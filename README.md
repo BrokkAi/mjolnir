@@ -34,6 +34,9 @@ and remote-control surface.
 
 ![Mjolnir browser interface showing session history, streaming agent output, and queued prompt controls](docs/readme-images/remote-ui.png)
 
+The same viewer opens as a native desktop window with `mj app` (included in
+the official macOS, Windows, and Linux builds).
+
 ## Four teams, one shortcut
 
 Choose one of four teams during onboarding, from `/mjconfig`, or with

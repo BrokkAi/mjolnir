@@ -206,6 +206,13 @@ struct Cli {
 enum Commands {
     /// Install repository guidance for coding agents.
     Agents(AgentsArgs),
+    /// Open the remote viewer in a native desktop window.
+    ///
+    /// Starts a private app-owned server on an ephemeral loopback port (it
+    /// never collides with a running `mj server`) and opens the viewer
+    /// already signed in. Closing the window shuts the server down.
+    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    App(AppArgs),
     /// List and manage persistent cross-session memories.
     Memory(MemoryArgs),
     /// Inspect or refresh model discovery state.
@@ -379,6 +386,16 @@ fn parse_optional_role_override(
     Ok((model.to_string(), effort))
 }
 
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[derive(Debug, clap::Args)]
+struct AppArgs {
+    /// Days of disconnected-session history to keep. Sessions (and their
+    /// queued prompts) whose last update is older are deleted by the
+    /// periodic sweeper. Pass 0 to keep history forever.
+    #[arg(long, default_value_t = 30)]
+    history_days: u32,
+}
+
 #[derive(Debug, clap::Args, Default)]
 struct ServerArgs {
     /// Public hostname to embed in the login QR code and TLS certificate.
@@ -515,6 +532,8 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Agents(_)) => false,
+        #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+        Some(Commands::App(_)) => false,
         Some(Commands::Memory(_)) => false,
         Some(Commands::Models(_)) => false,
         Some(Commands::Resume(args)) => !args.list,
@@ -611,6 +630,18 @@ async fn main() -> Result<()> {
             Commands::Agents(args) => match args.command {
                 AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
             },
+            #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+            Commands::App(args) => {
+                run_desktop_app(
+                    args,
+                    cwd,
+                    top_level_additional_directories,
+                    snapshot_exclusions,
+                    fs_max_text_bytes,
+                    termination.token(),
+                )
+                .await
+            }
             Commands::Memory(args) => run_memory_command(args.command, &cwd),
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {
@@ -927,6 +958,106 @@ fn role_for_session_entry<'a>(
                 .iter()
                 .find(|role| role.launch.source_id == adapter && role.ranked)
         })
+}
+
+/// Handle the `mj app` subcommand: start the app-owned desktop server, open
+/// the secure WebView shell against it, and keep the two lifecycles bound —
+/// closing the final window (or a shell startup failure) cancels and joins
+/// the server, and a server failure closes the window with the root cause
+/// propagated to the invoking terminal.
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+async fn run_desktop_app(
+    args: AppArgs,
+    cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
+    snapshot_exclusions: Vec<PathBuf>,
+    fs_max_text_bytes: u64,
+    termination: CancellationToken,
+) -> Result<()> {
+    let workspace_roots = validate_workspace_roots(&cwd, &additional_directories)?;
+    // Window close stops only the app-owned server; termination signals
+    // still reach it through the parent token.
+    let server_stop = termination.child_token();
+    let (handle, serve) = remote::prepare_desktop_server(remote::DesktopServerOptions {
+        history_days: args.history_days,
+        cwd,
+        additional_directories: workspace_roots.additional_directories().to_vec(),
+        snapshot_exclusions,
+        fs_max_text_bytes,
+        termination: server_stop.clone(),
+    })
+    .await?;
+
+    let (failure_tx, failure_rx) = tokio::sync::oneshot::channel::<String>();
+    let server_task = tokio::spawn({
+        let server_stop = server_stop.clone();
+        async move {
+            let result = serve.await;
+            if !server_stop.is_cancelled() {
+                let message = match &result {
+                    Ok(()) => "desktop server exited unexpectedly".to_string(),
+                    Err(error) => format!("desktop server failed: {error:#}"),
+                };
+                let _ = failure_tx.send(message);
+            }
+            result
+        }
+    });
+    let (shell_tx, shell_rx) = tokio::sync::oneshot::channel::<desktop::DesktopShellRemote>();
+    let watchdog = tokio::spawn({
+        let termination = termination.clone();
+        async move {
+            let failure = tokio::select! {
+                _ = termination.cancelled() => None,
+                failure = failure_rx => match failure {
+                    Ok(message) => Some(message),
+                    // The server task ended without reporting: normal shutdown.
+                    Err(_) => return,
+                },
+            };
+            let Ok(shell) = shell_rx.await else {
+                return;
+            };
+            match failure {
+                Some(message) => shell.fail(message),
+                None => shell.close(),
+            }
+        }
+    });
+
+    // The origin holds no secret — authentication rides the cookie, which
+    // never appears in a URL or on this terminal.
+    println!("Opening the Mjolnir desktop viewer at {}", handle.origin);
+
+    // The window event loop must run on the process's main thread (macOS
+    // requires it). `#[tokio::main]`'s block_on drives this future exactly
+    // there, and the multi-thread runtime keeps the spawned server making
+    // progress while the loop blocks this thread.
+    let shell_result = desktop::run(
+        desktop::DesktopShellOptions {
+            origin: handle.origin,
+            certificate_der: handle.certificate_der,
+            bootstrap_cookie_name: handle.bootstrap_cookie_name,
+            bootstrap_cookie_value: handle.bootstrap_cookie_value,
+        },
+        move |shell| {
+            let _ = shell_tx.send(shell);
+        },
+    );
+
+    // The window is gone — closed, failed to open, or torn down by the
+    // watchdog. Stop the server and join it before reporting the outcome.
+    server_stop.cancel();
+    let serve_result = server_task.await.context("join desktop server")?;
+    watchdog.abort();
+
+    match (shell_result, serve_result) {
+        (Ok(_), Ok(())) => Ok(()),
+        // A watchdog-injected failure already carries the server error; a
+        // shell-originated failure outranks the secondary drain error.
+        (Err(shell_error), _) => Err(shell_error),
+        (Ok(_), Err(serve_error)) => Err(serve_error),
+    }
 }
 
 /// Handle the `mj resume` subcommand: pick the agent to resume from, list
@@ -4200,6 +4331,37 @@ mod tests {
             rendered.contains("install"),
             "error should name the missing subcommand: {rendered}"
         );
+    }
+
+    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    #[test]
+    fn parse_app_subcommand_with_defaults_and_flags() {
+        let cli = try_parse_hermetic(&["mj", "app"]).expect("parse");
+        match cli.command {
+            Some(Commands::App(args)) => assert_eq!(args.history_days, 30),
+            _ => panic!("expected App subcommand"),
+        }
+
+        let cli = try_parse_hermetic(&[
+            "mj",
+            "--cwd",
+            "/tmp/test",
+            "--additional-directory",
+            "/tmp/extra",
+            "app",
+            "--history-days",
+            "0",
+        ])
+        .expect("parse");
+        assert_eq!(cli.cwd, Some(PathBuf::from("/tmp/test")));
+        assert_eq!(
+            cli.additional_directories,
+            vec![PathBuf::from("/tmp/extra")]
+        );
+        match cli.command {
+            Some(Commands::App(args)) => assert_eq!(args.history_days, 0),
+            _ => panic!("expected App subcommand"),
+        }
     }
 
     #[test]

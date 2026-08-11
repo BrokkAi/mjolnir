@@ -22,6 +22,9 @@ accepted = [
 # Union of the native targets used by the GitHub release workflow. The Android
 # archive does not include the voice worker, but retaining the full workspace
 # here is conservative and keeps target-specific dependencies visible.
+# Note: generate runs with `--features desktop-app` (see ci.yml) because the
+# official desktop artifacts ship the `mj app` shell and its dependencies
+# must appear in the notice report.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",

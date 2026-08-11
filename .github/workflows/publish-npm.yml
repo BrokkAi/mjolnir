@@ -77,6 +77,13 @@ jobs:
             fi
           done
 
+      - name: Install desktop shell runtime libraries
+        # The release binaries link the `desktop-app` feature, so even
+        # `mj --version` needs the WebKitGTK runtime present.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-0
+
       - name: Smoke-test the Linux npm installation
         run: |
           version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"

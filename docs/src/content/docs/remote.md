@@ -22,6 +22,35 @@ The viewer uses a bearer login token or short viewer code, then stores a signed
 session cookie. Treat QR codes, login URLs, tokens, cookies, certificate keys,
 and downloaded transcripts as secrets.
 
+## Desktop window
+
+```bash
+mj app
+```
+
+`mj app` opens the same remote viewer in a native decorated window instead of
+a browser tab. It starts a private server owned by the window on an
+OS-assigned loopback port, so it runs happily alongside an `mj server` that
+owns port 11921, and its sessions and viewer sign-in are fully isolated from
+that server's.
+
+The window opens already signed in: authentication rides an ephemeral session
+cookie installed directly into the window's private cookie store, never a URL
+or the six-digit viewer code screen. The bearer token, viewer code, and cookie
+signing key are per-launch in-memory secrets that die with the process, and
+the WebView pins the app's own TLS certificate rather than trusting it
+system-wide. Links to other sites open in the system browser; the window
+itself never navigates away from the viewer.
+
+Closing the window shuts the app-owned server down. Session history is kept
+in a dedicated per-user `mj/desktop-app` directory and trimmed with the same
+`--history-days` retention as `mj server`.
+
+`mj app` ships in the official macOS, Windows, and Linux desktop artifacts.
+On Linux it needs the WebKitGTK 4.1 runtime (preinstalled on most desktop
+distributions); see [Install](/install/). Android and server-only source
+builds do not include the command.
+
 ## Starting sessions
 
 The new-session folder picker browses the workspace roots configured on the

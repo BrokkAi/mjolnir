@@ -27,6 +27,23 @@ installs an embedded Node.js 24 runtime automatically. Android users already
 need Node.js/npm for the built-in ACP bridges; the npm installation route
 provides that prerequisite by construction.
 
+The official desktop binaries (npm, Homebrew, release installer, and release
+archives for macOS, Windows, and Linux) include the `mj app` desktop window.
+On Linux this links the WebKitGTK 4.1 runtime, so `mj` needs it installed —
+it is preinstalled on most desktop distributions:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get install libwebkit2gtk-4.1-0
+
+# Fedora
+sudo dnf install webkit2gtk4.1
+```
+
+For a headless or server-only Linux host without WebKitGTK, install from
+crates.io or build from source instead: the default `cargo` build has no
+WebView dependency and simply omits `mj app`.
+
 ### npm and npx
 
 Install Mjolnir permanently with npm:
@@ -124,10 +141,10 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-The default terminal build needs no WebView development package. To compile
-the optional `desktop-app` feature used for native desktop-shell development
-on macOS, install Apple's Command Line Tools. The shell uses the WebKit
-framework included in the macOS SDK:
+The default terminal build needs no WebView development package and omits the
+`mj app` desktop window. To compile the `desktop-app` feature that official
+desktop artifacts ship with, on macOS install Apple's Command Line Tools. The
+shell uses the WebKit framework included in the macOS SDK:
 
 ```bash
 xcode-select --install

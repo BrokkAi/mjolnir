@@ -36,7 +36,12 @@ mj memory add [--global] "one short fact"
 mj memory forget m7
 mj memory clear --yes
 mj server [--hostname HOST | --tailscale]
+mj app [--history-days DAYS]
 ```
+
+`mj app` (official desktop builds) opens the remote viewer in a native
+Mjolnir window backed by a private app-owned server; see
+[Remote control](/remote/).
 
 See [Sessions, worktrees, and resume](/sessions-worktrees/) and [Remote
 control](/remote/) for behavioral boundaries.

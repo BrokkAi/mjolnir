@@ -30,13 +30,13 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Install Linux audio dependencies
+      - name: Install Linux native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
       - name: Build release binary
-        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+        run: cargo build --release --locked --features desktop-app --target x86_64-unknown-linux-gnu
 
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
@@ -89,13 +89,13 @@ jobs:
         with:
           targets: aarch64-unknown-linux-gnu
 
-      - name: Install Linux audio dependencies
+      - name: Install Linux native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
       - name: Build release binary
-        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+        run: cargo build --release --locked --features desktop-app --target aarch64-unknown-linux-gnu
 
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
@@ -202,7 +202,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Build release binary
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked --features desktop-app --target x86_64-pc-windows-msvc
 
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-pc-windows-msvc
@@ -251,13 +251,13 @@ jobs:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
 
       - name: Build x86_64 binary
-        run: cargo build --release --locked --target x86_64-apple-darwin
+        run: cargo build --release --locked --features desktop-app --target x86_64-apple-darwin
 
       - name: Build x86_64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-apple-darwin
 
       - name: Build aarch64 binary
-        run: cargo build --release --locked --target aarch64-apple-darwin
+        run: cargo build --release --locked --features desktop-app --target aarch64-apple-darwin
 
       - name: Build aarch64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-apple-darwin

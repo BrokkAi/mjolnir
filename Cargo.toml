@@ -23,8 +23,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Kept opt-in until the `mj app` CLI and release packaging land in #727.
-# Android deliberately has no dependency entries for this feature.
+# Enables the `mj app` native desktop shell. Official desktop artifacts build
+# with this feature; Android deliberately has no dependency entries for it.
 desktop-app = [
     "dep:block2",
     "dep:tao",
@@ -34,6 +34,7 @@ desktop-app = [
     "dep:objc2",
     "dep:objc2-foundation",
     "dep:objc2-web-kit",
+    "dep:soup",
     "dep:webkit2gtk",
     "dep:webview2-com",
     "dep:windows-core",
@@ -117,11 +118,12 @@ wry = { version = "0.55.1", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6", optional = true }
 objc2 = { version = "0.6.4", features = ["exception", "disable-encoding-assertions"], optional = true }
-objc2-foundation = { version = "0.3.0", default-features = false, features = ["std", "NSData", "NSObject", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLProtectionSpace", "NSURLRequest", "NSURLSession"], optional = true }
-objc2-web-kit = { version = "0.3.0", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKNavigationAction", "WKNavigationDelegate", "WKWebView"], optional = true }
+objc2-foundation = { version = "0.3.0", default-features = false, features = ["std", "NSData", "NSDictionary", "NSEnumerator", "NSHTTPCookie", "NSObject", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLProtectionSpace", "NSURLRequest", "NSURLSession"], optional = true }
+objc2-web-kit = { version = "0.3.0", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKHTTPCookieStore", "WKNavigationAction", "WKNavigationDelegate", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore"], optional = true }
 
 [target.'cfg(all(target_os = "linux", not(target_os = "android")))'.dependencies]
 gio = { version = "0.18", optional = true }
+soup = { package = "soup3", version = "0.5", optional = true }
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
