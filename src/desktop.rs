@@ -16,6 +16,8 @@ use std::time::Duration;
 use url::Url;
 
 #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+use tao::dpi::LogicalSize;
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
 use tao::event::{Event, WindowEvent};
 #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -198,8 +200,15 @@ pub(crate) fn run(
     on_ready(DesktopShellRemote {
         proxy: event_loop.create_proxy(),
     });
+    let monitor_size = event_loop
+        .primary_monitor()
+        .map(|monitor| monitor.size().to_logical::<f64>(monitor.scale_factor()))
+        .map(|size| (size.width, size.height));
+    let (width, height) = default_window_size(monitor_size);
     let window = WindowBuilder::new()
         .with_title("Mjolnir")
+        .with_inner_size(LogicalSize::new(width, height))
+        .with_min_inner_size(LogicalSize::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT))
         .with_window_icon(Some(application_icon()?))
         .build(&event_loop)
         .context("create Mjolnir desktop window")?;
@@ -281,6 +290,29 @@ pub(crate) fn run(
     drop(webview);
     drop(window);
     result
+}
+
+/// Fallback when the primary monitor cannot be queried.
+const FALLBACK_WINDOW_WIDTH: f64 = 1280.0;
+const FALLBACK_WINDOW_HEIGHT: f64 = 800.0;
+const MIN_WINDOW_WIDTH: f64 = 800.0;
+const MIN_WINDOW_HEIGHT: f64 = 600.0;
+/// Fraction of the monitor's logical size the window opens at.
+const WINDOW_MONITOR_FRACTION: f64 = 0.85;
+
+/// Pick the initial window size from the monitor's logical size: most of the
+/// screen, never below the window's minimum size.
+fn default_window_size(monitor_logical: Option<(f64, f64)>) -> (f64, f64) {
+    let Some((monitor_width, monitor_height)) = monitor_logical else {
+        return (FALLBACK_WINDOW_WIDTH, FALLBACK_WINDOW_HEIGHT);
+    };
+    if monitor_width <= 0.0 || monitor_height <= 0.0 {
+        return (FALLBACK_WINDOW_WIDTH, FALLBACK_WINDOW_HEIGHT);
+    }
+    (
+        (monitor_width * WINDOW_MONITOR_FRACTION).max(MIN_WINDOW_WIDTH),
+        (monitor_height * WINDOW_MONITOR_FRACTION).max(MIN_WINDOW_HEIGHT),
+    )
 }
 
 #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
@@ -761,6 +793,18 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn default_window_size_scales_to_the_monitor_with_a_floor_and_fallback() {
+        assert_eq!(
+            default_window_size(Some((1920.0, 1080.0))),
+            (1920.0 * 0.85, 1080.0 * 0.85)
+        );
+        // Tiny monitors clamp to the window minimum instead of shrinking further.
+        assert_eq!(default_window_size(Some((640.0, 480.0))), (800.0, 600.0));
+        assert_eq!(default_window_size(None), (1280.0, 800.0));
+        assert_eq!(default_window_size(Some((0.0, 0.0))), (1280.0, 800.0));
+    }
 
     #[test]
     fn origin_policy_allows_only_the_exact_https_origin() {
