@@ -807,6 +807,19 @@ fn auth_required_detail(source: &agent_client_protocol::Error) -> Option<Option<
     Some(detail)
 }
 
+/// Whether a `session/prompt` failure means the agent's sign-in died.
+/// Claude Code reports an expired-and-unrefreshable OAuth session as a
+/// generic internal error whose data carries
+/// `errorKind: authentication_failed` — not as ACP `auth_required` —
+/// so match the payload shape as well as the error code.
+fn prompt_error_is_auth_failure(source: &agent_client_protocol::Error) -> bool {
+    if source.code == ErrorCode::AuthRequired {
+        return true;
+    }
+    let text = session_error_search_text(source);
+    text.contains("authentication_failed") || text.contains("failed to authenticate")
+}
+
 fn session_error_search_text(source: &agent_client_protocol::Error) -> String {
     let mut text = source.message.to_ascii_lowercase();
     if let Some(data) = source.data.as_ref() {
@@ -1224,6 +1237,18 @@ pub async fn run(
             command = %cfg.command.display(),
             "agent runtime started"
         );
+    }
+
+    // Rotate a near-expiry Claude OAuth token before the spawn so this
+    // seat never has to refresh concurrently with its siblings; see
+    // `claude_token` for why racing refreshes sign the account out.
+    if crate::claude_token::is_claude_invocation(
+        cfg.role_config
+            .as_ref()
+            .map(|role| role.adapter_source_id.as_str()),
+        &cfg.args,
+    ) {
+        crate::claude_token::ensure_fresh_before_spawn(cfg.cwd.clone(), &cfg.env).await;
     }
 
     let prepared = match prepare_agent_command_for_spawn(&cfg.command, &cfg.env, &ui_tx).await {
@@ -5809,9 +5834,14 @@ async fn drive_prompt_turn(
                         turn_diff_tracker
                             .emit_if_changed(ui_tx, diff_config.turn_id)
                             .await;
-                        let _ = ui_tx.send(UiEvent::PromptFailed {
-                            message: format!("prompt failed: {e}"),
-                        });
+                        let mut message = format!("prompt failed: {e}");
+                        if prompt_error_is_auth_failure(&e) {
+                            message.push_str(
+                                "\nhint: the agent's sign-in expired — sign in again under \
+                                 ACP Servers in /mjconfig (or the vendor CLI), then resubmit",
+                            );
+                        }
+                        let _ = ui_tx.send(UiEvent::PromptFailed { message });
                     }
                 }
                 return Ok(true);
@@ -12461,6 +12491,30 @@ mod tests {
                 "spawn failures must not blame cwd: {text}"
             );
         }
+    }
+
+    #[test]
+    fn prompt_auth_failures_are_recognized_beyond_the_acp_code() {
+        assert!(prompt_error_is_auth_failure(
+            &agent_client_protocol::Error::auth_required()
+        ));
+        // Claude Code's expired-and-unrefreshable OAuth session arrives
+        // as an internal error with an `errorKind` payload.
+        let claude_shape = agent_client_protocol::Error::new(
+            -32603,
+            "Internal error: Failed to authenticate: OAuth session expired \
+             and could not be refreshed",
+        )
+        .data(serde_json::json!({ "errorKind": "authentication_failed" }));
+        assert!(prompt_error_is_auth_failure(&claude_shape));
+        // The payload alone is enough even when the message is opaque.
+        let payload_only = agent_client_protocol::Error::internal_error()
+            .data(serde_json::json!({ "errorKind": "authentication_failed" }));
+        assert!(prompt_error_is_auth_failure(&payload_only));
+
+        let unrelated =
+            agent_client_protocol::Error::new(-32603, "model overloaded, try again later");
+        assert!(!prompt_error_is_auth_failure(&unrelated));
     }
 
     #[test]

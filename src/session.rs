@@ -124,6 +124,9 @@ pub async fn list_sessions_with_capabilities(
     agent_stderr: Option<&Path>,
 ) -> Result<SessionListResult> {
     let (ui_tx, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    if crate::claude_token::is_claude_invocation(None, &agent.args) {
+        crate::claude_token::ensure_fresh_before_spawn(cwd.clone(), &agent.env).await;
+    }
     let prepared = acp::prepare_agent_command_for_spawn(&agent.program, &agent.env, &ui_tx)
         .await
         .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))
@@ -158,6 +161,10 @@ pub async fn delete_session(
     agent_stderr: Option<&Path>,
 ) -> Result<()> {
     let (ui_tx, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
+    if crate::claude_token::is_claude_invocation(None, &agent.args) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        crate::claude_token::ensure_fresh_before_spawn(cwd, &agent.env).await;
+    }
     let prepared = acp::prepare_agent_command_for_spawn(&agent.program, &agent.env, &ui_tx)
         .await
         .map_err(|launch_err| anyhow::anyhow!("{launch_err}"))

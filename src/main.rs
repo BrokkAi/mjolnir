@@ -10,6 +10,7 @@ mod agent_usage;
 mod app;
 mod archive;
 mod auth;
+mod claude_token;
 mod claude_usage;
 mod clipboard;
 mod codex_usage;
@@ -2132,7 +2133,15 @@ async fn run_session(
         let handle = tokio::spawn(async move {
             let mut completed_turns = 0_u64;
             let mut codex_client = None;
+            // Pushes the steward's next attempt out when a refresh does
+            // not take (e.g. signed out) so the timer cannot spin while
+            // the token sits inside the refresh window.
+            let mut steward_not_before = tokio::time::Instant::now();
             loop {
+                let steward_at = claude_usage_env.as_ref().map(|env| {
+                    (tokio::time::Instant::now() + claude_token::steward_delay(env))
+                        .max(steward_not_before)
+                });
                 let trigger = tokio::select! {
                     biased;
                     _ = shutdown_rx.recv() => break,
@@ -2142,6 +2151,20 @@ async fn run_session(
                             completed_turns = completed_turns.saturating_add(1);
                         }
                         trigger
+                    },
+                    // Proactive token steward: rotate the Claude OAuth
+                    // token as it enters the refresh window so running
+                    // seats and every other process on this machine never
+                    // meet an expired credential file.
+                    _ = tokio::time::sleep_until(steward_at.unwrap_or_else(tokio::time::Instant::now)),
+                        if steward_at.is_some() =>
+                    {
+                        if let Some(env) = claude_usage_env.as_ref() {
+                            claude_token::ensure_fresh_before_spawn(usage_cwd.clone(), env).await;
+                        }
+                        steward_not_before = tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(10 * 60);
+                        continue;
                     },
                 };
                 if let Some(env) = codex_usage_env.as_ref() {
