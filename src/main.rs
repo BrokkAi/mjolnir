@@ -2843,15 +2843,21 @@ fn isolated_subagent_role_from_home(
     Ok((role, Some(isolated)))
 }
 
-/// Windows symlinks need elevated privileges or developer mode, so fall back
-/// to a copy there and accept the stale-credential window it reopens.
+/// Codex rewrites auth.json in place, so a symlink — or a same-volume hard
+/// link on Windows, where symlinks need developer mode or elevation — behaves
+/// exactly like the real file. The plain copy is a last resort that reopens
+/// the stale-credential window.
 fn share_auth_json(source: &Path, target: &Path, label: &str) -> Result<()> {
     let source = source
         .canonicalize()
         .unwrap_or_else(|_| source.to_path_buf());
     #[cfg(unix)]
     let linked = std::os::unix::fs::symlink(&source, target);
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&source, target)
+        .or_else(|_| std::fs::hard_link(&source, target))
+        .or_else(|_| std::fs::copy(&source, target).map(|_| ()));
+    #[cfg(not(any(unix, windows)))]
     let linked = std::fs::copy(&source, target).map(|_| ());
     linked.with_context(|| {
         format!(
