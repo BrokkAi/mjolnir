@@ -2012,7 +2012,12 @@ async fn ui_loop(
             && state.ragnarok.is_none()
             && !inline_resize_reflow.is_pending()
         {
-            flush_transcript_to_scrollback(terminal, &mut transcript_sink, &mut state)?;
+            flush_transcript_to_scrollback(
+                terminal,
+                &mut transcript_sink,
+                &mut state,
+                &mut inline_resize_reflow,
+            )?;
         }
 
         if let Some(reason) = state.exit_reason {
@@ -2374,8 +2379,9 @@ fn flush_transcript_to_scrollback(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sink: &mut TranscriptSink,
     state: &mut AppState,
+    reflow: &mut InlineResizeReflow,
 ) -> Result<()> {
-    flush_transcript_lines_to_scrollback(terminal, sink, state, false)
+    flush_transcript_lines_to_scrollback(terminal, sink, state, Some(reflow), false)
 }
 
 fn flush_transcript_to_scrollback_for_exit(
@@ -2383,24 +2389,29 @@ fn flush_transcript_to_scrollback_for_exit(
     sink: &mut TranscriptSink,
     state: &mut AppState,
 ) -> Result<()> {
-    flush_transcript_lines_to_scrollback(terminal, sink, state, true)
+    flush_transcript_lines_to_scrollback(terminal, sink, state, None, true)
 }
 
 fn flush_transcript_lines_to_scrollback(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     sink: &mut TranscriptSink,
     state: &mut AppState,
+    reflow: Option<&mut InlineResizeReflow>,
     exiting: bool,
 ) -> Result<()> {
-    let width = match terminal.size() {
-        Ok(size) => size.width,
+    let size = match terminal.size() {
+        Ok(size) => size,
         Err(e) if is_cursor_position_timeout_io(&e) => {
             trace_inline_cursor_position_timeout("transcript flush size query", &e);
             return Ok(());
         }
         Err(e) => return Err(e).context("query terminal size for transcript flush"),
     };
+    let width = size.width;
     if width == 0 {
+        return Ok(());
+    }
+    if !reconcile_inline_geometry_before_flush(terminal, size, reflow)? {
         return Ok(());
     }
     force_commit_overflowing_tail(state, width);
@@ -2413,6 +2424,47 @@ fn flush_transcript_lines_to_scrollback(
         return Ok(());
     }
     insert_lines_before_inline_viewport(terminal, lines, width)
+}
+
+/// The terminal can change size before the crossterm `Resize` event is
+/// observed (the reflow gate only sees consumed events), and ratatui's
+/// `insert_before` never autoresizes: its scroll math would run against the
+/// stale cached area, overwriting committed rows and leaving a permanent
+/// screen-sized blank band in scrollback (#755). Reconcile the cached
+/// geometry against the just-queried size before committing anything.
+///
+/// Returns `true` when the flush may proceed. When the geometry did change,
+/// the commit is deferred to the debounced resize reflow instead — it rebuilds
+/// the scrollback at the new width, pending entries included. Callers without
+/// a reflow (the exit flush cannot defer) proceed at the reconciled geometry.
+fn reconcile_inline_geometry_before_flush<B>(
+    terminal: &mut Terminal<B>,
+    size: Size,
+    reflow: Option<&mut InlineResizeReflow>,
+) -> Result<bool>
+where
+    B: Backend,
+    B::Error: Error + Send + Sync + 'static,
+{
+    let viewport_before = terminal.get_frame().area();
+    match terminal.autoresize() {
+        Ok(()) => {}
+        Err(e) if is_cursor_position_timeout_error(&e) => {
+            trace_inline_cursor_position_timeout("transcript flush geometry reconcile", &e);
+            return Ok(false);
+        }
+        Err(e) => return Err(e).context("reconcile terminal geometry for transcript flush"),
+    }
+    if terminal.get_frame().area() == viewport_before {
+        return Ok(true);
+    }
+    match reflow {
+        Some(reflow) => {
+            reflow.note_resize(size, Instant::now());
+            Ok(false)
+        }
+        None => Ok(true),
+    }
 }
 
 fn maybe_run_inline_resize_reflow(
@@ -20687,6 +20739,191 @@ mod tests {
         assert!(reflow.is_due(start + INLINE_RESIZE_REFLOW_DEBOUNCE * 2));
 
         reflow.clear();
+        assert!(!reflow.is_pending());
+    }
+
+    /// #755 helpers: an inline terminal with committed scrollback blocks, the
+    /// same shape `flush_transcript_lines_to_scrollback` produces.
+    fn inline_test_terminal(width: u16, height: u16, viewport: u16) -> Terminal<TestBackend> {
+        let mut backend = TestBackend::new(width, height);
+        backend
+            .set_cursor_position(Position::new(0, height.saturating_sub(1)))
+            .expect("seed cursor");
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport),
+            },
+        )
+        .expect("inline terminal");
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new("~viewport"), f.area()))
+            .expect("initial draw");
+        terminal
+    }
+
+    fn insert_test_block(
+        terminal: &mut Terminal<TestBackend>,
+        lines: Vec<Line<'static>>,
+        width: u16,
+    ) {
+        let height = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .min(u16::MAX as usize) as u16;
+        terminal
+            .insert_before(height, |buf| {
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(buf.area, buf);
+            })
+            .expect("insert block");
+    }
+
+    fn insert_committed_test_blocks(terminal: &mut Terminal<TestBackend>) {
+        for block in ["alpha", "beta"] {
+            let lines: Vec<Line<'static>> = (0..8)
+                .map(|i| Line::from(format!("committed {block} row {i}")))
+                .collect();
+            insert_test_block(terminal, lines, 60);
+            terminal
+                .draw(|f| f.render_widget(Paragraph::new("~viewport"), f.area()))
+                .expect("draw");
+        }
+    }
+
+    fn screen_and_scrollback_text(terminal: &Terminal<TestBackend>) -> String {
+        let backend = terminal.backend();
+        let mut rows = buffer_lines(backend.scrollback());
+        rows.extend(buffer_lines(backend.buffer()));
+        rows.join("\n")
+    }
+
+    /// Documents the #755 mechanism this workaround exists for: `insert_before`
+    /// with a stale cached area destroys committed rows. If ratatui ever
+    /// reconciles geometry itself, this starts failing and
+    /// `reconcile_inline_geometry_before_flush` can be removed.
+    #[test]
+    fn insert_before_with_stale_geometry_destroys_committed_rows() {
+        let mut terminal = inline_test_terminal(60, 30, 10);
+        insert_committed_test_blocks(&mut terminal);
+        // The terminal grew, but no crossterm Resize event was processed.
+        terminal.backend_mut().resize(60, 50);
+        let read_block: Vec<Line<'static>> = (0..9)
+            .map(|i| Line::from(format!("read block row {i}")))
+            .collect();
+        insert_test_block(&mut terminal, read_block, 60);
+
+        let text = screen_and_scrollback_text(&terminal);
+        let intact = (0..8).all(|i| {
+            text.contains(&format!("committed alpha row {i}"))
+                && text.contains(&format!("committed beta row {i}"))
+        });
+        assert!(
+            !intact,
+            "insert_before with stale geometry no longer corrupts committed rows; \
+             the reconcile workaround may be removable: {text}"
+        );
+    }
+
+    #[test]
+    fn reconcile_before_flush_preserves_committed_rows_across_unobserved_grow() {
+        let mut terminal = inline_test_terminal(60, 30, 10);
+        insert_committed_test_blocks(&mut terminal);
+        terminal.backend_mut().resize(60, 50);
+
+        // Exit-path flush: no reflow to defer to, proceed once reconciled.
+        let proceed = reconcile_inline_geometry_before_flush(
+            &mut terminal,
+            Size {
+                width: 60,
+                height: 50,
+            },
+            None,
+        )
+        .expect("reconcile");
+        assert!(proceed, "exit flush proceeds at the reconciled geometry");
+
+        let read_block: Vec<Line<'static>> = (0..9)
+            .map(|i| Line::from(format!("read block row {i}")))
+            .collect();
+        insert_test_block(&mut terminal, read_block, 60);
+
+        let text = screen_and_scrollback_text(&terminal);
+        for block in ["alpha", "beta"] {
+            for i in 0..8 {
+                assert!(
+                    text.contains(&format!("committed {block} row {i}")),
+                    "committed {block} row {i} destroyed by post-resize insert: {text}"
+                );
+            }
+        }
+        for i in 0..9 {
+            assert!(
+                text.contains(&format!("read block row {i}")),
+                "read block row {i} missing after post-resize insert: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn reconcile_before_flush_survives_unobserved_shrink() {
+        let mut terminal = inline_test_terminal(60, 30, 10);
+        insert_committed_test_blocks(&mut terminal);
+        // Without reconciliation this insert positions the cursor below the
+        // shrunken screen and panics in TestBackend (a real terminal smears).
+        terminal.backend_mut().resize(60, 20);
+        let proceed = reconcile_inline_geometry_before_flush(
+            &mut terminal,
+            Size {
+                width: 60,
+                height: 20,
+            },
+            None,
+        )
+        .expect("reconcile");
+        assert!(proceed);
+        let read_block: Vec<Line<'static>> = (0..9)
+            .map(|i| Line::from(format!("read block row {i}")))
+            .collect();
+        insert_test_block(&mut terminal, read_block, 60);
+    }
+
+    #[test]
+    fn reconcile_defers_flush_to_reflow_when_geometry_changed_unobserved() {
+        let mut terminal = inline_test_terminal(60, 30, 10);
+        terminal.backend_mut().resize(80, 30);
+        let mut reflow = InlineResizeReflow::default();
+        let proceed = reconcile_inline_geometry_before_flush(
+            &mut terminal,
+            Size {
+                width: 80,
+                height: 30,
+            },
+            Some(&mut reflow),
+        )
+        .expect("reconcile");
+        assert!(!proceed, "flush must defer to the resize reflow");
+        assert!(
+            reflow.is_pending(),
+            "unobserved resize must schedule the debounced reflow"
+        );
+    }
+
+    #[test]
+    fn reconcile_before_flush_is_a_noop_when_geometry_matches() {
+        let mut terminal = inline_test_terminal(60, 30, 10);
+        let mut reflow = InlineResizeReflow::default();
+        let proceed = reconcile_inline_geometry_before_flush(
+            &mut terminal,
+            Size {
+                width: 60,
+                height: 30,
+            },
+            Some(&mut reflow),
+        )
+        .expect("reconcile");
+        assert!(proceed);
         assert!(!reflow.is_pending());
     }
 
