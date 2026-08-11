@@ -608,6 +608,7 @@ fn install_bootstrap_cookie(
     options: &DesktopShellOptions,
     event_proxy: EventLoopProxy<ShellEvent>,
 ) -> Result<()> {
+    use objc2::Message;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2_foundation::{
