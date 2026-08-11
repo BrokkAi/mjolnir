@@ -597,9 +597,10 @@ fn install_platform_certificate_pin(
 
 /// Store the bootstrap session cookie in the webview's ephemeral cookie
 /// store, then post `ShellEvent::CookieInstalled` so the event loop loads the
-/// viewer origin. The cookie mirrors the attributes the server itself mints:
-/// host-only for the loopback origin, `Path=/`, `Secure`, `HttpOnly`,
-/// `SameSite=Strict`, and no expiry so it dies with the webview.
+/// viewer origin. The cookie mirrors the attributes the server itself mints —
+/// host-only for the loopback origin, `Path=/`, `Secure`, `SameSite=Strict`,
+/// no expiry so it dies with the webview — plus `HttpOnly` where the
+/// platform cookie API exposes it (WKWebView's public property keys do not).
 #[cfg(all(feature = "desktop-app", target_os = "macos"))]
 fn install_bootstrap_cookie(
     webview: &WebView,
@@ -607,10 +608,12 @@ fn install_bootstrap_cookie(
     options: &DesktopShellOptions,
     event_proxy: EventLoopProxy<ShellEvent>,
 ) -> Result<()> {
+    use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2_foundation::{
         NSDictionary, NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieName, NSHTTPCookiePath,
-        NSHTTPCookieSecure, NSHTTPCookieValue, NSString,
+        NSHTTPCookieSameSitePolicy, NSHTTPCookieSameSiteStrict, NSHTTPCookieSecure,
+        NSHTTPCookieValue, NSString,
     };
     use wry::WebViewExtMacOS;
 
@@ -621,20 +624,20 @@ fn install_bootstrap_cookie(
             NSHTTPCookieDomain,
             NSHTTPCookiePath,
             NSHTTPCookieSecure,
+            NSHTTPCookieSameSitePolicy,
         ]
     };
-    let values = [
+    let values: [Retained<AnyObject>; 6] = [
         NSString::from_str(options.bootstrap_cookie_name),
         NSString::from_str(&options.bootstrap_cookie_value),
         NSString::from_str(&policy.host),
         NSString::from_str("/"),
         NSString::from_str("TRUE"),
-    ];
-    let properties: objc2::rc::Retained<NSDictionary<NSString, AnyObject>> =
-        NSDictionary::from_retained_objects(
-            &keys.each_ref().map(|key| &**key),
-            values.map(|value| value.into_super().into_super()),
-        );
+        unsafe { NSHTTPCookieSameSiteStrict }.retain(),
+    ]
+    .map(|value| value.into_super().into_super());
+    let properties: Retained<NSDictionary<NSString, AnyObject>> =
+        NSDictionary::from_retained_objects(&keys, &values);
     let cookie = unsafe { NSHTTPCookie::cookieWithProperties(&properties) }
         .context("construct desktop viewer session cookie")?;
     let completion = block2::RcBlock::new(move || {
@@ -646,7 +649,7 @@ fn install_bootstrap_cookie(
             .configuration()
             .websiteDataStore()
             .httpCookieStore()
-            .setCookie_completionHandler(&cookie, Some(&completion));
+            .setCookie_completionHandler(&cookie, Some(&*completion));
     }
     Ok(())
 }
