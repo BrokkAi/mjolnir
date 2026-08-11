@@ -976,6 +976,36 @@ mod tests {
         assert!(gone, "timed-out Claude usage child {pid} survived cleanup");
     }
 
+    /// #737: a CLI that exits cleanly is already reaped when the teardown
+    /// tree-kill runs. On Windows, taskkill's "process not found" complaint
+    /// must not replace the successful output with a launch error.
+    #[tokio::test]
+    async fn clean_cli_exit_preserves_output_despite_reaped_pid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let prepared = crate::acp::PreparedProviderCli {
+            command: "cmd".into(),
+            args: ["/C", "echo", "usage-ok"].map(String::from).to_vec(),
+            env: HashMap::new(),
+        };
+        #[cfg(unix)]
+        let prepared = crate::acp::PreparedProviderCli {
+            command: "sh".into(),
+            args: ["-c", "echo usage-ok"].map(String::from).to_vec(),
+            env: HashMap::new(),
+        };
+
+        let output = run_cli(&prepared, temp.path(), &[], Duration::from_secs(30))
+            .await
+            .expect("clean CLI exit must not surface a teardown failure");
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("usage-ok"),
+            "stdout must survive teardown: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     #[test]
     fn parses_remaining_percent_lines() {
         let report = parse(

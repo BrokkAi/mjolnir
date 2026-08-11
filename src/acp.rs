@@ -3722,6 +3722,14 @@ pub(crate) async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) -
         }
         #[cfg(windows)]
         {
+            // A child the caller already reaped (`wait`/`try_wait`) has no
+            // live root for taskkill to walk: it exits non-zero with
+            // "process not found" — the Windows analogue of ESRCH, not a
+            // teardown failure. Tolerating it by exit code would be fragile
+            // (taskkill's codes are undocumented), so record reapedness
+            // instead. When the wrapper is still alive, every taskkill
+            // failure stays fatal.
+            let already_reaped = matches!(child.try_wait(), Ok(Some(_)));
             // /T = tree, /F = force. Targets the wrapper plus every
             // descendant it spawned (uvx -> python.exe, etc.).
             let status = tokio::process::Command::new("taskkill")
@@ -3732,7 +3740,7 @@ pub(crate) async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) -
                 .status()
                 .await;
             match status {
-                Ok(status) if !status.success() => {
+                Ok(status) if !status.success() && !already_reaped => {
                     failures.push(format!("taskkill agent pid {pid} exited with {status}"));
                 }
                 Ok(_) => {}
@@ -6374,6 +6382,28 @@ mod tests {
     /// waits this long, so passing runs never pay for it; loaded CI runners
     /// (notably Windows) blow well past a few seconds.
     const EVENT_DEADLINE: Duration = Duration::from_secs(60);
+
+    /// #737: after a clean `wait()` the caller still runs the tree kill for
+    /// surviving descendants. An already-reaped root ("process not found"
+    /// from taskkill, ESRCH from killpg) must not read as a teardown failure.
+    #[tokio::test]
+    async fn kill_agent_tree_tolerates_already_reaped_child() {
+        #[cfg(windows)]
+        let (program, args) = ("cmd", ["/C", "exit", "0"]);
+        #[cfg(unix)]
+        let (program, args) = ("sh", ["-c", "exit 0"]);
+        let mut command = Command::new(program);
+        command.args(args);
+        configure_isolated_child(&mut command, SpawnIsolation::ProcessGroup);
+        command.stdin(std::process::Stdio::null());
+        let mut child = command.spawn().expect("spawn short-lived child");
+        let pid = child.id();
+        child.wait().await.expect("wait for clean exit");
+
+        kill_agent_tree(&mut child, pid)
+            .await
+            .expect("teardown of an already-exited tree must be clean");
+    }
 
     #[test]
     fn exact_command_discovery_does_not_guess_aliases_or_case() {
