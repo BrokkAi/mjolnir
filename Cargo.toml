@@ -15,7 +15,7 @@ default-members = ["."]
 # Single source of truth for the release version; both crates inherit it, so
 # they cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
-version = "1.10.0"
+version = "1.10.1"
 
 [[bin]]
 name = "mj"
