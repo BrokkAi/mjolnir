@@ -1,27 +1,29 @@
 # Contributing to Mjolnir
 
-Thanks for helping improve Mjolnir. Contributions from people using AI tools
-are welcome; everyone remains responsible for the accuracy, safety, licensing,
-and relevance of what they submit. Please follow the
-[Code of Conduct](CODE_OF_CONDUCT.md).
+Thanks for helping improve Mjolnir. We accept contributions only in
+the form of [issues](https://github.com/BrokkAi/mjolnir/issues) and
+[discussions](https://github.com/BrokkAi/mjolnir/discussions). We do not accept
+pull requests; any pull request will be closed without review. Please follow
+the [Code of Conduct](CODE_OF_CONDUCT.md) when participating.
 
 ## Before You Start
 
-- Search existing issues and pull requests before opening a new one.
+- Search existing issues and discussions before opening a new one.
 - Use the TUI, session, or remote bug form for incorrect behavior while Mjolnir
   is running. Use the other-bug form for installation, development setup,
   packaging, updating, or documentation problems. Blank issues remain
   available when neither form fits.
-- Keep changes focused on one problem or capability. For a large ACP, Council,
-  permission, session-format, terminal-mode, or release change, open an issue
-  or discuss the direction on [Discord](https://discord.gg/geYkWUeH) first.
+- Keep each issue or discussion focused on one problem or capability. For a
+  large ACP, Council, permission, session-format, terminal-mode, or release
+  proposal, start a discussion or raise the idea on
+  [Discord](https://discord.gg/geYkWUeH).
 - Do not put credentials, private source code, or unredacted private
-  transcripts in issues, tests, logs, or pull requests. Report suspected
+  transcripts in issues or discussions. Report suspected
   vulnerabilities privately to
   [feedback@brokk.ai](mailto:feedback@brokk.ai).
 
-An issue is useful but not mandatory for a well-scoped pull request. Use
-`Fixes #123` or `Closes #123` when a pull request resolves an existing issue.
+Issues are best for concrete bug reports and feature requests. Use discussions
+for questions, ideas, and broader proposals that are not yet actionable.
 
 ## Development Setup
 
@@ -132,8 +134,8 @@ Add the smallest regression test that would have caught the problem:
 - Update [AGENTS.md](AGENTS.md) when an implementation invariant or contributor
   checklist changes.
 
-During development, run targeted tests by name or module. Before submitting,
-run the same core checks as CI:
+During development, run targeted tests by name or module. Maintainers should
+run the same core checks as CI before merging changes:
 
 ```bash
 cargo fmt --check
@@ -197,37 +199,11 @@ crate package contents, and fails when committed output is stale. Keep
 
 ## Pull Requests
 
-A useful pull request description lets a reviewer understand the behavioral
-change without reconstructing it from the file diff. Recent Mjolnir pull
-requests consistently provide:
-
-- A concise description of what changed, why, and the observable effect.
-- Key semantic changes rather than a list of edited files.
-- Root cause for bug fixes when it is known.
-- Before/after evidence and capability or safety boundaries for UI, session,
-  ACP, Council, permission, terminal, remote, or voice changes.
-- Important touch points for broad or cross-cutting changes.
-- Exact test, lint, build, packaging, benchmark, and manual-validation commands
-  actually run.
-
-If a relevant check could not be run or failed because of an environment
-constraint, say so explicitly and include any narrower validation that did
-pass. Do not report a check as passing based only on an expected outcome.
-
-Reviewers will pay particular attention to:
-
-- Terminal ownership, restoration, inline-mode resilience, and complete
-  permission content.
-- ACP compatibility and correct separation between Mjolnir-owned and
-  adapter-owned state.
-- Council role attribution, cancellation, and deterministic transcript and
-  tool-result behavior.
-- Safe permission, worktree, session, configuration, and remote-control
-  boundaries.
-- Regression tests, negative controls, and manual evidence for affected modes.
-- Documentation and repository-contract drift.
-- Cross-platform behavior, release packaging, and dependency-license
-  obligations.
+Mjolnir does not accept pull requests. Any pull request will be closed without
+review. Please share bug reports and feature requests through
+[issues](https://github.com/BrokkAi/mjolnir/issues), and use
+[discussions](https://github.com/BrokkAi/mjolnir/discussions) for questions and
+broader ideas.
 
 ## Releases
 
