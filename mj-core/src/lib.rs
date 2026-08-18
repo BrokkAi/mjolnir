@@ -12,6 +12,7 @@ pub mod event;
 pub mod memory;
 pub mod model_resolve;
 pub mod orchestrator;
+mod orchestrator_contract;
 pub mod paths;
 pub mod probe;
 pub mod provider_usage;

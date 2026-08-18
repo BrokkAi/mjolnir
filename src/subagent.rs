@@ -420,7 +420,7 @@ use futures::future::BoxFuture;
 
 pub use mj_core::orchestrator::{
     ActiveSubagentWorkers, SubagentProgressSource, SubagentReport, SubagentReportBus,
-    format_progress_wake, format_report_block, format_report_elapsed, format_report_injection,
+    format_report_block, format_report_elapsed, format_report_injection,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1882,38 +1882,6 @@ impl SubagentRegistry {
                 "<subagent_progress>\n{}\n</subagent_progress>",
                 entries.join("\n\n")
             )
-        })
-    }
-
-    /// Registers a running subagent whose worker answers every progress request
-    /// with a numbered snapshot, so a wake can be exercised without a real ACP
-    /// process. The returned task ends when the registry entry is dropped.
-    #[cfg(test)]
-    pub(crate) fn stub_running(
-        &self,
-        subagent_id: u64,
-        label: &str,
-        activity: &str,
-    ) -> JoinHandle<()> {
-        let (control, mut requests) = mpsc::unbounded_channel();
-        self.insert_running(subagent_id, label.to_string(), control);
-        let label = label.to_string();
-        let activity = activity.to_string();
-        tokio::spawn(async move {
-            let mut snapshots = 0_usize;
-            while let Some(request) = requests.recv().await {
-                if let WorkerRequest::Progress { respond } = request {
-                    snapshots += 1;
-                    let _ = respond.send(SubagentProgress {
-                        subagent_id,
-                        label: label.clone(),
-                        elapsed: Duration::from_secs(72),
-                        workspace: "Files touched: src/a.rs (1 file changed, 2 insertions(+))."
-                            .to_string(),
-                        activity: format!("{activity} #{snapshots}"),
-                    });
-                }
-            }
         })
     }
 
