@@ -12,6 +12,7 @@ pub mod event;
 pub mod memory;
 pub mod model_resolve;
 pub mod paths;
+pub mod probe;
 pub mod provider_usage;
 pub mod session;
 pub mod session_provenance;
