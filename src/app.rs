@@ -921,7 +921,6 @@ pub struct TokenUsage {
     pub thought_tokens: Option<u64>,
     pub context_used: Option<u64>,
     pub context_size: Option<u64>,
-    pub cost: Option<String>,
     /// The most recently surfaced rate-limit line, kept so the header can
     /// deliberately omit it (see `ui`) while the transcript shows it.
     pub rate_limit: Option<String>,
@@ -948,9 +947,6 @@ impl TokenUsage {
     fn apply_usage_update(&mut self, update: UsageUpdate) -> Option<String> {
         self.context_used = Some(update.used);
         self.context_size = Some(update.size);
-        self.cost = update
-            .cost
-            .map(|cost| format!("{:.4} {}", cost.amount, cost.currency));
 
         let line = claude_rate_limit_label(update.meta.as_ref())?;
         // The window label is the stable prefix before the first `:`
@@ -6510,8 +6506,8 @@ mod tests {
     }
     use agent_client_protocol::schema::v1::{
         AudioContent, AvailableCommand, AvailableCommandsUpdate, ConfigOptionUpdate, Content,
-        ContentBlock, ContentChunk, Cost, CreateElicitationRequest, CreateElicitationResponse,
-        Diff, ElicitationAcceptAction, ElicitationAction, ElicitationFormMode, ElicitationId,
+        ContentBlock, ContentChunk, CreateElicitationRequest, CreateElicitationResponse, Diff,
+        ElicitationAcceptAction, ElicitationAction, ElicitationFormMode, ElicitationId,
         ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode, EmbeddedResource,
         EmbeddedResourceResource, ImageContent, PermissionOption, PermissionOptionKind, Plan,
         PlanEntry, PlanEntryPriority, PlanEntryStatus, ResourceLink, SessionConfigOption,
@@ -9335,16 +9331,15 @@ mod tests {
     }
 
     #[test]
-    fn usage_update_records_context_tokens_and_cost() {
+    fn usage_update_records_context_tokens() {
         let mut s = AppState::new();
 
         s.apply_event(UiEvent::SessionUpdate(SessionUpdate::UsageUpdate(
-            UsageUpdate::new(12_000, 128_000).cost(Cost::new(0.125, "USD")),
+            UsageUpdate::new(12_000, 128_000),
         )));
 
         assert_eq!(s.token_usage.context_used, Some(12_000));
         assert_eq!(s.token_usage.context_size, Some(128_000));
-        assert_eq!(s.token_usage.cost.as_deref(), Some("0.1250 USD"));
     }
 
     #[test]
