@@ -65,7 +65,8 @@ pub struct MemoryEntry {
 struct ImportTombstone {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project: Option<PathBuf>,
-    source: String,
+    #[serde(default)]
+    text_hash: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -145,10 +146,10 @@ pub fn forget(path: &Path, id: u64) -> Result<Option<MemoryEntry>> {
         return Ok(None);
     };
     let removed = store.entries.remove(position);
-    if let Some(source) = removed.source.clone() {
+    if removed.source.is_some() {
         let tombstone = ImportTombstone {
             project: removed.project.clone(),
-            source,
+            text_hash: imported_text_hash(&removed.text),
         };
         if !store.import_tombstones.contains(&tombstone) {
             store.import_tombstones.push(tombstone);
@@ -244,6 +245,11 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn imported_text_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(text.as_bytes()))
+}
+
 // ---------------------------------------------------------------------------
 // Per-session behavior
 
@@ -254,40 +260,41 @@ const CLAUDE_AUTO_CHUNK_LIMIT: usize = 1_800;
 /// Import Claude Code's project auto-memory into the shared store. Imported
 /// chunks have stable source identities, so repeated turn-boundary refreshes
 /// are cheap and edits replace earlier content instead of duplicating it.
-fn sync_claude_auto_memory(store_path: &Path, project: &Path) -> Result<()> {
-    match claude_auto_memory_path(project) {
-        ClaudeMemoryResolution::Location(location) => {
-            remove_imports_from_other_scope(store_path, project, location.global)?;
-            sync_claude_auto_memory_from(store_path, project, Some(&location.path), location.global)
-        }
-        ClaudeMemoryResolution::Disabled => remove_claude_imports(store_path, project),
-        ClaudeMemoryResolution::Unresolved => Ok(()),
-    }
+#[derive(Clone, Copy)]
+enum ClaudeImportVisibility {
+    Project,
+    Global,
+    Disabled,
+    Unresolved,
 }
 
-fn remove_imports_from_other_scope(store_path: &Path, project: &Path, global: bool) -> Result<()> {
-    mutate_claude_imports(store_path, |entry| {
-        if global {
-            entry.project.as_deref() == Some(project)
-                && entry
-                    .source
-                    .as_deref()
-                    .is_some_and(|source| source.starts_with("claude-auto:"))
-        } else {
-            entry.project.is_none()
-                && entry
-                    .source
-                    .as_deref()
-                    .is_some_and(|source| source.starts_with("claude-auto-global:"))
+fn sync_claude_auto_memory(store_path: &Path, project: &Path) -> Result<ClaudeImportVisibility> {
+    match claude_auto_memory_path(project) {
+        ClaudeMemoryResolution::Location(location) => {
+            sync_claude_auto_memory_from(
+                store_path,
+                project,
+                Some(&location.path),
+                location.global,
+            )?;
+            Ok(if location.global {
+                ClaudeImportVisibility::Global
+            } else {
+                ClaudeImportVisibility::Project
+            })
         }
-    })
+        ClaudeMemoryResolution::Disabled => {
+            remove_claude_imports(store_path, project)?;
+            Ok(ClaudeImportVisibility::Disabled)
+        }
+        ClaudeMemoryResolution::Unresolved => Ok(ClaudeImportVisibility::Unresolved),
+    }
 }
 
 fn remove_claude_imports(store_path: &Path, project: &Path) -> Result<()> {
     mutate_claude_imports(store_path, |entry| {
         entry.source.as_deref().is_some_and(|source| {
-            (entry.project.as_deref() == Some(project) && source.starts_with("claude-auto:"))
-                || (entry.project.is_none() && source.starts_with("claude-auto-global:"))
+            entry.project.as_deref() == Some(project) && source.starts_with("claude-auto:")
         })
     })
 }
@@ -332,14 +339,18 @@ fn sync_claude_auto_memory_from(
 
     let _guard = lock_store(store_path)?;
     let mut store = load(store_path)?;
-    let mut changed = false;
+    let chunk_hashes: std::collections::HashSet<String> =
+        chunks.iter().map(|text| imported_text_hash(text)).collect();
+    let tombstone_count = store.import_tombstones.len();
+    store.import_tombstones.retain(|tombstone| {
+        tombstone.project != entry_project || chunk_hashes.contains(&tombstone.text_hash)
+    });
+    let mut changed = store.import_tombstones.len() != tombstone_count;
     for (index, text) in chunks.iter().enumerate() {
         let source = format!("{source_prefix}:{index}");
-        if store
-            .import_tombstones
-            .iter()
-            .any(|tombstone| tombstone.project == entry_project && tombstone.source == source)
-        {
+        if store.import_tombstones.iter().any(|tombstone| {
+            tombstone.project == entry_project && tombstone.text_hash == imported_text_hash(text)
+        }) {
             continue;
         }
         match store.entries.iter_mut().find(|entry| {
@@ -366,6 +377,12 @@ fn sync_claude_auto_memory_from(
     }
     let chunk_count = chunks.len();
     store.entries.retain(|entry| {
+        let stale_scope = global
+            && entry.project.as_deref() == Some(project)
+            && entry
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("claude-auto:"));
         let stale = entry.project == entry_project
             && entry.source.as_deref().is_some_and(|source| {
                 source
@@ -373,8 +390,8 @@ fn sync_claude_auto_memory_from(
                     .and_then(|index| index.parse::<usize>().ok())
                     .is_some_and(|index| index >= chunk_count)
             });
-        changed |= stale;
-        !stale
+        changed |= stale || stale_scope;
+        !(stale || stale_scope)
     });
     if changed {
         save(store_path, &store)?;
@@ -575,9 +592,12 @@ fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     let mut heading = String::new();
+    let mut in_fence = false;
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        let is_heading = trimmed.starts_with('#')
+        let is_fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        let is_heading = !in_fence
+            && trimmed.starts_with('#')
             && trimmed.chars().find(|character| *character != '#') == Some(' ');
         if is_heading {
             heading = line.to_string();
@@ -598,6 +618,9 @@ fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
                 }
             }
             current.push(character);
+        }
+        if is_fence {
+            in_fence = !in_fence;
         }
     }
     if !current.is_empty() {
@@ -664,21 +687,34 @@ impl SessionMemory {
         if !self.inject {
             return None;
         }
-        if self.import_claude_auto
-            && let Err(error) = sync_claude_auto_memory(&self.store_path, &self.project)
-        {
-            tracing::warn!("could not import Claude auto-memory: {error:#}");
-        }
+        let visibility = if self.import_claude_auto {
+            match sync_claude_auto_memory(&self.store_path, &self.project) {
+                Ok(visibility) => visibility,
+                Err(error) => {
+                    tracing::warn!("could not import Claude auto-memory: {error:#}");
+                    ClaudeImportVisibility::Unresolved
+                }
+            }
+        } else {
+            ClaudeImportVisibility::Disabled
+        };
         match entries_for_project(&self.store_path, &self.project) {
             Ok(mut entries) => {
-                if !self.import_claude_auto {
-                    entries.retain(|entry| {
-                        !entry
-                            .source
-                            .as_deref()
-                            .is_some_and(|source| source.starts_with(CLAUDE_AUTO_SOURCE))
-                    });
-                }
+                entries.retain(|entry| {
+                    let source = entry.source.as_deref();
+                    match visibility {
+                        ClaudeImportVisibility::Global => {
+                            !source.is_some_and(|source| source.starts_with("claude-auto:"))
+                        }
+                        ClaudeImportVisibility::Project => {
+                            !source.is_some_and(|source| source.starts_with("claude-auto-global:"))
+                        }
+                        ClaudeImportVisibility::Disabled => {
+                            !source.is_some_and(|source| source.starts_with(CLAUDE_AUTO_SOURCE))
+                        }
+                        ClaudeImportVisibility::Unresolved => true,
+                    }
+                });
                 Some(entries)
             }
             Err(error) => {
@@ -1429,6 +1465,16 @@ mod tests {
         );
         assert!(split.len() > 1);
         assert!(split[1].starts_with("## Rejected\n"));
+        let fenced = chunk_text(
+            "## Real\n```sh\n# not a heading\nxxxxxxxxxxxxxxxxxxxxxxxx\n```\n",
+            34,
+        );
+        assert!(
+            fenced
+                .iter()
+                .skip(1)
+                .all(|chunk| !chunk.starts_with("# not a heading"))
+        );
     }
 
     #[test]
@@ -1490,23 +1536,31 @@ mod tests {
         sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
         assert!(entries(&store_path).unwrap().is_empty());
         assert_eq!(load(&store_path).unwrap().import_tombstones.len(), 1);
+
+        std::fs::write(&memory, "brand new unrelated fact").unwrap();
+        sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
+        let refreshed = entries(&store_path).unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].text, "brand new unrelated fact");
+        assert!(load(&store_path).unwrap().import_tombstones.is_empty());
     }
 
     #[test]
-    fn scope_changes_and_disabling_remove_orphaned_imports() {
+    fn scope_changes_clean_project_imports_without_cross_project_global_deletion() {
         let dir = tempfile::tempdir().unwrap();
         let store_path = store(&dir);
         let project = Path::new("/project");
         let memory = dir.path().join("MEMORY.md");
         std::fs::write(&memory, "fact").unwrap();
         sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
-        remove_imports_from_other_scope(&store_path, project, true).unwrap();
         sync_claude_auto_memory_from(&store_path, project, Some(&memory), true).unwrap();
         let global = entries(&store_path).unwrap();
         assert_eq!(global.len(), 1);
         assert!(global[0].project.is_none());
+        remove_claude_imports(&store_path, Path::new("/another-project")).unwrap();
+        assert_eq!(entries(&store_path).unwrap().len(), 1);
         remove_claude_imports(&store_path, project).unwrap();
-        assert!(entries(&store_path).unwrap().is_empty());
+        assert_eq!(entries(&store_path).unwrap().len(), 1);
     }
 
     #[test]
