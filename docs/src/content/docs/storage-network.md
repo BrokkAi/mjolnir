@@ -13,7 +13,7 @@ equivalents.
 | Category | Purpose |
 | --- | --- |
 | `config.toml` | Models, ACP policy, review, and appearance preferences including thought output |
-| `memories.json` | Persistent cross-session memories managed via `/memory`, `mj memory`, or the agent's `memory_save` tool |
+| `memories.json` | Local shared project knowledge used across Claude and Codex sessions and managed via `/memory`, `mj memory`, or the agent's `memory_save` tool |
 | Session provenance | Maps resumable session IDs to their original adapter/model route |
 | Transcript exports | User-requested Markdown exports |
 | DeepSWE cache | Live model-ranking snapshot, refreshed on a time-to-live |

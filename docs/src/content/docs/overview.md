@@ -20,6 +20,7 @@ as advanced routes for specialists, comparison, or replacement.
 | User input, session controls, and permission presentation | Provider-specific tools and session behavior |
 | Model selection, subagent lifecycle, and review timing | Model reasoning and generated content |
 | Mjolnir-hosted filesystem, terminal, and subagent MCP tools | Any adapter-hosted tools and their policies |
+| Local shared project knowledge and its management interface | Provider-native memory and instruction files |
 | Session provenance, worktrees, and remote-control state | Provider data retention and service terms |
 
 This division keeps the terminal workflow stable when the selected model is
@@ -58,6 +59,8 @@ be turned off.
 - Pair one provider as coder with the other as reviewer so every changed turn
   faces adversarial review.
 - Let the primary agent hand bounded work to several fresh contexts at once.
+- Carry verified build requirements, architecture constraints, and debugging
+  conclusions between Claude and Codex sessions.
 - Isolate a session in a linked Git worktree and resume it later.
 - Run the same setup headlessly or through Mjolnir's remote viewer.
 

@@ -173,12 +173,17 @@ configuration remains unchanged.
 
 ## Shared project knowledge
 
-Mjolnir keeps short, durable facts (at most 2,000 bytes each) across sessions
-in `memories.json`, next to the config. Built-in Claude and Codex primary
-sessions share this store. Before each turn, Mjolnir refreshes the project
-snapshot and injects it when it differs from the last snapshot delivered to
-that session. Concurrent sessions therefore see one another's discoveries on
-their next turn without restarting.
+Switching between Claude and Codex should not mean teaching the repository
+twice. Mjolnir gives both agents one local, inspectable interface for verified
+build requirements, architecture constraints, debugging conclusions, and
+repository conventions.
+
+Mjolnir keeps these short, durable facts (at most 2,000 bytes each) across
+sessions in `memories.json`, next to the config. Built-in Claude and Codex
+primary sessions share this store. Before each turn, Mjolnir refreshes the
+project snapshot and injects it when it differs from the last snapshot
+delivered to that session. Concurrent sessions therefore see one another's
+discoveries on their next turn without restarting.
 
 Knowledge is global or project-scoped. The authenticated `mj-memory` MCP
 server instructs both agents to save non-obvious, verified implementation
