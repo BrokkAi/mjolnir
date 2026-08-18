@@ -3895,7 +3895,7 @@ mod tests {
         assert!(prompt.starts_with("<subagent_progress>"));
         assert!(prompt.contains("#4 port-the-parser: running 1m12s."));
         assert!(prompt.contains("still editing #1"));
-        assert!(prompt.ends_with(crate::subagent::PROGRESS_WAKE_INSTRUCTION));
+        assert!(prompt.ends_with(mj_core::orchestrator::PROGRESS_WAKE_INSTRUCTION));
         assert!(!prompt.contains("<subagent_result"));
         assert_eq!(bus.pending(), 1, "a heartbeat closes no report slot");
 

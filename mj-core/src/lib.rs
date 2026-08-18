@@ -11,6 +11,7 @@ pub mod config;
 pub mod event;
 pub mod memory;
 pub mod model_resolve;
+pub mod orchestrator;
 pub mod paths;
 pub mod probe;
 pub mod provider_usage;
