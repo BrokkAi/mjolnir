@@ -284,7 +284,7 @@ async fn authenticate_with_first_method(
 }
 
 fn client_implementation() -> Implementation {
-    Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).title("Mjolnir")
+    Implementation::new("brokk-mjolnir", env!("CARGO_PKG_VERSION")).title("Mjolnir")
 }
 
 fn is_auth_required(err: &agent_client_protocol::Error) -> bool {
@@ -321,8 +321,6 @@ fn require_session_delete(capabilities: &AgentCapabilities) -> Result<()> {
         anyhow::bail!("agent does not advertise ACP capability sessionCapabilities.delete")
     }
 }
-
-/// Interactive session picker state.
 
 #[cfg(test)]
 mod tests {
@@ -396,7 +394,7 @@ mod tests {
             .on_receive_request(
                 async move |req: InitializeRequest, responder, _cx| {
                     let client_info = req.client_info.expect("clientInfo");
-                    assert_eq!(client_info.name, env!("CARGO_PKG_NAME"));
+                    assert_eq!(client_info.name, "brokk-mjolnir");
                     assert_eq!(client_info.version, env!("CARGO_PKG_VERSION"));
                     responder.respond(
                         InitializeResponse::new(ProtocolVersion::V1)

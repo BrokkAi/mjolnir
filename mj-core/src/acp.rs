@@ -1913,7 +1913,7 @@ fn node24_archive_suffix() -> Option<&'static str> {
 }
 
 pub fn client_implementation() -> Implementation {
-    Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).title("Mjolnir")
+    Implementation::new("brokk-mjolnir", env!("CARGO_PKG_VERSION")).title("Mjolnir")
 }
 
 fn command_failure_summary(output: &std::process::Output) -> String {
@@ -8153,7 +8153,7 @@ mod tests {
                         Some(&serde_json::Value::Bool(true))
                     );
                     let client_info = req.client_info.expect("clientInfo");
-                    assert_eq!(client_info.name, env!("CARGO_PKG_NAME"));
+                    assert_eq!(client_info.name, "brokk-mjolnir");
                     assert_eq!(client_info.version, env!("CARGO_PKG_VERSION"));
                     responder.respond(
                         InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
