@@ -229,3 +229,152 @@ impl SubagentProgressService {
         self.0.progress_block().await
     }
 }
+
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::ReviewTier;
+use crate::event::{PromptImage, UiEvent};
+use crate::workflow::{WorkflowEmitter, WorkflowId};
+use crate::workspace_snapshot::ReviewSnapshot;
+
+pub struct ReviewJob {
+    pub epoch: u64,
+    pub workflow_id: WorkflowId,
+    pub review_pass: u32,
+    pub tier: ReviewTier,
+    pub workflow: WorkflowEmitter,
+    pub task: String,
+    pub images: Vec<PromptImage>,
+    pub user_messages: Vec<String>,
+    pub initial_result: String,
+    pub trajectory: String,
+    pub diff: String,
+    pub snapshot: Option<ReviewSnapshot>,
+    pub focus_snapshot: Option<ReviewSnapshot>,
+    pub prior_review: Option<PriorReviewContext>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewPassEvidence {
+    pub intent_brief: String,
+    pub intent_available: bool,
+    pub lanes: Vec<ReviewLaneEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLaneEvidence {
+    pub id: String,
+    pub outcome: SubagentOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorReviewContext {
+    pub synthesis: String,
+    pub evidence: ReviewPassEvidence,
+    pub exact_delta: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Findings {
+        synthesis: String,
+        evidence: ReviewPassEvidence,
+    },
+    Advisory {
+        synthesis: String,
+        evidence: ReviewPassEvidence,
+    },
+    Clean,
+    Failed {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewOutcome {
+    pub epoch: u64,
+    pub verdict: ReviewVerdict,
+}
+
+type ReviewSpawnFn = dyn Fn(
+        ReviewJob,
+        mpsc::UnboundedSender<UiEvent>,
+        CancellationToken,
+        mpsc::UnboundedSender<ReviewOutcome>,
+    ) -> JoinHandle<()>
+    + Send
+    + Sync;
+
+#[derive(Clone)]
+pub struct ReviewSpawner(Arc<ReviewSpawnFn>);
+
+impl std::fmt::Debug for ReviewSpawner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Spawner")
+    }
+}
+
+impl ReviewSpawner {
+    pub fn new(
+        dispatch: impl Fn(
+            ReviewJob,
+            mpsc::UnboundedSender<UiEvent>,
+            CancellationToken,
+            mpsc::UnboundedSender<ReviewOutcome>,
+        ) -> JoinHandle<()>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self(Arc::new(dispatch))
+    }
+
+    #[doc(hidden)]
+    pub fn stub(
+        dispatch: impl Fn(
+            ReviewJob,
+            mpsc::UnboundedSender<UiEvent>,
+            CancellationToken,
+            mpsc::UnboundedSender<ReviewOutcome>,
+        ) + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        let dispatch = Arc::new(dispatch);
+        Self::new(move |job, events, cancel, outcomes| {
+            let dispatch = Arc::clone(&dispatch);
+            tokio::spawn(async move { dispatch(job, events, cancel, outcomes) })
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn stub_async<F, Fut>(dispatch: F) -> Self
+    where
+        F: Fn(
+                ReviewJob,
+                mpsc::UnboundedSender<UiEvent>,
+                CancellationToken,
+                mpsc::UnboundedSender<ReviewOutcome>,
+            ) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let dispatch = Arc::new(dispatch);
+        Self::new(move |job, events, cancel, outcomes| {
+            tokio::spawn(dispatch(job, events, cancel, outcomes))
+        })
+    }
+
+    pub fn spawn(
+        &self,
+        job: ReviewJob,
+        events: mpsc::UnboundedSender<UiEvent>,
+        cancel: CancellationToken,
+        outcomes: mpsc::UnboundedSender<ReviewOutcome>,
+    ) -> JoinHandle<()> {
+        (self.0)(job, events, cancel, outcomes)
+    }
+}

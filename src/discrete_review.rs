@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     acp::{PreparedAgentCommand, RuntimeAccessMode},
     agent_usage::Seat,
-    event::{InternalMessage, InternalMessageKind, PromptImage, SubagentOutcome, UiEvent},
+    event::{InternalMessage, InternalMessageKind, SubagentOutcome, UiEvent},
     quota,
     roster::ResolvedAgent,
     subagent::{
@@ -275,62 +275,10 @@ pub(crate) struct FanoutConfig {
     pub id_allocator: SubagentIdAllocator,
 }
 
-/// The turn under review, snapshotted at the turn boundary so later work
-/// cannot mutate what the lanes were asked about.
-pub(crate) struct ReviewJob {
-    pub epoch: u64,
-    pub workflow_id: crate::workflow::WorkflowId,
-    pub review_pass: u32,
-    /// How much machinery this dispatch may spend. Read per dispatch, not per
-    /// process, so a `/mjconfig` change takes effect on the next turn.
-    pub tier: crate::config::ReviewTier,
-    pub workflow: crate::workflow::WorkflowEmitter,
-    pub task: String,
-    /// Image blocks attached to the current outer prompt. The intent analyst
-    /// and supervisor receive them directly instead of trying to reconstruct
-    /// visual requirements from replay placeholders.
-    pub images: Vec<PromptImage>,
-    /// Chronological user-role messages from the primary agent's ACP session. `task`
-    /// identifies the current outer prompt even when later internal
-    /// continuation prompts also appear in this list.
-    pub user_messages: Vec<String>,
-    pub initial_result: String,
-    pub trajectory: String,
-    pub diff: String,
-    /// Exact immutable Git endpoints for the completed turn. Production
-    /// reviews require this lease; focused unit tests may exercise prompt
-    /// behavior with only `diff`.
-    pub snapshot: Option<ReviewSnapshot>,
-    /// Exact previous-review-target -> current-target interval for a corrective
-    /// pass. `snapshot` remains the cumulative outer-turn state.
-    pub focus_snapshot: Option<ReviewSnapshot>,
-    /// Evidence from the immediately preceding pass. Corrective supervisors
-    /// reuse the stable intent brief and completed lane coverage instead of
-    /// starting the whole review from scratch.
-    pub prior_review: Option<PriorReviewContext>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ReviewPassEvidence {
-    pub intent_brief: String,
-    pub intent_available: bool,
-    pub lanes: Vec<ReviewLaneEvidence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReviewLaneEvidence {
-    pub id: String,
-    pub outcome: SubagentOutcome,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PriorReviewContext {
-    pub synthesis: String,
-    pub evidence: ReviewPassEvidence,
-    /// `false` means exact interval construction failed and this pass is
-    /// deliberately falling back to a cumulative review.
-    pub exact_delta: bool,
-}
+pub use mj_core::orchestrator::{
+    PriorReviewContext, ReviewJob, ReviewLaneEvidence, ReviewOutcome, ReviewPassEvidence,
+    ReviewSpawner as Spawner, ReviewVerdict,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -740,127 +688,23 @@ async fn require_review_bearer(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReviewVerdict {
-    /// Findings survived vetting; the orchestrator hands them back to the primary.
-    Findings {
-        synthesis: String,
-        evidence: ReviewPassEvidence,
-    },
-    /// Advisory findings survived vetting, but are not severe enough to require
-    /// a correction turn.
-    Advisory {
-        synthesis: String,
-        evidence: ReviewPassEvidence,
-    },
-    /// The supervisor vetted everything away; the held completion is released.
-    Clean,
-    /// Required review work failed. The orchestrator surfaces the reason and
-    /// terminates the review instead of substituting weaker review coverage.
-    Failed { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReviewOutcome {
-    /// Turn epoch this verdict belongs to. The orchestrator discards
-    /// outcomes whose epoch no longer matches the live turn.
-    pub epoch: u64,
-    pub verdict: ReviewVerdict,
-}
-
-type SpawnFn = dyn Fn(
-        ReviewJob,
-        UnboundedSender<UiEvent>,
-        CancellationToken,
-        UnboundedSender<ReviewOutcome>,
-    ) -> JoinHandle<()>
-    + Send
-    + Sync;
-
-/// The orchestrator's seam into this module. `live` runs the real fan-out;
-/// tests substitute a closure.
-#[derive(Clone)]
-pub(crate) struct Spawner(Arc<SpawnFn>);
-
-impl std::fmt::Debug for Spawner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Spawner")
-    }
-}
-
-impl Spawner {
-    /// Real review. Model turns are intentionally unbounded; the user-facing
-    /// Stop action cancels the shared token and the review driver reaps every
-    /// owned agent before returning its one outcome.
-    pub(crate) fn live(config: FanoutConfig) -> Self {
-        let config = Arc::new(config);
-        Self(Arc::new(move |job, events, cancel, outcomes| {
-            let config = Arc::clone(&config);
-            tokio::spawn(async move {
-                let epoch = job.epoch;
-                let review =
-                    tokio::spawn(async move { run_async(&config, job, &events, cancel).await });
-                let verdict = match review.await {
-                    Ok(verdict) => verdict,
-                    Err(error) => ReviewVerdict::Failed {
-                        reason: format!("the discrete review task failed unexpectedly: {error}"),
-                    },
-                };
-                let _ = outcomes.send(ReviewOutcome { epoch, verdict });
-            })
-        }))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn stub(
-        dispatch: impl Fn(
-            ReviewJob,
-            UnboundedSender<UiEvent>,
-            CancellationToken,
-            UnboundedSender<ReviewOutcome>,
-        ) + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        let dispatch = Arc::new(dispatch);
-        Self(Arc::new(move |job, events, cancel, outcomes| {
-            let dispatch = Arc::clone(&dispatch);
-            tokio::spawn(async move {
-                dispatch(job, events, cancel, outcomes);
-            })
-        }))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn stub_async<F, Fut>(dispatch: F) -> Self
-    where
-        F: Fn(
-                ReviewJob,
-                UnboundedSender<UiEvent>,
-                CancellationToken,
-                UnboundedSender<ReviewOutcome>,
-            ) -> Fut
-            + Send
-            + Sync
-            + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let dispatch = Arc::new(dispatch);
-        Self(Arc::new(move |job, events, cancel, outcomes| {
-            let future = dispatch(job, events, cancel, outcomes);
-            tokio::spawn(future)
-        }))
-    }
-
-    pub(crate) fn spawn(
-        &self,
-        job: ReviewJob,
-        events: UnboundedSender<UiEvent>,
-        cancel: CancellationToken,
-        outcomes: UnboundedSender<ReviewOutcome>,
-    ) -> JoinHandle<()> {
-        (self.0)(job, events, cancel, outcomes)
-    }
+pub(crate) fn live_spawner(config: FanoutConfig) -> Spawner {
+    let config = Arc::new(config);
+    Spawner::new(move |job, events, cancel, outcomes| {
+        let config = Arc::clone(&config);
+        tokio::spawn(async move {
+            let epoch = job.epoch;
+            let review =
+                tokio::spawn(async move { run_async(&config, job, &events, cancel).await });
+            let verdict = match review.await {
+                Ok(verdict) => verdict,
+                Err(error) => ReviewVerdict::Failed {
+                    reason: format!("the discrete review task failed unexpectedly: {error}"),
+                },
+            };
+            let _ = outcomes.send(ReviewOutcome { epoch, verdict });
+        })
+    })
 }
 
 struct SupplementalContext {
@@ -3252,7 +3096,7 @@ mod tests {
     #[tokio::test]
     async fn live_spawner_sends_one_epoch_tagged_failure() {
         let outside_repo = tempfile::tempdir().expect("outside repo");
-        let spawner = Spawner::live(test_fanout(outside_repo.path().to_path_buf()));
+        let spawner = live_spawner(test_fanout(outside_repo.path().to_path_buf()));
         assert_eq!(format!("{spawner:?}"), "Spawner");
         let (events, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (outcomes, mut outcome_rx) = tokio::sync::mpsc::unbounded_channel();

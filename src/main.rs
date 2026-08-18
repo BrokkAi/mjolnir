@@ -2347,7 +2347,7 @@ async fn run_session(
             review_root: cwd.clone(),
             review_fanout: review_workers.zip(roster.review_supervisor.clone()).map(
                 |(workers, supervisor)| {
-                    discrete_review::Spawner::live(discrete_review::FanoutConfig {
+                    discrete_review::live_spawner(discrete_review::FanoutConfig {
                         workers,
                         supervisor,
                         cwd: cwd.clone(),

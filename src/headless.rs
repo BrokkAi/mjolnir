@@ -408,7 +408,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             review_fanout: review_workers
                 .zip(review_supervisor)
                 .map(|(workers, supervisor)| {
-                    crate::discrete_review::Spawner::live(crate::discrete_review::FanoutConfig {
+                    crate::discrete_review::live_spawner(crate::discrete_review::FanoutConfig {
                         workers,
                         supervisor,
                         cwd: cfg.cwd.clone(),

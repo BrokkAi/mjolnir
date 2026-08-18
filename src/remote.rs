@@ -4718,7 +4718,7 @@ fn start_server_agent_session(
                         .and_then(|resolved| resolved.review_supervisor.clone()),
                 )
                 .map(|(workers, supervisor)| {
-                    crate::discrete_review::Spawner::live(crate::discrete_review::FanoutConfig {
+                    crate::discrete_review::live_spawner(crate::discrete_review::FanoutConfig {
                         workers,
                         supervisor,
                         cwd: provenance_cwd.clone(),
