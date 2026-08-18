@@ -339,18 +339,18 @@ fn sync_claude_auto_memory_from(
 
     let _guard = lock_store(store_path)?;
     let mut store = load(store_path)?;
-    let chunk_hashes: std::collections::HashSet<String> =
-        chunks.iter().map(|text| imported_text_hash(text)).collect();
-    let tombstone_count = store.import_tombstones.len();
-    store.import_tombstones.retain(|tombstone| {
-        tombstone.project != entry_project || chunk_hashes.contains(&tombstone.text_hash)
-    });
-    let mut changed = store.import_tombstones.len() != tombstone_count;
+    let mut changed = false;
     for (index, text) in chunks.iter().enumerate() {
         let source = format!("{source_prefix}:{index}");
         if store.import_tombstones.iter().any(|tombstone| {
             tombstone.project == entry_project && tombstone.text_hash == imported_text_hash(text)
         }) {
+            if let Some(position) = store.entries.iter().position(|entry| {
+                entry.project == entry_project && entry.source.as_deref() == Some(source.as_str())
+            }) {
+                store.entries.remove(position);
+                changed = true;
+            }
             continue;
         }
         match store.entries.iter_mut().find(|entry| {
@@ -826,7 +826,7 @@ fn render_preamble_block(
     }
     if omitted > 0 {
         block.push_str(&format!(
-            "\n\n({omitted} older memories omitted; run /memory to see all)"
+            "\n\n({omitted} memory entries omitted; run /memory to see all)"
         ));
     }
     block.push_str(if update {
@@ -1384,7 +1384,7 @@ mod tests {
         assert!(!preamble.contains("[m1]"), "oldest entry dropped");
 
         assert!(preamble.contains("[m20]"), "newest entry kept");
-        assert!(preamble.contains("older memories omitted"));
+        assert!(preamble.contains("memory entries omitted"));
     }
 
     #[test]
@@ -1542,7 +1542,11 @@ mod tests {
         let refreshed = entries(&store_path).unwrap();
         assert_eq!(refreshed.len(), 1);
         assert_eq!(refreshed[0].text, "brand new unrelated fact");
-        assert!(load(&store_path).unwrap().import_tombstones.is_empty());
+        assert_eq!(load(&store_path).unwrap().import_tombstones.len(), 1);
+
+        std::fs::write(&memory, "obsolete import").unwrap();
+        sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
+        assert!(entries(&store_path).unwrap().is_empty());
     }
 
     #[test]

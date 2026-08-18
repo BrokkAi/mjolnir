@@ -187,18 +187,22 @@ requirements, debugging conclusions, and repository conventions. It tells
 agents not to store secrets, speculation, transient task state, or facts
 trivially visible in source.
 
-For Codex primary sessions, Claude Code's native auto-memory `MEMORY.md` index is
-imported at turn boundaries; Claude sessions continue to use their native injection and
-do not receive a duplicate. Mjolnir honors `CLAUDE_CONFIG_DIR`,
-`CLAUDE_CODE_DISABLE_AUTO_MEMORY`, managed policy settings, user settings, and
-project/local `autoMemoryEnabled`. A policy- or user-configured
-`autoMemoryDirectory` is global; otherwise the standard per-project path is used.
-Topic files are not flattened into the prompt. Imports are source-tracked and updated in place. Project-scoped imports are removed
-when disabled or superseded; global imports are filtered outside their resolved scope and
-removed only when their global file is confirmed absent, so one project cannot delete another's data. Forgetting an import records a content-hash exclusion. Turn refreshes inject only new or changed entries, retrying
-budget-omitted entries on later turns. Users can also manage knowledge with `/memory`
-or `mj memory`. Side conversations,
-subagents, and review lanes remain isolated.
+For Codex primary sessions, Claude Code's native auto-memory `MEMORY.md`
+index is imported at turn boundaries; Claude sessions continue to use their
+native injection and do not receive a duplicate. Mjolnir honors
+`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, managed policy
+settings, user settings, and project/local `autoMemoryEnabled`. A policy- or
+user-configured `autoMemoryDirectory` is global; otherwise the standard
+per-project path is used. Topic files are not flattened into the prompt.
+Imports are source-tracked and updated in place. Project-scoped imports are
+removed when disabled or superseded; global imports are filtered outside their
+resolved scope and removed only when their global file is confirmed absent, so
+one project cannot delete another's data. Forgetting an import permanently
+excludes that exact imported chunk by content hash; a differently chunked or
+framed version is distinct. Turn refreshes inject only new or changed entries,
+retrying budget-omitted entries on later turns. Users can also manage knowledge
+with `/memory` or `mj memory`. Side conversations, subagents, and review lanes
+remain isolated.
 
 The feature is optional. A master switch plus two toggles control it, all on
 by default:
