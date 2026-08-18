@@ -254,7 +254,7 @@ fn handle_navigation(policy: &OriginPolicy, url: &str) -> bool {
     }
 }
 
-#[cfg(all(feature = "desktop-app", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn install_platform_certificate_pin(
     webview: &WebView,
     policy: &OriginPolicy,
@@ -446,7 +446,7 @@ fn install_platform_certificate_pin(
     Ok(delegate)
 }
 
-#[cfg(all(feature = "desktop-app", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn install_platform_certificate_pin(
     webview: &WebView,
     policy: &OriginPolicy,
@@ -503,7 +503,7 @@ fn install_platform_certificate_pin(
     Ok(())
 }
 
-#[cfg(all(feature = "desktop-app", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn install_platform_certificate_pin(
     webview: &WebView,
     policy: &OriginPolicy,

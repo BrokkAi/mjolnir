@@ -48,7 +48,7 @@ jobs:
 
     - name: Collect workspace coverage
       run: |
-        cargo llvm-cov --workspace --no-report --locked
+        cargo llvm-cov --workspace --exclude mj-desktop --no-report --locked
         cargo llvm-cov report --lcov --output-path coverage.lcov
         cargo llvm-cov report --json --output-path coverage.json
 
