@@ -712,6 +712,9 @@ fn transcript_entry_matches(state: &AppState, entry: &Entry, query: &str) -> boo
         Entry::Plan(entries) | Entry::SubagentPlan(entries) => entries
             .iter()
             .any(|entry| search_text_contains(&entry.content, query)),
+        Entry::ReviewLedger(lines) => lines
+            .iter()
+            .any(|line| search_text_contains(&line.plain_text(), query)),
         Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
             if search_text_contains(id, query) {
                 return true;
@@ -1055,6 +1058,7 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         Entry::UserPrompt(_)
         | Entry::System(_)
         | Entry::FeatureHint(_)
+        | Entry::ReviewLedger(_)
         | Entry::SessionBoundary(_)
         | Entry::Plan(_)
         | Entry::SubagentPlan(_)
@@ -2935,6 +2939,7 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
             + usize::from(workflow_progress_row_count(state))
+            + usize::from(review_board_row_count(state))
             + usage_quota_row_count(state, width)
     };
 
@@ -5957,6 +5962,14 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                 push_export_text(out, &heading, &message.text);
             }
             Entry::System(text) => push_export_text(out, "System", text),
+            Entry::ReviewLedger(lines) => {
+                let text = lines
+                    .iter()
+                    .map(crate::app::ReviewLedgerLine::plain_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                push_export_text(out, "Review", &text);
+            }
             // Feature hints are ephemeral UI guidance, not session content.
             Entry::FeatureHint(_) => {}
             Entry::SessionBoundary(text) => push_export_text(out, "Session", text),
@@ -7081,7 +7094,19 @@ fn draw(
     } else if state.terminals_viewer {
         draw_terminals_viewer(f, chunks[0], state, false);
     } else {
-        draw_transcript(f, chunks[0], state, transcript_scroll);
+        // An in-flight review with findings splits the stage: the issues
+        // physically displace transcript rows instead of hiding behind F9.
+        let board_rows = review_board_row_count(state);
+        if board_rows > 0 && chunks[0].height > board_rows + 3 {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(board_rows)])
+                .split(chunks[0]);
+            draw_transcript(f, split[0], state, transcript_scroll);
+            draw_review_board(f, split[1], state);
+        } else {
+            draw_transcript(f, chunks[0], state, transcript_scroll);
+        }
     }
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
@@ -7187,6 +7212,7 @@ fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
     }
     let reserved_rows = 1u16
         .saturating_add(workflow_progress_row_count(state))
+        .saturating_add(review_board_row_count(state))
         .saturating_add(running_terminals_row_count(state))
         .saturating_add(queued_prompt_row_count(state))
         .saturating_add(MIN_INPUT_HEIGHT)
@@ -7197,13 +7223,14 @@ fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
         .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS as u16)
 }
 
-fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 8] {
+fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 9] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(inline_transcript_tail_height(state, area)),
             Constraint::Length(1),
             Constraint::Length(workflow_progress_row_count(state)),
+            Constraint::Length(review_board_row_count(state)),
             Constraint::Length(running_terminals_row_count(state)),
             Constraint::Length(queued_prompt_row_count(state)),
             Constraint::Min(MIN_INPUT_HEIGHT),
@@ -7305,11 +7332,12 @@ fn draw_inline_chat(
     draw_inline_transcript_tail(f, chunks[0], state);
     draw_header(f, chunks[1], state);
     draw_workflow_progress_rows(f, chunks[2], state);
-    draw_running_terminals_row(f, chunks[3], state);
-    draw_queued_prompt_row(f, chunks[4], state);
-    draw_input(f, chunks[5], state, UiMode::InlineChat);
-    draw_status_line(f, chunks[6], state);
-    draw_usage_quota_row(f, chunks[7], state);
+    draw_review_board(f, chunks[3], state);
+    draw_running_terminals_row(f, chunks[4], state);
+    draw_queued_prompt_row(f, chunks[5], state);
+    draw_input(f, chunks[6], state, UiMode::InlineChat);
+    draw_status_line(f, chunks[7], state);
+    draw_usage_quota_row(f, chunks[8], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -7839,8 +7867,6 @@ fn draw_inline_transcript_viewer(
 }
 
 fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
-    use crate::workflow::ReviewIssueStatus;
-
     f.render_widget(Clear, area);
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -7865,50 +7891,60 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         .collect::<Vec<_>>();
     issues
         .sort_by_key(|(workflow_id, issue)| (workflow_id.turn_id, workflow_id.operation, issue.id));
-    let found = issues.len();
-    let validated = issues
+    let all = issues
         .iter()
-        .filter(|(_, issue)| issue.status == ReviewIssueStatus::Validated)
-        .count();
-    let fixed = issues
-        .iter()
-        .filter(|(_, issue)| issue.status == ReviewIssueStatus::Fixed)
-        .count();
-    let invalidated = issues
-        .iter()
-        .filter(|(_, issue)| issue.status == ReviewIssueStatus::Invalidated)
-        .count();
-    let mut lines = vec![Line::from(Span::styled(
-        format!(
-            " found {found} · validated {validated} · fixed {fixed} · invalidated {invalidated}"
-        ),
+        .map(|(_, issue)| (*issue).clone())
+        .collect::<Vec<_>>();
+    let tally = crate::workflow::ReviewIssueTally::count(&all);
+    let theme = state.theme;
+    let mut head = vec![Span::styled(
+        format!(" {} found", tally.found),
         Style::default()
-            .ink(state.theme.accent)
+            .ink(theme.accent)
             .add_modifier(Modifier::BOLD),
-    ))];
+    )];
+    for (count, label, ink) in [
+        (tally.open, "● {} open", theme.warning),
+        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.invalidated, "✘ {} invalidated", theme.error),
+    ] {
+        head.push(Span::styled("   ", Style::default()));
+        head.push(Span::styled(
+            label.replacen("{}", &count.to_string(), 1),
+            Style::default().ink(ink).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let mut lines = vec![Line::from(head)];
     if issues.is_empty() {
         lines.push(Line::from(Span::styled(
             " No review issues recorded yet.",
-            Style::default().ink(state.theme.muted),
+            Style::default().ink(theme.muted),
         )));
     } else {
-        lines.extend(issues.into_iter().map(|(_, issue)| {
-            let color = match issue.status {
-                ReviewIssueStatus::Validated => state.theme.warning,
-                ReviewIssueStatus::Fixed => state.theme.success,
-                ReviewIssueStatus::Invalidated => state.theme.muted,
-            };
-            Line::from(Span::styled(
-                format!(
-                    " #{} · {} · pass {} · {}",
-                    issue.id,
-                    issue.status.as_str(),
-                    issue.pass + 1,
-                    issue.summary
-                ),
-                Style::default().ink(color),
-            ))
-        }));
+        let mut last_group = None;
+        for (workflow_id, issue) in issues {
+            // A pass header per (workflow, pass) keeps multi-turn sessions
+            // legible without re-reading ids.
+            let group = (workflow_id.turn_id, workflow_id.operation, issue.pass);
+            if last_group != Some(group) {
+                last_group = Some(group);
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        " {} turn {} · review pass {}",
+                        crate::app::REVIEW_GLYPH,
+                        workflow_id.turn_id,
+                        issue.pass + 1
+                    ),
+                    Style::default()
+                        .ink(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            lines.push(review_ledger_line(
+                &crate::app::review_issue_row(issue),
+                theme,
+            ));
+        }
     }
     let total = Paragraph::new(lines.clone())
         .wrap(Wrap { trim: false })
@@ -8161,6 +8197,9 @@ fn render_nested_agent_lines(
             }
             Entry::System(text) => {
                 push_styled_message(&mut out, text, state.theme.accent, false, state.theme);
+            }
+            Entry::ReviewLedger(lines) => {
+                push_review_ledger_record(&mut out, lines, state.theme);
             }
             Entry::FeatureHint(text) => {
                 push_feature_hint(&mut out, text, state.theme);
@@ -9655,6 +9694,9 @@ fn render_transcript_entry_range_with_turns(
             Entry::System(text) => {
                 push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
             }
+            Entry::ReviewLedger(lines) => {
+                push_review_ledger_record(&mut out, lines, theme);
+            }
             Entry::FeatureHint(text) => {
                 push_feature_hint(&mut out, text, theme);
             }
@@ -9928,6 +9970,45 @@ fn active_thought_tail(text: &str) -> String {
         tail = format!("…{}", tail.chars().skip(keep).collect::<String>());
     }
     tail
+}
+
+/// Style for one review-ledger tone. Invalidations keep full error weight —
+/// a muted invalidation is how they went unnoticed before.
+fn review_tone_style(tone: crate::app::ReviewTone, theme: TerminalTheme) -> Style {
+    use crate::app::ReviewTone;
+
+    match tone {
+        ReviewTone::Header => Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+        ReviewTone::Open => Style::default().ink(theme.warning),
+        ReviewTone::Fixed => Style::default().ink(theme.success),
+        ReviewTone::Invalidated => Style::default()
+            .ink(theme.error)
+            .add_modifier(Modifier::BOLD),
+        ReviewTone::Struck => Style::default()
+            .ink(theme.error)
+            .add_modifier(Modifier::CROSSED_OUT),
+        ReviewTone::Detail => Style::default().ink(theme.secondary),
+    }
+}
+
+fn review_ledger_line(line: &crate::app::ReviewLedgerLine, theme: TerminalTheme) -> Line<'static> {
+    Line::from(
+        line.spans
+            .iter()
+            .map(|(text, tone)| Span::styled(text.clone(), review_tone_style(*tone, theme)))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn push_review_ledger_record(
+    out: &mut Vec<Line<'static>>,
+    lines: &[crate::app::ReviewLedgerLine],
+    theme: TerminalTheme,
+) {
+    out.extend(lines.iter().map(|line| review_ledger_line(line, theme)));
+    out.push(Line::from(""));
 }
 
 fn push_styled_message(
@@ -12358,6 +12439,112 @@ fn workflow_progress_row_count(state: &AppState) -> u16 {
     (visible + overflow).min(u16::MAX as usize) as u16
 }
 
+/// Issues the live Review Board shows: the newest in-flight review that has
+/// validated at least one issue. Finished reviews leave the board — their
+/// record is the verdict banner in the transcript.
+fn review_board_workflow(state: &AppState) -> Option<&crate::workflow::WorkflowState> {
+    state
+        .visible_workflows()
+        .filter(|workflow| {
+            workflow.kind == crate::workflow::WorkflowKind::Review
+                && workflow.outcome.is_none()
+                && !workflow.issues.is_empty()
+        })
+        .max_by_key(|workflow| (workflow.id.turn_id, workflow.id.operation))
+}
+
+const REVIEW_BOARD_MAX_ISSUE_ROWS: usize = 5;
+
+fn review_board_row_count(state: &AppState) -> u16 {
+    let Some(workflow) = review_board_workflow(state) else {
+        return 0;
+    };
+    let issues = workflow.issues.len();
+    let visible = issues.min(REVIEW_BOARD_MAX_ISSUE_ROWS);
+    let overflow = usize::from(issues > REVIEW_BOARD_MAX_ISSUE_ROWS);
+    (1 + visible + overflow).min(usize::from(u16::MAX)) as u16
+}
+
+/// Order the board so what needs the user's eyes comes first: still-open
+/// findings, then invalidations (loud, never buried), then the fixed tail.
+fn review_board_rank(status: crate::workflow::ReviewIssueStatus) -> u8 {
+    use crate::workflow::ReviewIssueStatus;
+
+    match status {
+        ReviewIssueStatus::Validated => 0,
+        ReviewIssueStatus::Invalidated => 1,
+        ReviewIssueStatus::Fixed => 2,
+    }
+}
+
+/// The live Review Board: one row per issue of the active review, drawn in
+/// both frontends (a transcript split in fullscreen, a viewport block above
+/// the input inline). Issue rows render through the same `review_issue_row`
+/// used by the transcript ledger so the two never disagree.
+fn draw_review_board(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let Some(workflow) = review_board_workflow(state) else {
+        return;
+    };
+    let theme = state.theme;
+    let tally = workflow.issue_tally();
+    let mut head = vec![Span::styled(
+        format!(
+            " {} review · {} issue{}",
+            crate::app::REVIEW_GLYPH,
+            tally.found,
+            if tally.found == 1 { "" } else { "s" }
+        ),
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for (count, label, ink) in [
+        (tally.open, "● {} open", theme.warning),
+        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.invalidated, "✘ {} invalidated", theme.error),
+    ] {
+        if count > 0 {
+            head.push(Span::styled("   ", Style::default()));
+            head.push(Span::styled(
+                label.replacen("{}", &count.to_string(), 1),
+                Style::default().ink(ink).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    head.push(Span::styled(
+        "   · F9 details",
+        Style::default().ink(theme.muted),
+    ));
+
+    let mut issues = workflow.issues.iter().collect::<Vec<_>>();
+    issues.sort_by_key(|issue| (review_board_rank(issue.status), issue.id));
+    let capacity = usize::from(area.height).saturating_sub(1);
+    let visible = if issues.len() > capacity {
+        capacity.saturating_sub(1)
+    } else {
+        issues.len()
+    };
+    let mut lines = vec![Line::from(head)];
+    lines.extend(
+        issues
+            .iter()
+            .take(visible)
+            .map(|issue| review_ledger_line(&crate::app::review_issue_row(issue), theme)),
+    );
+    if issues.len() > visible {
+        lines.push(Line::from(Span::styled(
+            format!("   … {} more · F9", issues.len() - visible),
+            Style::default().ink(theme.muted),
+        )));
+    }
+    // No wrap: clipping keeps the board one row per issue, so its height
+    // never disagrees with the row count the layout reserved.
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 /// One row while any agent-started terminal is still running.
 ///
 /// A running terminal has no natural place in the transcript — it never
@@ -12571,27 +12758,22 @@ fn workflow_progress_line(
     if completed > 0 {
         details.push(format!("{completed} done"));
     }
-    if !workflow.issues.is_empty() {
-        use crate::workflow::ReviewIssueStatus;
-        let validated = workflow
-            .issues
-            .iter()
-            .filter(|issue| issue.status == ReviewIssueStatus::Validated)
-            .count();
-        let fixed = workflow
-            .issues
-            .iter()
-            .filter(|issue| issue.status == ReviewIssueStatus::Fixed)
-            .count();
-        let invalidated = workflow
-            .issues
-            .iter()
-            .filter(|issue| issue.status == ReviewIssueStatus::Invalidated)
-            .count();
-        details.push(format!(
-            "issues {} found · {validated} validated · {fixed} fixed · {invalidated} invalidated · F9",
-            workflow.issues.len()
-        ));
+    // While the review runs, the Review Board block carries the per-issue
+    // detail; this truncation-prone tail only summarises finished workflows.
+    if !workflow.issues.is_empty() && workflow.outcome.is_some() {
+        let tally = workflow.issue_tally();
+        let mut parts = vec![format!("issues {} found", tally.found)];
+        for (count, label) in [
+            (tally.fixed, "fixed"),
+            (tally.invalidated, "invalidated"),
+            (tally.open, "unresolved"),
+        ] {
+            if count > 0 {
+                parts.push(format!("{count} {label}"));
+            }
+        }
+        parts.push("F9".to_string());
+        details.push(parts.join(" · "));
     }
 
     let requires_user_action = workflow
@@ -16129,6 +16311,92 @@ mod tests {
                 stage: WorkflowStage::new(0, phase),
             },
         );
+    }
+
+    #[test]
+    fn review_board_appears_while_review_is_live_and_collapses_at_terminal() {
+        use crate::workflow::ReviewIssueStatus;
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(3);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        assert_eq!(
+            review_board_row_count(&state),
+            0,
+            "a review without findings keeps the stage"
+        );
+
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![
+                    "cache write races the eviction sweep".to_string(),
+                    "retry budget off by one".to_string(),
+                ],
+            },
+        );
+        assert_eq!(
+            review_board_row_count(&state),
+            3,
+            "header plus one row per issue"
+        );
+        let area = Rect::new(0, 0, 120, 30);
+        let chunks = inline_chat_layout(&state, area);
+        assert_eq!(
+            chunks[3].height, 3,
+            "the inline viewport reserves the board block"
+        );
+
+        let backend = TestBackend::new(120, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_board(frame, frame.area(), &state))
+            .expect("draw board");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("review · 2 issues"), "{rendered}");
+        assert!(rendered.contains("● 2 open"), "{rendered}");
+        assert!(
+            rendered.contains("#1 cache write races the eviction sweep"),
+            "{rendered}"
+        );
+
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                status: ReviewIssueStatus::Invalidated,
+                reason: Some("correction turn changed nothing in the workspace".to_string()),
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_board(frame, frame.area(), &state))
+            .expect("draw board");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("✘ 2 invalidated"), "{rendered}");
+
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Completed,
+                coverage: WorkflowCoverage::Complete,
+            },
+        );
+        assert_eq!(
+            review_board_row_count(&state),
+            0,
+            "a finished review leaves the board to the verdict banner"
+        );
+        assert_eq!(inline_chat_layout(&state, area)[3].height, 0);
     }
 
     #[test]
@@ -21994,7 +22262,7 @@ mod tests {
         let baseline = desired_inline_height(&state, terminal_size);
         let area = Rect::new(0, 0, terminal_size.width, baseline);
         let baseline_tail_height = inline_transcript_tail_height(&state, area);
-        let baseline_input_area = inline_chat_layout(&state, area)[5];
+        let baseline_input_area = inline_chat_layout(&state, area)[6];
         let mut terminal =
             Terminal::new(TestBackend::new(terminal_size.width, baseline)).expect("terminal");
         terminal
@@ -22040,7 +22308,7 @@ mod tests {
             streamed_header_row, baseline_header_row,
             "streaming must not move the header inside the fixed viewport"
         );
-        let streamed_input_area = inline_chat_layout(&state, area)[5];
+        let streamed_input_area = inline_chat_layout(&state, area)[6];
         assert_eq!(
             streamed_input_area, baseline_input_area,
             "the input panel rendered by the inline layout must not move or resize"

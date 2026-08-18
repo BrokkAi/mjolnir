@@ -249,6 +249,35 @@ pub struct ReviewIssue {
     pub pass: u32,
     pub summary: String,
     pub status: ReviewIssueStatus,
+    /// Why the issue left `Validated` — e.g. the mechanical evidence behind an
+    /// invalidation. `None` while the issue is still open.
+    pub resolution_reason: Option<String>,
+}
+
+/// Per-status totals across a workflow's review issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReviewIssueTally {
+    pub found: usize,
+    pub open: usize,
+    pub fixed: usize,
+    pub invalidated: usize,
+}
+
+impl ReviewIssueTally {
+    pub fn count(issues: &[ReviewIssue]) -> Self {
+        let mut tally = Self {
+            found: issues.len(),
+            ..Self::default()
+        };
+        for issue in issues {
+            match issue.status {
+                ReviewIssueStatus::Validated => tally.open += 1,
+                ReviewIssueStatus::Fixed => tally.fixed += 1,
+                ReviewIssueStatus::Invalidated => tally.invalidated += 1,
+            }
+        }
+        tally
+    }
 }
 
 impl WorkflowOutcome {
@@ -276,6 +305,10 @@ pub struct WorkflowState {
 }
 
 impl WorkflowState {
+    pub fn issue_tally(&self) -> ReviewIssueTally {
+        ReviewIssueTally::count(&self.issues)
+    }
+
     pub fn selected_count(&self) -> usize {
         self.actors
             .values()
@@ -358,13 +391,41 @@ impl WorkflowState {
     /// Transcript line summarising how this workflow ended.
     pub fn terminal_notice(&self, outcome: WorkflowOutcome) -> String {
         match self.kind {
-            WorkflowKind::Review => match outcome {
-                WorkflowOutcome::Clean => "review complete · no material findings".to_string(),
-                WorkflowOutcome::Completed => "review complete".to_string(),
-                WorkflowOutcome::Degraded => "review complete · degraded coverage".to_string(),
-                WorkflowOutcome::Failed => "review failed".to_string(),
-                WorkflowOutcome::Cancelled => "review cancelled".to_string(),
-            },
+            WorkflowKind::Review => {
+                let head = match outcome {
+                    WorkflowOutcome::Clean if self.issues.is_empty() => {
+                        "review complete · no material findings"
+                    }
+                    WorkflowOutcome::Clean | WorkflowOutcome::Completed => "review complete",
+                    WorkflowOutcome::Degraded => "review complete · degraded coverage",
+                    WorkflowOutcome::Failed => "review failed",
+                    WorkflowOutcome::Cancelled => "review cancelled",
+                };
+                if self.issues.is_empty() {
+                    return head.to_string();
+                }
+                // The final tally is the record the user scrolls back for;
+                // "review complete" alone buries the verdict.
+                let tally = self.issue_tally();
+                let mut parts = vec![
+                    head.to_string(),
+                    format!(
+                        "{} issue{}",
+                        tally.found,
+                        if tally.found == 1 { "" } else { "s" }
+                    ),
+                ];
+                for (count, label) in [
+                    (tally.fixed, "fixed"),
+                    (tally.invalidated, "invalidated"),
+                    (tally.open, "unresolved"),
+                ] {
+                    if count > 0 {
+                        parts.push(format!("{count} {label}"));
+                    }
+                }
+                parts.join(" · ")
+            }
             WorkflowKind::Delegation => {
                 let head = match outcome {
                     WorkflowOutcome::Completed
@@ -452,6 +513,10 @@ pub enum WorkflowTransition {
     IssuesResolved {
         pass: u32,
         status: ReviewIssueStatus,
+        /// Mechanical evidence for the verdict (e.g. "the correction turn
+        /// changed nothing in the workspace"). Rendered wherever the verdict
+        /// is shown so an invalidation is never an unexplained gray row.
+        reason: Option<String>,
     },
     Terminal {
         outcome: WorkflowOutcome,
@@ -745,14 +810,20 @@ impl WorkflowStore {
                                 pass: *pass,
                                 summary: summary.clone(),
                                 status: ReviewIssueStatus::Validated,
+                                resolution_reason: None,
                             }),
                     );
             }
-            WorkflowTransition::IssuesResolved { pass, status } => {
+            WorkflowTransition::IssuesResolved {
+                pass,
+                status,
+                reason,
+            } => {
                 let mut changed = false;
                 for issue in state.issues.iter_mut().filter(|issue| issue.pass == *pass) {
                     if issue.status == ReviewIssueStatus::Validated {
                         issue.status = *status;
+                        issue.resolution_reason = reason.clone();
                         changed = true;
                     }
                 }
@@ -1117,12 +1188,17 @@ mod tests {
                 WorkflowTransition::IssuesResolved {
                     pass: 0,
                     status: ReviewIssueStatus::Fixed,
+                    reason: Some("correction turn changed the workspace".to_string()),
                 },
             ))
             .unwrap();
         assert_eq!(
             store.get(review()).unwrap().issues[0].status,
             ReviewIssueStatus::Fixed
+        );
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].resolution_reason,
+            Some("correction turn changed the workspace".to_string())
         );
 
         store
@@ -1140,12 +1216,32 @@ mod tests {
                 WorkflowTransition::IssuesResolved {
                     pass: 1,
                     status: ReviewIssueStatus::Invalidated,
+                    reason: Some("correction turn changed nothing in the workspace".to_string()),
                 },
             ))
             .unwrap();
         assert_eq!(
             store.get(review()).unwrap().issues[1].status,
             ReviewIssueStatus::Invalidated
+        );
+        assert_eq!(
+            store.get(review()).unwrap().issues[1].resolution_reason,
+            Some("correction turn changed nothing in the workspace".to_string())
+        );
+
+        let state = store.get(review()).unwrap();
+        assert_eq!(
+            state.issue_tally(),
+            ReviewIssueTally {
+                found: 2,
+                open: 0,
+                fixed: 1,
+                invalidated: 1,
+            }
+        );
+        assert_eq!(
+            state.terminal_notice(WorkflowOutcome::Completed),
+            "review complete · 2 issues · 1 fixed · 1 invalidated"
         );
     }
 

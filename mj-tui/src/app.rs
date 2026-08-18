@@ -433,9 +433,204 @@ pub enum Entry {
     System(String),
     /// Local Mjolnir feature-discovery hint. Never sent to the agent.
     FeatureHint(String),
+    /// Settled review-issue record: validated findings, pass verdicts, and
+    /// the final tally banner. Unlike `System`, each span carries a tone so
+    /// fixed/invalidated stay color-coded in scrollback.
+    ReviewLedger(Vec<ReviewLedgerLine>),
     /// Visual separator inserted at local session boundaries so a freshly
     /// started session is not confused with the previous transcript.
     SessionBoundary(String),
+}
+
+/// One transcript line of a [`Entry::ReviewLedger`] record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLedgerLine {
+    pub spans: Vec<(String, ReviewTone)>,
+}
+
+impl ReviewLedgerLine {
+    pub fn new(spans: Vec<(String, ReviewTone)>) -> Self {
+        Self { spans }
+    }
+
+    pub fn plain_text(&self) -> String {
+        self.spans
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<String>()
+    }
+}
+
+/// Semantic tone of a review ledger span; the renderer maps it to the theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTone {
+    /// Record headline ("⚖ review pass 1 · 3 validated issues").
+    Header,
+    /// A finding still awaiting its fix.
+    Open,
+    /// A finding the correction turn fixed.
+    Fixed,
+    /// A finding that did not survive: full error weight, never muted.
+    Invalidated,
+    /// The summary text of an invalidated finding, struck through.
+    Struck,
+    /// Supporting evidence such as the invalidation reason.
+    Detail,
+}
+
+pub const REVIEW_GLYPH: &str = "⚖";
+
+pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLedgerLine {
+    use crate::workflow::ReviewIssueStatus;
+
+    let label = format!(
+        "#{} {}",
+        issue.id,
+        crate::ragnarok::first_line(&issue.summary, 200)
+    );
+    match issue.status {
+        ReviewIssueStatus::Validated => {
+            ReviewLedgerLine::new(vec![(format!("   ● {label}"), ReviewTone::Open)])
+        }
+        ReviewIssueStatus::Fixed => {
+            ReviewLedgerLine::new(vec![(format!("   ✔ {label}"), ReviewTone::Fixed)])
+        }
+        ReviewIssueStatus::Invalidated => {
+            let mut spans = vec![
+                ("   ✘ ".to_string(), ReviewTone::Invalidated),
+                (label, ReviewTone::Struck),
+            ];
+            if let Some(reason) = issue.resolution_reason.as_deref() {
+                spans.push((format!(" — {reason}"), ReviewTone::Detail));
+            }
+            ReviewLedgerLine::new(spans)
+        }
+    }
+}
+
+/// Transcript record for a pass's freshly validated findings.
+fn review_validated_record(
+    pass: u32,
+    issues: &[crate::workflow::ReviewIssue],
+) -> Vec<ReviewLedgerLine> {
+    let of_pass: Vec<_> = issues.iter().filter(|issue| issue.pass == pass).collect();
+    if of_pass.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![ReviewLedgerLine::new(vec![(
+        format!(
+            "{REVIEW_GLYPH} review pass {} · {} validated issue{}",
+            pass + 1,
+            of_pass.len(),
+            if of_pass.len() == 1 { "" } else { "s" }
+        ),
+        ReviewTone::Header,
+    )])];
+    lines.extend(of_pass.into_iter().map(review_issue_row));
+    lines
+}
+
+/// Transcript record for a pass verdict: every listed issue just moved from
+/// `Validated` to `status`, with the mechanical evidence spelled out.
+fn review_resolved_record(
+    pass: u32,
+    status: crate::workflow::ReviewIssueStatus,
+    reason: Option<&str>,
+    issues: &[crate::workflow::ReviewIssue],
+) -> Vec<ReviewLedgerLine> {
+    use crate::workflow::ReviewIssueStatus;
+
+    let resolved: Vec<_> = issues
+        .iter()
+        .filter(|issue| issue.pass == pass && issue.status == status)
+        .collect();
+    if resolved.is_empty() {
+        return Vec::new();
+    }
+    let verdict_tone = match status {
+        ReviewIssueStatus::Fixed => ReviewTone::Fixed,
+        ReviewIssueStatus::Invalidated => ReviewTone::Invalidated,
+        ReviewIssueStatus::Validated => ReviewTone::Open,
+    };
+    let mut head = vec![
+        (
+            format!("{REVIEW_GLYPH} review pass {} · ", pass + 1),
+            ReviewTone::Header,
+        ),
+        (
+            format!(
+                "{} issue{} {}",
+                resolved.len(),
+                if resolved.len() == 1 { "" } else { "s" },
+                status.as_str()
+            ),
+            verdict_tone,
+        ),
+    ];
+    if let Some(reason) = reason {
+        head.push((format!(" — {reason}"), ReviewTone::Detail));
+    }
+    let mut lines = vec![ReviewLedgerLine::new(head)];
+    lines.extend(resolved.into_iter().map(review_issue_row));
+    lines
+}
+
+/// The banner a finished review fossilizes into: final counts up front, then
+/// one row per issue that did not end up plainly fixed.
+fn review_verdict_record(
+    state: &crate::workflow::WorkflowState,
+    outcome: crate::workflow::WorkflowOutcome,
+) -> Vec<ReviewLedgerLine> {
+    use crate::workflow::{ReviewIssueStatus, WorkflowOutcome};
+
+    let tally = state.issue_tally();
+    let head = match outcome {
+        WorkflowOutcome::Failed => "review failed",
+        WorkflowOutcome::Cancelled => "review cancelled",
+        _ => "review complete",
+    };
+    let mut counts = vec![
+        (format!("{REVIEW_GLYPH} {head} · "), ReviewTone::Header),
+        (
+            format!(
+                "{} issue{}",
+                tally.found,
+                if tally.found == 1 { "" } else { "s" }
+            ),
+            ReviewTone::Header,
+        ),
+    ];
+    for (count, label, tone) in [
+        (tally.fixed, "fixed", ReviewTone::Fixed),
+        (tally.invalidated, "invalidated", ReviewTone::Invalidated),
+        (tally.open, "unresolved", ReviewTone::Open),
+    ] {
+        if count > 0 {
+            counts.push((" · ".to_string(), ReviewTone::Detail));
+            counts.push((format!("{count} {label}"), tone));
+        }
+    }
+    let mut lines = vec![
+        ReviewLedgerLine::new(vec![(
+            format!("═══ {REVIEW_GLYPH} review verdict {}", "═".repeat(28)),
+            ReviewTone::Header,
+        )]),
+        ReviewLedgerLine::new(counts),
+    ];
+    // Fixed issues are the happy path and already recorded pass by pass;
+    // the banner re-lists only what still needs the user's judgement.
+    lines.extend(
+        state
+            .issues
+            .iter()
+            .filter(|issue| issue.status != ReviewIssueStatus::Fixed)
+            .map(review_issue_row),
+    );
+    lines.push(ReviewLedgerLine::new(vec![(
+        "═".repeat(46),
+        ReviewTone::Header,
+    )]));
+    lines
 }
 
 /// Ephemeral search state shared by the fullscreen transcript and the inline
@@ -3021,6 +3216,7 @@ impl AppState {
             | Entry::InternalMessage(_)
             | Entry::System(_)
             | Entry::FeatureHint(_)
+            | Entry::ReviewLedger(_)
             | Entry::SessionBoundary(_) => None,
         })
     }
@@ -3137,6 +3333,14 @@ impl AppState {
 
     pub fn push_system_message(&mut self, text: impl Into<String>) {
         self.transcript.push(Entry::System(text.into()));
+        self.bump_transcript_revision();
+    }
+
+    pub fn push_review_ledger(&mut self, lines: Vec<ReviewLedgerLine>) {
+        if lines.is_empty() {
+            return;
+        }
+        self.transcript.push(Entry::ReviewLedger(lines));
         self.bump_transcript_revision();
     }
 
@@ -4489,18 +4693,29 @@ impl AppState {
                 }
             }
             WorkflowTransition::Terminal { outcome, .. } => {
-                let summary = self
-                    .workflows
-                    .get(event.workflow_id)
-                    .map(|state| state.terminal_notice(*outcome));
                 if let Some(clock) = self.workflow_clocks.get_mut(&event.workflow_id) {
                     clock.finished_at = Some(Instant::now());
                 }
-                if let Some(summary) = summary {
+                let Some(state) = self.workflows.get(event.workflow_id) else {
+                    return;
+                };
+                // A review that surfaced issues fossilizes into the verdict
+                // banner; a plain "review complete" would bury the tally.
+                if state.kind == crate::workflow::WorkflowKind::Review && !state.issues.is_empty() {
+                    let banner = review_verdict_record(state, *outcome);
+                    self.push_review_ledger(banner);
+                } else {
+                    let summary = state.terminal_notice(*outcome);
                     self.push_system_message(summary);
                 }
             }
-            WorkflowTransition::IssuesValidated { summaries, .. } => {
+            WorkflowTransition::IssuesValidated { pass, summaries } => {
+                let record = self
+                    .workflows
+                    .get(event.workflow_id)
+                    .map(|state| review_validated_record(*pass, &state.issues))
+                    .unwrap_or_default();
+                self.push_review_ledger(record);
                 self.set_status_line(
                     StatusKind::Warning,
                     format!(
@@ -4510,7 +4725,19 @@ impl AppState {
                     ),
                 );
             }
-            WorkflowTransition::IssuesResolved { status, .. } => {
+            WorkflowTransition::IssuesResolved {
+                pass,
+                status,
+                reason,
+            } => {
+                let record = self
+                    .workflows
+                    .get(event.workflow_id)
+                    .map(|state| {
+                        review_resolved_record(*pass, *status, reason.as_deref(), &state.issues)
+                    })
+                    .unwrap_or_default();
+                self.push_review_ledger(record);
                 let count = self
                     .workflows
                     .get(event.workflow_id)
@@ -8027,6 +8254,120 @@ mod tests {
                 .any(|text| text.starts_with("review supervisor #42 · completed"))
         );
         assert!(summaries.contains(&"review complete · no material findings"));
+    }
+
+    #[test]
+    fn review_issue_lifecycle_fossilizes_ledger_records_and_verdict_banner() {
+        use crate::workflow::{
+            ReviewIssueStatus, WorkflowCoverage, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        fn ledger_texts(state: &AppState) -> Vec<String> {
+            state
+                .transcript
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::ReviewLedger(lines) => Some(
+                        lines
+                            .iter()
+                            .map(ReviewLedgerLine::plain_text)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(4);
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        )));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![
+                    "cache write races the eviction sweep".to_string(),
+                    "retry budget off by one".to_string(),
+                ],
+            },
+        )));
+
+        let records = ledger_texts(&state);
+        assert_eq!(records.len(), 1, "validated findings become a record");
+        assert!(
+            records[0].contains("review pass 1 · 2 validated issues"),
+            "{records:?}"
+        );
+        assert!(
+            records[0].contains("#1 cache write races the eviction sweep"),
+            "{records:?}"
+        );
+        assert!(
+            records[0].contains("#2 retry budget off by one"),
+            "{records:?}"
+        );
+
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                status: ReviewIssueStatus::Invalidated,
+                reason: Some("correction turn changed nothing in the workspace".to_string()),
+            },
+        )));
+        let records = ledger_texts(&state);
+        assert_eq!(records.len(), 2, "the pass verdict becomes a record");
+        assert!(
+            records[1].contains(
+                "2 issues invalidated — correction turn changed nothing in the workspace"
+            ),
+            "{records:?}"
+        );
+        let struck = state
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::ReviewLedger(lines) => Some(lines.iter()),
+                _ => None,
+            })
+            .flatten()
+            .flat_map(|line| line.spans.iter())
+            .any(|(_, tone)| *tone == ReviewTone::Struck);
+        assert!(struck, "invalidated summaries render struck through");
+
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Completed,
+                coverage: WorkflowCoverage::Complete,
+            },
+        )));
+        let records = ledger_texts(&state);
+        assert_eq!(
+            records.len(),
+            3,
+            "a review with findings ends in the banner"
+        );
+        assert!(records[2].contains("review verdict"), "{records:?}");
+        assert!(
+            records[2].contains("review complete · 2 issues · 2 invalidated"),
+            "{records:?}"
+        );
+        assert!(
+            !state.transcript.iter().any(|entry| matches!(
+                entry,
+                Entry::System(text) if text.starts_with("review complete")
+            )),
+            "the banner replaces the bare system notice"
+        );
     }
 
     #[test]
