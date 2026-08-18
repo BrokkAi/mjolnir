@@ -119,3 +119,77 @@ impl Subscriptions {
         }
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct AcpInventory {
+    pub servers: Vec<AcpServerInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpServerInfo {
+    pub id: String,
+    pub label: String,
+    pub policy: crate::config::AcpServerPolicy,
+    pub detected: bool,
+    pub selected: bool,
+    pub evidence: String,
+    pub launch: AdapterLaunch,
+    pub model_count: usize,
+    pub error: Option<String>,
+    pub session_config: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
+    pub subscription: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelChoice {
+    pub model: String,
+    pub pass_at_1: f64,
+    pub mean_cost_usd: f64,
+    pub available: bool,
+    pub disabled_reason: Option<String>,
+    pub adapter: Option<String>,
+    pub ranked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeAuthStatus {
+    LoggedIn,
+    NotLoggedIn,
+}
+
+impl ClaudeAuthStatus {
+    pub fn logged_in(self) -> bool {
+        self == Self::LoggedIn
+    }
+
+    pub fn unavailable_reason(self) -> &'static str {
+        match self {
+            Self::LoggedIn => "Claude Code is logged in",
+            Self::NotLoggedIn => "Claude credentials not found",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Availability {
+    pub codex_credentials: bool,
+    pub claude_status: ClaudeAuthStatus,
+    pub subscriptions: Subscriptions,
+}
+
+impl Availability {
+    pub fn missing_reason(&self, model: &str) -> Option<&'static str> {
+        let adapter = match crate::model_resolve::model_provider(model) {
+            "openai" => Some(AdapterKind::Codex),
+            "anthropic" => Some(AdapterKind::Claude),
+            _ => None,
+        }?;
+        match adapter {
+            AdapterKind::Codex if !self.codex_credentials => Some("Codex credentials not found"),
+            AdapterKind::Claude if !self.claude_status.logged_in() => {
+                Some(self.claude_status.unavailable_reason())
+            }
+            _ => None,
+        }
+    }
+}

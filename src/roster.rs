@@ -19,7 +19,8 @@ use mj_core::model_resolve;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub use mj_core::roster::{
-    AdapterKind, AdapterLaunch, ModelRow as Row, ResolvedAgent, configure_permissions,
+    AcpInventory, AcpServerInfo, AdapterKind, AdapterLaunch, Availability, ClaudeAuthStatus,
+    ModelChoice, ModelRow as Row, ResolvedAgent, configure_permissions,
 };
 
 /// Everything one resolution pass bound: the seats in use plus the catalog the
@@ -161,64 +162,11 @@ fn source_priority(source_id: &str, priority: &[String]) -> usize {
         .unwrap_or(priority.len())
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct AcpInventory {
-    pub servers: Vec<AcpServerInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AcpServerInfo {
-    pub id: String,
-    pub label: String,
-    pub policy: AcpServerPolicy,
-    pub detected: bool,
-    pub selected: bool,
-    pub evidence: String,
-    pub launch: AdapterLaunch,
-    pub model_count: usize,
-    pub error: Option<String>,
-    pub session_config: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
-    /// Subscription tier behind this server's account, when it has one.
-    pub subscription: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ModelChoice {
-    pub model: String,
-    pub pass_at_1: f64,
-    pub mean_cost_usd: f64,
-    pub available: bool,
-    pub disabled_reason: Option<String>,
-    pub adapter: Option<String>,
-    pub ranked: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct Availability {
-    pub codex_credentials: bool,
-    pub claude_status: ClaudeAuthStatus,
-    /// Subscription tier behind each vendor-native account, which decides
-    /// which provider `auto` routes the primary seat through.
-    pub subscriptions: Subscriptions,
-}
-
-impl Availability {
-    pub fn detect() -> Self {
-        Self {
-            codex_credentials: codex_credentials_available(),
-            claude_status: claude_auth_status(),
-            subscriptions: subscription::detect(),
-        }
-    }
-
-    pub fn missing_reason(&self, model: &str) -> Option<&'static str> {
-        match adapter_kind(model)? {
-            AdapterKind::Codex if !self.codex_credentials => Some("Codex credentials not found"),
-            AdapterKind::Claude if !self.claude_status.logged_in() => {
-                Some(self.claude_status.unavailable_reason())
-            }
-            _ => None,
-        }
+fn detect_availability() -> Availability {
+    Availability {
+        codex_credentials: codex_credentials_available(),
+        claude_status: claude_auth_status(),
+        subscriptions: subscription::detect(),
     }
 }
 
@@ -249,25 +197,6 @@ fn credential_file_evidence(path: &Path, pointers: &[&str]) -> Option<String> {
 
 fn codex_credentials_available() -> bool {
     crate::auth::detect(crate::auth::AuthVendor::OpenAi).available()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaudeAuthStatus {
-    LoggedIn,
-    NotLoggedIn,
-}
-
-impl ClaudeAuthStatus {
-    fn logged_in(self) -> bool {
-        self == Self::LoggedIn
-    }
-
-    fn unavailable_reason(self) -> &'static str {
-        match self {
-            Self::LoggedIn => "Claude Code is logged in",
-            Self::NotLoggedIn => "Claude credentials not found",
-        }
-    }
 }
 
 fn claude_auth_status() -> ClaudeAuthStatus {
@@ -373,7 +302,7 @@ fn launch_for(kind: AdapterKind) -> AdapterLaunch {
 }
 
 pub fn discover_inventory(config: &Config) -> AcpInventory {
-    let availability = Availability::detect();
+    let availability = detect_availability();
     let detections = [
         (
             AdapterKind::Codex,
@@ -874,7 +803,7 @@ pub async fn resolve_recovering(config: &mut Config, cwd: &Path) -> Result<(Rost
     )
     .await;
     let rows = natively_served(deepswe::eligible_high(&leaderboard.rows));
-    let availability = Availability::detect();
+    let availability = detect_availability();
     let inventory = discover_inventory(config);
     let discovery = discover_available(&rows, &inventory, cwd).await;
     let notices = recover_unavailable_explicit_models(config, &inventory, &discovery);
