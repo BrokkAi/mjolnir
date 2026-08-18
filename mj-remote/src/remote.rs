@@ -3839,6 +3839,8 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
 
 /// Options for [`run_server`], mirroring the `mj server` CLI surface.
 pub struct RuntimeServerOptions {
+    pub config: config::Config,
+    pub roster: roster::Roster,
     pub hostname: Option<String>,
     pub tailscale: bool,
     pub history_days: u32,
@@ -3854,6 +3856,8 @@ pub struct RuntimeServerOptions {
 
 pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     let RuntimeServerOptions {
+        config: cfg,
+        roster: resolved,
         hostname,
         tailscale,
         history_days,
@@ -3870,13 +3874,10 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     install_crypto_provider();
 
     let config_path = config::default_config_path();
-    let cfg = config::Config::load(&config_path)
-        .with_context(|| format!("load {}", config_path.display()))?;
     // The server counts as "working" for its whole lifetime: remote sessions
     // must survive the host idling even when no turn is in flight. Released
     // when this guard drops on any return path below.
     let _keep_awake = mj_core::keep_awake::KeepAwake::hold(cfg.keep_awake);
-    let resolved = roster::resolve(&cfg, &cwd).await?;
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
     let tailscale_tls = if tailscale {

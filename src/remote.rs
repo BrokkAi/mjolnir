@@ -158,7 +158,7 @@ pub async fn run_server(options: ServerOptions) -> anyhow::Result<()> {
     let resolved = crate::roster::resolve(&cfg, &options.cwd).await?;
     let session_manager =
         std::sync::Arc::new(crate::remote_host::RootServerSessionManager::new_roster(
-            resolved,
+            resolved.clone(),
             crate::remote_host::config_file_hash(&config_path),
             options.cwd.clone(),
             options.additional_directories.clone(),
@@ -166,6 +166,8 @@ pub async fn run_server(options: ServerOptions) -> anyhow::Result<()> {
             options.fs_max_text_bytes,
         ));
     run_server_runtime(RuntimeServerOptions {
+        config: cfg,
+        roster: resolved,
         hostname: options.hostname,
         tailscale: options.tailscale,
         history_days: options.history_days,
