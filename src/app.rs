@@ -29,6 +29,7 @@ use crate::event::{
     SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
+use crate::palette::TerminalThemeKindExt;
 use crate::ragnarok;
 use crate::session_state::SessionState;
 use crate::settings::{SettingsAction, SettingsEditor};

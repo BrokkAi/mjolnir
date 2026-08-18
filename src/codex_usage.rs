@@ -16,58 +16,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CodexUsageStatus {
-    Available(CodexUsageReport),
-    Unavailable(String),
-}
-
-impl CodexUsageStatus {
-    pub fn compact_label(&self) -> String {
-        match self {
-            Self::Available(report) => report.compact_label(),
-            Self::Unavailable(reason) => format!("Codex usage unavailable: {reason}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexUsageReport {
-    pub primary: Option<CodexUsageWindow>,
-    pub secondary: Option<CodexUsageWindow>,
-}
-
-impl CodexUsageReport {
-    fn compact_label(&self) -> String {
-        let parts = [&self.primary, &self.secondary]
-            .into_iter()
-            .flatten()
-            .map(CodexUsageWindow::compact_label)
-            .collect::<Vec<_>>();
-        format!("Codex usage: {}", parts.join(" · "))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexUsageWindow {
-    pub label: String,
-    pub remaining_percent: u8,
-    pub resets_at: Option<i64>,
-}
-
-impl CodexUsageWindow {
-    fn compact_label(&self) -> String {
-        let mut label = format!("{} {}% left", self.label, self.remaining_percent);
-        if let Some(reset) = self
-            .resets_at
-            .and_then(crate::usage_format::format_reset_local_seconds)
-        {
-            label.push_str(" · resets ");
-            label.push_str(&reset);
-        }
-        label
-    }
-}
+pub use mj_core::provider_usage::{CodexUsageReport, CodexUsageStatus, CodexUsageWindow};
 
 pub struct CodexUsageClient {
     child: Child,

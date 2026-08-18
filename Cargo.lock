@@ -2719,12 +2719,19 @@ dependencies = [
 name = "mj-core"
 version = "1.10.1"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
+ "chrono",
  "dirs",
+ "iana-time-zone",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "toml",
  "tracing",
+ "unicode-width",
 ]
 
 [[package]]

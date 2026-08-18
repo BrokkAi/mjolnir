@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::config::{AcpServerPolicy, Config, ModelsConfig, TeamPreset, ThoughtOutput};
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
+use crate::palette::TerminalThemeKindExt;
 use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;

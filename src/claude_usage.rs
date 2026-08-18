@@ -38,62 +38,7 @@ const CHECKOUT_LEASE: Duration = RUNTIME_PREPARE_TIMEOUT
 /// holds the checkout lease.
 const CHECKOUT_POLL: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClaudeUsageStatus {
-    Available(ClaudeUsageReport),
-    Unavailable(String),
-}
-
-impl ClaudeUsageStatus {
-    pub fn compact_label(&self) -> String {
-        match self {
-            Self::Available(report) => report.compact_label(),
-            Self::Unavailable(reason) => format!("Claude usage unavailable: {reason}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaudeUsageReport {
-    pub five_hour: Option<ClaudeUsageWindow>,
-    pub week: Option<ClaudeUsageWindow>,
-}
-
-impl ClaudeUsageReport {
-    pub fn compact_label(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(window) = &self.five_hour {
-            parts.push(window.compact_label("5H"));
-        }
-        if let Some(window) = &self.week {
-            parts.push(window.compact_label("week"));
-        }
-
-        if parts.is_empty() {
-            "Claude usage: unavailable".to_string()
-        } else {
-            format!("Claude usage: {}", parts.join(" · "))
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaudeUsageWindow {
-    pub remaining_percent: u8,
-    /// Text following `reset` in Claude Code output, without the word itself.
-    pub reset_context: Option<String>,
-}
-
-impl ClaudeUsageWindow {
-    fn compact_label(&self, label: &str) -> String {
-        let mut text = format!("{label} {}% left", self.remaining_percent);
-        if let Some(reset_context) = &self.reset_context {
-            text.push_str(" · resets ");
-            text.push_str(reset_context);
-        }
-        text
-    }
-}
+pub use mj_core::provider_usage::{ClaudeUsageReport, ClaudeUsageStatus, ClaudeUsageWindow};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaudeUsageError {

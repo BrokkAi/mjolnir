@@ -64,6 +64,8 @@ use crate::event::{
 use crate::ink::{Ink, InkStyle};
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
+#[cfg(test)]
+use crate::palette::TerminalThemeKindExt;
 use crate::ragnarok;
 use crate::ragnarok_sprites::{self, SpriteKind};
 use crate::settings::{SettingsAction, draw_settings_panel};

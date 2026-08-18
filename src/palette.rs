@@ -71,10 +71,19 @@ pub struct TerminalTheme {
     scan_red: [Ink; SCAN_RED_LEVELS],
 }
 
-impl TerminalThemeKind {
+pub trait TerminalThemeKindExt {
+    fn palette(self) -> TerminalTheme;
+    fn palette_with(
+        self,
+        terminal: Option<DefaultColors>,
+        level: StdoutColorLevel,
+    ) -> TerminalTheme;
+}
+
+impl TerminalThemeKindExt for TerminalThemeKind {
     /// The palette for this mode, using whatever the startup probe learned
     /// about the terminal.
-    pub fn palette(self) -> TerminalTheme {
+    fn palette(self) -> TerminalTheme {
         self.palette_with(
             terminal_palette::default_colors(),
             terminal_palette::stdout_color_level(),
@@ -83,7 +92,7 @@ impl TerminalThemeKind {
 
     /// The palette for explicitly supplied terminal colors and color level, so
     /// the adaptation can be tested without a real terminal.
-    pub fn palette_with(
+    fn palette_with(
         self,
         terminal: Option<DefaultColors>,
         level: StdoutColorLevel,

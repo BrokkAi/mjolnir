@@ -76,6 +76,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path, transcript_export_dir};
 use crate::event::{LoadSessionResult, UiCommand, UiEvent};
+use crate::palette::TerminalThemeKindExt;
 use crate::session::SessionEntryJson;
 use crate::ui::{HeaderLabels, UiMode};
 use crate::worktree::CreatedWorktree;

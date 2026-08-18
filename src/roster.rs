@@ -400,12 +400,6 @@ pub(crate) fn native_source_id(model: &str) -> Option<String> {
     Some(launch_for(adapter_kind(model)?).source_id)
 }
 
-/// Whether any built-in adapter serves this model's provider. Lets config
-/// load drop seat pins that no longer have a route.
-pub(crate) fn model_has_builtin_adapter(model: &str) -> bool {
-    adapter_kind(model).is_some()
-}
-
 /// A config that explicitly enables one built-in server for tests that need a
 /// selected route regardless of the host's credentials.
 #[cfg(test)]

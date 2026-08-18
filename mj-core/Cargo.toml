@@ -9,11 +9,19 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
 [dependencies]
+agent-client-protocol = { version = "1", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
+iana-time-zone = "0.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+tempfile = "3"
+tokio = { version = "1", features = ["sync"] }
+toml = "0.8"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 tempfile = "3"
