@@ -13,6 +13,7 @@ use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo}
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::acp;
+use crate::session_state::{config_option_choices, is_model_config_option};
 
 type AgentTransport = ByteStreams<
     tokio_util::compat::Compat<tokio::process::ChildStdin>,
@@ -180,8 +181,8 @@ where
             let session_config = session.config_options.unwrap_or_default();
             let models = session_config
                 .iter()
-                .filter(|option| crate::session_state::is_model_config_option(option))
-                .filter_map(crate::session_state::config_option_choices)
+                .filter(|option| is_model_config_option(option))
+                .filter_map(config_option_choices)
                 .flatten()
                 .map(|choice| ModelOption {
                     value: choice.value.to_string(),

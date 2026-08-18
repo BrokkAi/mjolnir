@@ -8,12 +8,16 @@ use std::time::Instant;
 use agent_client_protocol::schema::v1::{AvailableCommand, SessionConfigOption};
 
 use crate::app::{ConnectionState, Entry, TerminalRegistration, ToolCallView};
+pub use mj_core::session_state::{
+    ConfigValueChoice, config_option_choices, config_option_current_value_id,
+    is_model_config_option,
+};
+
 use crate::event::{SessionConfigTarget, TerminalOutputSnapshot};
 
 pub(crate) use crate::app::{
     ElicitationFormFieldKind, ElicitationView, RagnarokDraftPrStatus, RagnarokObservation,
-    StatusKind, classify_elicitation, config_option_choices, config_option_current_value_id,
-    is_model_config_option, is_subagent_transport_call, is_subagent_transport_update,
+    StatusKind, classify_elicitation, is_subagent_transport_call, is_subagent_transport_update,
     status_transcript_text,
 };
 
