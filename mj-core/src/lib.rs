@@ -14,6 +14,7 @@ pub mod model_resolve;
 pub mod paths;
 pub mod probe;
 pub mod provider_usage;
+pub mod roster;
 pub mod session;
 pub mod session_provenance;
 pub mod session_state;

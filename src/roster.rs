@@ -10,78 +10,17 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use futures::{StreamExt, stream};
 
-use crate::config::{AcpServerPolicy, Config, PermissionPreset, RuntimePermissionConfig};
-use crate::deepswe::{self, Row};
+use crate::config::{AcpServerPolicy, Config};
+use crate::deepswe;
 use crate::probe;
 use crate::subscription::Subscriptions;
 use mj_core::model_resolve;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdapterKind {
-    Codex,
-    Claude,
-}
-
-impl AdapterKind {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Codex => "Codex",
-            Self::Claude => "Claude Code",
-        }
-    }
-
-    pub fn from_source_id(source_id: &str) -> Option<Self> {
-        match source_id {
-            "codex-acp" => Some(Self::Codex),
-            "claude-acp" => Some(Self::Claude),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AdapterLaunch {
-    pub kind: AdapterKind,
-    pub source_id: String,
-    pub command: PathBuf,
-    pub args: Vec<String>,
-    pub env: HashMap<String, String>,
-}
-
-pub fn configure_permissions(
-    kind: AdapterKind,
-    mode: PermissionPreset,
-    _env: &mut HashMap<String, String>,
-) -> Option<RuntimePermissionConfig> {
-    let (config_id, value, manual_fallback) = match (kind, mode) {
-        (AdapterKind::Codex, PermissionPreset::Manual) => ("mode", "read-only", None),
-        (AdapterKind::Codex, PermissionPreset::Auto) => ("mode", "agent", Some("read-only")),
-        (AdapterKind::Codex, PermissionPreset::Yolo) => ("mode", "agent-full-access", None),
-        (AdapterKind::Claude, PermissionPreset::Manual) => ("mode", "default", None),
-        (AdapterKind::Claude, PermissionPreset::Auto) => ("mode", "auto", Some("default")),
-        (AdapterKind::Claude, PermissionPreset::Yolo) => ("mode", "bypassPermissions", None),
-    };
-    Some(RuntimePermissionConfig {
-        config_id: config_id.to_string(),
-        value: value.to_string(),
-        manual_fallback: manual_fallback.map(str::to_string),
-        mode,
-    })
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedAgent {
-    pub model: Row,
-    pub model_value: String,
-    pub launch: AdapterLaunch,
-    pub ranked: bool,
-    /// Per-seat reasoning-effort override applied to this agent's ACP
-    /// session (e.g. from `--model MODEL+high`). `None` leaves the
-    /// adapter's own default effort untouched.
-    pub reasoning_effort: Option<String>,
-}
+pub use mj_core::roster::{
+    AdapterKind, AdapterLaunch, ModelRow as Row, ResolvedAgent, configure_permissions,
+};
 
 /// Everything one resolution pass bound: the seats in use plus the catalog the
 /// UI and the subagent MCP surface offer.
@@ -1187,6 +1126,7 @@ fn assemble_roster(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PermissionPreset;
     use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
 
     #[test]

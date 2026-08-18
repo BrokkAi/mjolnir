@@ -22,14 +22,7 @@ pub struct Leaderboard {
     pub rows: Vec<Row>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct Row {
-    pub model: String,
-    #[serde(default)]
-    pub reasoning_effort: Option<String>,
-    pub pass_at_1: f64,
-    pub mean_cost_usd: f64,
-}
+pub use mj_core::roster::ModelRow as Row;
 
 pub fn default_cache_path() -> PathBuf {
     dirs::cache_dir()
