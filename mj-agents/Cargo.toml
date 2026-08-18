@@ -1,0 +1,31 @@
+[package]
+name = "mj-agents"
+version.workspace = true
+edition = "2024"
+rust-version = "1.97"
+description = "Multi-agent orchestration and review layer for Mjolnir"
+license = "GPL-3.0-only"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[dependencies]
+mj-core = { path = "../mj-core", version = "1.10.1" }
+agent-client-protocol = { version = "1", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+futures = "0.3"
+rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
+tracing = "0.1"
+getrandom = "0.3"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

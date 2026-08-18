@@ -523,7 +523,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
- "axum",
  "axum-server",
  "base64",
  "chrono",
@@ -532,12 +531,12 @@ dependencies = [
  "dirs",
  "flate2",
  "futures",
- "getrandom 0.3.4",
  "hmac",
  "http-body-util",
  "iana-time-zone",
  "image",
  "libc",
+ "mj-agents",
  "mj-core",
  "mj-desktop",
  "mj-remote",
@@ -545,11 +544,9 @@ dependencies = [
  "ratatui",
  "rcgen",
  "reqwest",
- "rmcp",
  "rusqlite",
  "rustls",
  "rustls-pemfile",
- "schemars 1.2.1",
  "semver",
  "serde",
  "serde_json",
@@ -2715,6 +2712,29 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mj-agents"
+version = "1.10.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "futures",
+ "getrandom 0.3.4",
+ "mj-core",
+ "reqwest",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

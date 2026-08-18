@@ -49,7 +49,6 @@ mod terminal_palette;
 mod termination;
 mod text;
 mod theme;
-mod trajectory;
 mod ui;
 mod usage_format;
 mod version;

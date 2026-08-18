@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::io::Write;
 
-pub use mj_core::worktree::*;
+pub use mj_agents::worktree::*;
 
 /// Ask whether to remove the worktree after the session ends, using an
 /// inline arrow-key menu when stdio is an interactive terminal and the

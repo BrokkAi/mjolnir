@@ -1,3 +1,3 @@
 //! Compatibility re-exports for the DeepSWE catalog.
 
-pub use mj_core::deepswe::*;
+pub use mj_agents::deepswe::*;

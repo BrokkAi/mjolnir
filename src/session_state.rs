@@ -8,9 +8,6 @@ use std::time::Instant;
 use agent_client_protocol::schema::v1::{AvailableCommand, SessionConfigOption};
 
 use crate::app::{ConnectionState, Entry, TerminalRegistration, ToolCallView};
-pub use mj_core::session_state::{
-    config_option_choices, config_option_current_value_id, is_model_config_option,
-};
 
 use crate::event::{SessionConfigTarget, TerminalOutputSnapshot};
 
