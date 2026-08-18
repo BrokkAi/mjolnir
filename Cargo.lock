@@ -2719,13 +2719,16 @@ name = "mj-desktop"
 version = "1.10.1"
 dependencies = [
  "anyhow",
+ "base64",
  "block2",
  "gio",
+ "image",
  "objc2",
  "objc2-foundation",
  "objc2-web-kit",
  "rustls",
  "tao",
+ "tracing",
  "url",
  "webbrowser",
  "webkit2gtk",

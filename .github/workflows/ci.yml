@@ -41,7 +41,9 @@ jobs:
     - name: Check crate package license files
       run: |
         diff -u LICENSE voice-worker/LICENSE
-        cargo package --locked --allow-dirty --no-verify -p brokk-mjolnir
+        cargo package --locked --allow-dirty --no-verify -p mj-desktop
+        # The root package cannot resolve its same-release mj-desktop registry
+        # dependency until publishing; the matrix build below validates it.
         cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/mjolnir-package-files.txt
         cargo package --locked --allow-dirty --list -p brokk-mj-voice-worker > /tmp/voice-worker-package-files.txt
         grep -Fx LICENSE /tmp/mjolnir-package-files.txt
@@ -95,9 +97,9 @@ jobs:
     - name: Run tests
       run: cargo test --features desktop-app
 
-    - name: Verify packaged macOS desktop feature
+    - name: Verify packaged macOS desktop crate
       if: runner.os == 'macOS'
-      run: cargo package --locked --allow-dirty -p brokk-mjolnir --features desktop-app
+      run: cargo package --locked --allow-dirty -p mj-desktop
 
   voice-worker:
     name: Voice worker (ubuntu-latest)

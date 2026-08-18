@@ -53,9 +53,10 @@ already-published release.
 
 ## crates.io publishing
 
-`publish.yml` publishes `brokk-mj-voice-worker` and `brokk-mjolnir`. It refuses
-to publish when the tag differs from either crate version, and packages both
-crates ahead of the `crates-io` environment gate so a packaging failure surfaces
+`publish.yml` publishes `brokk-mj-voice-worker`, `mj-desktop`, and
+`brokk-mjolnir` in dependency order. It refuses to publish when the tag differs
+from any crate version. It packages the independent crates and builds the root
+crate with `desktop-app` ahead of the `crates-io` environment gate so a failure surfaces
 without spending an approval.
 
 Publishing runs automatically once the release workflow succeeds. The automated
@@ -69,7 +70,8 @@ Each crate is skipped when that version is already on the registry. That is the
 recovery path if one crate publishes and the other fails: re-running resumes at
 the crate that did not land. crates.io reserves a version number permanently
 once published and yanking does not release it, so a shipped version can never
-be republished.
+be republished. `mj-desktop` is published before the root; the workflow retries
+the root publish while that new version propagates through the sparse index.
 
 To package a tag without publishing, run the workflow manually with `publish`
 off and inspect its `.crate` artifact.

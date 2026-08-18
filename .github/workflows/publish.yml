@@ -33,10 +33,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.97.1
 
-      - name: Install Linux audio dependencies
+      - name: Install Linux native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
       - name: Verify tag matches Cargo.toml version
         shell: bash
@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
           tag="${RELEASE_TAG#v}"
           versions="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "brokk-mjolnir" or .name == "brokk-mj-voice-worker") | [.name, .version] | @tsv')"
+            | jq -r '.packages[] | select(.name == "brokk-mjolnir" or .name == "brokk-mj-voice-worker" or .name == "mj-desktop") | [.name, .version] | @tsv')"
           test -n "$versions"
           while IFS=$'\t' read -r crate version; do
             if [ "$tag" != "$version" ]; then
@@ -56,7 +56,11 @@ jobs:
       - name: Package crates
         run: |
           cargo package --locked -p brokk-mj-voice-worker
-          cargo package --locked -p brokk-mjolnir
+          cargo package --locked -p mj-desktop
+          # The root depends on the same-release mj-desktop version, which is
+          # not in the registry until the publish job. Building its feature
+          # validates the local composition before either crate is published.
+          cargo build --locked -p brokk-mjolnir --features desktop-app
 
       - uses: actions/upload-artifact@v7
         with:
@@ -84,10 +88,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.97.1
 
-      - name: Install Linux audio dependencies
+      - name: Install Linux native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
       - name: Authenticate to crates.io
         uses: rust-lang/crates-io-auth-action@v1
@@ -132,10 +136,20 @@ jobs:
                 ;;
             esac
           }
-          for crate in brokk-mj-voice-worker brokk-mjolnir; do
+          for crate in brokk-mj-voice-worker mj-desktop brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"
               continue
             fi
-            cargo publish --locked -p "$crate"
+            if [ "$crate" = brokk-mjolnir ]; then
+              # The sparse index may take a moment to expose the just-published
+              # mj-desktop version required while packaging the root crate.
+              for attempt in 1 2 3 4 5 6; do
+                cargo publish --locked -p "$crate" && break
+                test "$attempt" -lt 6 || exit 1
+                sleep 10
+              done
+            else
+              cargo publish --locked -p "$crate"
+            fi
           done
