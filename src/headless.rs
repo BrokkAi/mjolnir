@@ -342,7 +342,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         memory: crate::memory::SessionMemory::from_config(
             &app_config.memory,
             &cfg.cwd,
-            Some(primary.launch.kind),
+            matches!(primary.launch.kind, crate::roster::AdapterKind::Codex),
         ),
         side_prompt_policy: false,
         termination: Some(cfg.termination.clone()),

@@ -4,6 +4,7 @@ pub mod agent_usage;
 pub mod archive;
 pub mod config;
 pub mod event;
+pub mod memory;
 pub mod model_resolve;
 pub mod paths;
 pub mod provider_usage;
