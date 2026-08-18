@@ -22,6 +22,8 @@ pub mod side;
 pub mod spinner;
 pub mod terminal_output;
 pub mod theme;
+pub mod trajectory;
 pub mod usage_fact;
 pub mod usage_format;
 pub mod workflow;
+pub mod workspace_snapshot;
