@@ -2775,7 +2775,7 @@ async fn drive_session(
                 } else {
                     None
                 };
-                let changed_memory = current_memory_entries.as_deref().and_then(|entries| {
+                let pending_memory = current_memory_entries.as_deref().and_then(|entries| {
                     memory.as_ref().and_then(|memory| {
                         crate::memory::render_preamble_update(
                             entries,
@@ -2784,9 +2784,8 @@ async fn drive_session(
                         )
                     })
                 });
-                last_memory_entries = current_memory_entries;
-                let text = match changed_memory {
-                    Some(preamble) if text.is_empty() => preamble,
+                let text = match pending_memory.as_ref().map(|update| update.text.as_str()) {
+                    Some(preamble) if text.is_empty() => preamble.to_string(),
                     Some(preamble) => format!("{preamble}\n\n{text}"),
                     None => text,
                 };
@@ -2811,6 +2810,16 @@ async fn drive_session(
                 )
                 .await?;
                 session_has_history = true;
+                if let Some(update) = pending_memory {
+                    let delivered = last_memory_entries.get_or_insert_with(Vec::new);
+                    for entry in update.delivered {
+                        if let Some(old) = delivered.iter_mut().find(|old| old.id == entry.id) {
+                            *old = entry;
+                        } else {
+                            delivered.push(entry);
+                        }
+                    }
+                }
                 if !keep_running {
                     break;
                 }
