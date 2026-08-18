@@ -2711,7 +2711,7 @@ async fn drive_session(
     let mut session_has_history = resumed;
     // Reread shared knowledge at every turn boundary so concurrent Claude and
     // Codex sessions observe one another's durable discoveries without restart.
-    let mut last_memory_preamble = None;
+    let mut last_memory_entries: Option<Vec<crate::memory::MemoryEntry>> = None;
     // Prompts that arrived while another operation owned `ui_rx` (a turn, a
     // config update, a session fork). They are replayed here, ahead of any
     // command still sitting in the channel, instead of being dropped: an
@@ -2765,8 +2765,8 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let current_memory_preamble = if let Some(memory) = memory.clone() {
-                    tokio::task::spawn_blocking(move || memory.preamble())
+                let current_memory_entries = if let Some(memory) = memory.clone() {
+                    tokio::task::spawn_blocking(move || memory.refresh_entries())
                         .await
                         .unwrap_or_else(|error| {
                             tracing::warn!("memory refresh task failed: {error}");
@@ -2775,10 +2775,16 @@ async fn drive_session(
                 } else {
                     None
                 };
-                let changed_memory = (current_memory_preamble != last_memory_preamble)
-                    .then(|| current_memory_preamble.clone())
-                    .flatten();
-                last_memory_preamble = current_memory_preamble;
+                let changed_memory = current_memory_entries.as_deref().and_then(|entries| {
+                    memory.as_ref().and_then(|memory| {
+                        crate::memory::render_preamble_update(
+                            entries,
+                            last_memory_entries.as_deref(),
+                            &memory.project,
+                        )
+                    })
+                });
+                last_memory_entries = current_memory_entries;
                 let text = match changed_memory {
                     Some(preamble) if text.is_empty() => preamble,
                     Some(preamble) => format!("{preamble}\n\n{text}"),
@@ -2884,7 +2890,7 @@ async fn drive_session(
                         context_usage.reset_for_session();
                         session_has_history = false;
                         next_turn_diff_id = 1;
-                        last_memory_preamble = None;
+                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(message) => {
@@ -2980,7 +2986,7 @@ async fn drive_session(
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
-                        last_memory_preamble = None;
+                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
