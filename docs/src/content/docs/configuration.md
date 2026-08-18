@@ -197,10 +197,11 @@ per-project path is used. Topic files are not flattened into the prompt.
 Imports are source-tracked and updated in place. Project-scoped imports are
 removed when disabled or superseded; global imports are filtered outside their
 resolved scope and removed only when their global file is confirmed absent, so
-one project cannot delete another's data. Forgetting an import permanently
-excludes that exact imported chunk by content hash; a differently chunked or
-framed version is distinct. Turn refreshes inject only new or changed entries,
-retrying budget-omitted entries on later turns. Users can also manage knowledge
+one project cannot delete another's data. Imported entries are a projection of
+`MEMORY.md` rather than knowledge Mjolnir owns, so `/memory forget` declines
+them and names the file; remove the text there and the next refresh drops it.
+Turn refreshes inject only new or changed entries, retrying budget-omitted
+entries on later turns. Users can also manage knowledge
 with `/memory` or `mj memory`. Side conversations, subagents, and review lanes
 remain isolated.
 

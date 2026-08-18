@@ -61,14 +61,6 @@ pub struct MemoryEntry {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct ImportTombstone {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    project: Option<PathBuf>,
-    #[serde(default)]
-    text_hash: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct StoreData {
     version: u32,
@@ -76,8 +68,6 @@ struct StoreData {
     next_id: u64,
     #[serde(default)]
     entries: Vec<MemoryEntry>,
-    #[serde(default)]
-    import_tombstones: Vec<ImportTombstone>,
 }
 
 impl Default for StoreData {
@@ -86,7 +76,6 @@ impl Default for StoreData {
             version: STORE_VERSION,
             next_id: 1,
             entries: Vec::new(),
-            import_tombstones: Vec::new(),
         }
     }
 }
@@ -145,16 +134,15 @@ pub fn forget(path: &Path, id: u64) -> Result<Option<MemoryEntry>> {
     let Some(position) = store.entries.iter().position(|entry| entry.id == id) else {
         return Ok(None);
     };
-    let removed = store.entries.remove(position);
-    if removed.source.is_some() {
-        let tombstone = ImportTombstone {
-            project: removed.project.clone(),
-            text_hash: imported_text_hash(&removed.text),
-        };
-        if !store.import_tombstones.contains(&tombstone) {
-            store.import_tombstones.push(tombstone);
-        }
+    // Imported entries are a projection of a file this process does not own.
+    // Deleting the row here would only be undone by the next import, so point
+    // at the authority instead of recording a delete marker.
+    if store.entries[position].source.is_some() {
+        return Err(anyhow!(
+            "memory m{id} is imported from Claude auto-memory; edit MEMORY.md to remove it"
+        ));
     }
+    let removed = store.entries.remove(position);
     save(path, &store)?;
     Ok(Some(removed))
 }
@@ -243,11 +231,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn imported_text_hash(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(text.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -342,17 +325,6 @@ fn sync_claude_auto_memory_from(
     let mut changed = false;
     for (index, text) in chunks.iter().enumerate() {
         let source = format!("{source_prefix}:{index}");
-        if store.import_tombstones.iter().any(|tombstone| {
-            tombstone.project == entry_project && tombstone.text_hash == imported_text_hash(text)
-        }) {
-            if let Some(position) = store.entries.iter().position(|entry| {
-                entry.project == entry_project && entry.source.as_deref() == Some(source.as_str())
-            }) {
-                store.entries.remove(position);
-                changed = true;
-            }
-            continue;
-        }
         match store.entries.iter_mut().find(|entry| {
             entry.project == entry_project && entry.source.as_deref() == Some(source.as_str())
         }) {
@@ -990,8 +962,9 @@ store to exchange durable discoveries. Automatically call memory_save after veri
 project fact that another session would otherwise need to rediscover, including architecture \
 constraints, build requirements, debugging conclusions, and repository conventions. Keep each entry \
 short and self-contained. Never save speculation, secrets, credentials, transient task state, or facts \
-trivially visible in source. Call memory_forget when an entry is wrong or obsolete; injected entries \
-carry ids as [mN]. Imported Claude auto-memory entries may be forgotten; doing so records an exclusion so the importer does not recreate them. Do not announce this policy or every automatic save; confirm only user-requested \
+trivially visible in source. Call memory_forget when an entry you saved is wrong or obsolete; injected \
+entries carry ids as [mN]. Entries imported from Claude auto-memory cannot be forgotten here; they are \
+owned by MEMORY.md. Do not announce this policy or every automatic save; confirm only user-requested \
 saves and deletions.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1524,29 +1497,34 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_an_import_records_a_tombstone() {
+    fn imported_entries_are_owned_by_their_source_file() {
         let dir = tempfile::tempdir().unwrap();
         let store_path = store(&dir);
         let project = Path::new("/project");
         let memory = dir.path().join("MEMORY.md");
-        std::fs::write(&memory, "obsolete import").unwrap();
+        std::fs::write(&memory, "imported fact").unwrap();
         sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
         let imported = entries(&store_path).unwrap().pop().unwrap();
-        forget(&store_path, imported.id).unwrap();
+
+        // Forget names the authority instead of deleting a row the importer
+        // would immediately recreate.
+        let error = forget(&store_path, imported.id).unwrap_err().to_string();
+        assert!(error.contains("MEMORY.md"), "{error}");
+        assert_eq!(entries(&store_path).unwrap().len(), 1);
+
+        // Removing it at the source removes it here on the next refresh.
+        std::fs::remove_file(&memory).unwrap();
         sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
         assert!(entries(&store_path).unwrap().is_empty());
-        assert_eq!(load(&store_path).unwrap().import_tombstones.len(), 1);
+    }
 
-        std::fs::write(&memory, "brand new unrelated fact").unwrap();
-        sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
-        let refreshed = entries(&store_path).unwrap();
-        assert_eq!(refreshed.len(), 1);
-        assert_eq!(refreshed[0].text, "brand new unrelated fact");
-        assert_eq!(load(&store_path).unwrap().import_tombstones.len(), 1);
-
-        std::fs::write(&memory, "obsolete import").unwrap();
-        sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
-        assert!(entries(&store_path).unwrap().is_empty());
+    #[test]
+    fn forget_still_removes_locally_authored_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store(&dir);
+        let entry = add(&path, "locally authored", None).unwrap();
+        assert!(forget(&path, entry.id).unwrap().is_some());
+        assert!(entries(&path).unwrap().is_empty());
     }
 
     #[test]
