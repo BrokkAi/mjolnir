@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use base64::Engine;
 use serde_json::Value;
 
-pub use mj_core::roster::{AdapterKind, Subscription, Subscriptions};
+pub use mj_core::roster::{Subscription, Subscriptions};
 
 /// Detect subscriptions recorded by vendor-native clients.
 pub fn detect() -> Subscriptions {
@@ -128,6 +128,7 @@ fn codex_plan(plan_type: &str) -> Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_core::roster::AdapterKind;
 
     fn subscriptions(claude: Option<Subscription>, codex: Option<Subscription>) -> Subscriptions {
         Subscriptions { claude, codex }
