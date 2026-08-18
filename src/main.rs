@@ -41,6 +41,7 @@ mod roster;
 mod self_update;
 mod session;
 mod session_provenance;
+mod session_state;
 mod settings;
 mod side;
 mod speech;

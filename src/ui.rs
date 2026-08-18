@@ -19078,8 +19078,8 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
 
         assert!(cmd_rx.try_recv().is_err());
-        assert_eq!(state.transcript.len(), 1);
-        match &state.transcript[0] {
+        assert_eq!(state.session.transcript.len(), 1);
+        match &state.session.transcript[0] {
             Entry::System(text) => assert_eq!(
                 text,
                 "acp runtime closed; type /clear for the same agent, /new for the picker, or Ctrl-C to quit"
@@ -20486,8 +20486,8 @@ mod tests {
         let warn = state.status_line.expect("warning");
         assert_eq!(warn.kind, StatusKind::Warning);
         assert!(warn.text.contains("/mj:bogus"), "msg: {}", warn.text);
-        assert_eq!(state.transcript.len(), 1);
-        match &state.transcript[0] {
+        assert_eq!(state.session.transcript.len(), 1);
+        match &state.session.transcript[0] {
             Entry::System(text) => assert_eq!(text, "warning: unknown mj command: /mj:bogus"),
             other => panic!("unexpected entry: {other:?}"),
         }
