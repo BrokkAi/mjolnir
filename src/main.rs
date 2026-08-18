@@ -4854,6 +4854,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_bridge_serves_an_initialized_root_session() {
+        use agent_client_protocol::schema::v1::McpServer;
+        use tokio::{
+            io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+            net::TcpStream,
+        };
+
+        let temp = tempfile::tempdir().expect("memory tempdir");
+        let session_memory = memory::SessionMemory {
+            store_path: temp.path().join("memories.json"),
+            project: temp.path().to_path_buf(),
+            inject: true,
+            tools: true,
+            import_claude_auto: false,
+        };
+        let server = memory::ToolServer::start(&session_memory)
+            .await
+            .expect("start bridge");
+        let McpServer::Stdio(stdio) = server.advertised() else {
+            panic!("bridge must advertise stdio");
+        };
+        let addr = stdio
+            .args
+            .iter()
+            .skip_while(|arg| arg.as_str() != "--addr")
+            .nth(1)
+            .expect("bridge address");
+        let token = &stdio
+            .env
+            .iter()
+            .find(|variable| variable.name == mj_core::mcp_bridge::TOKEN_ENV)
+            .expect("bridge token")
+            .value;
+        let stream = TcpStream::connect(addr).await.expect("connect bridge");
+        let (read, mut write) = stream.into_split();
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "root-fixture", "version": "1"}
+            }
+        });
+        write
+            .write_all(format!("{token}\n{initialize}\n").as_bytes())
+            .await
+            .expect("initialize bridge");
+        let response = BufReader::new(read)
+            .lines()
+            .next_line()
+            .await
+            .expect("read response")
+            .expect("bridge remains open");
+        let response: serde_json::Value =
+            serde_json::from_str(&response).expect("response is JSON");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["serverInfo"]["name"], "mj-memory");
+    }
+
+    #[tokio::test]
     async fn inline_session_load_reports_closed_command_channel() {
         let (commands, receiver) = mpsc::unbounded_channel();
         drop(receiver);
