@@ -14,6 +14,7 @@ pub mod paths;
 pub mod provider_usage;
 pub mod session;
 pub mod session_provenance;
+pub mod side;
 pub mod spinner;
 pub mod terminal_output;
 pub mod theme;
