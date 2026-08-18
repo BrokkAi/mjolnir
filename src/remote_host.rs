@@ -488,12 +488,7 @@ fn start_server_agent_session(
     let session_memory = mj_core::memory::SessionMemory::from_config(
         &app_config.memory,
         &cwd,
-        roster.as_ref().is_some_and(|resolved| {
-            matches!(
-                resolved.primary.launch.kind,
-                mj_core::roster::AdapterKind::Codex
-            )
-        }),
+        roster.as_ref().map(|resolved| resolved.primary.launch.kind),
     );
     let mut workspace_roots = Vec::with_capacity(1 + additional_directories.len());
     workspace_roots.push(cwd.clone());

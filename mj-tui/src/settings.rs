@@ -11,7 +11,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::config::{AcpServerPolicy, Config, ModelsConfig, TeamPreset, ThoughtOutput};
+use crate::config::{
+    AcpServerPolicy, Config, InterfaceMode, ModelsConfig, TeamPreset, ThoughtOutput,
+};
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
@@ -209,7 +211,7 @@ impl SettingsEditor {
                 self.settings_rows(self.tab).len()
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
-            SettingsTab::Appearance => 5,
+            SettingsTab::Appearance => 6,
         }
     }
 
@@ -311,6 +313,15 @@ impl SettingsEditor {
             }
             SettingsTab::Appearance if self.selected == 4 => {
                 self.config.keep_awake = !self.config.keep_awake;
+            }
+            SettingsTab::Appearance if self.selected == 5 => {
+                let current = InterfaceMode::ALL
+                    .iter()
+                    .position(|mode| *mode == self.config.interface)
+                    .unwrap_or(0);
+                let next =
+                    (current as i32 + delta).rem_euclid(InterfaceMode::ALL.len() as i32) as usize;
+                self.config.interface = InterfaceMode::ALL[next];
             }
             _ => return SettingsAction::None,
         }
@@ -1487,68 +1498,132 @@ fn draw_appearance(
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
-    let lines = vec![
-        Line::styled(
-            "Appearance changes preview immediately.",
-            Style::default().ink(theme.muted),
+    // Each selectable row with the description lines that belong to it, so
+    // scrolling can keep the whole selected block on screen in short panels
+    // instead of letting the bottom rows cycle blind.
+    let sections: Vec<(Option<usize>, Vec<Line>)> = vec![
+        (
+            None,
+            vec![
+                Line::styled(
+                    "Appearance changes preview immediately.",
+                    Style::default().ink(theme.muted),
+                ),
+                Line::raw(""),
+            ],
         ),
-        Line::raw(""),
-        selected_line(
-            editor.selected == 0,
-            format!("Theme       < {} >", editor.config.theme),
-            theme,
+        (
+            Some(0),
+            vec![
+                selected_line(
+                    editor.selected == 0,
+                    format!("Theme       < {} >", editor.config.theme),
+                    theme,
+                ),
+                Line::styled(
+                    format!("            {}", editor.config.theme.description()),
+                    Style::default().ink(theme.muted),
+                ),
+                Line::styled(
+                    format!("            {}", terminal_report()),
+                    Style::default().ink(theme.muted),
+                ),
+            ],
         ),
-        Line::styled(
-            format!("            {}", editor.config.theme.description()),
-            Style::default().ink(theme.muted),
+        (
+            Some(1),
+            vec![spinner_preview_line(
+                editor.selected == 1,
+                editor.config.spinner,
+                theme,
+            )],
         ),
-        Line::styled(
-            format!("            {}", terminal_report()),
-            Style::default().ink(theme.muted),
+        (
+            Some(2),
+            vec![
+                selected_line(
+                    editor.selected == 2,
+                    format!("Thought output < {} >", editor.config.thought_output),
+                    theme,
+                ),
+                Line::styled(
+                    format!(
+                        "               {}",
+                        editor.config.thought_output.description()
+                    ),
+                    Style::default().ink(theme.muted),
+                ),
+            ],
         ),
-        spinner_preview_line(editor.selected == 1, editor.config.spinner, theme),
-        selected_line(
-            editor.selected == 2,
-            format!("Thought output < {} >", editor.config.thought_output),
-            theme,
+        (
+            Some(3),
+            vec![selected_line(
+                editor.selected == 3,
+                format!(
+                    "Feature tips < {} >",
+                    if editor.config.feature_hints {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+                theme,
+            )],
         ),
-        Line::styled(
-            format!(
-                "               {}",
-                editor.config.thought_output.description()
-            ),
-            Style::default().ink(theme.muted),
+        (
+            Some(4),
+            vec![
+                selected_line(
+                    editor.selected == 4,
+                    format!(
+                        "Keep awake  < {} >",
+                        if editor.config.keep_awake {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ),
+                    theme,
+                ),
+                Line::styled(
+                    "            Prevent system sleep while the server runs or a turn is in flight.",
+                    Style::default().ink(theme.muted),
+                ),
+            ],
         ),
-        selected_line(
-            editor.selected == 3,
-            format!(
-                "Feature tips < {} >",
-                if editor.config.feature_hints {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-            theme,
-        ),
-        selected_line(
-            editor.selected == 4,
-            format!(
-                "Keep awake  < {} >",
-                if editor.config.keep_awake {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-            theme,
-        ),
-        Line::styled(
-            "            Prevent system sleep while the server runs or a turn is in flight.",
-            Style::default().ink(theme.muted),
+        (
+            Some(5),
+            vec![
+                selected_line(
+                    editor.selected == 5,
+                    format!("Interface   < {} >", editor.config.interface),
+                    theme,
+                ),
+                Line::styled(
+                    format!("            {}", editor.config.interface.description()),
+                    Style::default().ink(theme.muted),
+                ),
+                Line::styled(
+                    "            Applies when the next session starts; --fullscreen-tui overrides.",
+                    Style::default().ink(theme.muted),
+                ),
+            ],
         ),
     ];
-    frame.render_widget(Paragraph::new(lines), area);
+    let mut lines = Vec::new();
+    let mut selected_span = (0, 0);
+    for (row, section) in sections {
+        if row == Some(editor.selected) {
+            selected_span = (lines.len(), lines.len() + section.len() - 1);
+        }
+        lines.extend(section);
+    }
+    // Scroll just far enough to show the selected block's last line, but never
+    // past its first line when the block itself outgrows the viewport.
+    let scroll = (selected_span.1 + 1)
+        .saturating_sub(area.height as usize)
+        .min(selected_span.0);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), area);
 }
 
 /// What the startup probe learned, phrased for the appearance tab.
@@ -2405,6 +2480,33 @@ mod tests {
     }
 
     #[test]
+    fn appearance_scrolls_the_selected_bottom_row_into_view() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Appearance;
+
+        let unscrolled = render(&editor, SETTINGS_PANEL_MIN_WIDTH, SETTINGS_PANEL_MIN_HEIGHT);
+        assert!(unscrolled.contains("Theme"), "rendered:\n{unscrolled}");
+        assert!(!unscrolled.contains("Interface"), "rendered:\n{unscrolled}");
+
+        editor.selected = 5;
+        let scrolled = render(&editor, SETTINGS_PANEL_MIN_WIDTH, SETTINGS_PANEL_MIN_HEIGHT);
+        assert!(scrolled.contains("Interface"), "rendered:\n{scrolled}");
+    }
+
+    #[test]
+    fn appearance_tab_cycles_interface_mode() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Appearance;
+        editor.selected = 5;
+
+        assert_eq!(editor.config.interface, InterfaceMode::Inline);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.interface, InterfaceMode::Fullscreen);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.interface, InterfaceMode::Inline);
+    }
+
+    #[test]
     fn standard_tabs_render_their_controls() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
@@ -2465,6 +2567,8 @@ mod tests {
             "rendered:\n{appearance}"
         );
         assert!(appearance.contains("Keep awake"), "rendered:\n{appearance}");
+        assert!(appearance.contains("Interface"), "rendered:\n{appearance}");
+        assert!(appearance.contains("< inline >"), "rendered:\n{appearance}");
 
         assert!(!render(&editor, 27, 11).contains("mj config"));
     }

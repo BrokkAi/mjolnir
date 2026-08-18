@@ -171,23 +171,44 @@ Overrides require explicit model IDs; `auto` is not accepted. Each accepts an
 optional `+<effort>` suffix (`--model provider/model-id+high`). The saved
 configuration remains unchanged.
 
-## Memories
+## Shared project knowledge
 
-Mjolnir keeps short, durable facts (at most 2,000 bytes each) across sessions
-in `memories.json`, next to the config. Memory integration applies only to
-**Codex primary sessions**: Claude Code and custom adapters keep their own
-native memory systems, so mjolnir neither injects memories nor exposes the
-save tools there. The store and its management commands work regardless of
-the active adapter.
+Switching between Claude and Codex should not mean teaching the repository
+twice. Mjolnir gives both agents one local, inspectable interface for verified
+build requirements, architecture constraints, debugging conclusions, and
+repository conventions.
 
-Memories are global or scoped to the enclosing project (worktree sessions
-share the parent project's memories), and are created explicitly: ask the
-agent to remember something (it calls the `memory_save` tool exposed by the
-in-process `mj-memory` MCP server), or run `/memory add` in the TUI or
-`mj memory add` from the CLI. The relevant entries are injected at the start
-of the next Codex primary session in a `<mj-memory>` block, size-bounded with
-the oldest entries dropped first. Side conversations, subagents, and review
-lanes never see or write memories.
+Mjolnir keeps these short, durable facts (at most 2,000 bytes each) across
+sessions in `memories.json`, next to the config. Built-in Claude and Codex
+primary sessions share this store. Before each turn, Mjolnir refreshes the
+project snapshot and injects it when it differs from the last snapshot
+delivered to that session. Concurrent sessions therefore see one another's
+discoveries on their next turn without restarting.
+
+Knowledge is global or project-scoped. The authenticated `mj-memory` MCP
+server instructs both agents to save non-obvious, verified implementation
+discoveries automatically, including architecture constraints, build
+requirements, debugging conclusions, and repository conventions. It tells
+agents not to store secrets, speculation, transient task state, or facts
+trivially visible in source.
+
+For Codex primary sessions, Claude Code's native auto-memory `MEMORY.md`
+index is imported at turn boundaries; Claude sessions continue to use their
+native injection and do not receive a duplicate. Mjolnir honors
+`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, managed policy
+settings, user settings, and project/local `autoMemoryEnabled`. A policy- or
+user-configured `autoMemoryDirectory` is global; otherwise the standard
+per-project path is used. Topic files are not flattened into the prompt.
+Imports are source-tracked and updated in place. Project-scoped imports are
+removed when disabled or superseded; global imports are filtered outside their
+resolved scope and removed only when their global file is confirmed absent, so
+one project cannot delete another's data. Imported entries are a projection of
+`MEMORY.md` rather than knowledge Mjolnir owns, so `/memory forget` declines
+them and names the file; remove the text there and the next refresh drops it.
+Turn refreshes inject only new or changed entries, retrying budget-omitted
+entries on later turns. Users can also manage knowledge
+with `/memory` or `mj memory`. Side conversations, subagents, and review lanes
+remain isolated.
 
 The feature is optional. A master switch plus two toggles control it, all on
 by default:

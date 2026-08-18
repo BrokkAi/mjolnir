@@ -21,6 +21,10 @@ and remote-control surface.
   with an independent reviewer and targeted specialist checks.
 - **Worktree sessions:** start work in a linked Git worktree and keep agent
   changes separate from the current checkout, whichever coder you choose.
+- **Shared project knowledge:** carry verified discoveries across Claude and
+  Codex sessions through one local, inspectable memory interface. Claude's
+  native project memory is also available to Codex without duplicate injection
+  back into Claude.
 - **Remote control:** run the workspace and control plane on your machine while
   driving the session from another browser or device.
 - **Local voice input:** dictate prompts on macOS, Linux, and Windows with
@@ -52,6 +56,35 @@ workflow unchanged.
 Mjolnir itself, its remote-control server, transcripts, and workspace tools run
 on infrastructure you control. Model requests still use the selected provider
 under its terms and data boundaries.
+
+## Shared project knowledge
+
+Claude and Codex should not have to rediscover the same build requirement,
+architecture constraint, or debugging conclusion in separate sessions.
+Mjolnir gives both agents one local project-knowledge layer and refreshes active
+primary sessions when that knowledge changes.
+
+Agents can save verified discoveries as they work, or you can manage them
+directly:
+
+```bash
+mj memory list
+mj memory add "Release builds must run through Nix"
+mj memory add --global "Prefer concise commit messages"
+mj memory forget m7
+```
+
+Use `/memory` for the same workflow inside an interactive session. Knowledge
+can be project-scoped or global, remains readable in Mjolnir's local
+`memories.json`, and is bounded before it enters an agent's context.
+
+When Codex is the primary agent, Mjolnir also makes Claude Code's native
+project `MEMORY.md` available to it. Claude continues to manage that file and
+receive it natively; Mjolnir does not inject a second copy into Claude. This
+lets a discovery made in one agent remain useful when you switch teams.
+
+See [Shared project knowledge](https://mjolnir.brokk.ai/configuration/#shared-project-knowledge)
+for behavior, controls, and source ownership.
 
 ## Requirements
 
@@ -152,6 +185,7 @@ mj --worktree
 - [Remote control](https://mjolnir.brokk.ai/remote/)
 - [Voice dictation](https://mjolnir.brokk.ai/voice/)
 - [Subagents](https://mjolnir.brokk.ai/subagents/)
+- [Shared project knowledge](https://mjolnir.brokk.ai/configuration/#shared-project-knowledge)
 - [Delegation and adversarial review](https://mjolnir.brokk.ai/delegation-review/)
 - [Permissions and workspace scope](https://mjolnir.brokk.ai/permissions/)
 - [Sessions, worktrees, and resume](https://mjolnir.brokk.ai/sessions-worktrees/)

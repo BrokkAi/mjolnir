@@ -2700,11 +2700,9 @@ async fn drive_session(
     workspace_roots.extend(additional_directories.iter().cloned());
     let mut next_turn_diff_id = 1_u64;
     let mut session_has_history = resumed;
-    // Stored memories ride the first prompt of this runtime rather than every
-    // turn; entries saved mid-session reach the next session.
-    let mut memory_preamble = memory
-        .as_ref()
-        .and_then(crate::memory::SessionMemory::preamble);
+    // Reread shared knowledge at every turn boundary so concurrent Claude and
+    // Codex sessions observe one another's durable discoveries without restart.
+    let mut last_memory_entries: Option<Vec<crate::memory::MemoryEntry>> = None;
     // Prompts that arrived while another operation owned `ui_rx` (a turn, a
     // config update, a session fork). They are replayed here, ahead of any
     // command still sitting in the channel, instead of being dropped: an
@@ -2758,8 +2756,27 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let text = match memory_preamble.take() {
-                    Some(preamble) if text.is_empty() => preamble,
+                let current_memory_entries = if let Some(memory) = memory.clone() {
+                    tokio::task::spawn_blocking(move || memory.refresh_entries())
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!("memory refresh task failed: {error}");
+                            None
+                        })
+                } else {
+                    None
+                };
+                let pending_memory = current_memory_entries.as_deref().and_then(|entries| {
+                    memory.as_ref().and_then(|memory| {
+                        crate::memory::render_preamble_update(
+                            entries,
+                            last_memory_entries.as_deref(),
+                            &memory.project,
+                        )
+                    })
+                });
+                let text = match pending_memory.as_ref().map(|update| update.text.as_str()) {
+                    Some(preamble) if text.is_empty() => preamble.to_string(),
                     Some(preamble) => format!("{preamble}\n\n{text}"),
                     None => text,
                 };
@@ -2784,6 +2801,16 @@ async fn drive_session(
                 )
                 .await?;
                 session_has_history = true;
+                if let Some(update) = pending_memory {
+                    let delivered = last_memory_entries.get_or_insert_with(Vec::new);
+                    for entry in update.delivered {
+                        if let Some(old) = delivered.iter_mut().find(|old| old.id == entry.id) {
+                            *old = entry;
+                        } else {
+                            delivered.push(entry);
+                        }
+                    }
+                }
                 if !keep_running {
                     break;
                 }
@@ -2863,11 +2890,7 @@ async fn drive_session(
                         context_usage.reset_for_session();
                         session_has_history = false;
                         next_turn_diff_id = 1;
-                        // The previous session consumed the first-prompt
-                        // memory copy; a fresh session must get one again.
-                        memory_preamble = memory
-                            .as_ref()
-                            .and_then(crate::memory::SessionMemory::preamble);
+                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(message) => {
@@ -2963,11 +2986,7 @@ async fn drive_session(
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
-                        // A switched-in session behaves like a resume: its
-                        // next prompt carries the current stored memories.
-                        memory_preamble = memory
-                            .as_ref()
-                            .and_then(crate::memory::SessionMemory::preamble);
+                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
@@ -13034,10 +13053,11 @@ mod tests {
             None,
             None,
             Some(crate::memory::SessionMemory {
-                store_path: store,
+                store_path: store.clone(),
                 project: PathBuf::from("/tmp/proj"),
                 inject: true,
                 tools: false,
+                import_claude_auto: false,
             }),
             false,
             None,
@@ -13061,6 +13081,25 @@ mod tests {
             assert_eq!(log[1], "second");
         }
 
+        crate::memory::add(
+            &store,
+            "parser paths are normalized",
+            Some(PathBuf::from("/tmp/proj")),
+        )
+        .expect("publish concurrent knowledge");
+        cmd_tx
+            .send(send("after update"))
+            .expect("send after update");
+        wait_for_prompt_count(&prompts, 3).await;
+        {
+            let log = prompts.lock().expect("prompt log");
+            assert!(
+                log[2].contains("parser paths are normalized"),
+                "live update: {:?}",
+                log[2]
+            );
+        }
+
         let (responder, response) = oneshot::channel();
         cmd_tx
             .send(UiCommand::NewSession { responder })
@@ -13071,15 +13110,15 @@ mod tests {
         );
         wait_for_session_started(&mut ui_rx, "fresh-session").await;
         cmd_tx.send(send("third")).expect("send third");
-        wait_for_prompt_count(&prompts, 3).await;
+        wait_for_prompt_count(&prompts, 4).await;
         {
             let log = prompts.lock().expect("prompt log");
             assert!(
-                log[2].contains("<mj-memory>"),
+                log[3].contains("<mj-memory>"),
                 "fresh-session prompt must carry memories again: {:?}",
-                log[2]
+                log[3]
             );
-            assert!(log[2].ends_with("third"));
+            assert!(log[3].ends_with("third"));
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
