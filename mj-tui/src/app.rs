@@ -2385,6 +2385,9 @@ impl AppState {
     }
 
     pub fn open_team_picker(&mut self) {
+        if crate::roster::external_adapter().is_some() {
+            return;
+        }
         let active = self
             .config_path
             .as_deref()

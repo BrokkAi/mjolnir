@@ -534,6 +534,7 @@ dependencies = [
  "iana-time-zone",
  "libc",
  "mj-agents",
+ "mj-anvil",
  "mj-core",
  "mj-desktop",
  "mj-remote",
@@ -2730,6 +2731,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "mj-anvil"
+version = "1.10.1"
+dependencies = [
+ "mj-core",
 ]
 
 [[package]]

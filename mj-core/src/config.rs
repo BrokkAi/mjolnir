@@ -496,6 +496,17 @@ impl TeamPreset {
     }
 }
 
+/// Whether this build has a complete team route. A registered external
+/// adapter is the embedding platform's implicit team; otherwise one of the
+/// user-selectable built-in presets must be configured.
+pub fn has_valid_team(config: &Config) -> bool {
+    has_valid_team_with_external(config, crate::roster::external_adapter().is_some())
+}
+
+fn has_valid_team_with_external(config: &Config, external_registered: bool) -> bool {
+    external_registered || TeamPreset::from_config(config).is_some()
+}
+
 /// How much machinery one discrete review is allowed to spend.
 ///
 /// `Quick` runs a single general reviewer and then validates its findings,
@@ -870,10 +881,19 @@ impl Config {
     /// A seat pinned to a retired source, or to a model whose provider no
     /// built-in adapter serves, falls back to automatic selection.
     fn drop_retired_sources(&mut self) {
-        let known = DEFAULT_ACP_PRIORITY
+        self.drop_retired_sources_except(
+            crate::roster::external_adapter().map(|adapter| adapter.id.as_str()),
+        );
+    }
+
+    fn drop_retired_sources_except(&mut self, external_id: Option<&str>) {
+        let mut known = DEFAULT_ACP_PRIORITY
             .iter()
             .map(|id| (*id).to_string())
             .collect::<std::collections::HashSet<_>>();
+        if let Some(id) = external_id {
+            known.insert(id.to_string());
+        }
         let retired_model = |model: &str| {
             if matches!(model, "auto" | DISABLED_MODEL | "none") {
                 return false;
@@ -881,6 +901,11 @@ impl Config {
             // Legacy custom-server selectors can never resolve again.
             if model.starts_with("custom/") {
                 return true;
+            }
+            // An external adapter may advertise models from any provider, so
+            // no pin is conclusively dead while one is registered.
+            if external_id.is_some() {
+                return false;
             }
             // A model with no derivable provider may be an adapter-advertised
             // alias (e.g. claude-acp's `haiku`); only drop pins whose provider
@@ -918,7 +943,9 @@ impl Config {
     }
 
     pub fn set_acp_server_policy(&mut self, id: &str, policy: AcpServerPolicy) -> bool {
-        if matches!(id, "codex-acp" | "claude-acp") {
+        if matches!(id, "codex-acp" | "claude-acp")
+            || crate::roster::external_adapter().is_some_and(|external| external.id == id)
+        {
             if policy == AcpServerPolicy::Auto {
                 self.acp.policies.remove(id);
             } else {
@@ -1110,10 +1137,12 @@ impl Config {
             self.subagents.model = DISABLED_MODEL.to_string();
         }
         self.drop_retired_sources();
-        if let Some(team) = self.team.as_deref().and_then(TeamPreset::from_id) {
-            team.apply_runtime_routes(self);
-        } else {
-            self.team = None;
+        if !self.apply_registered_external_team() {
+            if let Some(team) = self.team.as_deref().and_then(TeamPreset::from_id) {
+                team.apply_runtime_routes(self);
+            } else {
+                self.team = None;
+            }
         }
         for (seat, priority) in [
             ("agent", &self.agent.acp_priority),
@@ -1148,6 +1177,26 @@ impl Config {
         );
 
         Ok(())
+    }
+
+    /// Bind every seat to the embedding platform's registered adapter.
+    /// Explicit model choices remain intact; only their runtime route changes.
+    pub fn apply_registered_external_team(&mut self) -> bool {
+        let Some(source_id) = crate::roster::external_adapter().map(|adapter| adapter.id.clone())
+        else {
+            return false;
+        };
+        self.apply_external_team_routes(&source_id);
+        true
+    }
+
+    fn apply_external_team_routes(&mut self, source_id: &str) {
+        // The embedding platform owns this implicit team. Do not persist a
+        // built-in preset that cannot be selected on that platform.
+        self.team = None;
+        self.agent.acp_source = Some(source_id.to_string());
+        self.review.acp_source = Some(source_id.to_string());
+        self.subagents.acp_source = Some(source_id.to_string());
     }
 }
 
@@ -1785,6 +1834,56 @@ kimi = "disabled"
         // removed as well.
         assert_eq!(loaded.subagents.model, "gpt-5-6-sol");
         assert_eq!(loaded.subagents.acp_source, None);
+    }
+
+    #[test]
+    fn registered_external_source_survives_retired_source_cleanup() {
+        let mut config = Config::default();
+        config
+            .acp
+            .policies
+            .insert("anvil".to_string(), AcpServerPolicy::Enabled);
+        config.agent.acp_source = Some("anvil".to_string());
+        config.agent.acp_priority = vec!["anvil".to_string(), "codex-acp".to_string()];
+        config.agent.model = "gemini-3-pro".to_string();
+
+        config.drop_retired_sources_except(Some("anvil"));
+        assert_eq!(config.agent.acp_source.as_deref(), Some("anvil"));
+        assert_eq!(
+            config.agent.acp_priority,
+            vec!["anvil".to_string(), "codex-acp".to_string()]
+        );
+        assert!(config.acp.policies.contains_key("anvil"));
+        // An external adapter may serve any provider, so the pin stays.
+        assert_eq!(config.agent.model, "gemini-3-pro");
+
+        config.drop_retired_sources_except(None);
+        assert_eq!(config.agent.acp_source, None);
+        assert!(!config.acp.policies.contains_key("anvil"));
+        assert_eq!(config.agent.model, "auto");
+    }
+
+    #[test]
+    fn external_team_is_valid_and_routes_every_seat_without_changing_models_or_review() {
+        let mut config = Config {
+            team: Some("codex_claude".to_string()),
+            ..Config::default()
+        };
+        config.agent.model = "primary-model".to_string();
+        config.review.model = "review-model".to_string();
+        config.subagents.model = "worker-model".to_string();
+
+        assert!(has_valid_team_with_external(&config, true));
+        config.apply_external_team_routes("sidecar");
+
+        assert_eq!(config.agent.acp_source.as_deref(), Some("sidecar"));
+        assert_eq!(config.review.acp_source.as_deref(), Some("sidecar"));
+        assert_eq!(config.subagents.acp_source.as_deref(), Some("sidecar"));
+        assert_eq!(config.team, None);
+        assert_eq!(config.agent.model, "primary-model");
+        assert_eq!(config.review.model, "review-model");
+        assert_eq!(config.subagents.model, "worker-model");
+        assert!(config.agent.discrete_review);
     }
 
     #[test]

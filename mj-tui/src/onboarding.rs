@@ -11,7 +11,9 @@ use ratatui::layout::Alignment;
 use ratatui::widgets::{Paragraph, Wrap};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, ONBOARDING_CONTENT_VERSION, TeamPreset};
+#[cfg(test)]
+use crate::config::TeamPreset;
+use crate::config::{Config, ONBOARDING_CONTENT_VERSION};
 use crate::roster::Roster;
 use crate::settings::{
     SETTINGS_PANEL_MIN_HEIGHT, SETTINGS_PANEL_MIN_WIDTH, SettingsAction, SettingsEditor,
@@ -58,9 +60,7 @@ impl State {
             .unwrap_or_default();
         let opens_recovery = notice.is_some();
         let notice = notice.or_else(|| {
-            TeamPreset::from_config(&config)
-                .is_none()
-                .then(|| TEAM_SELECTION_REQUIRED.to_string())
+            (!crate::config::has_valid_team(&config)).then(|| TEAM_SELECTION_REQUIRED.to_string())
         });
         let mut editor = SettingsEditor::new(config, choices, notice).with_inventory(inventory);
         if let Some(roster) = &roster {
@@ -102,7 +102,7 @@ impl State {
 
     fn handle_key(&mut self, code: KeyCode) -> Action {
         match self.editor.handle_key(code) {
-            SettingsAction::Save if TeamPreset::from_config(&self.editor.config).is_none() => {
+            SettingsAction::Save if !crate::config::has_valid_team(&self.editor.config) => {
                 self.editor.tab = SettingsTab::Team;
                 self.editor.selected = 0;
                 self.editor.notice = Some(TEAM_SELECTION_REQUIRED.to_string());

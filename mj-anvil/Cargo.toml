@@ -1,0 +1,12 @@
+[package]
+name = "mj-anvil"
+version.workspace = true
+edition = "2024"
+rust-version = "1.97"
+description = "Anvil ACP sidecar discovery for Mjolnir on Android"
+license = "GPL-3.0-only"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[dependencies]
+mj-core = { path = "../mj-core", version = "1.10.1" }

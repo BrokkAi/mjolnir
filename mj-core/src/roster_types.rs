@@ -21,6 +21,9 @@ pub struct ModelRow {
 pub enum AdapterKind {
     Codex,
     Claude,
+    /// An adapter registered by the embedding binary rather than built in.
+    /// Its identity lives in `AdapterLaunch::source_id`, not in this enum.
+    External,
 }
 
 impl AdapterKind {
@@ -28,6 +31,7 @@ impl AdapterKind {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
+            Self::External => "External",
         }
     }
 
@@ -61,6 +65,9 @@ pub fn configure_permissions(
         (AdapterKind::Claude, PermissionPreset::Manual) => ("mode", "default", None),
         (AdapterKind::Claude, PermissionPreset::Auto) => ("mode", "auto", Some("default")),
         (AdapterKind::Claude, PermissionPreset::Yolo) => ("mode", "bypassPermissions", None),
+        // External adapters have no known permission session config; every
+        // permission request flows through ACP prompts instead.
+        (AdapterKind::External, _) => return None,
     };
     Some(RuntimePermissionConfig {
         config_id: config_id.to_string(),
@@ -106,6 +113,7 @@ impl Subscriptions {
         match kind {
             AdapterKind::Claude => self.claude.as_ref(),
             AdapterKind::Codex => self.codex.as_ref(),
+            AdapterKind::External => None,
         }
     }
 

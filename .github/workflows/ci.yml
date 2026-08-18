@@ -43,7 +43,7 @@ jobs:
         # Every publishable crate carries its own copy of the GPL text, so each
         # one must stay byte-identical to the root license and must survive
         # packaging into the .crate that reaches crates.io.
-        for member in mj-core mj-agents mj-tui mj-remote mj-desktop voice-worker; do
+        for member in mj-core mj-agents mj-anvil mj-tui mj-remote mj-desktop voice-worker; do
           diff -u LICENSE "$member/LICENSE"
         done
         cargo package --locked --allow-dirty --no-verify -p mj-desktop
@@ -53,7 +53,7 @@ jobs:
         grep -Fx LICENSE /tmp/mjolnir-package-files.txt
         grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/mjolnir-package-files.txt
         grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/mjolnir-package-files.txt
-        for member in mj-core mj-agents mj-tui mj-remote mj-desktop brokk-mj-voice-worker; do
+        for member in mj-core mj-agents mj-anvil mj-tui mj-remote mj-desktop brokk-mj-voice-worker; do
           cargo package --locked --allow-dirty --list -p "$member" | grep -Fx LICENSE
         done
 

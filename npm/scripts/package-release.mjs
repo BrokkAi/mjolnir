@@ -51,6 +51,8 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: false,
+    // Anvil is the self-contained ACP route on Android (issue #685).
+    sidecars: ["anvil"],
     description: "Native Android ARM64 bundle for @brokkai/mjolnir",
     os: ["android"],
     cpu: ["arm64"],
@@ -179,6 +181,10 @@ async function stagePlatform(platform, version, source, stagingRoot) {
     const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
     await cp(path.join(source, worker), path.join(destination, "bin", worker));
     await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");
+  }
+  for (const sidecar of platform.sidecars ?? []) {
+    await cp(path.join(source, sidecar), path.join(destination, "bin", sidecar));
+    await ensureBinary(path.join(destination, "bin", sidecar), true);
   }
   await ensureBinary(path.join(destination, "bin", platform.binary), platform.binary !== "mj.exe");
   await writeManifest(destination, platformManifest(platform, version));

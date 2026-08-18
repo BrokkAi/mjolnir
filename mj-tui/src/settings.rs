@@ -28,7 +28,14 @@ pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT;
 pub(crate) const CONFIGURABLE_ACP_SERVERS: [&str; 2] = ["codex-acp", "claude-acp"];
 
 pub(crate) fn is_configurable_acp_server(id: &str) -> bool {
-    CONFIGURABLE_ACP_SERVERS.contains(&id)
+    is_configurable_acp_server_with_external(
+        id,
+        crate::roster::external_adapter().map(|adapter| adapter.id.as_str()),
+    )
+}
+
+fn is_configurable_acp_server_with_external(id: &str, external_id: Option<&str>) -> bool {
+    CONFIGURABLE_ACP_SERVERS.contains(&id) || external_id == Some(id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +115,8 @@ pub struct SettingsEditor {
 }
 
 impl SettingsEditor {
-    pub fn new(config: Config, choices: Vec<ModelChoice>, notice: Option<String>) -> Self {
+    pub fn new(mut config: Config, choices: Vec<ModelChoice>, notice: Option<String>) -> Self {
+        config.apply_registered_external_team();
         let inventory = crate::roster::discover_inventory(&config);
         Self {
             config,
@@ -712,6 +720,9 @@ impl SettingsEditor {
     }
 
     fn cycle_team(&mut self, delta: i32) {
+        if self.config.apply_registered_external_team() {
+            return;
+        }
         let current = TeamPreset::from_config(&self.config)
             .and_then(|active| TeamPreset::ALL.iter().position(|preset| *preset == active))
             .unwrap_or_else(|| {
@@ -1369,6 +1380,30 @@ fn draw_team(
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
+    if let Some(external) = crate::roster::external_adapter() {
+        let lines = vec![
+            Line::styled(
+                "Mjolnir automatically reviews generated code before returning the result.",
+                Style::default().ink(theme.text),
+            ),
+            Line::styled(
+                "This platform supplies one coding team.",
+                Style::default().ink(theme.muted),
+            ),
+            Line::raw(""),
+            selected_line(true, format!("Team  < {} >", external.label), theme),
+            Line::raw(""),
+            Line::styled(
+                format!(
+                    " * {:<31} handles primary, subagents, and review",
+                    external.label
+                ),
+                Style::default().ink(theme.primary),
+            ),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
     let active = TeamPreset::from_config(&editor.config);
     let active_label = active.map_or("Custom routing", TeamPreset::label);
     let mut lines = vec![
@@ -2422,6 +2457,18 @@ mod tests {
             editor.config.acp.policy("claude-acp"),
             AcpServerPolicy::Enabled
         );
+    }
+
+    #[test]
+    fn registered_external_server_is_configurable_without_naming_its_product() {
+        assert!(is_configurable_acp_server_with_external(
+            "sidecar",
+            Some("sidecar")
+        ));
+        assert!(!is_configurable_acp_server_with_external(
+            "other",
+            Some("sidecar")
+        ));
     }
 
     #[test]

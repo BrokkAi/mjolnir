@@ -143,11 +143,11 @@ jobs:
             esac
           }
           # Dependency order: mj-core has no workspace dependencies, mj-agents
-          # needs it, mj-tui needs both, mj-remote needs mj-core, and the root
-          # binary needs all of them plus mj-desktop. brokk-mj-voice-worker is
-          # independent. Publishing out of this order fails on a missing
-          # registry dependency.
-          for crate in brokk-mj-voice-worker mj-core mj-agents mj-tui mj-remote mj-desktop brokk-mjolnir; do
+          # and mj-anvil need it, mj-tui needs mj-core and mj-agents, mj-remote
+          # needs mj-core, and the root binary needs all of them plus
+          # mj-desktop. brokk-mj-voice-worker is independent. Publishing out of
+          # this order fails on a missing registry dependency.
+          for crate in brokk-mj-voice-worker mj-core mj-agents mj-anvil mj-tui mj-remote mj-desktop brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"
               continue
