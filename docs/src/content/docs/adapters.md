@@ -29,8 +29,8 @@ launch can require Node.js, npm, network access, and provider authentication.
 
 Selected routes are probed concurrently, and roster resolution waits for all
 of them before returning. Each probe opens an ACP connection and creates a
-disposable session to collect models, HTTP-MCP support, and session options.
-Mjolnir does not persist or reuse ACP capability results between resolutions.
+disposable session to collect models and session options. Mjolnir does not
+persist or reuse ACP capability results between resolutions.
 
 The live DeepSWE ranking is separate from adapter capabilities and remains
 cached for 24 hours. A bundled snapshot is available when the ranking endpoint

@@ -4079,6 +4079,14 @@ mod tests {
         let cli = try_parse_hermetic(&["mj", "server"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
 
+        let cli = try_parse_hermetic(&["mj", "mcp-bridge", "--addr", "127.0.0.1:12345"])
+            .expect("parse hidden MCP bridge");
+        assert!(!should_run_startup_update_check(&cli));
+        let Some(Commands::McpBridge(args)) = cli.command else {
+            panic!("expected MCP bridge subcommand");
+        };
+        assert_eq!(args.addr, "127.0.0.1:12345");
+
         let cli = try_parse_hermetic(&["mj", "models", "refresh"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
     }

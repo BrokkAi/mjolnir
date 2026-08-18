@@ -516,7 +516,7 @@ fn explicit<'a>(
             "{seat} model '{selector}' is not a ranked DeepSWE model and no connected ACP adapter advertised it"
         );
     }
-    bail!("{seat} model '{selector}' is unavailable: no HTTP-MCP-capable ACP adapter advertised it")
+    bail!("{seat} model '{selector}' is unavailable: no connected ACP adapter advertised it")
 }
 
 fn preferred_route<'a>(
@@ -1735,11 +1735,7 @@ mod tests {
         };
         let error = explicit("Agent", "gpt-5-6-sol", &rows, &[], &[])
             .expect_err("must reject unavailable explicit model");
-        assert!(
-            error
-                .to_string()
-                .contains("no HTTP-MCP-capable ACP adapter")
-        );
+        assert!(error.to_string().contains("no connected ACP adapter"));
         let _ = availability;
     }
 

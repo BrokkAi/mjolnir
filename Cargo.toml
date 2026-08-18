@@ -62,8 +62,8 @@ libc = "0.2"
 signal-hook = "0.3"
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
-# Official Rust MCP SDK. Powers the embedded Streamable HTTP `code_agent` and
-# In-process MCP tool servers. MIT-licensed (GPL-3.0-compatible).
+# Official Rust MCP SDK. Powers the in-process subagent, memory, and review
+# servers exposed to ACP adapters through the stdio bridge. MIT-licensed.
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Parses the tailscale-issued certificate/key PEMs for the SNI resolver in
