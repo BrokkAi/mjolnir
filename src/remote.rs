@@ -48,13 +48,13 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::acp::{self, AcpRuntimeConfig};
-use crate::app::{StatusKind, status_transcript_text};
 use crate::config::{self, SelectedAgent};
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
     PromptImage, SessionConfigTarget, SubagentEvent, SubagentOutcome, TerminalOutputSnapshot,
     UiCommand, UiEvent,
 };
+use crate::session_state::{StatusKind, status_transcript_text};
 use crate::{roster, subagent};
 
 const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
@@ -302,7 +302,7 @@ pub struct RagnarokVerdictRecord {
 }
 
 impl RagnarokRecord {
-    fn from_observation(observation: crate::app::RagnarokObservation) -> Self {
+    fn from_observation(observation: crate::session_state::RagnarokObservation) -> Self {
         let adoption_hint = ragnarok_adoption_hint(&observation);
         let fighters = observation
             .fighters
@@ -365,8 +365,10 @@ fn ragnarok_fighter_status(state: &crate::ragnarok::FighterState) -> (String, St
     }
 }
 
-fn ragnarok_adoption_hint(observation: &crate::app::RagnarokObservation) -> Option<String> {
-    use crate::app::RagnarokDraftPrStatus;
+fn ragnarok_adoption_hint(
+    observation: &crate::session_state::RagnarokObservation,
+) -> Option<String> {
+    use crate::session_state::RagnarokDraftPrStatus;
 
     if let Some(status) = observation.draft_pr_status.as_ref() {
         return Some(match status {
@@ -421,7 +423,7 @@ fn ragnarok_adoption_hint(observation: &crate::app::RagnarokObservation) -> Opti
 }
 
 fn ragnarok_fighter_name(
-    observation: &crate::app::RagnarokObservation,
+    observation: &crate::session_state::RagnarokObservation,
     id: crate::ragnarok::FighterId,
 ) -> String {
     observation
@@ -2747,7 +2749,8 @@ impl TrackerState {
                 self.touch();
             }
             SessionUpdate::ToolCall(tool_call) => {
-                if actor == "primary" && crate::app::is_subagent_transport_call(tool_call) {
+                if actor == "primary" && crate::session_state::is_subagent_transport_call(tool_call)
+                {
                     return;
                 }
                 self.close_agent_message(actor);
@@ -2764,7 +2767,8 @@ impl TrackerState {
                 self.touch();
             }
             SessionUpdate::ToolCallUpdate(update) => {
-                if actor == "primary" && crate::app::is_subagent_transport_update(update) {
+                if actor == "primary" && crate::session_state::is_subagent_transport_update(update)
+                {
                     return;
                 }
                 self.close_agent_message(actor);
@@ -3564,7 +3568,7 @@ impl RemoteSessionTracker {
         self.request_flush();
     }
 
-    pub fn observe_ragnarok(&self, observation: Option<crate::app::RagnarokObservation>) {
+    pub fn observe_ragnarok(&self, observation: Option<crate::session_state::RagnarokObservation>) {
         if self.shutting_down.load(Ordering::Relaxed) {
             return;
         }
@@ -5126,7 +5130,7 @@ enum RemotePendingApproval {
 }
 
 fn remote_elicitation_record(prompt: &ElicitationPrompt) -> Option<RemoteElicitationRecord> {
-    use crate::app::{ElicitationFormFieldKind, ElicitationView};
+    use crate::session_state::{ElicitationFormFieldKind, ElicitationView};
 
     let option_records = |options: Vec<agent_client_protocol::schema::v1::EnumOption>| {
         options
@@ -5141,7 +5145,7 @@ fn remote_elicitation_record(prompt: &ElicitationPrompt) -> Option<RemoteElicita
             })
             .collect()
     };
-    match crate::app::classify_elicitation(prompt) {
+    match crate::session_state::classify_elicitation(prompt) {
         ElicitationView::SingleSelect {
             property_name,
             title,
@@ -5264,7 +5268,7 @@ pub(crate) fn remote_elicitation_outcome(
     prompt: &ElicitationPrompt,
     option_id: &str,
 ) -> Option<ElicitationOutcome> {
-    use crate::app::{ElicitationFormFieldKind, ElicitationView};
+    use crate::session_state::{ElicitationFormFieldKind, ElicitationView};
 
     if option_id == REMOTE_ELICITATION_CANCEL {
         return Some(ElicitationOutcome::Cancel);
@@ -5274,7 +5278,7 @@ pub(crate) fn remote_elicitation_outcome(
     }
     let encoded = option_id.strip_prefix(REMOTE_ELICITATION_ACCEPT_PREFIX)?;
     let content: BTreeMap<String, ElicitationContentValue> = serde_json::from_str(encoded).ok()?;
-    let valid = match crate::app::classify_elicitation(prompt) {
+    let valid = match crate::session_state::classify_elicitation(prompt) {
         ElicitationView::SingleSelect {
             property_name,
             options,
@@ -13121,19 +13125,19 @@ mod tests {
 
     #[test]
     fn tracker_projects_and_clears_ragnarok_observations() {
-        let observation = || crate::app::RagnarokObservation {
+        let observation = || crate::session_state::RagnarokObservation {
             task: "forge the feature".to_string(),
             phase: crate::ragnarok::Phase::Verdict,
             awaiting_approval: false,
             fighters: vec![
-                crate::app::RagnarokFighterObservation {
+                crate::session_state::RagnarokFighterObservation {
                     id: 0,
                     agent_source_id: "claude".to_string(),
                     model_name: "Opus".to_string(),
                     state: crate::ragnarok::FighterState::Slain("tests failed".to_string()),
                     worktree_name: None,
                 },
-                crate::app::RagnarokFighterObservation {
+                crate::session_state::RagnarokFighterObservation {
                     id: 1,
                     agent_source_id: "codex".to_string(),
                     model_name: "GPT".to_string(),
@@ -13141,7 +13145,7 @@ mod tests {
                     worktree_name: Some("ragnarok-gpt".to_string()),
                 },
             ],
-            verdict: Some(crate::app::RagnarokVerdictObservation {
+            verdict: Some(crate::session_state::RagnarokVerdictObservation {
                 clear_winner: Some(1),
                 finalists: None,
                 ranking: vec![1, 0],

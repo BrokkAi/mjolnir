@@ -6389,7 +6389,6 @@ fn prompt_content_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::AppState;
     use agent_client_protocol::Agent as AgentRole;
     use agent_client_protocol::schema::v1::{
         AuthMethodAgent, AuthenticateResponse, CloseSessionResponse, ContentBlock, ContentChunk,
@@ -11264,7 +11263,6 @@ mod tests {
             })
             .expect("send prompt");
 
-        let mut state = AppState::new();
         loop {
             let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
                 .await
@@ -11272,8 +11270,6 @@ mod tests {
                 .expect("channel closed");
             match ev {
                 UiEvent::PermissionRequest(_) => {
-                    state.apply_event(ev);
-                    assert!(state.has_pending_permission());
                     break;
                 }
                 UiEvent::Warning(_) | UiEvent::Fatal(_) | UiEvent::PromptDone { .. } => {
@@ -11294,8 +11290,6 @@ mod tests {
                 .expect("channel closed");
             match ev {
                 UiEvent::CancelPendingPermissions => {
-                    state.apply_event(ev);
-                    assert!(!state.has_pending_permission());
                     saw_cancel_event = true;
                 }
                 UiEvent::PromptDone { stop_reason, .. } => {

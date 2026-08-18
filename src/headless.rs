@@ -1261,7 +1261,7 @@ fn emit_stream_update(update: &SessionUpdate, state: &HeadlessState, actor: &str
             emit_json(&StreamRecord::AgentThought { actor, text: &text })?;
         }
         SessionUpdate::ToolCall(tool_call) => {
-            if actor == "primary" && crate::app::is_subagent_transport_call(tool_call) {
+            if actor == "primary" && crate::session_state::is_subagent_transport_call(tool_call) {
                 return Ok(());
             }
             emit_json(&StreamRecord::ToolCall {
@@ -1273,7 +1273,7 @@ fn emit_stream_update(update: &SessionUpdate, state: &HeadlessState, actor: &str
             })?;
         }
         SessionUpdate::ToolCallUpdate(update) => {
-            if actor == "primary" && crate::app::is_subagent_transport_update(update) {
+            if actor == "primary" && crate::session_state::is_subagent_transport_update(update) {
                 return Ok(());
             }
             let existing = state.tool_calls.get(&update.tool_call_id.to_string());

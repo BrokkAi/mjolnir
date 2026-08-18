@@ -1642,8 +1642,8 @@ impl AgentHandle {
     /// `model_value`.
     fn model_is_current(&self, model_value: &str) -> bool {
         self.config_options.iter().any(|option| {
-            crate::app::is_model_config_option(option)
-                && crate::app::config_option_current_value_id(option)
+            crate::session_state::is_model_config_option(option)
+                && crate::session_state::config_option_current_value_id(option)
                     .is_some_and(|current| current.to_string() == model_value)
         })
     }
@@ -1656,10 +1656,10 @@ impl AgentHandle {
         agent_client_protocol::schema::v1::SessionConfigValueId,
     )> {
         for (option, target) in self.config_options.iter().zip(&self.config_targets) {
-            if !crate::app::is_model_config_option(option) {
+            if !crate::session_state::is_model_config_option(option) {
                 continue;
             }
-            let Some(choices) = crate::app::config_option_choices(option) else {
+            let Some(choices) = crate::session_state::config_option_choices(option) else {
                 continue;
             };
             // Setting the current value again is harmless, so no special case

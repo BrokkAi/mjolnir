@@ -650,7 +650,7 @@ pub enum ToolCallOutput {
 /// record. Registering terminals here gives `/terminals` a stable, ordered
 /// place to read them from without the transcript having to carry live state.
 #[derive(Debug, Clone)]
-struct TerminalRegistration {
+pub(crate) struct TerminalRegistration {
     terminal_id: String,
     /// Tool call that started it, used to resolve current output and status.
     tool_call_id: String,
@@ -1092,19 +1092,6 @@ pub struct AppState {
     /// startup; render code reads through this explicit state rather than a
     /// process-global catalog.
     pub session: SessionState,
-    /// Current connection lifecycle state. Private to enforce the invariant
-    /// that it and `connection_state_started_at` change together: mutate only
-    /// via `set_connection_state`, read via `connection_state()`.
-    connection_state: ConnectionState,
-    pub available_commands: Vec<AvailableCommand>,
-    hidden_session_config_ids: HashSet<String>,
-    pub side_session_supported: bool,
-    pub side_session_unsupported_reason: Option<String>,
-    pub is_side: bool,
-    pub side_start_requested: bool,
-    pub side_initial_question: Option<String>,
-    pub side_exit_requested: bool,
-    pub side_main_notice: Option<String>,
     /// Whether periodic local feature-discovery hints are enabled.
     pub feature_hints_enabled: bool,
     /// Holds an OS sleep assertion while a turn is in flight (and the config
@@ -1113,15 +1100,6 @@ pub struct AppState {
     pub keep_awake: crate::keep_awake::KeepAwake,
     completed_turns_since_hint: usize,
     feature_hint_cursor: usize,
-    /// Actor-owned streaming message blocks.  Unlike thoughts, a message can
-    /// remain open while another actor reports coordination activity after it.
-    /// Keeping that ownership separate from transcript position prevents a
-    /// later primary row from splitting a subagent's result into immutable pieces.
-    agent_open_message_index: Option<usize>,
-    pub tool_calls: HashMap<String, ToolCallView>,
-    /// Per-tool expansion choices, keyed by ACP tool-call ID. `true` means
-    /// expanded; entries matching the renderer's default are omitted.
-    tool_detail_overrides: HashMap<String, bool>,
     /// Latest on-demand worktree-versus-`HEAD` diff backing the Ctrl-G reader.
     /// One `Option` rather than a history: the workspace has a single current
     /// state, and every refresh supersedes the last.
@@ -1133,20 +1111,6 @@ pub struct AppState {
     /// Consumed when that turn completes so an older diff cannot affect a
     /// later no-diff turn's status.
     pending_workspace_diff_total: Option<usize>,
-    /// Primary-agent MCP calls that transport a subagent turn. Their protocol
-    /// state remains available, but the redundant parent row is omitted from
-    /// the transcript so it cannot pin nested activity behind a pending tool.
-    suppressed_tool_calls: HashSet<String>,
-    terminal_outputs: HashMap<String, TerminalOutputSnapshot>,
-    /// Every terminal seen this session, in the order the agent started them.
-    /// `terminal_outputs` is keyed for lookup and loses ordering; this keeps
-    /// the sequence and labels that `/terminals` presents.
-    terminal_registry: Vec<TerminalRegistration>,
-    /// Bumped whenever `transcript` or `tool_calls` change in a way that
-    /// affects rendering. The UI layer uses this as a cache key so it can
-    /// skip rebuilding `Vec<Line>` and re-running word-wrap when nothing
-    /// visible changed.
-    transcript_revision: u64,
     /// UI-owned reveal bounds for currently streaming prose. The canonical
     /// transcript always retains the complete source; this only lets the
     /// terminal renderer hold back incomplete or not-yet-paced source.
@@ -1279,8 +1243,6 @@ pub struct AppState {
     last_turn_elapsed: Option<Duration>,
     prompt_turns: Vec<PromptTurn>,
     active_prompt_turn: Option<usize>,
-    /// Time since the current connection lifecycle state was entered.
-    connection_state_started_at: Instant,
     /// Last token/context usage reported by the agent.
     pub token_usage: TokenUsage,
     /// Usage for the most recently started nested subagent session. Kept
@@ -2004,34 +1966,17 @@ impl AppState {
             agent_source_id: String::new(),
             primary_reasoning_effort: None,
             active_agent_launch: None,
-            session: SessionState::default(),
-            connection_state: ConnectionState::Launching,
-            available_commands: {
+            session: SessionState::new(now, {
                 let mut commands = Vec::new();
                 install_builtin_commands(&mut commands, false, false);
                 commands
-            },
-            hidden_session_config_ids: HashSet::new(),
-            side_session_supported: false,
-            side_session_unsupported_reason: None,
-            is_side: false,
-            side_start_requested: false,
-            side_initial_question: None,
-            side_exit_requested: false,
-            side_main_notice: None,
+            }),
             feature_hints_enabled: true,
             keep_awake: crate::keep_awake::KeepAwake::new(),
             completed_turns_since_hint: 0,
             feature_hint_cursor: 0,
-            agent_open_message_index: None,
-            tool_calls: HashMap::new(),
-            tool_detail_overrides: HashMap::new(),
             workspace_head_diff: None,
             workspace_diff_loading: false,
-            suppressed_tool_calls: HashSet::new(),
-            terminal_outputs: HashMap::new(),
-            terminal_registry: Vec::new(),
-            transcript_revision: 0,
             stream_visible_bytes: HashMap::new(),
             committed_transcript_entries: 0,
             input: String::new(),
@@ -2088,7 +2033,6 @@ impl AppState {
             last_turn_elapsed: None,
             prompt_turns: Vec::new(),
             active_prompt_turn: None,
-            connection_state_started_at: now,
             token_usage: TokenUsage::default(),
             subagent_token_usage: TokenUsage::default(),
             claude_usage: None,

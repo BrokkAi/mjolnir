@@ -180,8 +180,8 @@ where
             let session_config = session.config_options.unwrap_or_default();
             let models = session_config
                 .iter()
-                .filter(|option| crate::app::is_model_config_option(option))
-                .filter_map(crate::app::config_option_choices)
+                .filter(|option| crate::session_state::is_model_config_option(option))
+                .filter_map(crate::session_state::config_option_choices)
                 .flatten()
                 .map(|choice| ModelOption {
                     value: choice.value.to_string(),
