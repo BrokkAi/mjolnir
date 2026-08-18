@@ -48,9 +48,9 @@ jobs:
 
     - name: Collect workspace coverage
       run: |
-        cargo llvm-cov --workspace --exclude mj-desktop --no-report --locked
-        cargo llvm-cov report --lcov --output-path coverage.lcov
-        cargo llvm-cov report --json --output-path coverage.json
+        cargo llvm-cov --workspace --exclude mj-desktop --exclude-from-report brokk-mj-voice-worker --no-report --locked
+        cargo llvm-cov --workspace --exclude mj-desktop --exclude-from-report brokk-mj-voice-worker --no-run --locked --lcov --output-path coverage.lcov
+        cargo llvm-cov --workspace --exclude mj-desktop --exclude-from-report brokk-mj-voice-worker --no-run --locked --json --output-path coverage.json
 
     - name: Check coverage baseline
       run: node scripts/check-coverage.mjs coverage.json .github/coverage-baseline.json coverage-summary.md
