@@ -540,6 +540,7 @@ dependencies = [
  "libc",
  "mj-core",
  "mj-desktop",
+ "mj-remote",
  "qrcode",
  "ratatui",
  "rcgen",
@@ -2774,6 +2775,17 @@ dependencies = [
  "webview2-com",
  "windows-core 0.61.2",
  "wry",
+]
+
+[[package]]
+name = "mj-remote"
+version = "1.10.1"
+dependencies = [
+ "anyhow",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

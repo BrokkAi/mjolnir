@@ -28,7 +28,6 @@ mod onboarding;
 mod orchestrator;
 mod palette;
 mod pull_request;
-mod qr;
 mod quota;
 mod ragnarok;
 mod ragnarok_sprites;
@@ -42,7 +41,6 @@ mod side;
 mod speech;
 mod spinner;
 mod subagent;
-mod tailscale;
 mod term;
 #[cfg(test)]
 mod terminal_output;

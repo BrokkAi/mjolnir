@@ -4421,7 +4421,7 @@ pub async fn run_server(options: ServerOptions) -> Result<()> {
         );
     }
     if should_render_login_qr(&listen.viewer_host) {
-        println!("{}", crate::qr::render_qr(&viewer_url)?);
+        println!("{}", mj_remote::render_qr(&viewer_url)?);
     } else {
         println!(
             "QR code hidden because localhost is only reachable from this machine; use --hostname or --tailscale for a device-login QR."
@@ -5525,7 +5525,7 @@ fn install_crypto_provider() {
 /// local `mj` processes pin when reporting sessions.
 #[derive(Debug, Clone)]
 struct TailscaleTls {
-    tailscale: crate::tailscale::Tailscale,
+    tailscale: mj_remote::Tailscale,
     cert_path: PathBuf,
     key_path: PathBuf,
 }
@@ -5533,7 +5533,7 @@ struct TailscaleTls {
 fn prepare_tailscale_tls(root: &Path) -> Result<TailscaleTls> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("create remote-control dir {}", root.display()))?;
-    let tailscale = crate::tailscale::Tailscale::discover()?;
+    let tailscale = mj_remote::Tailscale::discover()?;
     let cert_path = root.join("tailscale-cert.pem");
     let key_path = root.join("tailscale-key.pem");
     println!(
@@ -5549,7 +5549,7 @@ fn prepare_tailscale_tls(root: &Path) -> Result<TailscaleTls> {
 }
 
 fn mint_tailscale_cert(
-    tailscale: &crate::tailscale::Tailscale,
+    tailscale: &mj_remote::Tailscale,
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<()> {

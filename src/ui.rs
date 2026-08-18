@@ -13235,7 +13235,7 @@ fn elicitation_view_lines(
                 }));
             }
             lines.push(Line::from(""));
-            match crate::qr::render_qr(&url) {
+            match mj_remote::render_qr(&url) {
                 Ok(qr) => {
                     let qr_width = qr.lines().map(|line| line.width()).max().unwrap_or(0);
                     if qr_width <= usize::from(width) {
@@ -13495,7 +13495,7 @@ fn elicitation_content_width_hint(view: &ElicitationView, message: &str) -> usiz
             message_width.max(option_width).max(title_width)
         }
         ElicitationView::Url { url } => {
-            let qr_width = crate::qr::render_qr(url)
+            let qr_width = mj_remote::render_qr(url)
                 .ok()
                 .and_then(|qr| qr.lines().map(|line| line.chars().count()).max())
                 .unwrap_or(0);
@@ -17316,7 +17316,7 @@ mod tests {
         assert_eq!(desired, terminal_size.height - 1);
         assert!(desired > INLINE_EXPANDED_MAX_HEIGHT);
 
-        let qr_width = crate::qr::render_qr(url)
+        let qr_width = mj_remote::render_qr(url)
             .expect("qr")
             .lines()
             .map(|line| line.width())
