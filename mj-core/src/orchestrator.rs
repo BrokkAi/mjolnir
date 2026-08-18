@@ -196,3 +196,16 @@ mod tests {
         assert_eq!(bus.pending(), 0);
     }
 }
+
+/// Convert a configured heartbeat in minutes into an optional wake interval.
+pub fn progress_wake_interval(minutes: u64) -> Option<Duration> {
+    (minutes > 0).then(|| Duration::from_secs(minutes * 60))
+}
+
+#[doc(hidden)]
+pub async fn heartbeat_tick(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}

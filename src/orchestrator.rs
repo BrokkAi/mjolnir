@@ -196,19 +196,7 @@ const MAX_RETAINED_DELEGATION_SESSIONS: usize = 128;
 /// reads about delivery timing while it is actually deciding what to do next.
 const REPORT_INJECTION_INSTRUCTION: &str = "Spot-check this report's claims against the repository only where they gate your next decision; full verification happens once, at the end of the turn. Where a <debrief> is present, treat its UNVERIFIED lines as your re-check list and its ANOMALIES lines as blockers to resolve before integrating. A <subagent_progress> block is a status snapshot, not a report: those subagents are still working and will be delivered the same way when they finish. Reports arrive only between your turns, so ending your turn while subagents run is how you wait for the rest.";
 
-/// `0` minutes disables the progress heartbeat.
-pub fn progress_wake_interval(minutes: u64) -> Option<Duration> {
-    (minutes > 0).then(|| Duration::from_secs(minutes * 60))
-}
-
-/// Resolves when the armed heartbeat deadline elapses, and never when the
-/// primary is not parked with running subagents.
-async fn heartbeat_tick(deadline: Option<tokio::time::Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline).await,
-        None => std::future::pending().await,
-    }
-}
+pub use mj_core::orchestrator::{heartbeat_tick, progress_wake_interval};
 
 fn ensure_delegation_workflow(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
     if workflow.state(workflow_id).is_some() {
