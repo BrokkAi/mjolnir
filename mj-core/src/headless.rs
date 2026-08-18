@@ -1,0 +1,2079 @@
+//! Non-interactive `mj --print` runner.
+//!
+//! This reuses the same ACP runtime as the TUI and swaps the terminal UI for a
+//! small event collector. It intentionally requires an already-selected agent in
+//! `~/.config/mj/config.toml`; the interactive picker remains a TUI concern.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use agent_client_protocol::schema::v1::{
+    PermissionOptionKind, SessionUpdate, StopReason, ToolCall, ToolCallStatus, ToolCallUpdate,
+    ToolKind, Usage,
+};
+use anyhow::Result;
+use serde::Serialize;
+use tokio::sync::mpsc;
+
+use crate::acp;
+use crate::config;
+use crate::event::{
+    ElicitationOutcome, PermissionDecision, SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
+    content_block_text,
+};
+use crate::labels::{tool_kind_label, tool_status_label};
+
+#[derive(Debug, Clone, Copy)]
+pub enum OutputFormat {
+    Text,
+    Json,
+    StreamJson,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PermissionMode {
+    Manual,
+    Auto,
+    Yolo,
+}
+
+impl From<PermissionMode> for config::PermissionPreset {
+    fn from(value: PermissionMode) -> Self {
+        match value {
+            PermissionMode::Manual => Self::Manual,
+            PermissionMode::Auto => Self::Auto,
+            PermissionMode::Yolo => Self::Yolo,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamRecord<'a> {
+    Connected {
+        agent_name: Option<&'a str>,
+        agent_version: Option<&'a str>,
+    },
+    SessionStarted {
+        session_id: &'a str,
+        resumed: bool,
+    },
+    AgentMessage {
+        actor: &'a str,
+        text: &'a str,
+    },
+    AgentThought {
+        actor: &'a str,
+        text: &'a str,
+    },
+    ToolCall {
+        actor: &'a str,
+        id: &'a str,
+        title: &'a str,
+        kind: String,
+        status: String,
+    },
+    ToolCallUpdate {
+        actor: &'a str,
+        id: &'a str,
+        title: Option<&'a str>,
+        kind: Option<String>,
+        status: Option<String>,
+    },
+    Permission {
+        actor: &'a str,
+        tool_call_id: &'a str,
+        decision: &'a str,
+    },
+    Review {
+        actor: &'a str,
+        target: &'a str,
+        kind: &'a str,
+        text: &'a str,
+    },
+    /// Lifecycle of one background subagent. `kind` is `started` (text = the
+    /// objective), `activity` (text = the distilled activity line) or
+    /// `finished` (text = the outcome summary, `elapsed_ms` set).
+    Subagent {
+        id: u64,
+        label: &'a str,
+        kind: &'a str,
+        text: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+    },
+    /// Lifecycle of an internal, detached review coordinator. These sessions
+    /// share the nested runtime machinery but are not user-delegated
+    /// subagents.
+    ReviewSession {
+        id: u64,
+        role: &'static str,
+        label: &'a str,
+        kind: &'a str,
+        text: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+    },
+    /// Runtime-authoritative workflow transition plus its resulting state.
+    Workflow(Box<WorkflowStreamRecord>),
+    Warning {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<&'a str>,
+        message: &'a str,
+    },
+    Error {
+        message: &'a str,
+    },
+    Result {
+        stop_reason: String,
+        session_id: Option<&'a str>,
+        resumed: bool,
+        text: &'a str,
+        usage: Option<&'a Usage>,
+        agent_usage: &'a crate::agent_usage::Snapshot,
+        error: Option<&'a str>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkflowStreamRecord {
+    workflow_id: String,
+    turn_id: u64,
+    operation: u32,
+    kind: &'static str,
+    transition: &'static str,
+    pass: u32,
+    phase: &'static str,
+    selected: usize,
+    running: usize,
+    waiting: usize,
+    completed: usize,
+    failed: usize,
+    cancelled: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_on: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remaining: Option<usize>,
+    requires_user_action: bool,
+    coverage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_lifecycle: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retained_session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JsonResult<'a> {
+    pub session_id: Option<&'a str>,
+    pub resumed: bool,
+    pub result: &'a str,
+    pub stop_reason: String,
+    pub usage: Option<&'a Usage>,
+    pub agent_usage: &'a crate::agent_usage::Snapshot,
+    pub error: Option<&'a str>,
+}
+
+#[derive(Debug, Default)]
+pub struct HeadlessState {
+    pub final_text: String,
+    tool_calls: HashMap<String, ToolCall>,
+    /// `Activity`/`Finished` subagent events carry only the id, so the label
+    /// (and the start instant behind `elapsed_ms`) is remembered from
+    /// `Started`.
+    subagents: HashMap<u64, SubagentTrace>,
+    pub workflows: crate::workflow::WorkflowStore,
+}
+
+#[derive(Debug)]
+struct SubagentTrace {
+    label: String,
+    role: Option<crate::workflow::WorkflowActorRole>,
+    started: std::time::Instant,
+}
+
+pub fn answer_permission(
+    format: OutputFormat,
+    mode: PermissionMode,
+    actor: &str,
+    prompt: crate::event::PermissionPrompt,
+) -> Result<()> {
+    let decision = permission_decision(mode, &prompt.tool_call, &prompt.options);
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_json(&StreamRecord::Permission {
+            actor,
+            tool_call_id: &prompt.tool_call.tool_call_id.to_string(),
+            decision: if decision.is_some() {
+                "selected"
+            } else {
+                "cancelled"
+            },
+        })?;
+    }
+    let _ = prompt.responder.send(match decision {
+        Some(option_id) => PermissionDecision::Selected(option_id),
+        None => PermissionDecision::Cancelled,
+    });
+    Ok(())
+}
+
+/// Record one primary completion. A pending nested report means the completed
+/// answer is provisional and the run must keep draining orchestrated turns.
+/// The report bus opens synchronously at admission and closes only after
+/// injection, so it also covers workers that finished but are not injected yet.
+pub fn record_prompt_done(
+    state: &mut HeadlessState,
+    collecting_turn_output: &mut bool,
+    stop_reason: &mut Option<StopReason>,
+    usage: &mut Option<Usage>,
+    reason: StopReason,
+    prompt_usage: Option<Usage>,
+    pending_reports: usize,
+) -> bool {
+    *stop_reason = Some(reason);
+    *usage = prompt_usage;
+    if pending_reports == 0 {
+        return false;
+    }
+    prepare_headless_followup(state, collecting_turn_output);
+    true
+}
+
+pub fn record_terminal_error(
+    format: OutputFormat,
+    terminal_error: &mut Option<String>,
+    message: String,
+) -> Result<()> {
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_json(&StreamRecord::Error { message: &message })?;
+    }
+    *terminal_error = Some(message);
+    Ok(())
+}
+
+pub fn emit_warning(format: OutputFormat, actor: Option<&str>, message: &str) -> Result<()> {
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_json(&StreamRecord::Warning { actor, message })?;
+    } else {
+        eprintln!("warning: {message}");
+    }
+    Ok(())
+}
+
+pub fn handle_subagent_event(
+    format: OutputFormat,
+    permission_mode: PermissionMode,
+    state: &mut HeadlessState,
+    event: SubagentEvent,
+) -> Result<()> {
+    match event {
+        SubagentEvent::Started {
+            subagent_id,
+            resumed,
+            label,
+            objective,
+            ..
+        } => {
+            let role = workflow_role_for_subagent(&state.workflows, subagent_id);
+            state.subagents.insert(
+                subagent_id,
+                SubagentTrace {
+                    label: label.clone(),
+                    role: role.clone(),
+                    started: std::time::Instant::now(),
+                },
+            );
+            emit_nested_session(
+                format,
+                subagent_id,
+                role.as_ref(),
+                &label,
+                if resumed {
+                    SUBAGENT_KIND_RESUMED
+                } else {
+                    SUBAGENT_KIND_STARTED
+                },
+                &objective,
+                None,
+            )?;
+        }
+        SubagentEvent::Activity {
+            subagent_id,
+            activity,
+        } => {
+            let label = state.subagent_label(subagent_id);
+            let role = state.subagent_role(subagent_id);
+            emit_nested_session(
+                format,
+                subagent_id,
+                role.as_ref(),
+                &label,
+                SUBAGENT_KIND_ACTIVITY,
+                &activity,
+                None,
+            )?;
+        }
+        SubagentEvent::Finished {
+            subagent_id,
+            outcome,
+        } => {
+            let trace = state.subagents.remove(&subagent_id);
+            let label = trace.as_ref().map_or_else(
+                || SUBAGENT_UNKNOWN_LABEL.to_string(),
+                |trace| trace.label.clone(),
+            );
+            let role = trace.as_ref().and_then(|trace| trace.role.clone());
+            let elapsed = trace.as_ref().map(|trace| trace.started.elapsed());
+            emit_nested_session(
+                format,
+                subagent_id,
+                role.as_ref(),
+                &label,
+                SUBAGENT_KIND_FINISHED,
+                &subagent_outcome_text(&outcome),
+                elapsed,
+            )?;
+        }
+        SubagentEvent::SessionUpdate {
+            subagent_id,
+            update,
+        } => {
+            if matches!(format, OutputFormat::StreamJson) {
+                let role = state.subagent_role(subagent_id);
+                let actor = nested_actor(subagent_id, role.as_ref());
+                emit_stream_update(&update, state, &actor)?;
+            }
+        }
+        SubagentEvent::PermissionRequest {
+            subagent_id,
+            prompt,
+        } => {
+            let role = state.subagent_role(subagent_id);
+            let actor = nested_actor(subagent_id, role.as_ref());
+            answer_permission(format, permission_mode, &actor, prompt)?;
+        }
+        SubagentEvent::ElicitationRequest { prompt, .. } => decline_elicitation(prompt),
+        SubagentEvent::SessionStarted { .. }
+        | SubagentEvent::TerminalOutput { .. }
+        | SubagentEvent::CancelPendingPermissions { .. }
+        | SubagentEvent::Status { .. } => {}
+    }
+    Ok(())
+}
+
+pub fn handle_workflow_event(
+    format: OutputFormat,
+    workflows: &mut crate::workflow::WorkflowStore,
+    event: crate::workflow::WorkflowEvent,
+) -> Result<()> {
+    if let Err(error) = workflows.apply(&event) {
+        tracing::warn!(
+            event = "workflow_transition_rejected_by_headless",
+            error = %error,
+            "ignoring an invalid workflow transition"
+        );
+        return Ok(());
+    }
+    if matches!(format, OutputFormat::StreamJson) {
+        emit_workflow(&event, workflows)?;
+    }
+    Ok(())
+}
+
+pub fn handle_internal_message(
+    format: OutputFormat,
+    state: &mut HeadlessState,
+    collecting_turn_output: &mut bool,
+    message: crate::event::InternalMessage,
+) -> Result<()> {
+    reset_superseded_headless_answer(state, collecting_turn_output, &message);
+    if matches!(format, OutputFormat::StreamJson) {
+        let kind = match message.kind {
+            crate::event::InternalMessageKind::Delegation => "delegation",
+            crate::event::InternalMessageKind::DiscreteReview => "discrete_review",
+            crate::event::InternalMessageKind::ReviewLane => "review_lane",
+            crate::event::InternalMessageKind::ReviewProgress => "review_progress",
+            crate::event::InternalMessageKind::ReviewSynthesis => "review_synthesis",
+        };
+        emit_json(&StreamRecord::Review {
+            actor: &message.source.to_ascii_lowercase(),
+            target: &message.target.to_ascii_lowercase(),
+            kind,
+            text: &message.text,
+        })?;
+    }
+    Ok(())
+}
+
+pub fn decline_elicitation(prompt: crate::event::ElicitationPrompt) {
+    // Headless runs have no interactive modal to render a form or URL, so the
+    // agent gets an explicit response instead of blocking on user input.
+    let _ = prompt.responder.send(ElicitationOutcome::Decline);
+}
+
+fn reset_superseded_headless_answer(
+    state: &mut HeadlessState,
+    collecting_turn_output: &mut bool,
+    message: &crate::event::InternalMessage,
+) {
+    if matches!(
+        message.kind,
+        crate::event::InternalMessageKind::DiscreteReview
+    ) && message.source.eq_ignore_ascii_case("primary")
+        && message.target.eq_ignore_ascii_case("primary")
+    {
+        // A findings correction supersedes the withheld answer. PromptDone has
+        // intentionally not arrived yet, so this is the boundary where
+        // headless output must start fresh.
+        prepare_headless_followup(state, collecting_turn_output);
+    }
+}
+
+fn prepare_headless_followup(state: &mut HeadlessState, collecting_turn_output: &mut bool) {
+    state.final_text.clear();
+    *collecting_turn_output = false;
+}
+
+pub fn apply_terminal_output(
+    state: &mut HeadlessState,
+    snapshot: &crate::event::TerminalOutputSnapshot,
+) {
+    if crate::trajectory::terminal_output_completes_agent_message_segment(snapshot) {
+        state.final_text.clear();
+    }
+}
+
+pub fn apply_session_update(
+    state: &mut HeadlessState,
+    update: SessionUpdate,
+    prompt_sent: bool,
+    collecting_turn_output: &mut bool,
+) {
+    match update {
+        SessionUpdate::UserMessageChunk(_) if prompt_sent => {
+            *collecting_turn_output = true;
+        }
+        SessionUpdate::AgentThoughtChunk(_) if prompt_sent => {
+            *collecting_turn_output = true;
+        }
+        SessionUpdate::AgentMessageChunk(chunk) if *collecting_turn_output => {
+            state
+                .final_text
+                .push_str(&content_block_text(&chunk.content));
+        }
+        SessionUpdate::ToolCall(tool_call) => {
+            let id = tool_call.tool_call_id.to_string();
+            let completes_segment =
+                crate::trajectory::tool_completes_agent_message_segment(&tool_call);
+            state.tool_calls.insert(id, tool_call);
+            if prompt_sent && completes_segment {
+                state.final_text.clear();
+            }
+            if prompt_sent {
+                *collecting_turn_output = true;
+            }
+        }
+        SessionUpdate::ToolCallUpdate(update) => {
+            let id = update.tool_call_id.to_string();
+            let completed = matches!(
+                update.fields.status,
+                Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
+            );
+            // Apply every update, not only terminal ones. The status gate below
+            // controls just the final-message boundary.
+            let tool_call = state
+                .tool_calls
+                .entry(id.clone())
+                .or_insert_with(|| ToolCall::new(id, "tool"));
+            tool_call.update(update.fields);
+            let completes_segment =
+                completed && crate::trajectory::tool_completes_agent_message_segment(tool_call);
+            if prompt_sent && completes_segment {
+                state.final_text.clear();
+            }
+            if prompt_sent {
+                *collecting_turn_output = true;
+            }
+        }
+        SessionUpdate::Plan(_) if prompt_sent => {
+            // BoundaryTracker treats a plan update as a semantic checkpoint;
+            // subsequent prose is the new candidate final response.
+            state.final_text.clear();
+            *collecting_turn_output = true;
+        }
+        _ => {}
+    }
+}
+
+const SUBAGENT_KIND_STARTED: &str = "started";
+const SUBAGENT_KIND_RESUMED: &str = "resumed";
+const SUBAGENT_KIND_ACTIVITY: &str = "activity";
+const SUBAGENT_KIND_FINISHED: &str = "finished";
+/// Label for a subagent whose `Started` event was never seen (a late attach or
+/// a dropped event); the id still identifies the run.
+const SUBAGENT_UNKNOWN_LABEL: &str = "subagent";
+
+impl HeadlessState {
+    fn subagent_label(&self, subagent_id: u64) -> String {
+        self.subagents
+            .get(&subagent_id)
+            .map_or_else(|| SUBAGENT_UNKNOWN_LABEL.to_string(), |t| t.label.clone())
+    }
+
+    fn subagent_role(&self, subagent_id: u64) -> Option<crate::workflow::WorkflowActorRole> {
+        self.subagents
+            .get(&subagent_id)
+            .and_then(|trace| trace.role.clone())
+            .or_else(|| workflow_role_for_subagent(&self.workflows, subagent_id))
+    }
+}
+
+fn workflow_role_for_subagent(
+    workflows: &crate::workflow::WorkflowStore,
+    subagent_id: u64,
+) -> Option<crate::workflow::WorkflowActorRole> {
+    let actor_id = crate::workflow::WorkflowActorId::Subagent(subagent_id);
+    workflows
+        .iter()
+        .find_map(|workflow| workflow.actors.get(&actor_id))
+        .map(|actor| actor.role.clone())
+}
+
+fn nested_actor(subagent_id: u64, role: Option<&crate::workflow::WorkflowActorRole>) -> String {
+    let prefix = role.map_or("subagent", crate::workflow::WorkflowActorRole::actor_prefix);
+    format!("{prefix}-{subagent_id}")
+}
+
+fn subagent_outcome_text(outcome: &SubagentOutcome) -> String {
+    match outcome {
+        SubagentOutcome::Failed(message) => format!("failed: {message}"),
+        other => other.label().to_string(),
+    }
+}
+
+fn emit_workflow(
+    event: &crate::workflow::WorkflowEvent,
+    workflows: &crate::workflow::WorkflowStore,
+) -> Result<()> {
+    let Some(record) = workflow_stream_record(event, workflows) else {
+        return Ok(());
+    };
+    emit_json(&record)
+}
+
+fn workflow_stream_record(
+    event: &crate::workflow::WorkflowEvent,
+    workflows: &crate::workflow::WorkflowStore,
+) -> Option<StreamRecord<'static>> {
+    use crate::workflow::{WorkflowActorLifecycle, WorkflowTransition};
+
+    let state = workflows.get(event.workflow_id)?;
+    let (transition, actor_id, actor_role, actor_lifecycle, retained_session_id) = match &event
+        .transition
+    {
+        WorkflowTransition::Started { .. } => ("started", None, None, None, None),
+        WorkflowTransition::PhaseChanged { .. } => ("phase_changed", None, None, None, None),
+        WorkflowTransition::ActorStarted { actor_id, role } => (
+            "actor_started",
+            Some(workflow_actor_display(actor_id, Some(role))),
+            Some(role.as_str()),
+            Some("running"),
+            None,
+        ),
+        WorkflowTransition::ActorSessionBound {
+            actor_id,
+            retained_session_id,
+        } => (
+            "actor_session_bound",
+            Some(workflow_actor_display(
+                actor_id,
+                state.actors.get(actor_id).map(|actor| &actor.role),
+            )),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            state
+                .actors
+                .get(actor_id)
+                .map(|actor| actor.lifecycle.as_str()),
+            Some(retained_session_id.clone()),
+        ),
+        WorkflowTransition::ActorWaiting { actor_id, .. } => (
+            "actor_waiting",
+            Some(workflow_actor_display(
+                actor_id,
+                state.actors.get(actor_id).map(|actor| &actor.role),
+            )),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            Some("waiting"),
+            state
+                .actors
+                .get(actor_id)
+                .and_then(|actor| actor.retained_session_id.clone()),
+        ),
+        WorkflowTransition::ActorResumed { actor_id } => (
+            "actor_resumed",
+            Some(workflow_actor_display(
+                actor_id,
+                state.actors.get(actor_id).map(|actor| &actor.role),
+            )),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            Some("running"),
+            state
+                .actors
+                .get(actor_id)
+                .and_then(|actor| actor.retained_session_id.clone()),
+        ),
+        WorkflowTransition::ActorFinished { actor_id, .. } => (
+            "actor_finished",
+            Some(workflow_actor_display(
+                actor_id,
+                state.actors.get(actor_id).map(|actor| &actor.role),
+            )),
+            state.actors.get(actor_id).map(|actor| actor.role.as_str()),
+            state
+                .actors
+                .get(actor_id)
+                .map(|actor| actor.lifecycle.as_str()),
+            state
+                .actors
+                .get(actor_id)
+                .and_then(|actor| actor.retained_session_id.clone()),
+        ),
+        WorkflowTransition::Waiting { .. } => ("waiting", None, None, None, None),
+        WorkflowTransition::CoverageChanged { .. } => ("coverage_changed", None, None, None, None),
+        WorkflowTransition::IssuesValidated { .. } => ("issues_validated", None, None, None, None),
+        WorkflowTransition::IssuesResolved { status, .. } => {
+            (status.as_str(), None, None, None, None)
+        }
+        WorkflowTransition::Terminal { .. } => ("terminal", None, None, None, None),
+    };
+    let waiting_on = state
+        .waiting
+        .as_ref()
+        .map(|waiting| waiting.dependency.clone());
+    let remaining = state.waiting.as_ref().and_then(|waiting| waiting.remaining);
+    let requires_user_action = state
+        .waiting
+        .as_ref()
+        .is_some_and(|waiting| waiting.requires_user_action)
+        || state.actors.values().any(|actor| {
+            matches!(
+                actor.lifecycle,
+                WorkflowActorLifecycle::Waiting {
+                    requires_user_action: true,
+                    ..
+                }
+            )
+        });
+    let actor_error = actor_id.as_ref().and_then(|actor_id| {
+        state
+            .actors
+            .iter()
+            .find(|(id, actor)| workflow_actor_display(id, Some(&actor.role)) == *actor_id)
+            .and_then(|(_, actor)| match &actor.lifecycle {
+                WorkflowActorLifecycle::Failed(error) => Some(error.clone()),
+                _ => None,
+            })
+    });
+    Some(StreamRecord::Workflow(Box::new(WorkflowStreamRecord {
+        workflow_id: state.id.to_string(),
+        turn_id: state.id.turn_id,
+        operation: state.id.operation,
+        kind: state.kind.as_str(),
+        transition,
+        pass: state.stage.pass,
+        phase: state.stage.phase.as_str(),
+        selected: state.selected_count(),
+        running: state.running_count(),
+        waiting: state.waiting_count(),
+        completed: state.completed_count(),
+        failed: state.failed_count(),
+        cancelled: state.cancelled_count(),
+        waiting_on,
+        remaining,
+        requires_user_action,
+        coverage: state.coverage.as_str(),
+        outcome: state.outcome.map(|outcome| outcome.as_str()),
+        actor_id,
+        actor_role,
+        actor_lifecycle,
+        actor_error,
+        retained_session_id,
+    })))
+}
+
+fn workflow_actor_display(
+    actor_id: &crate::workflow::WorkflowActorId,
+    role: Option<&crate::workflow::WorkflowActorRole>,
+) -> String {
+    match actor_id {
+        crate::workflow::WorkflowActorId::Subagent(id) => nested_actor(*id, role),
+        crate::workflow::WorkflowActorId::Named(name) => name.clone(),
+    }
+}
+
+/// One subagent lifecycle line. `stream-json` gets a structured record;
+/// `--print` text mode gets the one-line equivalent on **stderr**, so progress
+/// can never interleave with the answer text (or the single JSON object)
+/// written to stdout. `--output-format json` stays silent: its contract is
+/// exactly one object.
+fn emit_nested_session(
+    format: OutputFormat,
+    id: u64,
+    role: Option<&crate::workflow::WorkflowActorRole>,
+    label: &str,
+    kind: &str,
+    text: &str,
+    elapsed: Option<std::time::Duration>,
+) -> Result<()> {
+    let internal_role = role.filter(|role| role.is_internal_review_session());
+    match format {
+        OutputFormat::StreamJson => match internal_role {
+            Some(role) => emit_json(&StreamRecord::ReviewSession {
+                id,
+                role: role.as_str(),
+                label,
+                kind,
+                text,
+                elapsed_ms: elapsed.map(|elapsed| elapsed.as_millis() as u64),
+            }),
+            None => emit_json(&StreamRecord::Subagent {
+                id,
+                label,
+                kind,
+                text,
+                elapsed_ms: elapsed.map(|elapsed| elapsed.as_millis() as u64),
+            }),
+        },
+        OutputFormat::Text => {
+            eprintln!(
+                "{}",
+                nested_session_text_line(id, internal_role, label, kind, text, elapsed)
+            );
+            Ok(())
+        }
+        OutputFormat::Json => Ok(()),
+    }
+}
+
+fn nested_session_text_line(
+    id: u64,
+    role: Option<&crate::workflow::WorkflowActorRole>,
+    label: &str,
+    kind: &str,
+    text: &str,
+    elapsed: Option<std::time::Duration>,
+) -> String {
+    let actor = role.map_or(
+        "subagent",
+        crate::workflow::WorkflowActorRole::display_label,
+    );
+    let mut line = format!("{actor} #{id} · {label} · {kind} · {text}");
+    if let Some(elapsed) = elapsed {
+        line.push_str(" · ");
+        line.push_str(&format_duration(elapsed));
+    }
+    line
+}
+
+pub fn emit_stream_event(event: &UiEvent, state: &HeadlessState) -> Result<()> {
+    if let UiEvent::SessionUpdate(update) = event {
+        emit_stream_update(update, state, "primary")?;
+    }
+    Ok(())
+}
+
+fn emit_stream_update(update: &SessionUpdate, state: &HeadlessState, actor: &str) -> Result<()> {
+    match update {
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            let text = content_block_text(&chunk.content);
+            emit_json(&StreamRecord::AgentMessage { actor, text: &text })?;
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            let text = content_block_text(&chunk.content);
+            emit_json(&StreamRecord::AgentThought { actor, text: &text })?;
+        }
+        SessionUpdate::ToolCall(tool_call) => {
+            if actor == "primary" && crate::session_state::is_subagent_transport_call(tool_call) {
+                return Ok(());
+            }
+            emit_json(&StreamRecord::ToolCall {
+                actor,
+                id: &tool_call.tool_call_id.to_string(),
+                title: &tool_call.title,
+                kind: tool_kind_label(tool_call.kind).to_string(),
+                status: tool_status_label(tool_call.status).to_string(),
+            })?;
+        }
+        SessionUpdate::ToolCallUpdate(update) => {
+            if actor == "primary" && crate::session_state::is_subagent_transport_update(update) {
+                return Ok(());
+            }
+            let existing = state.tool_calls.get(&update.tool_call_id.to_string());
+            emit_json(&StreamRecord::ToolCallUpdate {
+                actor,
+                id: &update.tool_call_id.to_string(),
+                title: update
+                    .fields
+                    .title
+                    .as_deref()
+                    .or_else(|| existing.map(|t| t.title.as_str())),
+                kind: update.fields.kind.map(|k| tool_kind_label(k).to_string()),
+                status: update
+                    .fields
+                    .status
+                    .map(|s| tool_status_label(s).to_string()),
+            })?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn permission_decision(
+    mode: PermissionMode,
+    tool_call: &ToolCallUpdate,
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
+) -> Option<String> {
+    let allow = match mode {
+        PermissionMode::Manual => false,
+        PermissionMode::Yolo => true,
+        PermissionMode::Auto => matches!(
+            tool_call.fields.kind,
+            Some(ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
+        ),
+    };
+    if !allow {
+        return None;
+    }
+    choose_allow_option(options)
+}
+
+/// First `AllowAlways` option, else first `AllowOnce`. Shared with Ragnarok's
+/// unattended fighters, which bypass permissions inside their own worktrees.
+pub fn choose_allow_option(
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
+) -> Option<String> {
+    options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+        .or_else(|| {
+            options
+                .iter()
+                .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        })
+        .map(|option| option.option_id.to_string())
+}
+
+/// Forward commands to the ACP runtime, answering `RefreshWorkspaceDiff`
+/// locally. The runtime treats that command as a no-op, so without this a
+/// remote viewer's `/diff` would be dropped and its reader would show
+/// "reading" forever. The published event reaches the remote tracker through
+/// the ordinary runtime-event channel.
+pub fn spawn_workspace_diff_command_pump(
+    mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
+    runtime_cmd_tx: mpsc::UnboundedSender<UiCommand>,
+    refresher: Arc<acp::WorkspaceHeadDiffRefresher>,
+    event_tx: mpsc::UnboundedSender<UiEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(command) = cmd_rx.recv().await {
+            if matches!(command, UiCommand::RefreshWorkspaceDiff) {
+                refresher.spawn(event_tx.clone());
+                continue;
+            }
+            if runtime_cmd_tx.send(command).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+pub fn emit_json<T: Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string(value)?);
+    Ok(())
+}
+
+// Stop-reason / tool-kind / tool-status labels live in `crate::labels` so the
+// MCP server and this runner cannot drift apart on `#[non_exhaustive]` enums.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record_json(record: &StreamRecord<'_>) -> serde_json::Value {
+        serde_json::to_value(record).expect("stream record serializes")
+    }
+
+    /// A remote `/diff` against a headless session must be answered by the
+    /// pump itself: the ACP runtime ignores the command, and an unanswered
+    /// refresh leaves the web viewer reading the worktree forever.
+    #[tokio::test]
+    async fn command_pump_answers_workspace_diff_refreshes_without_the_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (runtime_cmd_tx, mut runtime_cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let refresher = acp::WorkspaceHeadDiffRefresher::new(
+            vec![temp.path().to_path_buf()],
+            Vec::new(),
+            64 * 1024,
+        );
+        let pump = spawn_workspace_diff_command_pump(cmd_rx, runtime_cmd_tx, refresher, event_tx);
+
+        cmd_tx
+            .send(UiCommand::RefreshWorkspaceDiff)
+            .expect("send refresh");
+        let event = event_rx.recv().await.expect("published answer");
+        assert!(
+            matches!(event, UiEvent::WorkspaceHeadDiff(_)),
+            "unexpected event: {event:?}"
+        );
+        assert!(
+            runtime_cmd_rx.try_recv().is_err(),
+            "the refresh must not reach the runtime, which would drop it"
+        );
+
+        // Every other command passes through untouched.
+        cmd_tx.send(UiCommand::Shutdown).expect("send shutdown");
+        assert!(matches!(
+            runtime_cmd_rx.recv().await,
+            Some(UiCommand::Shutdown)
+        ));
+
+        drop(cmd_tx);
+        pump.await.expect("pump exits when senders drop");
+    }
+
+    #[test]
+    fn corrective_review_discards_superseded_headless_answer() {
+        let mut state = HeadlessState {
+            final_text: "stale initial answer".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+        let message = crate::event::InternalMessage {
+            source: "primary".to_string(),
+            target: "primary".to_string(),
+            kind: crate::event::InternalMessageKind::DiscreteReview,
+            text: "correct these findings".to_string(),
+            owner_subagent_id: None,
+        };
+
+        reset_superseded_headless_answer(&mut state, &mut collecting, &message);
+
+        assert!(state.final_text.is_empty());
+        assert!(!collecting);
+    }
+
+    #[test]
+    fn headless_result_keeps_only_message_after_completed_tool_update() {
+        use agent_client_protocol::schema::v1::{
+            ContentBlock, ContentChunk, TextContent, ToolCallStatus, ToolCallUpdate,
+            ToolCallUpdateFields,
+        };
+
+        let chunk = |text| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        let mut state = HeadlessState::default();
+        let mut collecting = false;
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::UserMessageChunk(chunk("correct the finding")),
+            true,
+            &mut collecting,
+        );
+        apply_session_update(
+            &mut state,
+            SessionUpdate::AgentMessageChunk(chunk("I will verify it first.")),
+            true,
+            &mut collecting,
+        );
+        assert_eq!(state.final_text, "I will verify it first.");
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::ToolCall(ToolCall::new("tool-1", "verify")),
+            true,
+            &mut collecting,
+        );
+        assert_eq!(
+            state.final_text, "I will verify it first.",
+            "pending tools do not establish the final-message boundary"
+        );
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "tool-1",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+            true,
+            &mut collecting,
+        );
+        assert!(
+            state.final_text.is_empty(),
+            "pre-tool progress must not leak into the released answer"
+        );
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::AgentMessageChunk(chunk("Corrected and validated.")),
+            true,
+            &mut collecting,
+        );
+        assert_eq!(state.final_text, "Corrected and validated.");
+    }
+
+    #[test]
+    fn headless_result_honors_already_completed_tool_call_boundary() {
+        use agent_client_protocol::schema::v1::{
+            ContentBlock, ContentChunk, TextContent, ToolCallStatus,
+        };
+
+        let chunk = |text| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        let mut state = HeadlessState {
+            final_text: "progress before a one-shot tool".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::ToolCall(
+                ToolCall::new("tool-1", "verify").status(ToolCallStatus::Completed),
+            ),
+            true,
+            &mut collecting,
+        );
+        assert!(state.final_text.is_empty());
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::AgentMessageChunk(chunk("Final answer.")),
+            true,
+            &mut collecting,
+        );
+        assert_eq!(state.final_text, "Final answer.");
+    }
+
+    #[test]
+    fn headless_result_honors_update_only_completed_tool_boundary() {
+        use agent_client_protocol::schema::v1::{
+            Terminal, TerminalExitStatus, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+            ToolCallUpdateFields,
+        };
+
+        let mut state = HeadlessState {
+            final_text: "progress before a late-attached tool".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+
+        let mut pending = ToolCallUpdateFields::new().status(ToolCallStatus::InProgress);
+        pending.content = Some(vec![ToolCallContent::Terminal(Terminal::new(
+            "late-terminal",
+        ))]);
+        apply_session_update(
+            &mut state,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new("late-tool", pending)),
+            true,
+            &mut collecting,
+        );
+        assert_eq!(
+            state.final_text, "progress before a late-attached tool",
+            "nonterminal updates must not clear the candidate answer"
+        );
+        assert_eq!(
+            state
+                .tool_calls
+                .get("late-tool")
+                .expect("late-attached tool")
+                .content
+                .len(),
+            1,
+            "the nonterminal update must be retained"
+        );
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "late-tool",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+            true,
+            &mut collecting,
+        );
+
+        assert_eq!(
+            state.final_text, "progress before a late-attached tool",
+            "terminal-backed completion waits for TerminalOutput"
+        );
+        assert_eq!(
+            state
+                .tool_calls
+                .get("late-tool")
+                .expect("late-attached tool")
+                .content
+                .len(),
+            1,
+            "later completion must not discard prior update content"
+        );
+
+        apply_terminal_output(
+            &mut state,
+            &crate::event::TerminalOutputSnapshot {
+                terminal_id: "late-terminal".to_string(),
+                output: "done".to_string(),
+                truncated: false,
+                exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+            },
+        );
+        assert!(
+            state.final_text.is_empty(),
+            "terminal exit establishes the final-message boundary"
+        );
+    }
+
+    #[test]
+    fn headless_result_honors_terminal_output_completion_boundary() {
+        use agent_client_protocol::schema::v1::TerminalExitStatus;
+
+        let mut state = HeadlessState {
+            final_text: "progress before terminal completion".to_string(),
+            ..HeadlessState::default()
+        };
+        let snapshot = crate::event::TerminalOutputSnapshot {
+            terminal_id: "terminal-1".to_string(),
+            output: "done".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        };
+
+        apply_terminal_output(&mut state, &snapshot);
+
+        assert!(state.final_text.is_empty());
+    }
+
+    #[test]
+    fn headless_result_honors_plan_boundary() {
+        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, Plan, TextContent};
+
+        let chunk = |text| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        let mut state = HeadlessState {
+            final_text: "progress before plan update".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::Plan(Plan::new(Vec::new())),
+            true,
+            &mut collecting,
+        );
+        assert!(state.final_text.is_empty());
+
+        apply_session_update(
+            &mut state,
+            SessionUpdate::AgentMessageChunk(chunk("Final answer after plan.")),
+            true,
+            &mut collecting,
+        );
+        assert_eq!(state.final_text, "Final answer after plan.");
+    }
+
+    #[test]
+    fn subagent_followup_discards_the_prior_headless_answer() {
+        let mut state = HeadlessState {
+            final_text: "answer before an injected report".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+
+        prepare_headless_followup(&mut state, &mut collecting);
+
+        assert!(state.final_text.is_empty());
+        assert!(!collecting);
+    }
+
+    #[test]
+    fn subagent_stream_records_carry_id_label_kind_and_text() {
+        let started = record_json(&StreamRecord::Subagent {
+            id: 3,
+            label: "fix-tests",
+            kind: SUBAGENT_KIND_STARTED,
+            text: "make the failing suite green",
+            elapsed_ms: None,
+        });
+        assert_eq!(
+            started,
+            serde_json::json!({
+                "type": "subagent",
+                "id": 3,
+                "label": "fix-tests",
+                "kind": "started",
+                "text": "make the failing suite green",
+            }),
+            "started records omit elapsed entirely"
+        );
+
+        let finished = record_json(&StreamRecord::Subagent {
+            id: 3,
+            label: "fix-tests",
+            kind: SUBAGENT_KIND_FINISHED,
+            text: "completed",
+            elapsed_ms: Some(252_000),
+        });
+        assert_eq!(
+            finished,
+            serde_json::json!({
+                "type": "subagent",
+                "id": 3,
+                "label": "fix-tests",
+                "kind": "finished",
+                "text": "completed",
+                "elapsed_ms": 252_000,
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_stream_records_preserve_wait_resume_and_failure_facts() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowStore, WorkflowTransition,
+        };
+
+        let workflow_id = WorkflowId::review(9);
+        let actor_id = WorkflowActorId::Subagent(4);
+        let mut workflows = WorkflowStore::default();
+        for event in [
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Review,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorStarted {
+                    actor_id: actor_id.clone(),
+                    role: WorkflowActorRole::ReviewSupervisor,
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorSessionBound {
+                    actor_id: actor_id.clone(),
+                    retained_session_id: "supervisor-session".to_string(),
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorWaiting {
+                    actor_id: actor_id.clone(),
+                    dependency: "automatic specialist reviewer reports".to_string(),
+                    remaining: Some(2),
+                    requires_user_action: false,
+                },
+            ),
+        ] {
+            workflows.apply(&event).expect("valid workflow transition");
+        }
+        let waiting = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Waiting {
+                dependency: "automatic specialist reviewer reports".to_string(),
+                remaining: Some(2),
+                requires_user_action: false,
+            },
+        );
+        workflows
+            .apply(&waiting)
+            .expect("valid workflow wait transition");
+        let waiting_record = record_json(
+            &workflow_stream_record(&waiting, &workflows).expect("workflow state exists"),
+        );
+        assert_eq!(waiting_record["type"], "workflow");
+        assert_eq!(waiting_record["workflow_id"], "turn-9-workflow-1");
+        assert_eq!(waiting_record["running"], 0);
+        assert_eq!(waiting_record["waiting"], 1);
+        assert_eq!(waiting_record["remaining"], 2);
+        assert_eq!(
+            waiting_record["waiting_on"],
+            "automatic specialist reviewer reports"
+        );
+        assert_eq!(waiting_record["requires_user_action"], false);
+
+        let resumed = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorResumed {
+                actor_id: actor_id.clone(),
+            },
+        );
+        workflows
+            .apply(&resumed)
+            .expect("valid workflow resume transition");
+        let resumed_record = record_json(
+            &workflow_stream_record(&resumed, &workflows).expect("workflow state exists"),
+        );
+        assert_eq!(resumed_record["actor_id"], "review-supervisor-4");
+        assert_eq!(resumed_record["actor_lifecycle"], "running");
+        assert_eq!(resumed_record["retained_session_id"], "supervisor-session");
+        assert_eq!(resumed_record["running"], 1);
+        assert_eq!(resumed_record["waiting"], 0);
+        assert!(resumed_record.get("waiting_on").is_none());
+
+        let failed = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id,
+                outcome: SubagentOutcome::Failed("adapter exited".to_string()),
+            },
+        );
+        workflows
+            .apply(&failed)
+            .expect("valid workflow failure transition");
+        let failed_record = record_json(
+            &workflow_stream_record(&failed, &workflows).expect("workflow state exists"),
+        );
+        assert_eq!(failed_record["actor_lifecycle"], "failed");
+        assert_eq!(failed_record["actor_error"], "adapter exited");
+        assert_eq!(failed_record["failed"], 1);
+    }
+
+    #[test]
+    fn workflow_stream_record_ignores_an_evicted_workflow() {
+        use crate::workflow::{
+            WorkflowEvent, WorkflowId, WorkflowPhase, WorkflowStage, WorkflowStore,
+            WorkflowTransition,
+        };
+
+        let event = WorkflowEvent::new(
+            WorkflowId::review(99),
+            WorkflowTransition::PhaseChanged {
+                stage: WorkflowStage::new(0, WorkflowPhase::Synthesis),
+            },
+        );
+
+        assert!(workflow_stream_record(&event, &WorkflowStore::default()).is_none());
+    }
+
+    #[test]
+    fn subagent_stream_actors_distinguish_interleaved_updates_and_permissions() {
+        let mimir = nested_actor(4, None);
+        let heimdall = nested_actor(7, None);
+        let records = [
+            record_json(&StreamRecord::AgentMessage {
+                actor: &mimir,
+                text: "first report",
+            }),
+            record_json(&StreamRecord::AgentThought {
+                actor: &heimdall,
+                text: "checking boundary",
+            }),
+            record_json(&StreamRecord::Permission {
+                actor: &mimir,
+                tool_call_id: "call-1",
+                decision: "selected",
+            }),
+        ];
+
+        assert_eq!(records[0]["actor"], "subagent-4");
+        assert_eq!(records[1]["actor"], "subagent-7");
+        assert_eq!(records[2]["actor"], "subagent-4");
+    }
+
+    #[test]
+    fn failed_outcomes_keep_their_message_in_the_record_text() {
+        assert_eq!(
+            subagent_outcome_text(&SubagentOutcome::Failed("adapter exited".to_string())),
+            "failed: adapter exited"
+        );
+        assert_eq!(
+            subagent_outcome_text(&SubagentOutcome::Completed),
+            "completed"
+        );
+        assert_eq!(
+            subagent_outcome_text(&SubagentOutcome::Cancelled),
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn text_mode_lines_mirror_the_stream_records() {
+        assert_eq!(
+            nested_session_text_line(
+                3,
+                None,
+                "fix-tests",
+                SUBAGENT_KIND_STARTED,
+                "green the suite",
+                None
+            ),
+            "subagent #3 · fix-tests · started · green the suite"
+        );
+        assert_eq!(
+            nested_session_text_line(
+                3,
+                None,
+                "fix-tests",
+                SUBAGENT_KIND_FINISHED,
+                "completed",
+                Some(std::time::Duration::from_secs(252)),
+            ),
+            "subagent #3 · fix-tests · finished · completed · 4m12s"
+        );
+    }
+
+    #[test]
+    fn labels_survive_events_that_only_carry_the_id() {
+        let mut state = HeadlessState::default();
+        state.subagents.insert(
+            7,
+            SubagentTrace {
+                label: "audit-config".to_string(),
+                role: None,
+                started: std::time::Instant::now(),
+            },
+        );
+        assert_eq!(state.subagent_label(7), "audit-config");
+        // A subagent whose `Started` was never observed still streams under a
+        // stable placeholder rather than an empty label.
+        assert_eq!(state.subagent_label(9), SUBAGENT_UNKNOWN_LABEL);
+    }
+
+    #[test]
+    fn internal_review_sessions_have_distinct_actors_and_lifecycle_records() {
+        use crate::workflow::WorkflowActorRole;
+
+        let role = WorkflowActorRole::ReviewSupervisor;
+        assert_eq!(nested_actor(4, Some(&role)), "review-supervisor-4");
+        let record = record_json(&StreamRecord::ReviewSession {
+            id: 4,
+            role: role.as_str(),
+            label: "review · supervisor",
+            kind: SUBAGENT_KIND_STARTED,
+            text: "review · supervisor",
+            elapsed_ms: None,
+        });
+        assert_eq!(record["type"], "review_session");
+        assert_eq!(record["role"], "review_supervisor");
+        assert_eq!(
+            nested_session_text_line(
+                4,
+                Some(&role),
+                "review · supervisor",
+                SUBAGENT_KIND_STARTED,
+                "review · supervisor",
+                None,
+            ),
+            "review supervisor #4 · review · supervisor · started · review · supervisor"
+        );
+    }
+
+    #[test]
+    fn permission_modes_map_and_select_only_allowed_options() {
+        use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields, ToolKind};
+
+        assert!(matches!(
+            config::PermissionPreset::from(PermissionMode::Manual),
+            config::PermissionPreset::Manual
+        ));
+        assert!(matches!(
+            config::PermissionPreset::from(PermissionMode::Auto),
+            config::PermissionPreset::Auto
+        ));
+        assert!(matches!(
+            config::PermissionPreset::from(PermissionMode::Yolo),
+            config::PermissionPreset::Yolo
+        ));
+
+        let options = vec![
+            PermissionOption::new("deny", "Deny", PermissionOptionKind::RejectOnce),
+            PermissionOption::new("once", "Allow once", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("always", "Allow always", PermissionOptionKind::AllowAlways),
+        ];
+        let edit = ToolCallUpdate::new("edit", ToolCallUpdateFields::new().kind(ToolKind::Edit));
+        let execute = ToolCallUpdate::new(
+            "execute",
+            ToolCallUpdateFields::new().kind(ToolKind::Execute),
+        );
+
+        assert_eq!(
+            permission_decision(PermissionMode::Auto, &edit, &options).as_deref(),
+            Some("always")
+        );
+        assert_eq!(
+            permission_decision(PermissionMode::Yolo, &execute, &options).as_deref(),
+            Some("always")
+        );
+        assert!(permission_decision(PermissionMode::Manual, &edit, &options).is_none());
+        assert!(permission_decision(PermissionMode::Auto, &execute, &options).is_none());
+        assert!(choose_allow_option(&options[..1]).is_none());
+        assert_eq!(choose_allow_option(&options[1..2]).as_deref(), Some("once"));
+    }
+
+    #[tokio::test]
+    async fn permission_handler_answers_selected_and_cancelled() {
+        use agent_client_protocol::schema::v1::{PermissionOption, ToolCallUpdateFields, ToolKind};
+
+        let prompt = |id: &str| {
+            let (responder, response) = tokio::sync::oneshot::channel();
+            (
+                crate::event::PermissionPrompt {
+                    tool_call: ToolCallUpdate::new(
+                        id.to_string(),
+                        ToolCallUpdateFields::new().kind(ToolKind::Edit),
+                    ),
+                    options: vec![PermissionOption::new(
+                        "allow",
+                        "Allow",
+                        PermissionOptionKind::AllowOnce,
+                    )],
+                    responder,
+                },
+                response,
+            )
+        };
+
+        let (allowed, allowed_response) = prompt("allowed");
+        answer_permission(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            "primary",
+            allowed,
+        )
+        .expect("answer allowed permission");
+        assert!(matches!(
+            allowed_response.await.expect("allowed response"),
+            PermissionDecision::Selected(option) if option == "allow"
+        ));
+
+        let (cancelled, cancelled_response) = prompt("cancelled");
+        answer_permission(
+            OutputFormat::Json,
+            PermissionMode::Manual,
+            "subagent-7",
+            cancelled,
+        )
+        .expect("answer cancelled permission");
+        assert!(matches!(
+            cancelled_response.await.expect("cancelled response"),
+            PermissionDecision::Cancelled
+        ));
+    }
+
+    #[test]
+    fn prompt_completion_retains_only_the_final_orchestrated_turn() {
+        let mut state = HeadlessState {
+            final_text: "provisional answer".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+        let mut reason = None;
+        let mut usage = None;
+
+        assert!(record_prompt_done(
+            &mut state,
+            &mut collecting,
+            &mut reason,
+            &mut usage,
+            StopReason::EndTurn,
+            Some(Usage::new(8, 5, 3)),
+            1,
+        ));
+        assert!(state.final_text.is_empty());
+        assert!(!collecting);
+        assert!(matches!(reason, Some(StopReason::EndTurn)));
+        assert_eq!(usage.as_ref().map(|usage| usage.total_tokens), Some(8));
+
+        state.final_text = "final answer".to_string();
+        collecting = true;
+        assert!(!record_prompt_done(
+            &mut state,
+            &mut collecting,
+            &mut reason,
+            &mut usage,
+            StopReason::MaxTokens,
+            Some(Usage::new(13, 9, 4)),
+            0,
+        ));
+        assert_eq!(state.final_text, "final answer");
+        assert!(collecting);
+        assert!(matches!(reason, Some(StopReason::MaxTokens)));
+        assert_eq!(usage.as_ref().map(|usage| usage.total_tokens), Some(13));
+    }
+
+    #[test]
+    fn terminal_errors_and_warnings_follow_each_output_contract() {
+        let mut terminal_error = None;
+        record_terminal_error(
+            OutputFormat::StreamJson,
+            &mut terminal_error,
+            "adapter stopped".to_string(),
+        )
+        .expect("stream terminal error");
+        assert_eq!(terminal_error.as_deref(), Some("adapter stopped"));
+
+        record_terminal_error(
+            OutputFormat::Json,
+            &mut terminal_error,
+            "replacement error".to_string(),
+        )
+        .expect("json terminal error");
+        assert_eq!(terminal_error.as_deref(), Some("replacement error"));
+        emit_warning(OutputFormat::StreamJson, Some("subagent-3"), "retrying")
+            .expect("stream warning");
+        emit_warning(OutputFormat::Text, None, "plain warning").expect("text warning");
+        emit_warning(OutputFormat::Json, None, "silent warning").expect("json warning");
+    }
+
+    #[tokio::test]
+    async fn subagent_handler_tracks_lifecycle_streams_and_responses() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+        use agent_client_protocol::schema::v1::{
+            ContentBlock, ContentChunk, ElicitationId, ElicitationSessionScope, ElicitationUrlMode,
+            PermissionOption, TextContent, ToolCallUpdateFields, ToolKind,
+        };
+
+        let mut state = HeadlessState::default();
+        let workflow_id = WorkflowId::review(80);
+        for event in [
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Review,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+                },
+            ),
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::ActorStarted {
+                    actor_id: WorkflowActorId::Subagent(7),
+                    role: WorkflowActorRole::ReviewSupervisor,
+                },
+            ),
+        ] {
+            handle_workflow_event(OutputFormat::Json, &mut state.workflows, event)
+                .expect("prepare workflow role");
+        }
+
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::Started {
+                subagent_id: 7,
+                resumed: true,
+                label: "review · supervisor".to_string(),
+                model: Some("review-model".to_string()),
+                agent: "review-agent".to_string(),
+                objective: "synthesize findings".to_string(),
+            },
+        )
+        .expect("start retained review supervisor");
+        assert_eq!(state.subagent_label(7), "review · supervisor");
+        assert!(matches!(
+            state.subagent_role(7),
+            Some(WorkflowActorRole::ReviewSupervisor)
+        ));
+
+        handle_subagent_event(
+            OutputFormat::Text,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::Activity {
+                subagent_id: 7,
+                activity: "checking evidence".to_string(),
+            },
+        )
+        .expect("emit activity");
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::SessionUpdate {
+                subagent_id: 7,
+                update: SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new("review result"),
+                ))),
+            },
+        )
+        .expect("emit nested session update");
+
+        let (permission_tx, permission_rx) = tokio::sync::oneshot::channel();
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::PermissionRequest {
+                subagent_id: 7,
+                prompt: crate::event::PermissionPrompt {
+                    tool_call: ToolCallUpdate::new(
+                        "review-edit",
+                        ToolCallUpdateFields::new().kind(ToolKind::Edit),
+                    ),
+                    options: vec![PermissionOption::new(
+                        "allow",
+                        "Allow",
+                        PermissionOptionKind::AllowOnce,
+                    )],
+                    responder: permission_tx,
+                },
+            },
+        )
+        .expect("answer nested permission");
+        assert!(matches!(
+            permission_rx.await.expect("nested permission response"),
+            PermissionDecision::Selected(option) if option == "allow"
+        ));
+
+        let (elicitation_tx, elicitation_rx) = tokio::sync::oneshot::channel();
+        handle_subagent_event(
+            OutputFormat::Json,
+            PermissionMode::Manual,
+            &mut state,
+            SubagentEvent::ElicitationRequest {
+                subagent_id: 7,
+                prompt: crate::event::ElicitationPrompt {
+                    message: "sign in".to_string(),
+                    mode: ElicitationUrlMode::new(
+                        ElicitationSessionScope::new("review"),
+                        ElicitationId::new("login"),
+                        "https://example.com/login",
+                    )
+                    .into(),
+                    remote_id: None,
+                    responder: elicitation_tx,
+                },
+            },
+        )
+        .expect("decline nested elicitation");
+        assert!(matches!(
+            elicitation_rx.await.expect("nested elicitation response"),
+            ElicitationOutcome::Decline
+        ));
+
+        handle_subagent_event(
+            OutputFormat::StreamJson,
+            PermissionMode::Yolo,
+            &mut state,
+            SubagentEvent::Finished {
+                subagent_id: 7,
+                outcome: SubagentOutcome::Completed,
+            },
+        )
+        .expect("finish retained review supervisor");
+        assert!(!state.subagents.contains_key(&7));
+        handle_subagent_event(
+            OutputFormat::Json,
+            PermissionMode::Manual,
+            &mut state,
+            SubagentEvent::Finished {
+                subagent_id: 99,
+                outcome: SubagentOutcome::Cancelled,
+            },
+        )
+        .expect("finish late-attached subagent");
+    }
+
+    #[test]
+    fn workflow_handler_serializes_all_transition_families_and_ignores_invalid_state() {
+        use crate::workflow::{
+            ReviewIssueStatus, WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEvent,
+            WorkflowId, WorkflowKind, WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowStore,
+            WorkflowTransition,
+        };
+
+        let workflow_id = WorkflowId::review(81);
+        let mut workflows = WorkflowStore::default();
+        handle_workflow_event(
+            OutputFormat::StreamJson,
+            &mut workflows,
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::PhaseChanged {
+                    stage: WorkflowStage::new(0, WorkflowPhase::Synthesis),
+                },
+            ),
+        )
+        .expect("invalid transition is ignored");
+        assert!(workflows.get(workflow_id).is_none());
+
+        let started = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        );
+        handle_workflow_event(OutputFormat::StreamJson, &mut workflows, started.clone())
+            .expect("start workflow");
+        assert_eq!(
+            record_json(&workflow_stream_record(&started, &workflows).unwrap())["transition"],
+            "started"
+        );
+
+        let actor_id = WorkflowActorId::Named("primary-correction".to_string());
+        let actor_started = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: actor_id.clone(),
+                role: WorkflowActorRole::PrimaryCorrection,
+            },
+        );
+        handle_workflow_event(
+            OutputFormat::StreamJson,
+            &mut workflows,
+            actor_started.clone(),
+        )
+        .expect("start named actor");
+        let actor_record =
+            record_json(&workflow_stream_record(&actor_started, &workflows).unwrap());
+        assert_eq!(actor_record["actor_id"], "primary-correction");
+        assert_eq!(actor_record["transition"], "actor_started");
+
+        let transitions = [
+            (
+                WorkflowTransition::PhaseChanged {
+                    stage: WorkflowStage::new(0, WorkflowPhase::Correction),
+                },
+                "phase_changed",
+            ),
+            (
+                WorkflowTransition::ActorSessionBound {
+                    actor_id: actor_id.clone(),
+                    retained_session_id: "correction-session".to_string(),
+                },
+                "actor_session_bound",
+            ),
+            (
+                WorkflowTransition::CoverageChanged {
+                    coverage: WorkflowCoverage::Complete,
+                },
+                "coverage_changed",
+            ),
+            (
+                WorkflowTransition::IssuesValidated {
+                    pass: 0,
+                    summaries: vec!["finding".to_string()],
+                },
+                "issues_validated",
+            ),
+            (
+                WorkflowTransition::IssuesResolved {
+                    pass: 0,
+                    status: ReviewIssueStatus::Invalidated,
+                },
+                "invalidated",
+            ),
+            (
+                WorkflowTransition::Terminal {
+                    outcome: WorkflowOutcome::Completed,
+                    coverage: WorkflowCoverage::Complete,
+                },
+                "terminal",
+            ),
+        ];
+        for (transition, expected) in transitions {
+            let event = WorkflowEvent::new(workflow_id, transition);
+            let record = record_json(&workflow_stream_record(&event, &workflows).unwrap());
+            assert_eq!(record["transition"], expected);
+        }
+    }
+
+    #[test]
+    fn internal_message_handler_streams_every_kind_and_resets_only_corrections() {
+        use crate::event::{InternalMessage, InternalMessageKind};
+
+        let mut state = HeadlessState {
+            final_text: "candidate".to_string(),
+            ..HeadlessState::default()
+        };
+        let mut collecting = true;
+        for kind in [
+            InternalMessageKind::Delegation,
+            InternalMessageKind::ReviewLane,
+            InternalMessageKind::ReviewProgress,
+            InternalMessageKind::ReviewSynthesis,
+        ] {
+            handle_internal_message(
+                OutputFormat::StreamJson,
+                &mut state,
+                &mut collecting,
+                InternalMessage {
+                    source: "Týr".to_string(),
+                    target: "Supervisor".to_string(),
+                    kind,
+                    text: "evidence".to_string(),
+                    owner_subagent_id: Some(7),
+                },
+            )
+            .expect("stream internal message");
+        }
+        assert_eq!(state.final_text, "candidate");
+        assert!(collecting);
+
+        handle_internal_message(
+            OutputFormat::StreamJson,
+            &mut state,
+            &mut collecting,
+            InternalMessage {
+                source: "PRIMARY".to_string(),
+                target: "Primary".to_string(),
+                kind: InternalMessageKind::DiscreteReview,
+                text: "correct findings".to_string(),
+                owner_subagent_id: None,
+            },
+        )
+        .expect("stream corrective review message");
+        assert!(state.final_text.is_empty());
+        assert!(!collecting);
+    }
+
+    #[tokio::test]
+    async fn primary_elicitation_is_explicitly_declined() {
+        use agent_client_protocol::schema::v1::{
+            ElicitationId, ElicitationSessionScope, ElicitationUrlMode,
+        };
+
+        let (responder, response) = tokio::sync::oneshot::channel();
+        decline_elicitation(crate::event::ElicitationPrompt {
+            message: "authenticate".to_string(),
+            mode: ElicitationUrlMode::new(
+                ElicitationSessionScope::new("primary"),
+                ElicitationId::new("auth"),
+                "https://example.com/auth",
+            )
+            .into(),
+            remote_id: None,
+            responder,
+        });
+        assert!(matches!(
+            response.await.expect("elicitation response"),
+            ElicitationOutcome::Decline
+        ));
+    }
+
+    #[test]
+    fn stream_emitters_cover_messages_tools_updates_and_nested_formats() {
+        use crate::workflow::WorkflowActorRole;
+        use agent_client_protocol::schema::v1::{
+            ContentBlock, ContentChunk, TextContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
+        };
+
+        let mut state = HeadlessState::default();
+        let message = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("answer"),
+        )));
+        let thought = SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("reasoning"),
+        )));
+        emit_stream_event(&UiEvent::SessionUpdate(message.clone()), &state)
+            .expect("emit primary message event");
+        emit_stream_update(&thought, &state, "subagent-2").expect("emit thought");
+
+        let normal_call = ToolCall::new("normal", "read file")
+            .kind(ToolKind::Read)
+            .status(ToolCallStatus::InProgress);
+        emit_stream_update(
+            &SessionUpdate::ToolCall(normal_call.clone()),
+            &state,
+            "primary",
+        )
+        .expect("emit tool call");
+        state.tool_calls.insert("normal".to_string(), normal_call);
+        emit_stream_update(
+            &SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "normal",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+            &state,
+            "primary",
+        )
+        .expect("emit tool update with existing title");
+        emit_stream_update(
+            &SessionUpdate::ToolCall(ToolCall::new(
+                "transport",
+                "mcp.mj-subagents.create_subagent",
+            )),
+            &state,
+            "primary",
+        )
+        .expect("suppress primary subagent transport call");
+        emit_stream_update(
+            &SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "transport",
+                ToolCallUpdateFields::new().title("mcp.mj-subagents.subagent_cancel"),
+            )),
+            &state,
+            "primary",
+        )
+        .expect("suppress primary subagent transport update");
+
+        let role = WorkflowActorRole::IntentAnalyst;
+        emit_nested_session(
+            OutputFormat::StreamJson,
+            2,
+            Some(&role),
+            "review · intent",
+            SUBAGENT_KIND_FINISHED,
+            "completed",
+            Some(std::time::Duration::from_millis(25)),
+        )
+        .expect("emit review-session JSON");
+        emit_nested_session(
+            OutputFormat::StreamJson,
+            3,
+            None,
+            "worker",
+            SUBAGENT_KIND_STARTED,
+            "inspect code",
+            None,
+        )
+        .expect("emit subagent JSON");
+        emit_nested_session(
+            OutputFormat::Text,
+            3,
+            None,
+            "worker",
+            SUBAGENT_KIND_ACTIVITY,
+            "testing",
+            None,
+        )
+        .expect("emit subagent text");
+        emit_nested_session(
+            OutputFormat::Json,
+            3,
+            None,
+            "worker",
+            SUBAGENT_KIND_ACTIVITY,
+            "silent",
+            None,
+        )
+        .expect("keep single-object JSON silent");
+    }
+}

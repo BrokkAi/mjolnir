@@ -9,6 +9,7 @@ pub mod claude_usage;
 pub mod codex_usage;
 pub mod config;
 pub mod event;
+pub mod headless;
 pub mod labels;
 pub mod memory;
 pub mod model_resolve;
