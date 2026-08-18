@@ -254,7 +254,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     record.adapter_source_id
                 )
             })?;
-        resolved.rebind_auto_review_for_primary(&app_config);
+        crate::roster::rebind_auto_review_for_primary(&mut resolved, &app_config);
     }
     let primary = resolved.primary.clone();
     let review_supervisor = resolved.review_supervisor.clone();
@@ -270,8 +270,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         let _ = event_tx.send(UiEvent::Warning(warning.clone()));
     }
     let quota_gate = crate::quota::Gate::new(cfg.cwd.clone(), event_tx.clone());
-    let (subagent_roles, _subagent_codex_home) =
-        crate::isolated_subagent_roles(resolved.subagent_failover_roles(), "subagent")?;
+    let (subagent_roles, _subagent_codex_home) = crate::isolated_subagent_roles(
+        crate::roster::subagent_failover_roles(&resolved),
+        "subagent",
+    )?;
     let subagent_pool = (!subagent_roles.is_empty()).then(|| {
         crate::quota::RolePool::new(
             subagent_roles,

@@ -20,73 +20,45 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub use mj_core::roster::{
     AcpInventory, AcpServerInfo, AdapterKind, AdapterLaunch, Availability, ClaudeAuthStatus,
-    ModelChoice, ModelRow as Row, ResolvedAgent, configure_permissions,
+    ModelChoice, ModelRow as Row, ResolvedAgent, Roster, configure_permissions,
 };
 
-/// Everything one resolution pass bound: the seats in use plus the catalog the
-/// UI and the subagent MCP surface offer.
-#[derive(Debug, Clone)]
-pub struct Roster {
-    /// The agent that owns the conversation.
-    pub primary: ResolvedAgent,
-    /// The discrete review supervisor. `None` disables the agentic review
-    /// fan-out and lets the orchestrator use its existing degraded fallback.
-    pub review_supervisor: Option<ResolvedAgent>,
-    /// Default model for `create_subagent` delegations. `None` disables them.
-    pub subagent_default: Option<ResolvedAgent>,
-    pub available: Vec<ResolvedAgent>,
-    pub choices: Vec<ModelChoice>,
-    pub warnings: Vec<String>,
-    pub inventory: AcpInventory,
-    pub(crate) subagent_acp_priority: Vec<String>,
-    pub(crate) subagent_acp_source: Option<String>,
+pub fn subagent_failover_roles(roster: &Roster) -> Vec<ResolvedAgent> {
+    let Some(initial) = roster.subagent_default.clone() else {
+        return Vec::new();
+    };
+    let available = source_candidates(&roster.available, roster.subagent_acp_source.as_deref());
+    failover_roles(initial, &available, false, &roster.subagent_acp_priority)
 }
 
-impl Roster {
-    /// The subagent pool's route preference order: its bound default first,
-    /// then the same model through other ACP sources in configured priority
-    /// order, followed by the remaining ranked models and their routes.
-    pub fn subagent_failover_roles(&self) -> Vec<ResolvedAgent> {
-        let Some(initial) = self.subagent_default.clone() else {
-            return Vec::new();
-        };
-        let available = source_candidates(&self.available, self.subagent_acp_source.as_deref());
-        failover_roles(initial, &available, false, &self.subagent_acp_priority)
+pub fn rebind_auto_review_for_primary(roster: &mut Roster, config: &Config) {
+    if !config.agent.discrete_review {
+        roster.review_supervisor = None;
+        return;
     }
-
-    /// Rebind the auto-selected review supervisor after resume provenance pins
-    /// the primary to a different launchable role. Explicit review selections
-    /// are user-forced and remain bound as-is, even when they match the pinned
-    /// primary model.
-    pub fn rebind_auto_review_for_primary(&mut self, config: &Config) {
-        if !config.agent.discrete_review {
-            self.review_supervisor = None;
-            return;
-        }
-        if config.review.model != "auto" {
-            return;
-        }
-        let available = source_candidates(&self.available, config.review.acp_source.as_deref());
-        let rows = self
-            .choices
-            .iter()
-            .filter(|choice| choice.ranked)
-            .map(|choice| Row {
-                model: choice.model.clone(),
-                reasoning_effort: None,
-                pass_at_1: choice.pass_at_1,
-                mean_cost_usd: choice.mean_cost_usd,
-            })
-            .collect::<Vec<_>>();
-        self.review_supervisor = choose_review_auto(
-            &self.primary,
-            &rows,
-            &available,
-            &config.review.acp_priority,
-        );
-        if let Some(review_supervisor) = self.review_supervisor.as_mut() {
-            review_supervisor.reasoning_effort = config.review.reasoning_effort.clone();
-        }
+    if config.review.model != "auto" {
+        return;
+    }
+    let available = source_candidates(&roster.available, config.review.acp_source.as_deref());
+    let rows = roster
+        .choices
+        .iter()
+        .filter(|choice| choice.ranked)
+        .map(|choice| Row {
+            model: choice.model.clone(),
+            reasoning_effort: None,
+            pass_at_1: choice.pass_at_1,
+            mean_cost_usd: choice.mean_cost_usd,
+        })
+        .collect::<Vec<_>>();
+    roster.review_supervisor = choose_review_auto(
+        &roster.primary,
+        &rows,
+        &available,
+        &config.review.acp_priority,
+    );
+    if let Some(review_supervisor) = roster.review_supervisor.as_mut() {
+        review_supervisor.reasoning_effort = config.review.reasoning_effort.clone();
     }
 }
 
@@ -1456,7 +1428,7 @@ mod tests {
         };
 
         roster.primary = claude;
-        roster.rebind_auto_review_for_primary(&config);
+        rebind_auto_review_for_primary(&mut roster, &config);
 
         let review = roster.review_supervisor.expect("review rebound");
         assert_eq!(review.model.model, "gpt-5-6-sol");
@@ -1482,7 +1454,7 @@ mod tests {
         };
 
         roster.primary = claude;
-        roster.rebind_auto_review_for_primary(&config);
+        rebind_auto_review_for_primary(&mut roster, &config);
 
         assert_eq!(
             roster
@@ -1512,8 +1484,7 @@ mod tests {
         };
 
         assert!(
-            roster
-                .subagent_failover_roles()
+            subagent_failover_roles(&roster)
                 .iter()
                 .all(|candidate| candidate.launch.source_id == "codex-acp")
         );

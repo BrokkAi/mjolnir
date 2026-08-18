@@ -193,3 +193,17 @@ impl Availability {
         }
     }
 }
+
+/// Roles and catalog state bound by one roster resolution pass.
+#[derive(Debug, Clone)]
+pub struct Roster {
+    pub primary: ResolvedAgent,
+    pub review_supervisor: Option<ResolvedAgent>,
+    pub subagent_default: Option<ResolvedAgent>,
+    pub available: Vec<ResolvedAgent>,
+    pub choices: Vec<ModelChoice>,
+    pub warnings: Vec<String>,
+    pub inventory: AcpInventory,
+    pub subagent_acp_priority: Vec<String>,
+    pub subagent_acp_source: Option<String>,
+}

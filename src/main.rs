@@ -976,7 +976,7 @@ async fn run_resume(
             })?
             .clone();
         resume_roster.primary = pinned.clone();
-        resume_roster.rebind_auto_review_for_primary(&cfg);
+        crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
         agent = selected_agent_for_role(&pinned);
     } else if let Some(session_id) = args.session_id.as_deref() {
         let matches = list_agent_sessions(&resume_roster, &cwd, args.agent_stderr.as_deref())
@@ -998,7 +998,7 @@ async fn run_resume(
                 });
                 agent = selected_agent_for_role(&role);
                 resume_roster.primary = role;
-                resume_roster.rebind_auto_review_for_primary(&cfg);
+                crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
             }
             [] => {}
             _ => anyhow::bail!(
@@ -1145,7 +1145,7 @@ async fn run_resume(
                     .clone();
                 agent = selected_agent_for_role(&role);
                 resume_roster.primary = role;
-                resume_roster.rebind_auto_review_for_primary(&cfg);
+                crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
                 let result = run_app(
                     cwd,
                     RuntimeOptions {
@@ -1532,7 +1532,7 @@ async fn run_app(
         })
     {
         roster.primary = pinned.clone();
-        roster.rebind_auto_review_for_primary(&cfg);
+        crate::roster::rebind_auto_review_for_primary(&mut roster, &cfg);
     }
     let mut primary_agent = selected_agent_for_role(&roster.primary);
 
@@ -2040,7 +2040,7 @@ async fn run_session(
             .as_millis()
     );
     let (subagent_roles, _subagent_codex_home) =
-        isolated_subagent_roles(roster.subagent_failover_roles(), "subagent")?;
+        isolated_subagent_roles(crate::roster::subagent_failover_roles(&roster), "subagent")?;
 
     let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
     let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
