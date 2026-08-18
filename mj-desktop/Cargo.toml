@@ -12,7 +12,7 @@ publish = true
 anyhow = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tracing = "0.1"
 url = "2"
 
