@@ -2247,28 +2247,30 @@ async fn run_session(
             session_tag: Some(session_tag.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),
         }),
-        subagents: subagent_pool.map(|subagent_pool| {
-            let mut config =
-                subagent::Config::new(subagent_pool, runtime_options.agent_stderr.clone());
-            if let Some(role) = config.role_config.as_mut() {
-                role.session_tag = Some(session_tag.clone());
-            }
-            config
-                .with_subagent_handoff_counter(subagent_handoffs_this_turn.clone())
-                .with_id_allocator(subagent_ids.clone())
-                .with_active_implementation_workers(active_implementation_workers.clone())
-                .with_max_parallel(subagents_config.max_parallel)
-                .with_debrief(subagents_config.debrief)
-                .with_reports(subagent_reports.clone())
-                .with_run_registry(subagent_runs.clone())
-                .with_prewarm(subagent::RunContext {
-                    cwd: cwd.clone(),
-                    additional_directories: runtime_options.additional_directories.clone(),
-                    snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
-                    fs_max_text_bytes: runtime_options.fs_max_text_bytes,
-                    access_mode: acp::RuntimeAccessMode::Full,
-                })
-        }),
+        subagents: subagent_pool
+            .map(|subagent_pool| {
+                let mut config =
+                    subagent::Config::new(subagent_pool, runtime_options.agent_stderr.clone());
+                if let Some(role) = config.role_config.as_mut() {
+                    role.session_tag = Some(session_tag.clone());
+                }
+                config
+                    .with_subagent_handoff_counter(subagent_handoffs_this_turn.clone())
+                    .with_id_allocator(subagent_ids.clone())
+                    .with_active_implementation_workers(active_implementation_workers.clone())
+                    .with_max_parallel(subagents_config.max_parallel)
+                    .with_debrief(subagents_config.debrief)
+                    .with_reports(subagent_reports.clone())
+                    .with_run_registry(subagent_runs.clone())
+                    .with_prewarm(subagent::RunContext {
+                        cwd: cwd.clone(),
+                        additional_directories: runtime_options.additional_directories.clone(),
+                        snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
+                        fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+                        access_mode: acp::RuntimeAccessMode::Full,
+                    })
+            })
+            .map(subagent::runtime_service),
         memory: memory::SessionMemory::from_config(
             &memory_config,
             &cwd,

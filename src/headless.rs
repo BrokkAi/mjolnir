@@ -321,24 +321,26 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             session_tag: None,
             reasoning_effort: primary.reasoning_effort.clone(),
         }),
-        subagents: subagent_pool.map(|subagent_pool| {
-            subagent::Config::new(subagent_pool, cfg.agent_stderr.clone())
-                .with_subagent_handoff_counter(subagent_handoffs.clone())
-                .with_id_allocator(subagent_ids.clone())
-                .with_active_implementation_workers(active_implementation_workers.clone())
-                .with_max_parallel(app_config.subagents.max_parallel)
-                .with_debrief(app_config.subagents.debrief)
-                .with_headless_permission_mode(cfg.permission_mode.into())
-                .with_reports(subagent_reports.clone())
-                .with_run_registry(subagent_runs.clone())
-                .with_prewarm(subagent::RunContext {
-                    cwd: cfg.cwd.clone(),
-                    additional_directories: cfg.additional_directories.clone(),
-                    snapshot_exclusions: cfg.snapshot_exclusions.clone(),
-                    fs_max_text_bytes: cfg.fs_max_text_bytes,
-                    access_mode: acp::RuntimeAccessMode::Full,
-                })
-        }),
+        subagents: subagent_pool
+            .map(|subagent_pool| {
+                subagent::Config::new(subagent_pool, cfg.agent_stderr.clone())
+                    .with_subagent_handoff_counter(subagent_handoffs.clone())
+                    .with_id_allocator(subagent_ids.clone())
+                    .with_active_implementation_workers(active_implementation_workers.clone())
+                    .with_max_parallel(app_config.subagents.max_parallel)
+                    .with_debrief(app_config.subagents.debrief)
+                    .with_headless_permission_mode(cfg.permission_mode.into())
+                    .with_reports(subagent_reports.clone())
+                    .with_run_registry(subagent_runs.clone())
+                    .with_prewarm(subagent::RunContext {
+                        cwd: cfg.cwd.clone(),
+                        additional_directories: cfg.additional_directories.clone(),
+                        snapshot_exclusions: cfg.snapshot_exclusions.clone(),
+                        fs_max_text_bytes: cfg.fs_max_text_bytes,
+                        access_mode: acp::RuntimeAccessMode::Full,
+                    })
+            })
+            .map(subagent::runtime_service),
         memory: crate::memory::SessionMemory::from_config(
             &app_config.memory,
             &cfg.cwd,

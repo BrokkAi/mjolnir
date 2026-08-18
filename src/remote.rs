@@ -4629,23 +4629,25 @@ fn start_server_agent_session(
     // into the subagent config and the runtime config respectively.
     let review_workers = subagent_pool.clone();
     let review_additional_directories = additional_directories.clone();
-    let subagents = subagent_pool.map(|subagent_pool| {
-        subagent::Config::new(subagent_pool, None)
-            .with_subagent_handoff_counter(subagent_handoffs.clone())
-            .with_id_allocator(subagent_ids.clone())
-            .with_active_implementation_workers(active_implementation_workers.clone())
-            .with_max_parallel(app_config.subagents.max_parallel)
-            .with_debrief(app_config.subagents.debrief)
-            .with_reports(subagent_reports.clone())
-            .with_run_registry(subagent_runs.clone())
-            .with_prewarm(subagent::RunContext {
-                cwd: cwd.clone(),
-                additional_directories: additional_directories.clone(),
-                snapshot_exclusions: snapshot_exclusions.clone(),
-                fs_max_text_bytes,
-                access_mode: crate::acp::RuntimeAccessMode::Full,
-            })
-    });
+    let subagents = subagent_pool
+        .map(|subagent_pool| {
+            subagent::Config::new(subagent_pool, None)
+                .with_subagent_handoff_counter(subagent_handoffs.clone())
+                .with_id_allocator(subagent_ids.clone())
+                .with_active_implementation_workers(active_implementation_workers.clone())
+                .with_max_parallel(app_config.subagents.max_parallel)
+                .with_debrief(app_config.subagents.debrief)
+                .with_reports(subagent_reports.clone())
+                .with_run_registry(subagent_runs.clone())
+                .with_prewarm(subagent::RunContext {
+                    cwd: cwd.clone(),
+                    additional_directories: additional_directories.clone(),
+                    snapshot_exclusions: snapshot_exclusions.clone(),
+                    fs_max_text_bytes,
+                    access_mode: crate::acp::RuntimeAccessMode::Full,
+                })
+        })
+        .map(subagent::runtime_service);
     let provenance_primary = roster.as_ref().map(|resolved| resolved.primary.clone());
     let provenance_cwd = cwd.clone();
     let session_memory = crate::memory::SessionMemory::from_config(

@@ -30,6 +30,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo};
 use anyhow::Result;
+use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
@@ -44,7 +45,6 @@ use crate::event::{
     SideSessionSource, TerminalOutputSnapshot, UiCommand, UiEvent, WorkspaceDiff,
     WorkspaceDiffEvent, WorkspaceHeadDiffEvent, WorkspaceHeadDiffUnavailable, content_block_text,
 };
-use crate::subagent;
 use mj_core::model_resolve;
 use mj_core::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
 
@@ -91,7 +91,7 @@ pub struct AcpRuntimeConfig {
     pub role_config: Option<RuntimeRoleConfig>,
     /// Optional model-visible subagent MCP service. Interactive TUI sessions
     /// set this; nested and non-interactive runtimes leave it absent.
-    pub subagents: Option<subagent::Config>,
+    pub subagents: Option<Arc<dyn RuntimeService>>,
     /// Persistent cross-session memory behavior. Primary sessions set this;
     /// side conversations, subagents, and review lanes leave it absent.
     pub memory: Option<crate::memory::SessionMemory>,
@@ -101,6 +101,31 @@ pub struct AcpRuntimeConfig {
     /// is used by supervised nested subagent runs; ordinary runtimes get a fresh,
     /// never-cancelled token.
     pub termination: Option<CancellationToken>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeServiceContext {
+    pub cwd: PathBuf,
+    pub additional_directories: Vec<PathBuf>,
+    pub fs_max_text_bytes: u64,
+    pub access_mode: RuntimeAccessMode,
+}
+
+#[async_trait]
+pub trait RuntimeService: Send + Sync {
+    async fn start(
+        &self,
+        context: RuntimeServiceContext,
+        events: mpsc::UnboundedSender<UiEvent>,
+    ) -> Result<Box<dyn RunningRuntimeService>>;
+
+    async fn cancel(&self);
+    async fn shutdown(&self);
+    async fn shutdown_and_wait(&self);
+}
+
+pub trait RunningRuntimeService: Send {
+    fn advertised(&self) -> &McpServer;
 }
 
 #[derive(Debug, Clone)]
@@ -2034,7 +2059,7 @@ async fn drive_client_with_fs_limit<T>(
     config_path: Option<PathBuf>,
     saved_session_config: HashMap<String, String>,
     role_config: Option<RuntimeRoleConfig>,
-    subagents: Option<subagent::Config>,
+    subagents: Option<Arc<dyn RuntimeService>>,
     memory: Option<crate::memory::SessionMemory>,
     side_prompt_policy: bool,
     stderr_tail: Option<AgentStderrTail>,
@@ -2083,8 +2108,7 @@ where
     let wait_terminals = terminals.clone();
     let kill_terminals = terminals.clone();
     let drive_terminals = terminals.clone();
-    let subagent_controller = subagent::Controller::default();
-    let drive_subagent_controller = subagent_controller.clone();
+    let cleanup_subagents = subagents.clone();
     let result = Client
         .builder()
         .on_receive_notification(
@@ -2306,7 +2330,6 @@ where
                 subagents,
                 memory,
                 side_prompt_policy,
-                drive_subagent_controller,
                 context_usage,
                 advertised_commands,
                 control_in_flight,
@@ -2323,7 +2346,9 @@ where
         })
         .await;
 
-    subagent_controller.shutdown_and_wait().await;
+    if let Some(service) = cleanup_subagents.as_ref() {
+        service.shutdown_and_wait().await;
+    }
     terminals.shutdown_all().await;
     result.map_err(|e| anyhow::anyhow!("acp client error: {e}"))?;
     Ok(())
@@ -2351,10 +2376,9 @@ async fn drive_session(
     config_path: Option<PathBuf>,
     saved_session_config: HashMap<String, String>,
     role_config: Option<RuntimeRoleConfig>,
-    subagents: Option<subagent::Config>,
+    subagents: Option<Arc<dyn RuntimeService>>,
     memory: Option<crate::memory::SessionMemory>,
     side_prompt_policy: bool,
-    subagent_controller: subagent::Controller,
     context_usage: Arc<ContextUsageTracker>,
     advertised_commands: Arc<std::sync::Mutex<HashMap<String, HashSet<String>>>>,
     control_in_flight: Arc<AtomicBool>,
@@ -2431,7 +2455,7 @@ async fn drive_session(
         .await;
         return Err(anyhow::anyhow!(text));
     }
-    let subagent_http = if let Some(config) = subagents {
+    let subagent_http = if let Some(service) = subagents.as_ref() {
         if !init_resp.agent_capabilities.mcp_capabilities.http {
             let launch_err = LaunchError::SubagentHttpUnsupported;
             let text = emit_fatal_with_stderr(
@@ -2443,21 +2467,13 @@ async fn drive_session(
             .await;
             return Err(anyhow::anyhow!(text));
         }
-        let context = subagent::RunContext {
+        let context = RuntimeServiceContext {
             cwd: cwd.clone(),
             additional_directories: additional_directories.clone(),
-            snapshot_exclusions: config.snapshot_exclusions.clone(),
             fs_max_text_bytes,
             access_mode,
         };
-        match subagent::HttpServer::start(
-            config,
-            context,
-            ui_tx.clone(),
-            subagent_controller.clone(),
-        )
-        .await
-        {
+        match service.start(context, ui_tx.clone()).await {
             Ok(server) => Some(server),
             Err(error) => {
                 let text = emit_fatal_with_stderr(
@@ -2787,7 +2803,7 @@ async fn drive_session(
                         max_text_bytes: fs_max_text_bytes,
                         turn_id: next_turn_diff_id,
                     },
-                    &subagent_controller,
+                    subagents.as_deref(),
                     session_has_history,
                     &mut deferred_prompts,
                     &mut deferred_config_updates,
@@ -5815,7 +5831,7 @@ async fn drive_prompt_turn(
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     session_state: &RuntimeSessionState,
     diff_config: PromptTurnDiffConfig<'_>,
-    subagent_controller: &subagent::Controller,
+    subagent_service: Option<&dyn RuntimeService>,
     side_source_has_history: bool,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
     deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
@@ -5861,7 +5877,9 @@ async fn drive_prompt_turn(
                         // Cancel both lanes. Stopping only the subagents returns
                         // a tool error to the still-running primary turn, which
                         // can then immediately delegate the same work again.
-                        subagent_controller.cancel().await;
+                        if let Some(service) = subagent_service {
+                            service.cancel().await;
+                        }
                         if !cancel_sent {
                             session_state.mark_permissions_cancelled(session_id).await;
                             let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
@@ -5872,7 +5890,9 @@ async fn drive_prompt_turn(
                         }
                     }
                     Some(UiCommand::Shutdown) | None => {
-                        subagent_controller.shutdown().await;
+                        if let Some(service) = subagent_service {
+                            service.shutdown().await;
+                        }
                         return Ok(false);
                     }
                     Some(UiCommand::SendPrompt {
@@ -13384,7 +13404,7 @@ mod tests {
         use agent_client_protocol::schema::v1::McpServerHttp;
 
         let server = McpServer::Http(McpServerHttp::new(
-            subagent::MCP_SERVER_NAME,
+            crate::subagent::MCP_SERVER_NAME,
             "http://127.0.0.1:1234/mcp",
         ));
         let servers = vec![server.clone()];

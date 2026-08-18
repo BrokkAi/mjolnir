@@ -522,6 +522,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "arboard",
+ "async-trait",
  "axum",
  "axum-server",
  "base64",
