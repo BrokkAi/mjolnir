@@ -2702,7 +2702,9 @@ fn lane_prompt(
     )
 }
 
-pub use mj_core::orchestrator::{bound_review_section, review_section_limits};
+use mj_core::orchestrator::bound_review_section;
+#[cfg(test)]
+use mj_core::orchestrator::review_section_limits;
 
 /// Bound analyzer output without cutting a structured line in half.
 fn bound_complete_lines(text: &str, limit: usize, label: &str) -> String {
