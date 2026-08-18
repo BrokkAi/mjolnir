@@ -19,13 +19,20 @@ const outputPath = path.resolve(
 // otherwise change without anyone deciding whether an artifact notice is due.
 const auditedStandaloneNotices = new Set(["cfg_aliases/NOTICES.md"]);
 const auditedLinksPackages = new Set([
+  // Desktop system-library bindings and objc2's compiled helper are covered
+  // by their Cargo package licenses; they do not embed separate payloads.
+  "atk-sys",
   "alsa-sys",
   "bzip2-sys",
+  "gdk-sys",
+  "gtk-sys",
   "libsqlite3-sys",
+  "objc2-exception-helper",
   "prettyplease",
   "ring",
   "sherpa-onnx-sys",
   "wasm-bindgen-shared",
+  "webkit2gtk-sys",
 ]);
 const auditedFonts = new Set([
   "jetbrains-mono.woff2",
