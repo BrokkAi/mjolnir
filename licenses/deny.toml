@@ -38,6 +38,7 @@ exceptions = [
     # Workspace packages are the GPL-covered project, not generally allowed
     # third-party dependencies.
     { crate = "brokk-mjolnir", allow = ["GPL-3.0-only"] },
+    { crate = "mj-desktop", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-voice-worker", allow = ["GPL-3.0-only"] },
     # MPL applies at file scope. Keep it limited to the reviewed crate.
     { crate = "option-ext@0.2.0", allow = ["MPL-2.0"] },
