@@ -134,6 +134,11 @@ pub fn forget(path: &Path, id: u64) -> Result<Option<MemoryEntry>> {
     let Some(position) = store.entries.iter().position(|entry| entry.id == id) else {
         return Ok(None);
     };
+    if store.entries[position].source.is_some() {
+        return Err(anyhow!(
+            "memory m{id} is managed by an importer and cannot be forgotten directly"
+        ));
+    }
     let removed = store.entries.remove(position);
     save(path, &store)?;
     Ok(Some(removed))
@@ -245,7 +250,12 @@ fn sync_claude_auto_memory_from(
     project: &Path,
     memory_path: Option<&Path>,
 ) -> Result<()> {
-    let content = memory_path
+    // `None` means path resolution failed, not that Claude's file was deleted.
+    // Only a positively resolved, absent path may remove imported chunks.
+    let Some(memory_path) = memory_path else {
+        return Ok(());
+    };
+    let content = Some(memory_path)
         .filter(|path| path.is_file())
         .map(read_claude_auto_memory)
         .transpose()?
@@ -336,37 +346,83 @@ fn read_claude_auto_memory(entrypoint: &Path) -> Result<String> {
 
 fn claude_auto_memory_path(project: &Path) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    let settings_path = home.join(".claude/settings.json");
-    if let Ok(body) = std::fs::read_to_string(settings_path)
-        && let Ok(settings) = serde_json::from_str::<serde_json::Value>(&body)
-        && let Some(configured) = settings.get("autoMemoryDirectory").and_then(|v| v.as_str())
-    {
-        let configured = configured
-            .strip_prefix("~/")
-            .map(|suffix| home.join(suffix))
-            .unwrap_or_else(|| PathBuf::from(configured));
-        return Some(configured.join("MEMORY.md"));
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"));
+    let settings_paths = [
+        project.join(".claude/settings.local.json"),
+        project.join(".claude/settings.json"),
+        config_dir.join("settings.json"),
+    ];
+    for settings_path in settings_paths {
+        if let Ok(body) = std::fs::read_to_string(settings_path)
+            && let Ok(settings) = serde_json::from_str::<serde_json::Value>(&body)
+        {
+            if settings
+                .get("autoMemoryEnabled")
+                .and_then(|value| value.as_bool())
+                == Some(false)
+            {
+                return None;
+            }
+            if let Some(configured) = settings
+                .get("autoMemoryDirectory")
+                .and_then(|value| value.as_str())
+            {
+                let configured = configured
+                    .strip_prefix("~/")
+                    .map(|suffix| home.join(suffix))
+                    .unwrap_or_else(|| PathBuf::from(configured));
+                let configured = if configured.is_absolute() {
+                    configured
+                } else {
+                    project.join(configured)
+                };
+                return Some(configured.join("MEMORY.md"));
+            }
+        }
     }
-    let encoded = claude_project_directory_name(project);
     Some(
-        home.join(".claude/projects")
-            .join(encoded)
+        config_dir
+            .join("projects")
+            .join(claude_project_directory_name(project))
             .join("memory/MEMORY.md"),
     )
 }
 
 fn claude_project_directory_name(project: &Path) -> String {
-    project
-        .to_string_lossy()
+    let original = project.to_string_lossy();
+    let encoded: String = original
         .chars()
         .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+            if character.is_ascii_alphanumeric() {
                 character
             } else {
                 '-'
             }
         })
-        .collect()
+        .collect();
+    if encoded.len() <= 200 {
+        return encoded;
+    }
+    // Claude uses JavaScript's 32-bit string hash over UTF-16 code units.
+    let mut hash = 0_i32;
+    for unit in original.encode_utf16() {
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    format!("{}-{}", &encoded[..200], base36(hash.unsigned_abs()))
+}
+
+fn base36(mut value: u32) -> String {
+    if value == 0 {
+        return "0".into();
+    }
+    let mut digits = Vec::new();
+    while value > 0 {
+        digits.push(char::from_digit(value % 36, 36).expect("base-36 digit"));
+        value /= 36;
+    }
+    digits.iter().rev().collect()
 }
 
 fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
@@ -409,6 +465,8 @@ pub struct SessionMemory {
     pub inject: bool,
     /// Expose the `memory_save` / `memory_forget` MCP tools.
     pub tools: bool,
+    // Claude injects native auto-memory itself; only Codex needs the mirror.
+    pub import_claude_auto: bool,
 }
 
 impl SessionMemory {
@@ -436,6 +494,7 @@ impl SessionMemory {
             project: project_key(cwd),
             inject: config.use_memories,
             tools: config.generate_memories,
+            import_claude_auto: matches!(adapter, Some(crate::roster::AdapterKind::Codex)),
         })
     }
 
@@ -445,7 +504,9 @@ impl SessionMemory {
         if !self.inject {
             return None;
         }
-        if let Err(error) = sync_claude_auto_memory(&self.store_path, &self.project) {
+        if self.import_claude_auto
+            && let Err(error) = sync_claude_auto_memory(&self.store_path, &self.project)
+        {
             tracing::warn!("could not import Claude auto-memory: {error:#}");
         }
         match entries_for_project(&self.store_path, &self.project) {
@@ -467,18 +528,26 @@ fn render_preamble(entries: &[MemoryEntry], project: &Path) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
-    // Drop oldest-first (memories append in creation order) until the
-    // rendered block fits the budget.
-    let mut start = 0;
+    let mut kept: Vec<&MemoryEntry> = entries.iter().collect();
+    let mut omitted = 0;
     loop {
-        let kept = &entries[start..];
-        let omitted = start;
-        let rendered = render_preamble_block(kept, project, omitted);
+        let rendered = render_preamble_block_refs(&kept, project, omitted);
         if rendered.len() <= PROMPT_CHAR_BUDGET || kept.len() <= 1 {
             return Some(rendered);
         }
-        start += 1;
+        // Imported snapshots are supplemental: evict them before user-saved facts.
+        let remove = kept
+            .iter()
+            .position(|entry| entry.source.is_some())
+            .unwrap_or(0);
+        kept.remove(remove);
+        omitted += 1;
     }
+}
+
+fn render_preamble_block_refs(entries: &[&MemoryEntry], project: &Path, omitted: usize) -> String {
+    let owned: Vec<MemoryEntry> = entries.iter().map(|entry| (*entry).clone()).collect();
+    render_preamble_block(&owned, project, omitted)
 }
 
 fn render_preamble_block(entries: &[MemoryEntry], project: &Path, omitted: usize) -> String {
@@ -889,6 +958,7 @@ mod tests {
             project: PathBuf::from("/tmp/proj"),
             inject: true,
             tools: true,
+            import_claude_auto: false,
         };
         let preamble = memory.preamble().expect("preamble rendered");
         assert!(preamble.len() <= PROMPT_CHAR_BUDGET);
@@ -990,6 +1060,7 @@ mod tests {
             project: PathBuf::from("/tmp/proj"),
             inject: true,
             tools: true,
+            import_claude_auto: false,
         };
         assert!(memory.preamble().is_none());
         add(&path, "other project", Some(PathBuf::from("/tmp/other"))).unwrap();
@@ -1007,6 +1078,7 @@ mod tests {
             project: PathBuf::from("/tmp/proj"),
             inject: true,
             tools: true,
+            import_claude_auto: false,
         };
         let preamble = memory.preamble().expect("preamble rendered");
         assert!(preamble.starts_with("<mj-memory>"));
@@ -1025,6 +1097,7 @@ mod tests {
             project: PathBuf::from("/tmp/proj"),
             inject: false,
             tools: true,
+            import_claude_auto: false,
         };
         assert!(memory.preamble().is_none());
     }
@@ -1042,6 +1115,7 @@ mod tests {
             project: PathBuf::from("/tmp/proj"),
             inject: true,
             tools: true,
+            import_claude_auto: false,
         };
         let preamble = memory.preamble().expect("preamble rendered");
         assert!(preamble.len() <= PROMPT_CHAR_BUDGET);
@@ -1207,6 +1281,7 @@ mod tests {
             project: PathBuf::from("/tmp/proj"),
             inject: true,
             tools: true,
+            import_claude_auto: false,
         });
         handler
             .memory_save(Parameters(MemorySaveArgs {
@@ -1237,6 +1312,7 @@ mod tests {
             project: PathBuf::from("/tmp/proj"),
             inject: true,
             tools: true,
+            import_claude_auto: false,
         });
         let ok = handler
             .memory_forget(Parameters(MemoryForgetArgs { id: 1 }))

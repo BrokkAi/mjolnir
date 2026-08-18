@@ -2765,9 +2765,16 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let current_memory_preamble = memory
-                    .as_ref()
-                    .and_then(crate::memory::SessionMemory::preamble);
+                let current_memory_preamble = if let Some(memory) = memory.clone() {
+                    tokio::task::spawn_blocking(move || memory.preamble())
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!("memory refresh task failed: {error}");
+                            None
+                        })
+                } else {
+                    None
+                };
                 let changed_memory = (current_memory_preamble != last_memory_preamble)
                     .then(|| current_memory_preamble.clone())
                     .flatten();
@@ -13042,6 +13049,7 @@ mod tests {
                 project: PathBuf::from("/tmp/proj"),
                 inject: true,
                 tools: false,
+                import_claude_auto: false,
             }),
             false,
             None,
