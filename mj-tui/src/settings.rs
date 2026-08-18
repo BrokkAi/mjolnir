@@ -11,7 +11,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::config::{AcpServerPolicy, Config, ModelsConfig, TeamPreset, ThoughtOutput};
+use crate::config::{
+    AcpServerPolicy, Config, InterfaceMode, ModelsConfig, TeamPreset, ThoughtOutput,
+};
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
@@ -209,7 +211,7 @@ impl SettingsEditor {
                 self.settings_rows(self.tab).len()
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
-            SettingsTab::Appearance => 5,
+            SettingsTab::Appearance => 6,
         }
     }
 
@@ -311,6 +313,15 @@ impl SettingsEditor {
             }
             SettingsTab::Appearance if self.selected == 4 => {
                 self.config.keep_awake = !self.config.keep_awake;
+            }
+            SettingsTab::Appearance if self.selected == 5 => {
+                let current = InterfaceMode::ALL
+                    .iter()
+                    .position(|mode| *mode == self.config.interface)
+                    .unwrap_or(0);
+                let next =
+                    (current as i32 + delta).rem_euclid(InterfaceMode::ALL.len() as i32) as usize;
+                self.config.interface = InterfaceMode::ALL[next];
             }
             _ => return SettingsAction::None,
         }
@@ -1547,6 +1558,19 @@ fn draw_appearance(
             "            Prevent system sleep while the server runs or a turn is in flight.",
             Style::default().ink(theme.muted),
         ),
+        selected_line(
+            editor.selected == 5,
+            format!("Interface   < {} >", editor.config.interface),
+            theme,
+        ),
+        Line::styled(
+            format!("            {}", editor.config.interface.description()),
+            Style::default().ink(theme.muted),
+        ),
+        Line::styled(
+            "            Applies when the next session starts; --fullscreen-tui overrides.",
+            Style::default().ink(theme.muted),
+        ),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -2405,6 +2429,19 @@ mod tests {
     }
 
     #[test]
+    fn appearance_tab_cycles_interface_mode() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Appearance;
+        editor.selected = 5;
+
+        assert_eq!(editor.config.interface, InterfaceMode::Inline);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.interface, InterfaceMode::Fullscreen);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.interface, InterfaceMode::Inline);
+    }
+
+    #[test]
     fn standard_tabs_render_their_controls() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
@@ -2465,6 +2502,8 @@ mod tests {
             "rendered:\n{appearance}"
         );
         assert!(appearance.contains("Keep awake"), "rendered:\n{appearance}");
+        assert!(appearance.contains("Interface"), "rendered:\n{appearance}");
+        assert!(appearance.contains("< inline >"), "rendered:\n{appearance}");
 
         assert!(!render(&editor, 27, 11).contains("mj config"));
     }

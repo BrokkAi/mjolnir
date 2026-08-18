@@ -488,6 +488,12 @@ fn ui_mode(fullscreen_tui: bool) -> UiMode {
     }
 }
 
+/// The chat surface for this run: the configured interface preference, with
+/// the `--fullscreen-tui` flag as a one-run fullscreen override.
+fn effective_ui_mode(cli_fullscreen_tui: bool, cfg: &Config) -> UiMode {
+    ui_mode(cli_fullscreen_tui || cfg.interface == config::InterfaceMode::Fullscreen)
+}
+
 fn should_run_startup_update_check(cli: &Cli) -> bool {
     if cli.no_update_check || cli.print.is_some() {
         return false;
@@ -700,18 +706,25 @@ async fn main() -> Result<()> {
         worktree_label.clone(),
         None,
         None,
-        ui_mode(fullscreen_tui),
+        fullscreen_tui,
     )
     .await;
 
-    let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(ui_mode(fullscreen_tui)));
+    // Best-effort match for the mode the terminal was left in: sessions adopt
+    // a changed interface preference on /new, so the freshest config is the
+    // closest stand-in for the mode of the session that just ended.
+    let mode = effective_ui_mode(
+        fullscreen_tui,
+        &Config::load(&config::default_config_path()).unwrap_or_default(),
+    );
+    let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
 
     // Print resume hint so the user can come back to this session.
     match &result {
         Ok(Some(session_id)) => {
             if worktree_kept {
                 print_resume_hint(
-                    ui_mode(fullscreen_tui),
+                    mode,
                     session_id,
                     worktree_label.as_deref(),
                     workspace_roots.additional_directories(),
@@ -919,7 +932,6 @@ async fn run_resume(
     permission_mode: Option<config::PermissionPreset>,
     termination: CancellationToken,
 ) -> Result<()> {
-    let mode = ui_mode(args.fullscreen_tui);
     let cwd = match args.cwd.clone() {
         Some(p) => absolutize_cwd(p)?,
         None => std::env::current_dir().context("current dir")?,
@@ -932,6 +944,7 @@ async fn run_resume(
     let worktree_label = worktree_label(worktree.as_ref());
     let project_label = project_label(&cwd);
     let cfg = Config::load(&config::default_config_path())?;
+    let mode = effective_ui_mode(args.fullscreen_tui, &cfg);
     let mut resume_roster = if args.list {
         roster::resolve(&cfg, &cwd).await?
     } else {
@@ -1055,7 +1068,7 @@ async fn run_resume(
                 title,
             }),
             Some(agent),
-            mode,
+            args.fullscreen_tui,
         )
         .await;
         let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
@@ -1148,7 +1161,7 @@ async fn run_resume(
                         title: session_title,
                     }),
                     Some(agent),
-                    mode,
+                    args.fullscreen_tui,
                 )
                 .await;
                 let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
@@ -1461,7 +1474,7 @@ async fn run_app(
     worktree_label: Option<String>,
     resume_target: Option<ResumeTarget>,
     initial_agent: Option<SelectedAgent>,
-    mode: UiMode,
+    fullscreen_tui: bool,
 ) -> Result<Option<String>> {
     let termination = runtime_options.termination.clone();
     let config_path = config::default_config_path();
@@ -1517,6 +1530,9 @@ async fn run_app(
         crate::roster::rebind_auto_review_for_primary(&mut roster, &cfg);
     }
     let mut primary_agent = selected_agent_for_role(&roster.primary);
+    // Computed after onboarding so a freshly picked interface preference
+    // shapes the very first session.
+    let mut mode = effective_ui_mode(fullscreen_tui, &cfg);
 
     // Consume resume_session and any pinned resume launch on the first
     // iteration only. Fresh sessions always use the resolved primary agent.
@@ -1572,6 +1588,7 @@ async fn run_app(
                 }
                 roster = resolved;
                 primary_agent = selected_agent_for_role(&roster.primary);
+                mode = effective_ui_mode(fullscreen_tui, &cfg);
                 initial_agent = Some(primary_agent.clone());
                 pending_new_session_boundary = show_new_session_boundary;
                 if session_result.reason == UiExitReason::ClearSession {
@@ -3953,6 +3970,17 @@ mod tests {
 
         assert_eq!(ui_mode(false), UiMode::InlineChat);
         assert_eq!(ui_mode(true), UiMode::FullscreenTui);
+    }
+
+    #[test]
+    fn configured_interface_drives_the_ui_mode_with_a_cli_override() {
+        let mut cfg = Config::default();
+        assert_eq!(effective_ui_mode(false, &cfg), UiMode::InlineChat);
+        assert_eq!(effective_ui_mode(true, &cfg), UiMode::FullscreenTui);
+
+        cfg.interface = config::InterfaceMode::Fullscreen;
+        assert_eq!(effective_ui_mode(false, &cfg), UiMode::FullscreenTui);
+        assert_eq!(effective_ui_mode(true, &cfg), UiMode::FullscreenTui);
     }
 
     #[test]
