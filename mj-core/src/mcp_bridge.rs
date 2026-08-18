@@ -166,7 +166,6 @@ where
     tokio::select! {
         _ = cancellation.cancelled() => {
             session_cancellation.cancel();
-            let _ = waiting.await;
         }
         outcome = &mut waiting => {
             outcome.context("MCP bridge session task failed")?;
@@ -418,19 +417,32 @@ mod tests {
             .await
             .expect("start bridge");
         let (addr, token) = stdio_parts(&server);
-        let mut stream = TcpStream::connect(&addr).await.expect("connect");
-        stream
-            .write_all(format!("{token}\n").as_bytes())
+        let stream = TcpStream::connect(&addr).await.expect("connect");
+        let (read, mut write) = stream.into_split();
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "fixture", "version": "1"}
+            }
+        });
+        write
+            .write_all(format!("{token}\n{initialize}\n").as_bytes())
             .await
-            .expect("authenticate");
+            .expect("initialize");
+        let mut lines = BufReader::new(read).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read initialize response")
+            .expect("session remains open");
 
         server.shutdown().await;
 
-        let mut body = Vec::new();
-        match stream.read_to_end(&mut body).await {
-            Ok(_) => assert!(body.is_empty()),
-            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
-        }
+        assert!(lines.next_line().await.expect("read close").is_none());
         assert!(TcpStream::connect(&addr).await.is_err());
     }
 }
