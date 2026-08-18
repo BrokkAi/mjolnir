@@ -380,31 +380,6 @@ fn subagent_identity_from_meta(meta: Option<&serde_json::Map<String, serde_json:
             .and_then(serde_json::Value::as_str)
             .is_some_and(subagent_identity_from_name)
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use agent_client_protocol::schema::v1::{
-        SessionConfigOptionCategory, SessionConfigSelectOption,
-    };
-
-    #[test]
-    fn model_select_helpers_expose_current_value_and_choices() {
-        let option = SessionConfigOption::select(
-            "model",
-            "Model",
-            "sonnet",
-            vec![SessionConfigSelectOption::new("sonnet", "Sonnet")],
-        )
-        .category(SessionConfigOptionCategory::Model);
-
-        assert!(is_model_config_option(&option));
-        assert_eq!(
-            config_option_current_value_id(&option).unwrap().to_string(),
-            "sonnet"
-        );
-        assert_eq!(config_option_choices(&option).unwrap()[0].name, "Sonnet");
-    }
-}
 
 const REMOTE_ELICITATION_ACCEPT_PREFIX: &str = "elicitation:accept:";
 const REMOTE_ELICITATION_CANCEL: &str = "elicitation:cancel";
@@ -508,4 +483,30 @@ pub fn remote_elicitation_outcome(
         ElicitationView::Unsupported => false,
     };
     valid.then_some(ElicitationOutcome::Accept(content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOptionCategory, SessionConfigSelectOption,
+    };
+
+    #[test]
+    fn model_select_helpers_expose_current_value_and_choices() {
+        let option = SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![SessionConfigSelectOption::new("sonnet", "Sonnet")],
+        )
+        .category(SessionConfigOptionCategory::Model);
+
+        assert!(is_model_config_option(&option));
+        assert_eq!(
+            config_option_current_value_id(&option).unwrap().to_string(),
+            "sonnet"
+        );
+        assert_eq!(config_option_choices(&option).unwrap()[0].name, "Sonnet");
+    }
 }

@@ -10,7 +10,12 @@ publish = true
 
 [workspace]
 members = ["mj-core", "mj-agents", "mj-tui", "mj-desktop", "mj-remote", "voice-worker"]
-default-members = ["."]
+# Bare `cargo test`/`cargo clippy`/`cargo build` must cover the binary and every
+# crate its code was extracted into, or those crates lose their lint and test
+# gate. `mj-desktop` and `voice-worker` stay out so an ordinary contributor does
+# not need WebKitGTK or ALSA to build: each has its own CI job, and the
+# `desktop-app` feature still pulls `mj-desktop` in when it is requested.
+default-members = [".", "mj-core", "mj-agents", "mj-tui", "mj-remote"]
 
 # Single source of truth for the release version; workspace crates inherit it, so
 # they cannot drift apart (RELEASING.md requires them to match).
