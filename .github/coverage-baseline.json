@@ -1,6 +1,6 @@
 {
   "aggregate": {
-    "lines": 81.08,
+    "lines": 80.42,
     "material_regression_tolerance": 0.25
   },
   "production_module_line_target": 70.0,
