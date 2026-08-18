@@ -78,3 +78,44 @@ pub struct ResolvedAgent {
     pub ranked: bool,
     pub reasoning_effort: Option<String>,
 }
+
+/// A signed-in subscription and its relative monthly capacity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Subscription {
+    pub label: String,
+    pub capacity: f64,
+}
+
+impl Subscription {
+    pub fn new(label: impl Into<String>, capacity: f64) -> Self {
+        Self {
+            label: label.into(),
+            capacity,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Subscriptions {
+    pub claude: Option<Subscription>,
+    pub codex: Option<Subscription>,
+}
+
+impl Subscriptions {
+    pub fn for_adapter(&self, kind: AdapterKind) -> Option<&Subscription> {
+        match kind {
+            AdapterKind::Claude => self.claude.as_ref(),
+            AdapterKind::Codex => self.codex.as_ref(),
+        }
+    }
+
+    pub fn favored(&self) -> Option<AdapterKind> {
+        let claude = self.claude.as_ref()?;
+        let codex = self.codex.as_ref()?;
+        match claude.capacity.total_cmp(&codex.capacity) {
+            std::cmp::Ordering::Greater => Some(AdapterKind::Claude),
+            std::cmp::Ordering::Less => Some(AdapterKind::Codex),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+}

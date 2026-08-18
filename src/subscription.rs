@@ -10,69 +10,18 @@
 //! `chatgpt_plan_type` inside the ID token it persists in `auth.json`, so an
 //! upgrade shows up here once Codex next refreshes that token.
 
-use std::cmp::Ordering;
 use std::path::PathBuf;
 
 use base64::Engine;
 use serde_json::Value;
 
-use crate::roster::AdapterKind;
+pub use mj_core::roster::{AdapterKind, Subscription, Subscriptions};
 
-/// A signed-in subscription and how much monthly capacity it carries.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Subscription {
-    pub label: String,
-    /// Capacity in units of the vendor's entry paid plan. Anthropic publishes
-    /// its own multipliers - Max 5x and Max 20x are exactly that much Pro
-    /// usage - so those are used verbatim. OpenAI publishes none, so ChatGPT
-    /// plans are placed on the same scale by subscription price, the only
-    /// stable public signal comparable across both vendors: Plus and Claude
-    /// Pro are both the $20 rung, ChatGPT Pro and Claude Max 20x the $200 one.
-    pub capacity: f64,
-}
-
-impl Subscription {
-    fn new(label: impl Into<String>, capacity: f64) -> Self {
-        Self {
-            label: label.into(),
-            capacity,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Subscriptions {
-    pub claude: Option<Subscription>,
-    pub codex: Option<Subscription>,
-}
-
-impl Subscriptions {
-    pub fn detect() -> Self {
-        Self {
-            claude: detect_claude(),
-            codex: detect_codex(),
-        }
-    }
-
-    pub fn for_adapter(&self, kind: AdapterKind) -> Option<&Subscription> {
-        match kind {
-            AdapterKind::Claude => self.claude.as_ref(),
-            AdapterKind::Codex => self.codex.as_ref(),
-        }
-    }
-
-    /// The adapter whose subscription carries strictly more capacity. Equal
-    /// tiers and a one-sided detection both yield `None` on purpose: with no
-    /// capacity to gain there is nothing to trade model quality for, so
-    /// ranking stays the only input.
-    pub fn favored(&self) -> Option<AdapterKind> {
-        let claude = self.claude.as_ref()?;
-        let codex = self.codex.as_ref()?;
-        match claude.capacity.total_cmp(&codex.capacity) {
-            Ordering::Greater => Some(AdapterKind::Claude),
-            Ordering::Less => Some(AdapterKind::Codex),
-            Ordering::Equal => None,
-        }
+/// Detect subscriptions recorded by vendor-native clients.
+pub fn detect() -> Subscriptions {
+    Subscriptions {
+        claude: detect_claude(),
+        codex: detect_codex(),
     }
 }
 
@@ -139,36 +88,40 @@ fn decode_jwt_claims(token: &str) -> Option<Value> {
 
 fn claude_plan(organization_type: &str, rate_limit_tier: Option<&str>) -> Subscription {
     match (organization_type, rate_limit_tier) {
-        ("claude_max", Some("default_claude_max_20x")) => Subscription::new("Claude Max 20x", 20.0),
-        ("claude_max", Some("default_claude_max_5x")) => Subscription::new("Claude Max 5x", 5.0),
+        ("claude_max", Some("default_claude_max_20x")) => {
+            mj_core::roster::Subscription::new("Claude Max 20x", 20.0)
+        }
+        ("claude_max", Some("default_claude_max_5x")) => {
+            mj_core::roster::Subscription::new("Claude Max 5x", 5.0)
+        }
         // An unrecognized Max tier is read as the smaller one. Understating
         // capacity only forgoes a routing preference; overstating it parks the
         // primary seat on a plan that cannot carry the session.
-        ("claude_max", _) => Subscription::new("Claude Max", 5.0),
-        ("claude_team", _) => Subscription::new("Claude Team", 1.0),
-        ("claude_enterprise", _) => Subscription::new("Claude Enterprise", 1.0),
-        ("claude_pro", _) => Subscription::new("Claude Pro", 1.0),
-        (other, _) => Subscription::new(format!("Claude ({other})"), 1.0),
+        ("claude_max", _) => mj_core::roster::Subscription::new("Claude Max", 5.0),
+        ("claude_team", _) => mj_core::roster::Subscription::new("Claude Team", 1.0),
+        ("claude_enterprise", _) => mj_core::roster::Subscription::new("Claude Enterprise", 1.0),
+        ("claude_pro", _) => mj_core::roster::Subscription::new("Claude Pro", 1.0),
+        (other, _) => mj_core::roster::Subscription::new(format!("Claude ({other})"), 1.0),
     }
 }
 
 fn codex_plan(plan_type: &str) -> Subscription {
     match plan_type {
-        "free" => Subscription::new("ChatGPT Free", 0.0),
-        "go" => Subscription::new("ChatGPT Go", 0.25),
-        "plus" => Subscription::new("ChatGPT Plus", 1.0),
-        "prolite" => Subscription::new("ChatGPT Pro Lite", 5.0),
-        "pro" => Subscription::new("ChatGPT Pro", 20.0),
+        "free" => mj_core::roster::Subscription::new("ChatGPT Free", 0.0),
+        "go" => mj_core::roster::Subscription::new("ChatGPT Go", 0.25),
+        "plus" => mj_core::roster::Subscription::new("ChatGPT Plus", 1.0),
+        "prolite" => mj_core::roster::Subscription::new("ChatGPT Pro Lite", 5.0),
+        "pro" => mj_core::roster::Subscription::new("ChatGPT Pro", 20.0),
         // Seat-priced plans bill per member, so one seat is the entry rung
         // however large the organization behind it is.
         "team" | "business" | "self_serve_business_prolite" | "self_serve_business_usage_based" => {
-            Subscription::new("ChatGPT Business", 1.0)
+            mj_core::roster::Subscription::new("ChatGPT Business", 1.0)
         }
         "enterprise" | "ent26" | "enterprise_cbp_automation" | "enterprise_cbp_usage_based" => {
-            Subscription::new("ChatGPT Enterprise", 1.0)
+            mj_core::roster::Subscription::new("ChatGPT Enterprise", 1.0)
         }
-        "edu" => Subscription::new("ChatGPT Edu", 1.0),
-        other => Subscription::new(format!("ChatGPT ({other})"), 1.0),
+        "edu" => mj_core::roster::Subscription::new("ChatGPT Edu", 1.0),
+        other => mj_core::roster::Subscription::new(format!("ChatGPT ({other})"), 1.0),
     }
 }
 
@@ -184,15 +137,15 @@ mod tests {
     fn claude_max_tiers_carry_anthropics_published_multipliers() {
         assert_eq!(
             claude_plan("claude_max", Some("default_claude_max_20x")),
-            Subscription::new("Claude Max 20x", 20.0)
+            mj_core::roster::Subscription::new("Claude Max 20x", 20.0)
         );
         assert_eq!(
             claude_plan("claude_max", Some("default_claude_max_5x")),
-            Subscription::new("Claude Max 5x", 5.0)
+            mj_core::roster::Subscription::new("Claude Max 5x", 5.0)
         );
         assert_eq!(
             claude_plan("claude_pro", Some("default_claude_ai")),
-            Subscription::new("Claude Pro", 1.0)
+            mj_core::roster::Subscription::new("Claude Pro", 1.0)
         );
     }
 
@@ -200,11 +153,11 @@ mod tests {
     fn an_unrecognized_max_tier_is_read_as_the_smaller_one() {
         assert_eq!(
             claude_plan("claude_max", Some("default_claude_max_50x")),
-            Subscription::new("Claude Max", 5.0)
+            mj_core::roster::Subscription::new("Claude Max", 5.0)
         );
         assert_eq!(
             claude_plan("claude_forge", None),
-            Subscription::new("Claude (claude_forge)", 1.0)
+            mj_core::roster::Subscription::new("Claude (claude_forge)", 1.0)
         );
     }
 
@@ -218,14 +171,17 @@ mod tests {
             codex_plan("pro").capacity,
             claude_plan("claude_max", Some("default_claude_max_20x")).capacity
         );
-        assert_eq!(codex_plan("free"), Subscription::new("ChatGPT Free", 0.0));
+        assert_eq!(
+            codex_plan("free"),
+            mj_core::roster::Subscription::new("ChatGPT Free", 0.0)
+        );
         assert_eq!(
             codex_plan("self_serve_business_usage_based"),
-            Subscription::new("ChatGPT Business", 1.0)
+            mj_core::roster::Subscription::new("ChatGPT Business", 1.0)
         );
         assert_eq!(
             codex_plan("moonshot"),
-            Subscription::new("ChatGPT (moonshot)", 1.0)
+            mj_core::roster::Subscription::new("ChatGPT (moonshot)", 1.0)
         );
     }
 

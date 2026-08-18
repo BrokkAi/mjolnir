@@ -13,7 +13,7 @@ use futures::{StreamExt, stream};
 use crate::config::{AcpServerPolicy, Config};
 use crate::deepswe;
 use crate::probe;
-use crate::subscription::Subscriptions;
+use crate::subscription::{self, Subscriptions};
 use mj_core::model_resolve;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -207,7 +207,7 @@ impl Availability {
         Self {
             codex_credentials: codex_credentials_available(),
             claude_status: claude_auth_status(),
-            subscriptions: Subscriptions::detect(),
+            subscriptions: subscription::detect(),
         }
     }
 
