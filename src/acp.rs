@@ -37,15 +37,16 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::archive;
+use crate::deepswe;
 use crate::event::{
     AgentCommandOutcome, CompactTrigger, ElicitationOutcome, ElicitationPrompt, LoadSessionResult,
     PermissionDecision, PermissionPrompt, PromptImage, PromptResource, SessionConfigTarget,
     SideSessionSource, TerminalOutputSnapshot, UiCommand, UiEvent, WorkspaceDiff,
     WorkspaceDiffEvent, WorkspaceHeadDiffEvent, WorkspaceHeadDiffUnavailable, content_block_text,
 };
-use crate::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
 use crate::subagent;
-use crate::{deepswe, model_resolve};
+use mj_core::model_resolve;
+use mj_core::paths::{WorkspaceRoots, normalize_spawn_program, path_is_under_any_root};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionRestoreMode {

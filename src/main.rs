@@ -24,12 +24,10 @@ mod keep_awake;
 mod labels;
 mod memory;
 mod menu;
-mod model_resolve;
 mod notifications;
 mod onboarding;
 mod orchestrator;
 mod palette;
-mod paths;
 mod probe;
 mod pull_request;
 mod qr;
@@ -40,7 +38,6 @@ mod remote;
 mod roster;
 mod self_update;
 mod session;
-mod session_provenance;
 mod session_state;
 mod settings;
 mod side;
@@ -881,7 +878,8 @@ async fn list_agent_sessions(
             Ok(mut listing) => {
                 for entry in &mut listing.sessions {
                     entry.adapter_source_id = Some(role.launch.source_id.clone());
-                    if let Some(record) = session_provenance::find(&entry.session_id, &entry.cwd)
+                    if let Some(record) =
+                        mj_core::session_provenance::find(&entry.session_id, &entry.cwd)
                         && record.adapter_source_id == role.launch.source_id
                     {
                         entry.model = Some(record.model);
@@ -959,7 +957,7 @@ async fn run_resume(
     };
     let mut agent = selected_agent_for_role(&resume_roster.primary);
     if let Some(session_id) = args.session_id.as_deref()
-        && let Some(record) = session_provenance::find(session_id, &cwd)
+        && let Some(record) = mj_core::session_provenance::find(session_id, &cwd)
     {
         let pinned = resume_roster
             .available
@@ -991,7 +989,7 @@ async fn run_resume(
                 let role = role_for_session_entry(&resume_roster, entry)
                     .ok_or_else(|| anyhow::anyhow!("session {session_id} has no launchable route"))?
                     .clone();
-                session_provenance::record(session_provenance::Record {
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: session_id.to_string(),
                     cwd: entry.cwd.clone(),
                     adapter_source_id: role.launch.source_id.clone(),
@@ -1249,16 +1247,16 @@ fn configured_snapshot_exclusions(
 fn validate_workspace_roots(
     cwd: &Path,
     additional_directories: &[PathBuf],
-) -> Result<paths::WorkspaceRoots> {
-    paths::WorkspaceRoots::new(cwd, additional_directories)
+) -> Result<mj_core::paths::WorkspaceRoots> {
+    mj_core::paths::WorkspaceRoots::new(cwd, additional_directories)
 }
 
 fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
-    worktree.map(|w| paths::folder_label(&w.worktree_root))
+    worktree.map(|w| mj_core::paths::folder_label(&w.worktree_root))
 }
 
 fn project_label(cwd: &std::path::Path) -> String {
-    paths::display_path_with_tilde(cwd)
+    mj_core::paths::display_path_with_tilde(cwd)
 }
 
 fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>, mode: Option<UiMode>) -> bool {
@@ -1601,7 +1599,7 @@ async fn run_app(
             }
             UiExitReason::SwitchSession => {
                 if let Some(session_id) = session_result.session_id {
-                    let resume_agent = session_provenance::find(&session_id, &cwd)
+                    let resume_agent = mj_core::session_provenance::find(&session_id, &cwd)
                         .and_then(|record| {
                             roster.available.iter().find(|role| {
                                 role.model.model == record.model
@@ -1816,7 +1814,7 @@ async fn run_session_picker_action_for_roster(
                 let role = role_for_session_entry(roster, &entry)
                     .ok_or_else(|| anyhow::anyhow!("selected session route is unavailable"))?
                     .clone();
-                session_provenance::record(session_provenance::Record {
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: entry.session_id.clone(),
                     cwd: entry.cwd.clone(),
                     adapter_source_id: role.launch.source_id.clone(),
@@ -1870,7 +1868,7 @@ async fn delete_session_notice(
     let session_id = entry.session_id;
     match session::delete_session(agent, session_id.clone(), agent_stderr).await {
         Ok(()) => {
-            session_provenance::remove(&session_id, &cwd, adapter_source_id.as_deref());
+            mj_core::session_provenance::remove(&session_id, &cwd, adapter_source_id.as_deref());
             format!("Deleted session: {label}")
         }
         Err(err) => format!("Delete failed for {label}: {err:#}"),
@@ -2307,7 +2305,7 @@ async fn run_session(
     let tracker_worktree_label = header_labels
         .worktree
         .clone()
-        .or_else(|| paths::worktree_name_from_cwd(&cwd));
+        .or_else(|| mj_core::paths::worktree_name_from_cwd(&cwd));
     let remote_tracker = remote::RemoteSessionTracker::new(
         tracker_project_label,
         tracker_worktree_label,
@@ -2383,7 +2381,7 @@ async fn run_session(
         let mut events = orchestrated.events;
         while let Some(event) = events.recv().await {
             if let UiEvent::SessionStarted { session_id, .. } = &event {
-                session_provenance::record(session_provenance::Record {
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: session_id.clone(),
                     cwd: event_cwd.clone(),
                     adapter_source_id: event_primary.launch.source_id.clone(),
@@ -3595,7 +3593,7 @@ mod tests {
 
         assert_eq!(
             project_label(&worktree.session_cwd),
-            paths::display_path_with_tilde(&worktree.session_cwd)
+            mj_core::paths::display_path_with_tilde(&worktree.session_cwd)
         );
     }
 
@@ -3603,13 +3601,19 @@ mod tests {
     fn project_label_uses_full_directory_path_inside_mjolnir_worktree() {
         let cwd =
             std::path::Path::new("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src");
-        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
+        assert_eq!(
+            project_label(cwd),
+            mj_core::paths::display_path_with_tilde(cwd)
+        );
     }
 
     #[test]
     fn project_label_uses_full_directory_path_without_worktree() {
         let cwd = std::path::Path::new("/Users/ryan/code/mjolnir/src");
-        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
+        assert_eq!(
+            project_label(cwd),
+            mj_core::paths::display_path_with_tilde(cwd)
+        );
     }
 
     #[test]
@@ -4501,7 +4505,7 @@ mod tests {
         };
         assert_eq!(
             worktree_label(Some(&worktree)),
-            Some(paths::folder_label(&worktree.worktree_root))
+            Some(mj_core::paths::folder_label(&worktree.worktree_root))
         );
         assert_eq!(worktree_label(None), None);
     }

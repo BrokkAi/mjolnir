@@ -236,7 +236,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let _keep_awake = crate::keep_awake::KeepAwake::hold(app_config.keep_awake);
     let mut resolved = roster::resolve(&app_config, &cfg.cwd).await?;
     if let Some(session_id) = cfg.resume_session.as_deref()
-        && let Some(record) = crate::session_provenance::find(session_id, &cfg.cwd)
+        && let Some(record) = mj_core::session_provenance::find(session_id, &cfg.cwd)
     {
         resolved.primary = resolved
             .available
@@ -261,8 +261,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let provenance_primary = primary.clone();
     let provenance_cwd = cfg.cwd.clone();
 
-    let project_label = crate::paths::project_label_from_cwd(&cfg.cwd);
-    let worktree_label = crate::paths::worktree_name_from_cwd(&cfg.cwd);
+    let project_label = mj_core::paths::project_label_from_cwd(&cfg.cwd);
+    let worktree_label = mj_core::paths::worktree_name_from_cwd(&cfg.cwd);
     let agent_label = primary.model.model.clone();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -476,7 +476,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             } => {
                 session_id = Some(started_session_id.clone());
                 resumed = was_resumed;
-                crate::session_provenance::record(crate::session_provenance::Record {
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: started_session_id.clone(),
                     cwd: provenance_cwd.clone(),
                     adapter_source_id: provenance_primary.launch.source_id.clone(),

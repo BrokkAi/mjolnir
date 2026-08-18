@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 /// directly or through a symlink, so capability checks, ACP payloads, and UI
 /// labels all agree on whether there are real extra roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceRoots {
+pub struct WorkspaceRoots {
     primary: PathBuf,
     additional: Vec<PathBuf>,
 }
 
 impl WorkspaceRoots {
-    pub(crate) fn new(primary: &Path, additional: &[PathBuf]) -> Result<Self> {
+    pub fn new(primary: &Path, additional: &[PathBuf]) -> Result<Self> {
         let primary = canonical_existing_directory("workspace root", primary)?;
         let mut canonical_additional = Vec::new();
         for path in additional {
@@ -31,11 +31,11 @@ impl WorkspaceRoots {
         })
     }
 
-    pub(crate) fn additional_directories(&self) -> &[PathBuf] {
+    pub fn additional_directories(&self) -> &[PathBuf] {
         &self.additional
     }
 
-    pub(crate) fn active_roots(&self) -> Vec<PathBuf> {
+    pub fn active_roots(&self) -> Vec<PathBuf> {
         let mut roots = Vec::with_capacity(1 + self.additional.len());
         roots.push(self.primary.clone());
         roots.extend(self.additional.iter().cloned());
@@ -57,7 +57,7 @@ fn canonical_existing_directory(label: &str, path: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-pub(crate) fn path_is_under_any_root(roots: &[PathBuf], path: &Path) -> bool {
+pub fn path_is_under_any_root(roots: &[PathBuf], path: &Path) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
 

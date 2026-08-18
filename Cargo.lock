@@ -537,6 +537,7 @@ dependencies = [
  "iana-time-zone",
  "image",
  "libc",
+ "mj-core",
  "mj-desktop",
  "qrcode",
  "ratatui",
@@ -2712,6 +2713,18 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mj-core"
+version = "1.10.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

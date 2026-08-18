@@ -12,8 +12,9 @@ use futures::{StreamExt, stream};
 
 use crate::config::{AcpServerPolicy, Config, PermissionPreset};
 use crate::deepswe::{self, Row};
+use crate::probe;
 use crate::subscription::Subscriptions;
-use crate::{model_resolve, probe};
+use mj_core::model_resolve;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 

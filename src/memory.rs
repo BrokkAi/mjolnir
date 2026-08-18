@@ -95,7 +95,7 @@ pub fn default_path() -> PathBuf {
 /// project when `cwd` is inside a `.mjolnir` worktree, otherwise `cwd`
 /// itself. Worktree sessions therefore share the parent project's memories.
 pub fn project_key(cwd: &Path) -> PathBuf {
-    crate::paths::parent_above_mjolnir(cwd).unwrap_or_else(|| cwd.to_path_buf())
+    mj_core::paths::parent_above_mjolnir(cwd).unwrap_or_else(|| cwd.to_path_buf())
 }
 
 pub fn add(path: &Path, text: &str, project: Option<PathBuf>) -> Result<MemoryEntry> {
