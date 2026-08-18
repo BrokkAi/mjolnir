@@ -261,6 +261,14 @@ pub enum PermissionPreset {
     Yolo,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePermissionConfig {
+    pub config_id: String,
+    pub value: String,
+    pub manual_fallback: Option<String>,
+    pub mode: PermissionPreset,
+}
+
 impl std::fmt::Display for PermissionPreset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {

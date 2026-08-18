@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use futures::{StreamExt, stream};
 
-use crate::config::{AcpServerPolicy, Config, PermissionPreset};
+use crate::config::{AcpServerPolicy, Config, PermissionPreset, RuntimePermissionConfig};
 use crate::deepswe::{self, Row};
 use crate::probe;
 use crate::subscription::Subscriptions;
@@ -48,14 +48,6 @@ pub struct AdapterLaunch {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimePermissionConfig {
-    pub config_id: String,
-    pub value: String,
-    pub manual_fallback: Option<String>,
-    pub mode: PermissionPreset,
 }
 
 pub fn configure_permissions(
