@@ -347,7 +347,16 @@ fn claude_auto_memory_path(project: &Path) -> Option<PathBuf> {
             .unwrap_or_else(|| PathBuf::from(configured));
         return Some(configured.join("MEMORY.md"));
     }
-    let encoded = project
+    let encoded = claude_project_directory_name(project);
+    Some(
+        home.join(".claude/projects")
+            .join(encoded)
+            .join("memory/MEMORY.md"),
+    )
+}
+
+fn claude_project_directory_name(project: &Path) -> String {
+    project
         .to_string_lossy()
         .chars()
         .map(|character| {
@@ -357,12 +366,7 @@ fn claude_auto_memory_path(project: &Path) -> Option<PathBuf> {
                 '-'
             }
         })
-        .collect::<String>();
-    Some(
-        home.join(".claude/projects")
-            .join(encoded)
-            .join("memory/MEMORY.md"),
-    )
+        .collect()
 }
 
 fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
@@ -1042,8 +1046,17 @@ mod tests {
         let preamble = memory.preamble().expect("preamble rendered");
         assert!(preamble.len() <= PROMPT_CHAR_BUDGET);
         assert!(!preamble.contains("[m1]"), "oldest entry dropped");
+
         assert!(preamble.contains("[m20]"), "newest entry kept");
         assert!(preamble.contains("older memories omitted"));
+    }
+
+    #[test]
+    fn claude_project_directory_name_matches_claude_code_layout() {
+        assert_eq!(
+            claude_project_directory_name(Path::new("/home/parallels/code/mjolnir")),
+            "-home-parallels-code-mjolnir"
+        );
     }
 
     #[test]
