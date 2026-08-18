@@ -10,69 +10,18 @@
 //! `chatgpt_plan_type` inside the ID token it persists in `auth.json`, so an
 //! upgrade shows up here once Codex next refreshes that token.
 
-use std::cmp::Ordering;
 use std::path::PathBuf;
 
 use base64::Engine;
 use serde_json::Value;
 
-use crate::roster::AdapterKind;
+pub use crate::roster_types::{Subscription, Subscriptions};
 
-/// A signed-in subscription and how much monthly capacity it carries.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Subscription {
-    pub label: String,
-    /// Capacity in units of the vendor's entry paid plan. Anthropic publishes
-    /// its own multipliers - Max 5x and Max 20x are exactly that much Pro
-    /// usage - so those are used verbatim. OpenAI publishes none, so ChatGPT
-    /// plans are placed on the same scale by subscription price, the only
-    /// stable public signal comparable across both vendors: Plus and Claude
-    /// Pro are both the $20 rung, ChatGPT Pro and Claude Max 20x the $200 one.
-    pub capacity: f64,
-}
-
-impl Subscription {
-    fn new(label: impl Into<String>, capacity: f64) -> Self {
-        Self {
-            label: label.into(),
-            capacity,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Subscriptions {
-    pub claude: Option<Subscription>,
-    pub codex: Option<Subscription>,
-}
-
-impl Subscriptions {
-    pub fn detect() -> Self {
-        Self {
-            claude: detect_claude(),
-            codex: detect_codex(),
-        }
-    }
-
-    pub fn for_adapter(&self, kind: AdapterKind) -> Option<&Subscription> {
-        match kind {
-            AdapterKind::Claude => self.claude.as_ref(),
-            AdapterKind::Codex => self.codex.as_ref(),
-        }
-    }
-
-    /// The adapter whose subscription carries strictly more capacity. Equal
-    /// tiers and a one-sided detection both yield `None` on purpose: with no
-    /// capacity to gain there is nothing to trade model quality for, so
-    /// ranking stays the only input.
-    pub fn favored(&self) -> Option<AdapterKind> {
-        let claude = self.claude.as_ref()?;
-        let codex = self.codex.as_ref()?;
-        match claude.capacity.total_cmp(&codex.capacity) {
-            Ordering::Greater => Some(AdapterKind::Claude),
-            Ordering::Less => Some(AdapterKind::Codex),
-            Ordering::Equal => None,
-        }
+/// Detect subscriptions recorded by vendor-native clients.
+pub fn detect() -> Subscriptions {
+    Subscriptions {
+        claude: detect_claude(),
+        codex: detect_codex(),
     }
 }
 
@@ -175,6 +124,7 @@ fn codex_plan(plan_type: &str) -> Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::roster_types::AdapterKind;
 
     fn subscriptions(claude: Option<Subscription>, codex: Option<Subscription>) -> Subscriptions {
         Subscriptions { claude, codex }

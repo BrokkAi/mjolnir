@@ -521,32 +521,28 @@ version = "1.10.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "arboard",
- "axum",
+ "async-trait",
  "axum-server",
  "base64",
  "chrono",
  "clap",
- "crossterm",
  "dirs",
  "flate2",
  "futures",
- "getrandom 0.3.4",
  "hmac",
  "http-body-util",
  "iana-time-zone",
- "image",
  "libc",
+ "mj-agents",
+ "mj-core",
  "mj-desktop",
- "qrcode",
- "ratatui",
+ "mj-remote",
+ "mj-tui",
  "rcgen",
  "reqwest",
- "rmcp",
  "rusqlite",
  "rustls",
  "rustls-pemfile",
- "schemars 1.2.1",
  "semver",
  "serde",
  "serde_json",
@@ -563,7 +559,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "unicode-width",
  "url",
  "zip",
 ]
@@ -2715,6 +2710,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "mj-agents"
+version = "1.10.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "futures",
+ "getrandom 0.3.4",
+ "mj-core",
+ "reqwest",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "mj-core"
+version = "1.10.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "dirs",
+ "flate2",
+ "futures",
+ "getrandom 0.3.4",
+ "iana-time-zone",
+ "libc",
+ "reqwest",
+ "rmcp",
+ "rusqlite",
+ "schemars 1.2.1",
+ "semver",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "signal-hook",
+ "similar",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "unicode-width",
+ "url",
+ "zip",
+]
+
+[[package]]
 name = "mj-desktop"
 version = "1.10.1"
 dependencies = [
@@ -2735,6 +2790,81 @@ dependencies = [
  "webview2-com",
  "windows-core 0.61.2",
  "wry",
+]
+
+[[package]]
+name = "mj-remote"
+version = "1.10.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "axum-server",
+ "base64",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "getrandom 0.3.4",
+ "hmac",
+ "http-body-util",
+ "libc",
+ "mj-core",
+ "qrcode",
+ "rcgen",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shell-words",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "mj-tui"
+version = "1.10.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "base64",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "futures",
+ "iana-time-zone",
+ "image",
+ "libc",
+ "mj-agents",
+ "mj-core",
+ "qrcode",
+ "ratatui",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "signal-hook",
+ "similar",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "unicode-width",
+ "url",
 ]
 
 [[package]]

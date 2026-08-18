@@ -7,8 +7,8 @@ tests, and dependency-license maintenance.
 ## Versions
 
 The release version is set once, in `[workspace.package]` in the root
-`Cargo.toml`; both crates inherit it via `version.workspace = true`, so they
-cannot drift apart. After bumping it, run `cargo update --workspace` to refresh
+`Cargo.toml`; every workspace crate inherits it via `version.workspace = true`,
+so they cannot drift apart. After bumping it, run `cargo update --workspace` to refresh
 the workspace entries in `Cargo.lock`. `install.sh`'s `SCRIPT_VERSION` is an
 independent installer logging revision and is not automatically synchronized
 to product releases.
@@ -53,11 +53,15 @@ already-published release.
 
 ## crates.io publishing
 
-`publish.yml` publishes `brokk-mj-voice-worker`, `mj-desktop`, and
-`brokk-mjolnir` in dependency order. It refuses to publish when the tag differs
-from any crate version. It packages the independent crates and builds the root
-crate with `desktop-app` ahead of the `crates-io` environment gate so a failure surfaces
-without spending an approval.
+`publish.yml` publishes `brokk-mj-voice-worker`, `mj-core`, `mj-agents`,
+`mj-tui`, `mj-remote`, `mj-desktop`, and `brokk-mjolnir` in dependency order:
+each library crate must reach the registry before anything that depends on it.
+It refuses to publish when the tag differs from any workspace crate version. It
+packages the whole workspace in one `cargo package --workspace` run — so the
+same-release sibling versions resolve against the crates packaged beside them
+rather than the registry, where they do not exist yet — and builds the root
+crate with `desktop-app` ahead of the `crates-io` environment gate so a failure
+surfaces without spending an approval.
 
 Publishing runs automatically once the release workflow succeeds. The automated
 release job explicitly dispatches `publish.yml` after creating the GitHub
@@ -67,11 +71,11 @@ token, and crates.io rejects the `workflow_run` trigger. A release published by
 another actor also starts `publish.yml` through its release event.
 
 Each crate is skipped when that version is already on the registry. That is the
-recovery path if one crate publishes and the other fails: re-running resumes at
-the crate that did not land. crates.io reserves a version number permanently
+recovery path if some crates publish and a later one fails: re-running resumes
+at the crate that did not land. crates.io reserves a version number permanently
 once published and yanking does not release it, so a shipped version can never
-be republished. `mj-desktop` is published before the root; the workflow retries
-the root publish while that new version propagates through the sparse index.
+be republished. Every publish is retried, because a crate cannot be packaged
+until the sibling it depends on has propagated through the sparse index.
 
 To package a tag without publishing, run the workflow manually with `publish`
 off and inspect its `.crate` artifact.
@@ -94,7 +98,8 @@ with `publish` off and inspect its tarball artifact and Linux smoke test.
 
 Confirm that:
 
-1. Both crate manifests and their `Cargo.lock` workspace entries match the intended tag.
+1. Every workspace crate manifest and its `Cargo.lock` workspace entry matches
+   the intended tag.
 2. Formatting, Clippy, release builds, tests, and relevant cross-platform or
    packaging checks pass.
 3. Dependency-license policy and generated notice reports are current.

@@ -192,8 +192,10 @@ node scripts/generate-supplemental-third-party-notices.mjs
 
 Review the generated diff rather than assuming regeneration is sufficient. CI
 recreates both notice reports, inventories bundled native material, checks the
-crate package contents, and fails when committed output is stale. Keep
-`voice-worker/LICENSE` synchronized with the root license.
+crate package contents, and fails when committed output is stale. Every
+publishable crate ships its own copy of the GPL text, so a new workspace member
+needs a `LICENSE` file and CI keeps all of them byte-identical to the root
+license.
 
 ## Pull Requests
 

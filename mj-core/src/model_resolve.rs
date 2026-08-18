@@ -39,6 +39,24 @@ use std::collections::HashMap;
 /// A normalized join key (see module docs). Compared by exact equality only.
 pub type MatchKey = String;
 
+/// Provider inferred from a canonical model id.
+pub fn model_provider(model: &str) -> &'static str {
+    let lower = model.to_ascii_lowercase();
+    if lower.starts_with("gpt-") || lower.starts_with("o1-") || lower.starts_with("o3-") {
+        "openai"
+    } else if lower.starts_with("claude-") {
+        "anthropic"
+    } else if lower.starts_with("gemini-") || lower.starts_with("gemma-") {
+        "google"
+    } else if lower.starts_with("glm-") {
+        "zhipuai"
+    } else if lower.starts_with("kimi-") {
+        "moonshotai"
+    } else {
+        ""
+    }
+}
+
 /// How directly a leaderboard row produced a key. Exact keys are generated from
 /// the row's published model name; aliases come from progressively stripped
 /// suffixes such as `-high`, `-preview`, or a date. Exact rows must beat aliases

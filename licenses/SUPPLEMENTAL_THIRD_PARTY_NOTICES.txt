@@ -141,7 +141,7 @@ The Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, and GPLv3 texts are included in
 Embedded web fonts
 ================================================================================
 
-Source: src/fonts/*.woff2
+Source: mj-remote/src/fonts/*.woff2
 Inclusion: embedded in the mj binary and served by the remote viewer
 
 The following font software is licensed under the SIL Open Font License 1.1. The complete terms are in OFL-1.1.md.

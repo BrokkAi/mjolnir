@@ -119,7 +119,7 @@ async function checkStandaloneNoticeInventory(metadata) {
 }
 
 async function checkFontInventory() {
-  const fontDirectory = path.join(repositoryRoot, "src", "fonts");
+  const fontDirectory = path.join(repositoryRoot, "mj-remote", "src", "fonts");
   const discovered = (await readdir(fontDirectory))
     .filter((filename) => filename.endsWith(".woff2"))
     .sort();
@@ -239,7 +239,7 @@ async function embeddedFontsNotice() {
   await checkedInLegalFile("licenses/OFL-1.1.md");
   return {
     component: "Embedded web fonts",
-    source: "src/fonts/*.woff2",
+    source: "mj-remote/src/fonts/*.woff2",
     scope: "embedded in the mj binary and served by the remote viewer",
     text: [
       "The following font software is licensed under the SIL Open Font License 1.1. The complete terms are in OFL-1.1.md.",

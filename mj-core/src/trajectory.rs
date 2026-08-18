@@ -222,7 +222,7 @@ fn tool_has_terminal(tool: &agent_client_protocol::schema::v1::ToolCall) -> bool
 /// A completed non-terminal tool starts a new candidate final-message segment.
 /// Both the trajectory tracker and headless result collector use this boundary
 /// so the user-facing answer cannot drift from the orchestrator's definition.
-pub(crate) fn tool_completes_agent_message_segment(
+pub fn tool_completes_agent_message_segment(
     tool: &agent_client_protocol::schema::v1::ToolCall,
 ) -> bool {
     use agent_client_protocol::schema::v1::ToolCallStatus;
@@ -232,7 +232,7 @@ pub(crate) fn tool_completes_agent_message_segment(
     ) && !tool_has_terminal(tool)
 }
 
-pub(crate) fn terminal_output_completes_agent_message_segment(
+pub fn terminal_output_completes_agent_message_segment(
     snapshot: &crate::event::TerminalOutputSnapshot,
 ) -> bool {
     snapshot.exit_status.is_some()

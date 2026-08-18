@@ -12,7 +12,7 @@ available at:
 
 https://github.com/BrokkAi/mjolnir
 
-Mjolnir and its voice worker are licensed under `GPL-3.0-only`; `LICENSE`
+Mjolnir workspace packages and its voice worker are licensed under `GPL-3.0-only`; `LICENSE`
 contains the GNU GPL version 3 text. `THIRD_PARTY_LICENSES.html` covers the
 locked Rust graph. `SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt` and the other files in
 this directory cover native libraries, embedded fonts, and standalone notices

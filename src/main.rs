@@ -8,59 +8,37 @@ mod acp;
 mod agent_instructions;
 mod agent_usage;
 mod app;
-mod archive;
-mod auth;
 mod claude_token;
 mod claude_usage;
-mod clipboard;
 mod codex_usage;
 mod config;
+#[cfg(test)]
 mod deepswe;
 mod discrete_review;
 mod event;
 mod headless;
-mod ink;
 mod keep_awake;
 mod labels;
 mod memory;
 mod menu;
-mod model_resolve;
-mod notifications;
 mod onboarding;
 mod orchestrator;
 mod palette;
-mod paths;
-mod probe;
-mod pull_request;
-mod qr;
 mod quota;
 mod ragnarok;
-mod ragnarok_sprites;
 mod remote;
+mod remote_host;
 mod roster;
 mod self_update;
 mod session;
-mod session_provenance;
 mod session_state;
-mod settings;
 mod side;
-mod speech;
 mod spinner;
 mod subagent;
-mod subscription;
-mod tailscale;
-mod term;
-mod terminal_output;
 mod terminal_palette;
 mod termination;
-mod text;
 mod theme;
-mod trajectory;
 mod ui;
-mod usage_fact;
-mod usage_format;
-mod version;
-mod workflow;
 mod workspace_snapshot;
 mod worktree;
 
@@ -79,6 +57,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path, transcript_export_dir};
 use crate::event::{LoadSessionResult, UiCommand, UiEvent};
+use crate::palette::TerminalThemeKindExt;
 use crate::session::SessionEntryJson;
 use crate::ui::{HeaderLabels, UiMode};
 use crate::worktree::CreatedWorktree;
@@ -881,7 +860,8 @@ async fn list_agent_sessions(
             Ok(mut listing) => {
                 for entry in &mut listing.sessions {
                     entry.adapter_source_id = Some(role.launch.source_id.clone());
-                    if let Some(record) = session_provenance::find(&entry.session_id, &entry.cwd)
+                    if let Some(record) =
+                        mj_core::session_provenance::find(&entry.session_id, &entry.cwd)
                         && record.adapter_source_id == role.launch.source_id
                     {
                         entry.model = Some(record.model);
@@ -959,7 +939,7 @@ async fn run_resume(
     };
     let mut agent = selected_agent_for_role(&resume_roster.primary);
     if let Some(session_id) = args.session_id.as_deref()
-        && let Some(record) = session_provenance::find(session_id, &cwd)
+        && let Some(record) = mj_core::session_provenance::find(session_id, &cwd)
     {
         let pinned = resume_roster
             .available
@@ -978,7 +958,7 @@ async fn run_resume(
             })?
             .clone();
         resume_roster.primary = pinned.clone();
-        resume_roster.rebind_auto_review_for_primary(&cfg);
+        crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
         agent = selected_agent_for_role(&pinned);
     } else if let Some(session_id) = args.session_id.as_deref() {
         let matches = list_agent_sessions(&resume_roster, &cwd, args.agent_stderr.as_deref())
@@ -991,7 +971,7 @@ async fn run_resume(
                 let role = role_for_session_entry(&resume_roster, entry)
                     .ok_or_else(|| anyhow::anyhow!("session {session_id} has no launchable route"))?
                     .clone();
-                session_provenance::record(session_provenance::Record {
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: session_id.to_string(),
                     cwd: entry.cwd.clone(),
                     adapter_source_id: role.launch.source_id.clone(),
@@ -1000,7 +980,7 @@ async fn run_resume(
                 });
                 agent = selected_agent_for_role(&role);
                 resume_roster.primary = role;
-                resume_roster.rebind_auto_review_for_primary(&cfg);
+                crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
             }
             [] => {}
             _ => anyhow::bail!(
@@ -1147,7 +1127,7 @@ async fn run_resume(
                     .clone();
                 agent = selected_agent_for_role(&role);
                 resume_roster.primary = role;
-                resume_roster.rebind_auto_review_for_primary(&cfg);
+                crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
                 let result = run_app(
                     cwd,
                     RuntimeOptions {
@@ -1249,16 +1229,16 @@ fn configured_snapshot_exclusions(
 fn validate_workspace_roots(
     cwd: &Path,
     additional_directories: &[PathBuf],
-) -> Result<paths::WorkspaceRoots> {
-    paths::WorkspaceRoots::new(cwd, additional_directories)
+) -> Result<mj_core::paths::WorkspaceRoots> {
+    mj_core::paths::WorkspaceRoots::new(cwd, additional_directories)
 }
 
 fn worktree_label(worktree: Option<&CreatedWorktree>) -> Option<String> {
-    worktree.map(|w| paths::folder_label(&w.worktree_root))
+    worktree.map(|w| mj_core::paths::folder_label(&w.worktree_root))
 }
 
 fn project_label(cwd: &std::path::Path) -> String {
-    paths::display_path_with_tilde(cwd)
+    mj_core::paths::display_path_with_tilde(cwd)
 }
 
 fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>, mode: Option<UiMode>) -> bool {
@@ -1534,7 +1514,7 @@ async fn run_app(
         })
     {
         roster.primary = pinned.clone();
-        roster.rebind_auto_review_for_primary(&cfg);
+        crate::roster::rebind_auto_review_for_primary(&mut roster, &cfg);
     }
     let mut primary_agent = selected_agent_for_role(&roster.primary);
 
@@ -1601,7 +1581,7 @@ async fn run_app(
             }
             UiExitReason::SwitchSession => {
                 if let Some(session_id) = session_result.session_id {
-                    let resume_agent = session_provenance::find(&session_id, &cwd)
+                    let resume_agent = mj_core::session_provenance::find(&session_id, &cwd)
                         .and_then(|record| {
                             roster.available.iter().find(|role| {
                                 role.model.model == record.model
@@ -1816,7 +1796,7 @@ async fn run_session_picker_action_for_roster(
                 let role = role_for_session_entry(roster, &entry)
                     .ok_or_else(|| anyhow::anyhow!("selected session route is unavailable"))?
                     .clone();
-                session_provenance::record(session_provenance::Record {
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: entry.session_id.clone(),
                     cwd: entry.cwd.clone(),
                     adapter_source_id: role.launch.source_id.clone(),
@@ -1870,7 +1850,7 @@ async fn delete_session_notice(
     let session_id = entry.session_id;
     match session::delete_session(agent, session_id.clone(), agent_stderr).await {
         Ok(()) => {
-            session_provenance::remove(&session_id, &cwd, adapter_source_id.as_deref());
+            mj_core::session_provenance::remove(&session_id, &cwd, adapter_source_id.as_deref());
             format!("Deleted session: {label}")
         }
         Err(err) => format!("Delete failed for {label}: {err:#}"),
@@ -2042,7 +2022,7 @@ async fn run_session(
             .as_millis()
     );
     let (subagent_roles, _subagent_codex_home) =
-        isolated_subagent_roles(roster.subagent_failover_roles(), "subagent")?;
+        isolated_subagent_roles(crate::roster::subagent_failover_roles(&roster), "subagent")?;
 
     let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
     let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
@@ -2248,28 +2228,30 @@ async fn run_session(
             session_tag: Some(session_tag.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),
         }),
-        subagents: subagent_pool.map(|subagent_pool| {
-            let mut config =
-                subagent::Config::new(subagent_pool, runtime_options.agent_stderr.clone());
-            if let Some(role) = config.role_config.as_mut() {
-                role.session_tag = Some(session_tag.clone());
-            }
-            config
-                .with_subagent_handoff_counter(subagent_handoffs_this_turn.clone())
-                .with_id_allocator(subagent_ids.clone())
-                .with_active_implementation_workers(active_implementation_workers.clone())
-                .with_max_parallel(subagents_config.max_parallel)
-                .with_debrief(subagents_config.debrief)
-                .with_reports(subagent_reports.clone())
-                .with_run_registry(subagent_runs.clone())
-                .with_prewarm(subagent::RunContext {
-                    cwd: cwd.clone(),
-                    additional_directories: runtime_options.additional_directories.clone(),
-                    snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
-                    fs_max_text_bytes: runtime_options.fs_max_text_bytes,
-                    access_mode: acp::RuntimeAccessMode::Full,
-                })
-        }),
+        subagents: subagent_pool
+            .map(|subagent_pool| {
+                let mut config =
+                    subagent::Config::new(subagent_pool, runtime_options.agent_stderr.clone());
+                if let Some(role) = config.role_config.as_mut() {
+                    role.session_tag = Some(session_tag.clone());
+                }
+                config
+                    .with_subagent_handoff_counter(subagent_handoffs_this_turn.clone())
+                    .with_id_allocator(subagent_ids.clone())
+                    .with_active_implementation_workers(active_implementation_workers.clone())
+                    .with_max_parallel(subagents_config.max_parallel)
+                    .with_debrief(subagents_config.debrief)
+                    .with_reports(subagent_reports.clone())
+                    .with_run_registry(subagent_runs.clone())
+                    .with_prewarm(subagent::RunContext {
+                        cwd: cwd.clone(),
+                        additional_directories: runtime_options.additional_directories.clone(),
+                        snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
+                        fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+                        access_mode: acp::RuntimeAccessMode::Full,
+                    })
+            })
+            .map(subagent::runtime_service),
         memory: memory::SessionMemory::from_config(
             &memory_config,
             &cwd,
@@ -2307,7 +2289,7 @@ async fn run_session(
     let tracker_worktree_label = header_labels
         .worktree
         .clone()
-        .or_else(|| paths::worktree_name_from_cwd(&cwd));
+        .or_else(|| mj_core::paths::worktree_name_from_cwd(&cwd));
     let remote_tracker = remote::RemoteSessionTracker::new(
         tracker_project_label,
         tracker_worktree_label,
@@ -2321,11 +2303,13 @@ async fn run_session(
         Some(ui_event_tx.clone()),
         true,
     );
-    let (ragnarok_observer_tx, mut ragnarok_observer_rx) = mpsc::unbounded_channel();
+    let (ragnarok_observer_tx, mut ragnarok_observer_rx) =
+        mpsc::unbounded_channel::<Option<crate::session_state::RagnarokObservation>>();
     let ragnarok_tracker = remote_tracker.clone();
     let ragnarok_observer_task = tokio::spawn(async move {
         while let Some(observation) = ragnarok_observer_rx.recv().await {
-            ragnarok_tracker.observe_ragnarok(observation);
+            ragnarok_tracker
+                .observe_ragnarok(observation.map(remote::ragnarok_record_from_observation));
         }
     });
     let orchestrated = orchestrator::spawn(
@@ -2335,7 +2319,7 @@ async fn run_session(
             active_subagent_workers: active_implementation_workers.clone(),
             subagent_reports: subagent_report_rx,
             subagent_report_bus: subagent_reports.clone(),
-            subagent_runs,
+            subagent_runs: mj_core::orchestrator::SubagentProgressService::new(subagent_runs),
             progress_wake: orchestrator::progress_wake_interval(
                 subagents_config.progress_wake_minutes,
             ),
@@ -2346,7 +2330,7 @@ async fn run_session(
             review_root: cwd.clone(),
             review_fanout: review_workers.zip(roster.review_supervisor.clone()).map(
                 |(workers, supervisor)| {
-                    discrete_review::Spawner::live(discrete_review::FanoutConfig {
+                    discrete_review::live_spawner(discrete_review::FanoutConfig {
                         workers,
                         supervisor,
                         cwd: cwd.clone(),
@@ -2383,7 +2367,7 @@ async fn run_session(
         let mut events = orchestrated.events;
         while let Some(event) = events.recv().await {
             if let UiEvent::SessionStarted { session_id, .. } = &event {
-                session_provenance::record(session_provenance::Record {
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: session_id.clone(),
                     cwd: event_cwd.clone(),
                     adapter_source_id: event_primary.launch.source_id.clone(),
@@ -2917,9 +2901,7 @@ fn isolated_subagent_roles(
     Ok((roles, guard))
 }
 
-fn setup_session_terminal(
-    mode: UiMode,
-) -> Result<ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>> {
+fn setup_session_terminal(mode: UiMode) -> Result<mj_tui::Terminal> {
     match mode {
         UiMode::InlineChat => {
             ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")
@@ -2928,17 +2910,14 @@ fn setup_session_terminal(
     }
 }
 
-fn restore_session_terminal(
-    terminal: &mut ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>,
-    mode: UiMode,
-) -> Result<()> {
+fn restore_session_terminal(terminal: &mut mj_tui::Terminal, mode: UiMode) -> Result<()> {
     match mode {
         UiMode::InlineChat => ui::restore_inline_chat_terminal(terminal),
         UiMode::FullscreenTui => ui::restore_fullscreen_terminal(terminal),
     }
 }
 
-type Terminal = ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>;
+type Terminal = mj_tui::Terminal;
 
 /// A restoration operation owned alongside the terminal it cleans up.
 ///
@@ -3595,7 +3574,7 @@ mod tests {
 
         assert_eq!(
             project_label(&worktree.session_cwd),
-            paths::display_path_with_tilde(&worktree.session_cwd)
+            mj_core::paths::display_path_with_tilde(&worktree.session_cwd)
         );
     }
 
@@ -3603,13 +3582,19 @@ mod tests {
     fn project_label_uses_full_directory_path_inside_mjolnir_worktree() {
         let cwd =
             std::path::Path::new("/Users/ryan/code/mjolnir/.mjolnir/worktrees/bold-willow/src");
-        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
+        assert_eq!(
+            project_label(cwd),
+            mj_core::paths::display_path_with_tilde(cwd)
+        );
     }
 
     #[test]
     fn project_label_uses_full_directory_path_without_worktree() {
         let cwd = std::path::Path::new("/Users/ryan/code/mjolnir/src");
-        assert_eq!(project_label(cwd), paths::display_path_with_tilde(cwd));
+        assert_eq!(
+            project_label(cwd),
+            mj_core::paths::display_path_with_tilde(cwd)
+        );
     }
 
     #[test]
@@ -4501,7 +4486,7 @@ mod tests {
         };
         assert_eq!(
             worktree_label(Some(&worktree)),
-            Some(paths::folder_label(&worktree.worktree_root))
+            Some(mj_core::paths::folder_label(&worktree.worktree_root))
         );
         assert_eq!(worktree_label(None), None);
     }
