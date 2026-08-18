@@ -19,7 +19,9 @@ use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use rmcp::{ServerHandler, serve_server};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -179,6 +181,16 @@ where
 pub async fn run_bridge(addr: &str) -> Result<()> {
     let token = std::env::var(TOKEN_ENV)
         .with_context(|| format!("{TOKEN_ENV} must be set by the parent mj process"))?;
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    run_bridge_io(addr, &token, &mut stdin, &mut stdout).await
+}
+
+async fn run_bridge_io<R, W>(addr: &str, token: &str, input: &mut R, output: &mut W) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let stream = TcpStream::connect(addr)
         .await
         .with_context(|| format!("connect to mj MCP bridge listener at {addr}"))?;
@@ -190,14 +202,12 @@ pub async fn run_bridge(addr: &str) -> Result<()> {
         .context("send MCP bridge token")?;
 
     let stdin_to_socket = async {
-        let mut stdin = tokio::io::stdin();
-        let _ = tokio::io::copy(&mut stdin, &mut socket_write).await;
+        let _ = tokio::io::copy(input, &mut socket_write).await;
         let _ = socket_write.shutdown().await;
     };
     let socket_to_stdout = async {
-        let mut stdout = tokio::io::stdout();
-        let _ = tokio::io::copy(&mut socket_read, &mut stdout).await;
-        let _ = stdout.flush().await;
+        let _ = tokio::io::copy(&mut socket_read, output).await;
+        let _ = output.flush().await;
     };
     tokio::pin!(stdin_to_socket, socket_to_stdout);
     tokio::select! {
@@ -222,6 +232,7 @@ mod tests {
         PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     };
     use rmcp::service::{RequestContext, RoleServer};
+    use tokio::io::duplex;
 
     #[derive(Clone)]
     struct EchoHandler;
@@ -341,5 +352,85 @@ mod tests {
             response["result"]["serverInfo"]["name"],
             serde_json::json!("bridge-test")
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_io_forwards_input_then_drains_parent_output() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let parent = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("token"));
+            assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("request"));
+            write.write_all(b"response\n").await.expect("respond");
+        });
+
+        let mut input = b"request\n".as_slice();
+        let mut output = Vec::new();
+        run_bridge_io(&addr.to_string(), "token", &mut input, &mut output)
+            .await
+            .expect("bridge");
+        parent.await.expect("parent");
+        assert_eq!(output, b"response\n");
+    }
+
+    #[tokio::test]
+    async fn bridge_io_exits_when_parent_closes_while_input_stays_open() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let parent = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read, mut write) = stream.into_split();
+            let token = BufReader::new(read).lines().next_line().await.unwrap();
+            assert_eq!(token.as_deref(), Some("token"));
+            write.write_all(b"done\n").await.expect("respond");
+        });
+
+        let (_input_writer, mut input) = duplex(64);
+        let mut output = Vec::new();
+        run_bridge_io(&addr.to_string(), "token", &mut input, &mut output)
+            .await
+            .expect("bridge");
+        parent.await.expect("parent");
+        assert_eq!(output, b"done\n");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_handshake_times_out_and_closes_the_connection() {
+        let server = BridgeServer::start("bridge-test", EchoHandler)
+            .await
+            .expect("start bridge");
+        let (addr, _token) = stdio_parts(&server);
+        let mut stream = TcpStream::connect(&addr).await.expect("connect");
+
+        tokio::time::advance(HANDSHAKE_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.expect("read close");
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_an_initialized_session_and_listener() {
+        let server = BridgeServer::start("bridge-test", EchoHandler)
+            .await
+            .expect("start bridge");
+        let (addr, token) = stdio_parts(&server);
+        let mut stream = TcpStream::connect(&addr).await.expect("connect");
+        stream
+            .write_all(format!("{token}\n").as_bytes())
+            .await
+            .expect("authenticate");
+
+        server.shutdown().await;
+
+        let mut body = Vec::new();
+        match stream.read_to_end(&mut body).await {
+            Ok(_) => assert!(body.is_empty()),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+        }
+        assert!(TcpStream::connect(&addr).await.is_err());
     }
 }
