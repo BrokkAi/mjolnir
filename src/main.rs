@@ -494,6 +494,16 @@ fn effective_ui_mode(cli_fullscreen_tui: bool, cfg: &Config) -> UiMode {
     ui_mode(cli_fullscreen_tui || cfg.interface == config::InterfaceMode::Fullscreen)
 }
 
+/// Best-effort match for the mode the terminal was left in after a session:
+/// sessions adopt a changed interface preference on /new, so the freshest
+/// config is the closest stand-in for the session that just ended.
+fn post_session_ui_mode(cli_fullscreen_tui: bool) -> UiMode {
+    effective_ui_mode(
+        cli_fullscreen_tui,
+        &Config::load(&config::default_config_path()).unwrap_or_default(),
+    )
+}
+
 fn should_run_startup_update_check(cli: &Cli) -> bool {
     if cli.no_update_check || cli.print.is_some() {
         return false;
@@ -710,13 +720,7 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    // Best-effort match for the mode the terminal was left in: sessions adopt
-    // a changed interface preference on /new, so the freshest config is the
-    // closest stand-in for the mode of the session that just ended.
-    let mode = effective_ui_mode(
-        fullscreen_tui,
-        &Config::load(&config::default_config_path()).unwrap_or_default(),
-    );
+    let mode = post_session_ui_mode(fullscreen_tui);
     let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
 
     // Print resume hint so the user can come back to this session.
@@ -1071,6 +1075,7 @@ async fn run_resume(
             args.fullscreen_tui,
         )
         .await;
+        let mode = post_session_ui_mode(args.fullscreen_tui);
         let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
         // Show resume hint for the session we just ran
         if let Ok(Some(resumed_id)) = &result
@@ -1164,6 +1169,7 @@ async fn run_resume(
                     args.fullscreen_tui,
                 )
                 .await;
+                let mode = post_session_ui_mode(args.fullscreen_tui);
                 let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
                 // Show resume hint for the session we just ran
                 if let Ok(Some(resumed_id)) = &result
