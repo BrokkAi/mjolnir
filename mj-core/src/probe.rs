@@ -107,7 +107,6 @@ pub struct ModelOption {
 /// ACP capabilities needed by the model-first adapter catalog.
 #[derive(Debug, Clone)]
 pub struct AdapterCapabilities {
-    pub http_mcp: bool,
     pub models: Vec<ModelOption>,
     pub session_config: Vec<SessionConfigOption>,
 }
@@ -202,7 +201,6 @@ where
                     .await;
             }
             Ok(Ok(AdapterCapabilities {
-                http_mcp: init_resp.agent_capabilities.mcp_capabilities.http,
                 models,
                 session_config,
             }))
@@ -367,7 +365,6 @@ mod tests {
         .await
         .expect("probe succeeds");
 
-        assert!(capabilities.http_mcp);
         assert_eq!(capabilities.session_config.len(), 2);
         assert_eq!(capabilities.models.len(), 2);
         assert_eq!(capabilities.models[0].value, "sonnet");

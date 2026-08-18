@@ -185,6 +185,11 @@ struct Cli {
 enum Commands {
     /// Install repository guidance for coding agents.
     Agents(AgentsArgs),
+    /// Pipe stdin/stdout to an in-process MCP tool server of a parent mj
+    /// process. Spawned by ACP agents as an advertised stdio MCP server;
+    /// not for interactive use.
+    #[command(hide = true)]
+    McpBridge(McpBridgeArgs),
     /// List and manage persistent cross-session memories.
     Memory(MemoryArgs),
     /// Inspect or refresh model discovery state.
@@ -218,6 +223,13 @@ struct AgentsInstallArgs {
     /// Apply the displayed diff without an interactive confirmation.
     #[arg(short = 'y', long)]
     yes: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct McpBridgeArgs {
+    /// Loopback address of the parent mj process's MCP bridge listener.
+    #[arg(long)]
+    addr: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -494,6 +506,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Agents(_)) => false,
+        Some(Commands::McpBridge(_)) => false,
         Some(Commands::Memory(_)) => false,
         Some(Commands::Models(_)) => false,
         Some(Commands::Resume(args)) => !args.list,
@@ -560,6 +573,11 @@ fn run_memory_command(command: MemoryCommand, cwd: &Path) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_file.as_deref())?;
+    // The bridge child must stay a bare stdio pipe: no signal coordinator,
+    // no update check, nothing that could write to stdout.
+    if let Some(Commands::McpBridge(args)) = &cli.command {
+        return mj_core::mcp_bridge::run_bridge(&args.addr).await;
+    }
     let debug_file = cli.log_file.clone();
     let snapshot_exclusions =
         configured_snapshot_exclusions(cli.log_file.as_deref(), cli.agent_stderr.as_deref());
@@ -590,6 +608,9 @@ async fn main() -> Result<()> {
             Commands::Agents(args) => match args.command {
                 AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
             },
+            // Dispatched before the termination coordinator installs; kept
+            // here only for match exhaustiveness.
+            Commands::McpBridge(args) => mj_core::mcp_bridge::run_bridge(&args.addr).await,
             Commands::Memory(args) => run_memory_command(args.command, &cwd),
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {

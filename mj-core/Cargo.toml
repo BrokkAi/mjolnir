@@ -9,7 +9,6 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
 [dependencies]
-axum = "0.8"
 base64 = "0.22"
 getrandom = "0.3"
 agent-client-protocol = { version = "1", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
@@ -23,7 +22,7 @@ iana-time-zone = "0.1"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 url = "2"
-rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
+rmcp = { version = "1", features = ["server", "macros", "transport-async-rw"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 schemars = "1"

@@ -25,15 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{
-    EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio,
-};
-use anyhow::{Context, anyhow};
-use axum::extract::{Request as HttpRequest, State};
-use axum::http::{StatusCode, header::AUTHORIZATION};
-use axum::middleware::Next;
-use axum::response::Response;
-use base64::Engine;
+use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
+use anyhow::Context;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -43,16 +36,11 @@ use rmcp::{
     },
     service::RequestContext,
     tool, tool_router,
-    transport::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        streamable_http_server::session::local::LocalSessionManager,
-    },
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -90,7 +78,6 @@ const SYNTHESIS_LIMIT: usize = 32 * 1024;
 const LANE_DIFF_LIMIT: usize = 96 * 1024;
 const LANE_TRAJECTORY_LIMIT: usize = 16 * 1024;
 const SMALL_DIFF_CHANGED_LINES: usize = 200;
-const REVIEW_MCP_PATH: &str = "/mcp";
 const REVIEW_MCP_SERVER_NAME: &str = "mj-review";
 
 /// Lanes admitted concurrently. Currently the whole roster; the admission
@@ -602,91 +589,25 @@ impl ServerHandler for ReviewMcpHandler {
     }
 }
 
-struct ReviewHttpServer {
-    advertised: McpServer,
-    cancellation: CancellationToken,
-    task: JoinHandle<()>,
+struct ReviewMcpServer {
+    bridge: mj_core::mcp_bridge::BridgeServer,
 }
 
-impl ReviewHttpServer {
+impl ReviewMcpServer {
     async fn start(dispatch: ReviewDispatch) -> anyhow::Result<Self> {
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes)
-            .map_err(|error| anyhow!("generate review MCP bearer token: {error}"))?;
-        let authorization = format!(
-            "Bearer {}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes)
-        );
-        let cancellation = CancellationToken::new();
-        let mut config = StreamableHttpServerConfig::default();
-        config.cancellation_token = cancellation.clone();
-        let mut sessions = LocalSessionManager::default();
-        sessions.session_config.keep_alive = None;
         let handler = ReviewMcpHandler::new(dispatch);
-        let service =
-            StreamableHttpService::new(move || Ok(handler.clone()), Arc::new(sessions), config);
-        let protected = axum::Router::new()
-            .nest_service(REVIEW_MCP_PATH, service)
-            .layer(axum::middleware::from_fn_with_state(
-                authorization.clone(),
-                require_review_bearer,
-            ));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let bridge = mj_core::mcp_bridge::BridgeServer::start(REVIEW_MCP_SERVER_NAME, handler)
             .await
-            .context("bind review MCP listener")?;
-        let addr = listener
-            .local_addr()
-            .context("read review MCP listener address")?;
-        let task_cancellation = cancellation.clone();
-        let task = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, protected)
-                .with_graceful_shutdown(task_cancellation.cancelled_owned())
-                .await
-            {
-                tracing::warn!("review MCP listener stopped: {error}");
-            }
-        });
-        let advertised = McpServer::Http(
-            McpServerHttp::new(
-                REVIEW_MCP_SERVER_NAME,
-                format!("http://{addr}{REVIEW_MCP_PATH}"),
-            )
-            .headers(vec![HttpHeader::new("Authorization", authorization)]),
-        );
-        Ok(Self {
-            advertised,
-            cancellation,
-            task,
-        })
+            .context("start review MCP bridge")?;
+        Ok(Self { bridge })
     }
 
-    async fn shutdown(mut self) {
-        self.cancellation.cancel();
-        let _ = (&mut self.task).await;
+    fn advertised(&self) -> &McpServer {
+        self.bridge.advertised()
     }
-}
 
-impl Drop for ReviewHttpServer {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        self.task.abort();
-    }
-}
-
-async fn require_review_bearer(
-    State(expected): State<String>,
-    request: HttpRequest,
-    next: Next,
-) -> std::result::Result<Response, (StatusCode, &'static str)> {
-    let authorized = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.as_bytes() == expected.as_bytes());
-    if authorized {
-        Ok(next.run(request).await)
-    } else {
-        Err((StatusCode::UNAUTHORIZED, "unauthorized"))
+    async fn shutdown(self) {
+        self.bridge.shutdown().await;
     }
 }
 
@@ -1149,7 +1070,7 @@ async fn run_async(
         workflow: job.workflow.clone(),
     };
     let reviewer_launch_failures = Arc::clone(&dispatch.launch_failures);
-    let review_server = match ReviewHttpServer::start(dispatch).await {
+    let review_server = match ReviewMcpServer::start(dispatch).await {
         Ok(server) => server,
         Err(error) => {
             let _ = reviewer_pool.shutdown_and_wait().await;
@@ -1195,7 +1116,7 @@ async fn run_async(
                     &repository_root,
                     SUPERVISOR_BIFROST_TOOLSET,
                 ),
-                review_server.advertised.clone(),
+                review_server.advertised().clone(),
             ],
             retain_after_completion: true,
             workflow: Some(mj_core::workflow::WorkflowActorContext {
@@ -3185,8 +3106,31 @@ mod tests {
         while report_rx.try_recv().is_ok() {}
     }
 
+    fn bridge_parts(advertised: &McpServer) -> (String, String) {
+        let McpServer::Stdio(stdio) = advertised else {
+            panic!("review dispatch must be advertised as a stdio bridge");
+        };
+        let addr = stdio
+            .args
+            .iter()
+            .skip_while(|arg| arg.as_str() != "--addr")
+            .nth(1)
+            .expect("advertised args carry --addr")
+            .clone();
+        let token = stdio
+            .env
+            .iter()
+            .find(|var| var.name == mj_core::mcp_bridge::TOKEN_ENV)
+            .expect("advertised env carries the bridge token")
+            .value
+            .clone();
+        (addr, token)
+    }
+
     #[tokio::test]
-    async fn review_http_server_enforces_its_private_bearer_and_shuts_down() {
+    async fn review_mcp_server_enforces_its_private_token_and_shuts_down() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+
         let repository = tempfile::tempdir().expect("repository");
         init_repo(repository.path());
         let root = std::fs::canonicalize(repository.path()).expect("canonical repository");
@@ -3203,46 +3147,68 @@ mod tests {
             review_pass: 0,
             workflow,
         };
-        let server = ReviewHttpServer::start(dispatch)
+        let server = ReviewMcpServer::start(dispatch)
             .await
             .expect("start review MCP server");
-        let McpServer::Http(advertised) = &server.advertised else {
-            panic!("review dispatch must be advertised over HTTP");
+        let McpServer::Stdio(advertised) = server.advertised() else {
+            panic!("review dispatch must be advertised as a stdio bridge");
         };
         assert_eq!(advertised.name, REVIEW_MCP_SERVER_NAME);
-        let authorization = advertised
-            .headers
-            .iter()
-            .find(|header| header.name.eq_ignore_ascii_case("authorization"))
-            .expect("authorization header")
-            .value
-            .clone();
-        assert!(authorization.starts_with("Bearer "));
-        assert!(authorization.len() > "Bearer ".len() + 20);
-
-        let client = reqwest::Client::new();
-        let unauthorized = client
-            .get(&advertised.url)
-            .send()
-            .await
-            .expect("unauthorized request");
-        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
         assert_eq!(
-            unauthorized.text().await.expect("unauthorized body"),
-            "unauthorized"
+            advertised.args.first().map(String::as_str),
+            Some("mcp-bridge")
         );
-        let authorized = client
-            .get(&advertised.url)
-            .header("Authorization", authorization)
-            .send()
+        let (addr, token) = bridge_parts(server.advertised());
+        assert!(token.len() > 20);
+
+        // A connection with the wrong token is closed without serving MCP.
+        let mut unauthorized = tokio::net::TcpStream::connect(&addr)
             .await
-            .expect("authorized request");
-        assert_ne!(authorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+            .expect("connect with wrong token");
+        unauthorized
+            .write_all(b"wrong-token\n")
+            .await
+            .expect("send wrong token");
+        let mut sink = Vec::new();
+        assert_eq!(
+            unauthorized
+                .read_to_end(&mut sink)
+                .await
+                .expect("server closes unauthorized connection"),
+            0
+        );
+
+        // The advertised token reaches the MCP handler.
+        let stream = tokio::net::TcpStream::connect(&addr)
+            .await
+            .expect("connect with token");
+        let (read, mut write) = stream.into_split();
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "fixture", "version": "1"}
+            }
+        });
+        write
+            .write_all(format!("{token}\n{initialize}\n").as_bytes())
+            .await
+            .expect("send token and initialize");
+        let mut lines = tokio::io::BufReader::new(read).lines();
+        let response = lines
+            .next_line()
+            .await
+            .expect("read initialize response")
+            .expect("connection stays open");
+        assert!(response.contains(REVIEW_MCP_SERVER_NAME), "{response}");
 
         server.shutdown().await;
 
         let (drop_workflow_id, drop_workflow) = start_workflow(22);
-        let drop_server = ReviewHttpServer::start(ReviewDispatch {
+        let drop_server = ReviewMcpServer::start(ReviewDispatch {
             pool: pool.clone(),
             shared_context: Arc::new("review context".to_string()),
             bifrost: BifrostCommand::direct(std::env::current_exe().expect("current executable")),
@@ -3255,9 +3221,19 @@ mod tests {
         })
         .await
         .expect("start disposable server");
-        let cancellation = drop_server.cancellation.clone();
+        let (drop_addr, _) = bridge_parts(drop_server.advertised());
         drop(drop_server);
-        assert!(cancellation.is_cancelled());
+        // Dropping aborts the accept loop; the listener closes shortly after.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::net::TcpStream::connect(&drop_addr).await {
+                Err(_) => break,
+                Ok(_) if std::time::Instant::now() >= deadline => {
+                    panic!("dropped bridge kept accepting connections");
+                }
+                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
         let _ = pool.shutdown_and_wait().await;
     }
 

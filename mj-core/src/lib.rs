@@ -13,6 +13,7 @@ pub mod event;
 pub mod headless;
 pub mod keep_awake;
 pub mod labels;
+pub mod mcp_bridge;
 pub mod memory;
 pub mod model_resolve;
 pub mod orchestrator;
