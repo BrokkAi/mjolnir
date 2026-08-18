@@ -5513,7 +5513,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 Ok(entry) => state.record_status_message(
                     StatusKind::Info,
                     format!(
-                        "saved memory m{} ({}); applies to new Codex sessions",
+                        "saved memory m{} ({}); shared before the next Claude or Codex turn",
                         entry.id,
                         if global { "global" } else { "this project" }
                     ),

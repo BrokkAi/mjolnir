@@ -2709,11 +2709,9 @@ async fn drive_session(
     workspace_roots.extend(additional_directories.iter().cloned());
     let mut next_turn_diff_id = 1_u64;
     let mut session_has_history = resumed;
-    // Stored memories ride the first prompt of this runtime rather than every
-    // turn; entries saved mid-session reach the next session.
-    let mut memory_preamble = memory
-        .as_ref()
-        .and_then(crate::memory::SessionMemory::preamble);
+    // Reread shared knowledge at every turn boundary so concurrent Claude and
+    // Codex sessions observe one another's durable discoveries without restart.
+    let mut last_memory_preamble = None;
     // Prompts that arrived while another operation owned `ui_rx` (a turn, a
     // config update, a session fork). They are replayed here, ahead of any
     // command still sitting in the channel, instead of being dropped: an
@@ -2767,7 +2765,14 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let text = match memory_preamble.take() {
+                let current_memory_preamble = memory
+                    .as_ref()
+                    .and_then(crate::memory::SessionMemory::preamble);
+                let changed_memory = (current_memory_preamble != last_memory_preamble)
+                    .then(|| current_memory_preamble.clone())
+                    .flatten();
+                last_memory_preamble = current_memory_preamble;
+                let text = match changed_memory {
                     Some(preamble) if text.is_empty() => preamble,
                     Some(preamble) => format!("{preamble}\n\n{text}"),
                     None => text,
@@ -2872,11 +2877,7 @@ async fn drive_session(
                         context_usage.reset_for_session();
                         session_has_history = false;
                         next_turn_diff_id = 1;
-                        // The previous session consumed the first-prompt
-                        // memory copy; a fresh session must get one again.
-                        memory_preamble = memory
-                            .as_ref()
-                            .and_then(crate::memory::SessionMemory::preamble);
+                        last_memory_preamble = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(message) => {
@@ -2972,11 +2973,7 @@ async fn drive_session(
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
-                        // A switched-in session behaves like a resume: its
-                        // next prompt carries the current stored memories.
-                        memory_preamble = memory
-                            .as_ref()
-                            .and_then(crate::memory::SessionMemory::preamble);
+                        last_memory_preamble = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
@@ -13041,7 +13038,7 @@ mod tests {
             None,
             None,
             Some(crate::memory::SessionMemory {
-                store_path: store,
+                store_path: store.clone(),
                 project: PathBuf::from("/tmp/proj"),
                 inject: true,
                 tools: false,
@@ -13068,6 +13065,25 @@ mod tests {
             assert_eq!(log[1], "second");
         }
 
+        crate::memory::add(
+            &store,
+            "parser paths are normalized",
+            Some(PathBuf::from("/tmp/proj")),
+        )
+        .expect("publish concurrent knowledge");
+        cmd_tx
+            .send(send("after update"))
+            .expect("send after update");
+        wait_for_prompt_count(&prompts, 3).await;
+        {
+            let log = prompts.lock().expect("prompt log");
+            assert!(
+                log[2].contains("parser paths are normalized"),
+                "live update: {:?}",
+                log[2]
+            );
+        }
+
         let (responder, response) = oneshot::channel();
         cmd_tx
             .send(UiCommand::NewSession { responder })
@@ -13078,15 +13094,15 @@ mod tests {
         );
         wait_for_session_started(&mut ui_rx, "fresh-session").await;
         cmd_tx.send(send("third")).expect("send third");
-        wait_for_prompt_count(&prompts, 3).await;
+        wait_for_prompt_count(&prompts, 4).await;
         {
             let log = prompts.lock().expect("prompt log");
             assert!(
-                log[2].contains("<mj-memory>"),
+                log[3].contains("<mj-memory>"),
                 "fresh-session prompt must carry memories again: {:?}",
-                log[2]
+                log[3]
             );
-            assert!(log[2].ends_with("third"));
+            assert!(log[3].ends_with("third"));
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
