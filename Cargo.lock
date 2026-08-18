@@ -2749,6 +2749,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-width",
+ "url",
  "zip",
 ]
 

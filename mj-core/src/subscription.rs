@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use base64::Engine;
 use serde_json::Value;
 
-pub use mj_core::roster::{Subscription, Subscriptions};
+pub use crate::roster_types::{Subscription, Subscriptions};
 
 /// Detect subscriptions recorded by vendor-native clients.
 pub fn detect() -> Subscriptions {
@@ -88,47 +88,43 @@ fn decode_jwt_claims(token: &str) -> Option<Value> {
 
 fn claude_plan(organization_type: &str, rate_limit_tier: Option<&str>) -> Subscription {
     match (organization_type, rate_limit_tier) {
-        ("claude_max", Some("default_claude_max_20x")) => {
-            mj_core::roster::Subscription::new("Claude Max 20x", 20.0)
-        }
-        ("claude_max", Some("default_claude_max_5x")) => {
-            mj_core::roster::Subscription::new("Claude Max 5x", 5.0)
-        }
+        ("claude_max", Some("default_claude_max_20x")) => Subscription::new("Claude Max 20x", 20.0),
+        ("claude_max", Some("default_claude_max_5x")) => Subscription::new("Claude Max 5x", 5.0),
         // An unrecognized Max tier is read as the smaller one. Understating
         // capacity only forgoes a routing preference; overstating it parks the
         // primary seat on a plan that cannot carry the session.
-        ("claude_max", _) => mj_core::roster::Subscription::new("Claude Max", 5.0),
-        ("claude_team", _) => mj_core::roster::Subscription::new("Claude Team", 1.0),
-        ("claude_enterprise", _) => mj_core::roster::Subscription::new("Claude Enterprise", 1.0),
-        ("claude_pro", _) => mj_core::roster::Subscription::new("Claude Pro", 1.0),
-        (other, _) => mj_core::roster::Subscription::new(format!("Claude ({other})"), 1.0),
+        ("claude_max", _) => Subscription::new("Claude Max", 5.0),
+        ("claude_team", _) => Subscription::new("Claude Team", 1.0),
+        ("claude_enterprise", _) => Subscription::new("Claude Enterprise", 1.0),
+        ("claude_pro", _) => Subscription::new("Claude Pro", 1.0),
+        (other, _) => Subscription::new(format!("Claude ({other})"), 1.0),
     }
 }
 
 fn codex_plan(plan_type: &str) -> Subscription {
     match plan_type {
-        "free" => mj_core::roster::Subscription::new("ChatGPT Free", 0.0),
-        "go" => mj_core::roster::Subscription::new("ChatGPT Go", 0.25),
-        "plus" => mj_core::roster::Subscription::new("ChatGPT Plus", 1.0),
-        "prolite" => mj_core::roster::Subscription::new("ChatGPT Pro Lite", 5.0),
-        "pro" => mj_core::roster::Subscription::new("ChatGPT Pro", 20.0),
+        "free" => Subscription::new("ChatGPT Free", 0.0),
+        "go" => Subscription::new("ChatGPT Go", 0.25),
+        "plus" => Subscription::new("ChatGPT Plus", 1.0),
+        "prolite" => Subscription::new("ChatGPT Pro Lite", 5.0),
+        "pro" => Subscription::new("ChatGPT Pro", 20.0),
         // Seat-priced plans bill per member, so one seat is the entry rung
         // however large the organization behind it is.
         "team" | "business" | "self_serve_business_prolite" | "self_serve_business_usage_based" => {
-            mj_core::roster::Subscription::new("ChatGPT Business", 1.0)
+            Subscription::new("ChatGPT Business", 1.0)
         }
         "enterprise" | "ent26" | "enterprise_cbp_automation" | "enterprise_cbp_usage_based" => {
-            mj_core::roster::Subscription::new("ChatGPT Enterprise", 1.0)
+            Subscription::new("ChatGPT Enterprise", 1.0)
         }
-        "edu" => mj_core::roster::Subscription::new("ChatGPT Edu", 1.0),
-        other => mj_core::roster::Subscription::new(format!("ChatGPT ({other})"), 1.0),
+        "edu" => Subscription::new("ChatGPT Edu", 1.0),
+        other => Subscription::new(format!("ChatGPT ({other})"), 1.0),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_core::roster::AdapterKind;
+    use crate::roster_types::AdapterKind;
 
     fn subscriptions(claude: Option<Subscription>, codex: Option<Subscription>) -> Subscriptions {
         Subscriptions { claude, codex }
@@ -138,15 +134,15 @@ mod tests {
     fn claude_max_tiers_carry_anthropics_published_multipliers() {
         assert_eq!(
             claude_plan("claude_max", Some("default_claude_max_20x")),
-            mj_core::roster::Subscription::new("Claude Max 20x", 20.0)
+            Subscription::new("Claude Max 20x", 20.0)
         );
         assert_eq!(
             claude_plan("claude_max", Some("default_claude_max_5x")),
-            mj_core::roster::Subscription::new("Claude Max 5x", 5.0)
+            Subscription::new("Claude Max 5x", 5.0)
         );
         assert_eq!(
             claude_plan("claude_pro", Some("default_claude_ai")),
-            mj_core::roster::Subscription::new("Claude Pro", 1.0)
+            Subscription::new("Claude Pro", 1.0)
         );
     }
 
@@ -154,11 +150,11 @@ mod tests {
     fn an_unrecognized_max_tier_is_read_as_the_smaller_one() {
         assert_eq!(
             claude_plan("claude_max", Some("default_claude_max_50x")),
-            mj_core::roster::Subscription::new("Claude Max", 5.0)
+            Subscription::new("Claude Max", 5.0)
         );
         assert_eq!(
             claude_plan("claude_forge", None),
-            mj_core::roster::Subscription::new("Claude (claude_forge)", 1.0)
+            Subscription::new("Claude (claude_forge)", 1.0)
         );
     }
 
@@ -172,17 +168,14 @@ mod tests {
             codex_plan("pro").capacity,
             claude_plan("claude_max", Some("default_claude_max_20x")).capacity
         );
-        assert_eq!(
-            codex_plan("free"),
-            mj_core::roster::Subscription::new("ChatGPT Free", 0.0)
-        );
+        assert_eq!(codex_plan("free"), Subscription::new("ChatGPT Free", 0.0));
         assert_eq!(
             codex_plan("self_serve_business_usage_based"),
-            mj_core::roster::Subscription::new("ChatGPT Business", 1.0)
+            Subscription::new("ChatGPT Business", 1.0)
         );
         assert_eq!(
             codex_plan("moonshot"),
-            mj_core::roster::Subscription::new("ChatGPT (moonshot)", 1.0)
+            Subscription::new("ChatGPT (moonshot)", 1.0)
         );
     }
 

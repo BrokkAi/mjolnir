@@ -27,7 +27,6 @@ mod notifications;
 mod onboarding;
 mod orchestrator;
 mod palette;
-mod probe;
 mod pull_request;
 mod qr;
 mod quota;
@@ -43,7 +42,6 @@ mod side;
 mod speech;
 mod spinner;
 mod subagent;
-mod subscription;
 mod tailscale;
 mod term;
 #[cfg(test)]
