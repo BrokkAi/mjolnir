@@ -3,41 +3,39 @@
 //! The CLI wiring lands in #727. Keeping policy and TLS verification here lets
 //! the server work in #728 depend on a small, security-reviewed interface.
 
-#![allow(dead_code)]
-
 use anyhow::{Context, Result, anyhow, bail};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 use tao::event::{Event, WindowEvent};
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 use tao::platform::run_return::EventLoopExtRunReturn;
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 use tao::window::{Icon, WindowBuilder};
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 use wry::{NewWindowResponse, WebView, WebViewBuilder};
 
 const TLS_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
-pub(crate) struct DesktopShellOptions {
+pub struct DesktopShellOptions {
     pub origin: Url,
     /// DER encoding of the private certificate/CA trusted for this invocation.
     pub certificate_der: Vec<u8>,
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DesktopShellExit {
+pub enum DesktopShellExit {
     WindowClosed,
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellEvent {
     Fatal(String),
@@ -148,8 +146,8 @@ fn verify_pinned_tls(options: &DesktopShellOptions) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
-pub(crate) fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
+#[cfg(not(target_os = "android"))]
+pub fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
     let policy = OriginPolicy::new(&options.origin)?;
     verify_pinned_tls(&options)?;
 
@@ -231,7 +229,7 @@ pub(crate) fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
     result
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 fn application_icon() -> Result<Icon> {
     let image = image::load_from_memory_with_format(
         include_bytes!("icons/icon-192.png"),
@@ -242,7 +240,7 @@ fn application_icon() -> Result<Icon> {
     Icon::from_rgba(image.into_raw(), width, height).context("decode Mjolnir application icon")
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 fn handle_navigation(policy: &OriginPolicy, url: &str) -> bool {
     match policy.decide(url) {
         NavigationDecision::Internal => true,

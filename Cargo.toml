@@ -9,7 +9,7 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
 [workspace]
-members = ["voice-worker"]
+members = ["mj-desktop", "voice-worker"]
 default-members = ["."]
 
 # Single source of truth for the release version; both crates inherit it, so
@@ -25,19 +25,7 @@ path = "src/main.rs"
 default = []
 # Kept opt-in until the `mj app` CLI and release packaging land in #727.
 # Android deliberately has no dependency entries for this feature.
-desktop-app = [
-    "dep:block2",
-    "dep:tao",
-    "dep:webbrowser",
-    "dep:wry",
-    "dep:gio",
-    "dep:objc2",
-    "dep:objc2-foundation",
-    "dep:objc2-web-kit",
-    "dep:webkit2gtk",
-    "dep:webview2-com",
-    "dep:windows-core",
-]
+desktop-app = ["dep:mj-desktop"]
 
 [dependencies]
 agent-client-protocol = { version = "1", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
@@ -99,6 +87,11 @@ url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 unicode-width = "0.2.2"
 
+[target.'cfg(not(target_os = "android"))'.dependencies.mj-desktop]
+path = "mj-desktop"
+version = "1.10.1"
+optional = true
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
@@ -107,23 +100,3 @@ http-body-util = "0.1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = "3.4"
-tao = { version = "0.35", default-features = false, features = ["rwh_06", "x11"], optional = true }
-webbrowser = { version = "1.2", optional = true }
-# macOS private-CA trust is installed by the desktop shell because Wry's
-# portable API does not expose it yet. Keep this registry-backed so packaged
-# crates retain a working `desktop-app` feature.
-wry = { version = "0.55.1", optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-block2 = { version = "0.6", optional = true }
-objc2 = { version = "0.6.4", features = ["exception", "disable-encoding-assertions"], optional = true }
-objc2-foundation = { version = "0.3.0", default-features = false, features = ["std", "NSData", "NSObject", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLProtectionSpace", "NSURLRequest", "NSURLSession"], optional = true }
-objc2-web-kit = { version = "0.3.0", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKNavigationAction", "WKNavigationDelegate", "WKWebView"], optional = true }
-
-[target.'cfg(all(target_os = "linux", not(target_os = "android")))'.dependencies]
-gio = { version = "0.18", optional = true }
-webkit2gtk = { version = "=2.0.2", features = ["v2_38"], optional = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-webview2-com = { version = "0.38", optional = true }
-windows-core = { version = "0.61", optional = true }

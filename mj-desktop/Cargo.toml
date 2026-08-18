@@ -1,0 +1,36 @@
+[package]
+name = "mj-desktop"
+version.workspace = true
+edition = "2024"
+rust-version = "1.97"
+description = "Native desktop shell for Mjolnir"
+license = "GPL-3.0-only"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tracing = "0.1"
+url = "2"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tao = { version = "0.35", default-features = false, features = ["rwh_06", "x11"] }
+webbrowser = "1.2"
+wry = "0.55.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = { version = "0.6.4", features = ["exception", "disable-encoding-assertions"] }
+objc2-foundation = { version = "0.3.0", default-features = false, features = ["std", "NSData", "NSObject", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLProtectionSpace", "NSURLRequest", "NSURLSession"] }
+objc2-web-kit = { version = "0.3.0", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKNavigationAction", "WKNavigationDelegate", "WKWebView"] }
+
+[target.'cfg(all(target_os = "linux", not(target_os = "android")))'.dependencies]
+gio = "0.18"
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38"
+windows-core = "0.61"

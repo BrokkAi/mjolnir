@@ -525,7 +525,6 @@ dependencies = [
  "axum",
  "axum-server",
  "base64",
- "block2",
  "chrono",
  "clap",
  "crossterm",
@@ -533,15 +532,12 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.3.4",
- "gio",
  "hmac",
  "http-body-util",
  "iana-time-zone",
  "image",
  "libc",
- "objc2",
- "objc2-foundation",
- "objc2-web-kit",
+ "mj-desktop",
  "qrcode",
  "ratatui",
  "rcgen",
@@ -558,7 +554,6 @@ dependencies = [
  "shell-words",
  "signal-hook",
  "similar",
- "tao",
  "tar",
  "tempfile",
  "time",
@@ -570,11 +565,6 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "url",
- "webbrowser",
- "webkit2gtk",
- "webview2-com",
- "windows-core 0.61.2",
- "wry",
  "zip",
 ]
 
@@ -2722,6 +2712,26 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mj-desktop"
+version = "1.10.1"
+dependencies = [
+ "anyhow",
+ "block2",
+ "gio",
+ "objc2",
+ "objc2-foundation",
+ "objc2-web-kit",
+ "rustls",
+ "tao",
+ "url",
+ "webbrowser",
+ "webkit2gtk",
+ "webview2-com",
+ "windows-core 0.61.2",
+ "wry",
 ]
 
 [[package]]
