@@ -2723,15 +2723,20 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "flate2",
+ "futures",
  "iana-time-zone",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
  "toml",
  "tracing",
  "unicode-width",
+ "zip",
 ]
 
 [[package]]

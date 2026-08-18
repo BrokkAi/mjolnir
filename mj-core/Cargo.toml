@@ -13,15 +13,20 @@ agent-client-protocol = { version = "1", features = ["unstable_session_fork", "u
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
+flate2 = "1"
+futures = "0.3"
 iana-time-zone = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tempfile = "3"
-tokio = { version = "1", features = ["sync"] }
+tar = "0.4"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
 toml = "0.8"
 unicode-width = "0.2.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
