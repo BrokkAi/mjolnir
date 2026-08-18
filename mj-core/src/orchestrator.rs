@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::future::BoxFuture;
+
 use tokio::sync::{mpsc, watch};
 
 use crate::event::SubagentOutcome;
@@ -207,5 +209,23 @@ pub async fn heartbeat_tick(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
+    }
+}
+
+/// Agent-side service queried by the core orchestrator for live progress.
+pub trait SubagentProgressSource: Send + Sync {
+    fn progress_block(&self) -> BoxFuture<'_, Option<String>>;
+}
+
+#[derive(Clone)]
+pub struct SubagentProgressService(Arc<dyn SubagentProgressSource>);
+
+impl SubagentProgressService {
+    pub fn new(service: impl SubagentProgressSource + 'static) -> Self {
+        Self(Arc::new(service))
+    }
+
+    pub async fn progress_block(&self) -> Option<String> {
+        self.0.progress_block().await
     }
 }

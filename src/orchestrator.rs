@@ -13,6 +13,9 @@ use agent_client_protocol::schema::v1::{SessionUpdate, StopReason, UsageUpdate};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use crate::subagent::SubagentRegistry;
+
 use crate::{
     agent_usage::{Record, Seat},
     config::ReviewTier,
@@ -22,8 +25,8 @@ use crate::{
         ReviewTarget, SubagentOutcome, UiCommand, UiEvent, content_block_text,
     },
     subagent::{
-        ActiveSubagentWorkers, SubagentRegistry, SubagentReport, SubagentReportBus,
-        format_progress_wake, format_report_injection,
+        ActiveSubagentWorkers, SubagentReport, SubagentReportBus, format_progress_wake,
+        format_report_injection,
     },
     trajectory::BoundaryTracker,
     workflow::{
@@ -347,7 +350,7 @@ pub struct Config {
     pub subagent_report_bus: SubagentReportBus,
     /// The live subagent pool, asked for a progress snapshot every time the
     /// primary is woken. Empty when no subagent pool is configured.
-    pub subagent_runs: SubagentRegistry,
+    pub subagent_runs: mj_core::orchestrator::SubagentProgressService,
     /// How long a parked primary may go without a report before it is woken
     /// with progress alone. `None` disables the heartbeat.
     pub progress_wake: Option<Duration>,
@@ -2315,7 +2318,9 @@ mod tests {
             active_subagent_workers: ActiveSubagentWorkers::default(),
             subagent_reports: reports,
             subagent_report_bus: bus,
-            subagent_runs: SubagentRegistry::default(),
+            subagent_runs: mj_core::orchestrator::SubagentProgressService::new(
+                SubagentRegistry::default(),
+            ),
             progress_wake: None,
             discrete_review: true,
             review_tier: ReviewTier::Extended,
@@ -3652,7 +3657,9 @@ mod tests {
                 active_subagent_workers: workers.clone(),
                 subagent_reports: reports,
                 subagent_report_bus: bus,
-                subagent_runs: SubagentRegistry::default(),
+                subagent_runs: mj_core::orchestrator::SubagentProgressService::new(
+                    SubagentRegistry::default(),
+                ),
                 progress_wake: None,
                 discrete_review: false,
                 review_tier: ReviewTier::default(),
@@ -3713,7 +3720,7 @@ mod tests {
             active_subagent_workers,
             subagent_reports: reports,
             subagent_report_bus: bus,
-            subagent_runs,
+            subagent_runs: mj_core::orchestrator::SubagentProgressService::new(subagent_runs),
             progress_wake,
             discrete_review: false,
             review_tier: ReviewTier::default(),

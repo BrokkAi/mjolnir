@@ -2336,7 +2336,7 @@ async fn run_session(
             active_subagent_workers: active_implementation_workers.clone(),
             subagent_reports: subagent_report_rx,
             subagent_report_bus: subagent_reports.clone(),
-            subagent_runs,
+            subagent_runs: mj_core::orchestrator::SubagentProgressService::new(subagent_runs),
             progress_wake: orchestrator::progress_wake_interval(
                 subagents_config.progress_wake_minutes,
             ),

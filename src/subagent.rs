@@ -416,9 +416,11 @@ struct SessionSpec {
     model: String,
 }
 
+use futures::future::BoxFuture;
+
 pub use mj_core::orchestrator::{
-    ActiveSubagentWorkers, SubagentReport, SubagentReportBus, format_progress_wake,
-    format_report_block, format_report_elapsed, format_report_injection,
+    ActiveSubagentWorkers, SubagentProgressSource, SubagentReport, SubagentReportBus,
+    format_progress_wake, format_report_block, format_report_elapsed, format_report_injection,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1946,6 +1948,12 @@ impl SubagentRegistry {
         self.retained_order
             .lock()
             .expect("subagent retention order lock poisoned")
+    }
+}
+
+impl SubagentProgressSource for SubagentRegistry {
+    fn progress_block(&self) -> BoxFuture<'_, Option<String>> {
+        Box::pin(async move { SubagentRegistry::progress_block(self).await })
     }
 }
 
