@@ -2781,11 +2781,37 @@ dependencies = [
 name = "mj-remote"
 version = "1.10.1"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
+ "async-trait",
+ "axum",
+ "axum-server",
+ "base64",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "getrandom 0.3.4",
+ "hmac",
+ "http-body-util",
+ "libc",
+ "mj-core",
  "qrcode",
+ "rcgen",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2",
+ "shell-words",
  "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
 ]
 
 [[package]]

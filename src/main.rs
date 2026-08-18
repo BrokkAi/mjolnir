@@ -32,6 +32,7 @@ mod quota;
 mod ragnarok;
 mod ragnarok_sprites;
 mod remote;
+mod remote_host;
 mod roster;
 mod self_update;
 mod session;
@@ -2318,11 +2319,13 @@ async fn run_session(
         Some(ui_event_tx.clone()),
         true,
     );
-    let (ragnarok_observer_tx, mut ragnarok_observer_rx) = mpsc::unbounded_channel();
+    let (ragnarok_observer_tx, mut ragnarok_observer_rx) =
+        mpsc::unbounded_channel::<Option<crate::session_state::RagnarokObservation>>();
     let ragnarok_tracker = remote_tracker.clone();
     let ragnarok_observer_task = tokio::spawn(async move {
         while let Some(observation) = ragnarok_observer_rx.recv().await {
-            ragnarok_tracker.observe_ragnarok(observation);
+            ragnarok_tracker
+                .observe_ragnarok(observation.map(remote::ragnarok_record_from_observation));
         }
     });
     let orchestrated = orchestrator::spawn(

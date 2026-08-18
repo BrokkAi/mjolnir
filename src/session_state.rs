@@ -14,14 +14,7 @@ pub use mj_core::session_state::{
 
 use crate::event::{SessionConfigTarget, TerminalOutputSnapshot};
 
-pub(crate) use crate::app::{
-    ElicitationFormFieldKind, ElicitationView, RagnarokDraftPrStatus, RagnarokObservation,
-    StatusKind, classify_elicitation, is_subagent_transport_call, is_subagent_transport_update,
-    status_transcript_text,
-};
-
-#[cfg(test)]
-pub(crate) use crate::app::{RagnarokFighterObservation, RagnarokVerdictObservation};
+pub(crate) use crate::app::{RagnarokDraftPrStatus, RagnarokObservation};
 
 #[derive(Debug)]
 pub struct SessionState {

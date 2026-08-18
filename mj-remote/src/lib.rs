@@ -1,7 +1,12 @@
 //! Remote-control server and web viewer for Mjolnir.
 
 mod qr;
+pub mod remote;
+#[allow(dead_code)]
+mod settings;
 mod tailscale;
+
+pub use remote::*;
 
 pub use qr::render_qr;
 pub use tailscale::Tailscale;

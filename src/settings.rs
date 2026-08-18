@@ -159,13 +159,6 @@ impl SettingsEditor {
             .unwrap_or_else(|| self.selected.min(self.row_count().saturating_sub(1)));
     }
 
-    /// Discovered ACP inventory backing the editor's server and session rows.
-    /// The remote-control server projects it into the web `/mjconfig` panel so
-    /// both UIs describe the same servers with the same status strings.
-    pub(crate) fn inventory(&self) -> &AcpInventory {
-        &self.inventory
-    }
-
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
         match code {
             KeyCode::Esc => SettingsAction::Cancel,
@@ -738,36 +731,6 @@ impl SettingsEditor {
             }
         }
         choices
-    }
-
-    pub(crate) fn staged_model_detail(&self, model: &str) -> String {
-        if model == "auto" {
-            return "automatic selection".to_string();
-        }
-        if model == crate::config::DISABLED_MODEL {
-            return "role disabled".to_string();
-        }
-        let Some(choice) = self.choices.iter().find(|choice| choice.model == model) else {
-            return "saved model; not reported this session".to_string();
-        };
-        if !choice.available {
-            return format!(
-                "unavailable: {}",
-                choice
-                    .disabled_reason
-                    .as_deref()
-                    .unwrap_or("no launchable ACP route")
-            );
-        }
-        if choice.ranked {
-            format!(
-                "Pass@1 {:.1}%; ${:.2}",
-                choice.pass_at_1 * 100.0,
-                choice.mean_cost_usd
-            )
-        } else {
-            "unranked".to_string()
-        }
     }
 
     pub(crate) fn staged_model_warning(&self, model: &str) -> Option<String> {

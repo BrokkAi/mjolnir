@@ -1,10 +1,258 @@
 //! Frontend-neutral ACP session-state helpers.
 
 use agent_client_protocol::schema::v1::{
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
+    ElicitationMode, ElicitationPropertySchema, EnumOption, MultiSelectItems, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
     SessionConfigSelectOptions, SessionConfigValueId,
 };
 
+use crate::event::ElicitationPrompt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    Info,
+    Warning,
+    Fatal,
+}
+
+pub fn status_transcript_text(kind: StatusKind, text: &str) -> String {
+    match kind {
+        StatusKind::Info => text.to_string(),
+        StatusKind::Warning => format!("warning: {text}"),
+        StatusKind::Fatal => format!("fatal: {text}"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElicitationFormField {
+    pub property_name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub required: bool,
+    pub kind: ElicitationFormFieldKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ElicitationFormFieldKind {
+    SingleSelect {
+        options: Vec<EnumOption>,
+    },
+    MultiSelect {
+        options: Vec<EnumOption>,
+        min_items: Option<u64>,
+        max_items: Option<u64>,
+    },
+    Text,
+    Number {
+        minimum: Option<f64>,
+        maximum: Option<f64>,
+    },
+    Integer {
+        minimum: Option<i64>,
+        maximum: Option<i64>,
+    },
+    Boolean,
+}
+
+/// How a pending elicitation should be rendered and resolved, derived once
+/// from its mode + schema so the renderer and the key handler agree on the
+/// interpretation. Owned data keeps both call sites borrow-free.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ElicitationView {
+    /// Single-select form: exactly one property, a `StringPropertySchema`
+    /// with a non-empty `oneOf` or `enum`. Accept maps `{ property => String(value) }`.
+    SingleSelect {
+        property_name: String,
+        title: Option<String>,
+        options: Vec<EnumOption>,
+    },
+    /// URL/QR step (e.g. OAuth login). Accept carries no content.
+    Url { url: String },
+    /// Free-text form: exactly one property, a `StringPropertySchema` with no
+    /// `oneOf`/`enum` (e.g. an API-key entry). Accept maps
+    /// `{ property => String(typed_value) }`.
+    Text {
+        property_name: String,
+        title: Option<String>,
+        description: Option<String>,
+    },
+    /// A form with multiple properties, or a single multi-select property.
+    /// Fields are presented in schema order and accumulated into one Accept.
+    Form {
+        title: Option<String>,
+        fields: Vec<ElicitationFormField>,
+    },
+    /// Any shape the UI cannot render (an enum with no options or a future
+    /// schema variant). The modal shows an informational message and resolves
+    /// to `decline` on dismiss.
+    Unsupported,
+}
+
+/// Classify an elicitation prompt into the renderable/resolvable view. Never
+/// panics on an unexpected schema: unsupported primitive or future variants
+/// become [`ElicitationView::Unsupported`].
+pub fn classify_elicitation(prompt: &ElicitationPrompt) -> ElicitationView {
+    match &prompt.mode {
+        ElicitationMode::Url(url_mode) => ElicitationView::Url {
+            url: url_mode.url.clone(),
+        },
+        ElicitationMode::Form(form) => {
+            let schema = &form.requested_schema;
+            if schema.properties.is_empty() {
+                return ElicitationView::Unsupported;
+            }
+            if schema.properties.len() > 1
+                || matches!(
+                    schema.properties.values().next(),
+                    Some(
+                        ElicitationPropertySchema::Array(_)
+                            | ElicitationPropertySchema::Number(_)
+                            | ElicitationPropertySchema::Integer(_)
+                            | ElicitationPropertySchema::Boolean(_)
+                    )
+                )
+            {
+                let required = schema.required.as_deref().unwrap_or_default();
+                let mut fields = Vec::with_capacity(schema.properties.len());
+                for (property_name, property) in &schema.properties {
+                    let field = match property {
+                        ElicitationPropertySchema::String(string_schema) => {
+                            let options = string_schema
+                                .one_of
+                                .clone()
+                                .filter(|options| !options.is_empty())
+                                .or_else(|| {
+                                    string_schema.enum_values.as_ref().and_then(|values| {
+                                        (!values.is_empty()).then(|| {
+                                            values
+                                                .iter()
+                                                .map(|value| {
+                                                    EnumOption::new(value.clone(), value.clone())
+                                                })
+                                                .collect()
+                                        })
+                                    })
+                                });
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: string_schema.title.clone(),
+                                description: string_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: options.map_or(ElicitationFormFieldKind::Text, |options| {
+                                    ElicitationFormFieldKind::SingleSelect { options }
+                                }),
+                            }
+                        }
+                        ElicitationPropertySchema::Array(array_schema) => {
+                            let options = match &array_schema.items {
+                                MultiSelectItems::Titled(items) => items.options.clone(),
+                                MultiSelectItems::Untitled(items) => items
+                                    .values
+                                    .iter()
+                                    .map(|value| EnumOption::new(value.clone(), value.clone()))
+                                    .collect(),
+                                _ => return ElicitationView::Unsupported,
+                            };
+                            if options.is_empty() {
+                                return ElicitationView::Unsupported;
+                            }
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: array_schema.title.clone(),
+                                description: array_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: ElicitationFormFieldKind::MultiSelect {
+                                    options,
+                                    min_items: array_schema.min_items,
+                                    max_items: array_schema.max_items,
+                                },
+                            }
+                        }
+                        ElicitationPropertySchema::Number(number_schema) => ElicitationFormField {
+                            property_name: property_name.clone(),
+                            title: number_schema.title.clone(),
+                            description: number_schema.description.clone(),
+                            required: required.contains(property_name),
+                            kind: ElicitationFormFieldKind::Number {
+                                minimum: number_schema.minimum,
+                                maximum: number_schema.maximum,
+                            },
+                        },
+                        ElicitationPropertySchema::Integer(integer_schema) => {
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: integer_schema.title.clone(),
+                                description: integer_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: ElicitationFormFieldKind::Integer {
+                                    minimum: integer_schema.minimum,
+                                    maximum: integer_schema.maximum,
+                                },
+                            }
+                        }
+                        ElicitationPropertySchema::Boolean(boolean_schema) => {
+                            ElicitationFormField {
+                                property_name: property_name.clone(),
+                                title: boolean_schema.title.clone(),
+                                description: boolean_schema.description.clone(),
+                                required: required.contains(property_name),
+                                kind: ElicitationFormFieldKind::Boolean,
+                            }
+                        }
+                        _ => return ElicitationView::Unsupported,
+                    };
+                    fields.push(field);
+                }
+                return ElicitationView::Form {
+                    title: schema.title.clone(),
+                    fields,
+                };
+            }
+            let Some((property_name, property)) = schema.properties.iter().next() else {
+                return ElicitationView::Unsupported;
+            };
+            match property {
+                ElicitationPropertySchema::String(string_schema) => {
+                    let one_of_options = string_schema
+                        .one_of
+                        .as_ref()
+                        .filter(|opts| !opts.is_empty());
+                    let enum_options = string_schema
+                        .enum_values
+                        .as_ref()
+                        .filter(|opts| !opts.is_empty());
+                    match (one_of_options, enum_options) {
+                        (Some(options), _) => ElicitationView::SingleSelect {
+                            property_name: property_name.clone(),
+                            // Prefer the per-property title, falling back to the
+                            // schema-level title for the modal heading.
+                            title: string_schema.title.clone().or_else(|| schema.title.clone()),
+                            options: options.clone(),
+                        },
+                        (None, Some(values)) => ElicitationView::SingleSelect {
+                            property_name: property_name.clone(),
+                            title: string_schema.title.clone().or_else(|| schema.title.clone()),
+                            options: values
+                                .iter()
+                                .map(|value| EnumOption::new(value.clone(), value.clone()))
+                                .collect(),
+                        },
+                        // A string field without `oneOf` or `enum` is free
+                        // text: render an input field (e.g. API-key entry).
+                        _ => ElicitationView::Text {
+                            property_name: property_name.clone(),
+                            title: string_schema.title.clone().or_else(|| schema.title.clone()),
+                            description: string_schema.description.clone(),
+                        },
+                    }
+                }
+                _ => ElicitationView::Unsupported,
+            }
+        }
+        // `ElicitationMode` is `#[non_exhaustive]`; future modes degrade safely.
+        _ => ElicitationView::Unsupported,
+    }
+}
 /// One displayed value for a select-style session config option.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigValueChoice {
