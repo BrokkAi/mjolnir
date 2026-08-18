@@ -13,6 +13,10 @@
       "minimum": 51.5,
       "reason": "The binary entrypoint is exercised primarily through PTY and end-to-end process tests; the keep-awake config plumbing added entrypoint-only lines and per-run coverage varies ~0.2pt with PTY test timing."
     },
+    "src/headless.rs": {
+      "minimum": 66.5,
+      "reason": "Remaining branches require live ACP adapters and subprocess-driven headless sessions; package-wide instrumentation can vary with process timing."
+    },
     "src/pull_request.rs": {
       "minimum": 0.0,
       "reason": "This boundary shells out to an authenticated GitHub CLI and needs a hermetic integration harness."
@@ -24,6 +28,10 @@
     "src/ragnarok.rs": {
       "minimum": 62.5,
       "reason": "Full battle paths require multiple real ACP runtimes, git worktrees, timers, and GitHub or git subprocesses."
+    },
+    "src/remote_host.rs": {
+      "minimum": 0.0,
+      "reason": "This host adapter launches real ACP, subagent, review, side-session, and worktree runtimes; its behavior is covered through remote API tests while a hermetic multi-runtime harness remains future work."
     },
     "src/self_update.rs": {
       "minimum": 69.5,
