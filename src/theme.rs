@@ -1,3 +1,3 @@
-//! Terminal theme configuration re-exported from the core config model.
+//! Compatibility re-exports for the terminal frontend.
 
-pub use mj_core::theme::*;
+pub use mj_tui::theme::*;

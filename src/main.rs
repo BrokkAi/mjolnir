@@ -8,51 +8,37 @@ mod acp;
 mod agent_instructions;
 mod agent_usage;
 mod app;
-mod auth;
 mod claude_token;
 mod claude_usage;
-mod clipboard;
 mod codex_usage;
 mod config;
+#[cfg(test)]
 mod deepswe;
 mod discrete_review;
 mod event;
 mod headless;
-mod ink;
 mod keep_awake;
 mod labels;
 mod memory;
 mod menu;
-mod notifications;
 mod onboarding;
 mod orchestrator;
 mod palette;
-mod pull_request;
 mod quota;
 mod ragnarok;
-mod ragnarok_sprites;
 mod remote;
 mod remote_host;
 mod roster;
 mod self_update;
 mod session;
 mod session_state;
-mod settings;
 mod side;
-mod speech;
 mod spinner;
 mod subagent;
-mod term;
-#[cfg(test)]
-mod terminal_output;
 mod terminal_palette;
 mod termination;
-mod text;
 mod theme;
 mod ui;
-mod usage_format;
-mod version;
-mod workflow;
 mod workspace_snapshot;
 mod worktree;
 
@@ -2916,9 +2902,7 @@ fn isolated_subagent_roles(
     Ok((roles, guard))
 }
 
-fn setup_session_terminal(
-    mode: UiMode,
-) -> Result<ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>> {
+fn setup_session_terminal(mode: UiMode) -> Result<mj_tui::Terminal> {
     match mode {
         UiMode::InlineChat => {
             ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")
@@ -2927,17 +2911,14 @@ fn setup_session_terminal(
     }
 }
 
-fn restore_session_terminal(
-    terminal: &mut ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>,
-    mode: UiMode,
-) -> Result<()> {
+fn restore_session_terminal(terminal: &mut mj_tui::Terminal, mode: UiMode) -> Result<()> {
     match mode {
         UiMode::InlineChat => ui::restore_inline_chat_terminal(terminal),
         UiMode::FullscreenTui => ui::restore_fullscreen_terminal(terminal),
     }
 }
 
-type Terminal = ratatui::Terminal<crate::term::TrackedBackend<std::io::Stdout>>;
+type Terminal = mj_tui::Terminal;
 
 /// A restoration operation owned alongside the terminal it cleans up.
 ///

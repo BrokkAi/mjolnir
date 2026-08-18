@@ -1,3 +1,3 @@
-//! Spinner configuration and frame data re-exported from the core config model.
+//! Compatibility re-exports for the terminal frontend.
 
-pub use mj_core::spinner::*;
+pub use mj_tui::spinner::*;

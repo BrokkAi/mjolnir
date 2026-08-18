@@ -1,12 +1,12 @@
 //! Frontend-neutral ACP session-state helpers.
 
 use agent_client_protocol::schema::v1::{
-    ElicitationMode, ElicitationPropertySchema, EnumOption, MultiSelectItems, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
-    SessionConfigSelectOptions, SessionConfigValueId,
+    ElicitationContentValue, ElicitationMode, ElicitationPropertySchema, EnumOption,
+    MultiSelectItems, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelect, SessionConfigSelectOptions, SessionConfigValueId,
 };
 
-use crate::event::ElicitationPrompt;
+use crate::event::{ElicitationOutcome, ElicitationPrompt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
@@ -404,4 +404,108 @@ mod tests {
         );
         assert_eq!(config_option_choices(&option).unwrap()[0].name, "Sonnet");
     }
+}
+
+const REMOTE_ELICITATION_ACCEPT_PREFIX: &str = "elicitation:accept:";
+const REMOTE_ELICITATION_CANCEL: &str = "elicitation:cancel";
+const REMOTE_ELICITATION_DECLINE: &str = "elicitation:decline";
+
+/// Validate a viewer-supplied decision against the prompt it claims to answer
+/// and project it onto an [`ElicitationOutcome`]. `None` rejects the decision:
+/// the content must satisfy the prompt's own schema, so a stale or malformed
+/// payload is dropped rather than answered with something the agent never
+/// offered. Shared by the `mj server` loop and the TUI's remote-decision path.
+pub fn remote_elicitation_outcome(
+    prompt: &ElicitationPrompt,
+    option_id: &str,
+) -> Option<ElicitationOutcome> {
+    if option_id == REMOTE_ELICITATION_CANCEL {
+        return Some(ElicitationOutcome::Cancel);
+    }
+    if option_id == REMOTE_ELICITATION_DECLINE {
+        return Some(ElicitationOutcome::Decline);
+    }
+    let encoded = option_id.strip_prefix(REMOTE_ELICITATION_ACCEPT_PREFIX)?;
+    let content: std::collections::BTreeMap<String, ElicitationContentValue> =
+        serde_json::from_str(encoded).ok()?;
+    let valid = match classify_elicitation(prompt) {
+        ElicitationView::SingleSelect {
+            property_name,
+            options,
+            ..
+        } => content.len() == 1
+            && content.get(&property_name).is_some_and(|value| {
+                let ElicitationContentValue::String(value) = value else {
+                    return false;
+                };
+                options.iter().any(|option| option.value == *value)
+            }),
+        ElicitationView::Text { property_name, .. } => content.len() == 1
+            && content.get(&property_name).is_some_and(|value| {
+                matches!(value, ElicitationContentValue::String(value) if !value.trim().is_empty())
+            }),
+        ElicitationView::Url { .. } => content.is_empty(),
+        ElicitationView::Form { fields, .. } => {
+            content.keys().all(|name| fields.iter().any(|field| field.property_name == *name))
+                && fields.iter().all(|field| {
+                    let value = content.get(&field.property_name);
+                    if value.is_none() {
+                        return !field.required;
+                    }
+                    match (&field.kind, value.expect("checked above")) {
+                        (
+                            ElicitationFormFieldKind::SingleSelect { options },
+                            ElicitationContentValue::String(value),
+                        ) => options.iter().any(|option| option.value == *value),
+                        (
+                            ElicitationFormFieldKind::MultiSelect {
+                                options,
+                                min_items,
+                                max_items,
+                            },
+                            ElicitationContentValue::StringArray(values),
+                        ) => {
+                            min_items.is_none_or(|minimum| values.len() as u64 >= minimum)
+                                && max_items.is_none_or(|maximum| values.len() as u64 <= maximum)
+                                && values.iter().all(|value| {
+                                    options.iter().any(|option| option.value == *value)
+                                })
+                        }
+                        (
+                            ElicitationFormFieldKind::Text,
+                            ElicitationContentValue::String(value),
+                        ) => !field.required || !value.trim().is_empty(),
+                        (
+                            ElicitationFormFieldKind::Number { minimum, maximum },
+                            ElicitationContentValue::Number(value),
+                        ) => {
+                            minimum.is_none_or(|minimum| *value >= minimum)
+                                && maximum.is_none_or(|maximum| *value <= maximum)
+                        }
+                        (
+                            ElicitationFormFieldKind::Number { minimum, maximum },
+                            ElicitationContentValue::Integer(value),
+                        ) => {
+                            let value = *value as f64;
+                            minimum.is_none_or(|minimum| value >= minimum)
+                                && maximum.is_none_or(|maximum| value <= maximum)
+                        }
+                        (
+                            ElicitationFormFieldKind::Integer { minimum, maximum },
+                            ElicitationContentValue::Integer(value),
+                        ) => {
+                            minimum.is_none_or(|minimum| *value >= minimum)
+                                && maximum.is_none_or(|maximum| *value <= maximum)
+                        }
+                        (
+                            ElicitationFormFieldKind::Boolean,
+                            ElicitationContentValue::Boolean(_),
+                        ) => true,
+                        _ => false,
+                    }
+                })
+        }
+        ElicitationView::Unsupported => false,
+    };
+    valid.then_some(ElicitationOutcome::Accept(content))
 }

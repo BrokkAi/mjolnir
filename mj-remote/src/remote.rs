@@ -9,11 +9,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use agent_client_protocol::schema::v1::ElicitationContentValue;
+
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, AvailableCommandInput, ContentBlock, Diff, ElicitationContentValue,
-    PermissionOptionKind, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate,
-    ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
+    AvailableCommand, AvailableCommandInput, ContentBlock, Diff, PermissionOptionKind,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionUpdate, ToolCallContent,
+    ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
@@ -4184,8 +4187,11 @@ fn remote_elicitation_record(prompt: &ElicitationPrompt) -> Option<RemoteElicita
     }
 }
 
+#[cfg(test)]
 const REMOTE_ELICITATION_ACCEPT_PREFIX: &str = "elicitation:accept:";
+#[cfg(test)]
 const REMOTE_ELICITATION_CANCEL: &str = "elicitation:cancel";
+#[cfg(test)]
 const REMOTE_ELICITATION_DECLINE: &str = "elicitation:decline";
 
 /// Validate a viewer-supplied decision against the prompt it claims to answer
@@ -4197,96 +4203,7 @@ pub fn remote_elicitation_outcome(
     prompt: &ElicitationPrompt,
     option_id: &str,
 ) -> Option<ElicitationOutcome> {
-    use mj_core::session_state::{ElicitationFormFieldKind, ElicitationView};
-
-    if option_id == REMOTE_ELICITATION_CANCEL {
-        return Some(ElicitationOutcome::Cancel);
-    }
-    if option_id == REMOTE_ELICITATION_DECLINE {
-        return Some(ElicitationOutcome::Decline);
-    }
-    let encoded = option_id.strip_prefix(REMOTE_ELICITATION_ACCEPT_PREFIX)?;
-    let content: BTreeMap<String, ElicitationContentValue> = serde_json::from_str(encoded).ok()?;
-    let valid = match mj_core::session_state::classify_elicitation(prompt) {
-        ElicitationView::SingleSelect {
-            property_name,
-            options,
-            ..
-        } => content.len() == 1
-            && content.get(&property_name).is_some_and(|value| {
-                let ElicitationContentValue::String(value) = value else {
-                    return false;
-                };
-                options.iter().any(|option| option.value == *value)
-            }),
-        ElicitationView::Text { property_name, .. } => content.len() == 1
-            && content.get(&property_name).is_some_and(|value| {
-                matches!(value, ElicitationContentValue::String(value) if !value.trim().is_empty())
-            }),
-        ElicitationView::Url { .. } => content.is_empty(),
-        ElicitationView::Form { fields, .. } => {
-            content.keys().all(|name| fields.iter().any(|field| field.property_name == *name))
-                && fields.iter().all(|field| {
-                    let value = content.get(&field.property_name);
-                    if value.is_none() {
-                        return !field.required;
-                    }
-                    match (&field.kind, value.expect("checked above")) {
-                        (
-                            ElicitationFormFieldKind::SingleSelect { options },
-                            ElicitationContentValue::String(value),
-                        ) => options.iter().any(|option| option.value == *value),
-                        (
-                            ElicitationFormFieldKind::MultiSelect {
-                                options,
-                                min_items,
-                                max_items,
-                            },
-                            ElicitationContentValue::StringArray(values),
-                        ) => {
-                            min_items.is_none_or(|minimum| values.len() as u64 >= minimum)
-                                && max_items.is_none_or(|maximum| values.len() as u64 <= maximum)
-                                && values.iter().all(|value| {
-                                    options.iter().any(|option| option.value == *value)
-                                })
-                        }
-                        (
-                            ElicitationFormFieldKind::Text,
-                            ElicitationContentValue::String(value),
-                        ) => !field.required || !value.trim().is_empty(),
-                        (
-                            ElicitationFormFieldKind::Number { minimum, maximum },
-                            ElicitationContentValue::Number(value),
-                        ) => {
-                            minimum.is_none_or(|minimum| *value >= minimum)
-                                && maximum.is_none_or(|maximum| *value <= maximum)
-                        }
-                        (
-                            ElicitationFormFieldKind::Number { minimum, maximum },
-                            ElicitationContentValue::Integer(value),
-                        ) => {
-                            let value = *value as f64;
-                            minimum.is_none_or(|minimum| value >= minimum)
-                                && maximum.is_none_or(|maximum| value <= maximum)
-                        }
-                        (
-                            ElicitationFormFieldKind::Integer { minimum, maximum },
-                            ElicitationContentValue::Integer(value),
-                        ) => {
-                            minimum.is_none_or(|minimum| *value >= minimum)
-                                && maximum.is_none_or(|maximum| *value <= maximum)
-                        }
-                        (
-                            ElicitationFormFieldKind::Boolean,
-                            ElicitationContentValue::Boolean(_),
-                        ) => true,
-                        _ => false,
-                    }
-                })
-        }
-        ElicitationView::Unsupported => false,
-    };
-    valid.then_some(ElicitationOutcome::Accept(content))
+    mj_core::session_state::remote_elicitation_outcome(prompt, option_id)
 }
 
 fn namespace_remote_id(prefix: Option<&str>, id: &str) -> String {

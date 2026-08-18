@@ -1,3 +1,3 @@
-//! Compatibility re-exports for stable ACP labels.
+//! Compatibility re-exports for the terminal frontend.
 
-pub use mj_core::labels::*;
+pub use mj_tui::labels::*;
