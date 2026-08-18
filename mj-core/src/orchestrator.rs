@@ -378,3 +378,29 @@ impl ReviewSpawner {
         (self.0)(job, events, cancel, outcomes)
     }
 }
+
+pub fn review_section_limits(trajectory_len: usize, diff_len: usize) -> (usize, usize) {
+    const TOTAL: usize = 128 * 1024;
+    const TRAJECTORY_SHARE: usize = 32 * 1024;
+    let mut trajectory = trajectory_len.min(TRAJECTORY_SHARE);
+    let mut diff = diff_len.min(TOTAL - TRAJECTORY_SHARE);
+    let mut remaining = TOTAL.saturating_sub(trajectory + diff);
+    let diff_extra = diff_len.saturating_sub(diff).min(remaining);
+    diff += diff_extra;
+    remaining -= diff_extra;
+    trajectory += trajectory_len.saturating_sub(trajectory).min(remaining);
+    (trajectory, diff)
+}
+
+pub fn bound_review_section(text: &str, limit: usize, label: &str) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let marker = format!("\n…[{label} omitted]…\n");
+    let available = limit.saturating_sub(marker.len());
+    let head = available.saturating_mul(3) / 4;
+    let tail = available.saturating_sub(head);
+    let head_end = text.floor_char_boundary(head);
+    let tail_start = text.ceil_char_boundary(text.len().saturating_sub(tail));
+    format!("{}{}{}", &text[..head_end], marker, &text[tail_start..])
+}

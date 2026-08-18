@@ -1938,10 +1938,10 @@ fn post_review_recap_prompt(
 fn discrete_review_context(delta: Option<&WorkspaceDelta>, trajectory: String) -> String {
     let diff = review_diff(delta);
     let (trajectory_limit, diff_limit) =
-        crate::discrete_review::review_section_limits(trajectory.len(), diff.len());
+        mj_core::orchestrator::review_section_limits(trajectory.len(), diff.len());
     let trajectory =
-        crate::discrete_review::bound_review_section(&trajectory, trajectory_limit, "trajectory");
-    let diff = crate::discrete_review::bound_review_section(&diff, diff_limit, "workspace diff");
+        mj_core::orchestrator::bound_review_section(&trajectory, trajectory_limit, "trajectory");
+    let diff = mj_core::orchestrator::bound_review_section(&diff, diff_limit, "workspace diff");
     format!(
         "<trajectory projection=\"compact; tool results and edit diffs omitted\">\n{trajectory}\n</trajectory>\n\n<workspace_diff scope=\"same-user-turn; cumulative\">\n{diff}\n</workspace_diff>"
     )
