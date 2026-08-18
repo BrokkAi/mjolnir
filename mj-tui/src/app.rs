@@ -1046,6 +1046,17 @@ pub struct MjConfigMenu {
     orig_thought_output: crate::config::ThoughtOutput,
 }
 
+/// Mouse drag selection over the fullscreen transcript panel, in terminal
+/// screen coordinates. Exists only between left-button press and release;
+/// the release copies the covered text to the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptSelection {
+    /// Cell where the drag started.
+    pub anchor: (u16, u16),
+    /// Cell the pointer last reached.
+    pub head: (u16, u16),
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub theme_kind: TerminalThemeKind,
@@ -1265,6 +1276,16 @@ pub struct AppState {
     pub help_scroll: u16,
     /// True while mouse capture is disabled so the terminal can select text.
     pub text_selection_mode: bool,
+    /// In-progress mouse drag selection over the fullscreen transcript panel.
+    /// Cleared (and copied to the clipboard) on mouse-up.
+    pub transcript_selection: Option<TranscriptSelection>,
+    /// Screen area `(x, y, width, height)` of the transcript panel, captured
+    /// each frame so mouse events can be mapped onto the visible text.
+    pub transcript_panel_area: Option<(u16, u16, u16, u16)>,
+    /// Per-cell symbols of the visible transcript rows, captured at draw time
+    /// while a selection is active. Continuation cells of wide graphemes hold
+    /// empty strings so cell columns stay aligned with screen columns.
+    pub transcript_panel_grid: Vec<Vec<String>>,
     /// Project shown in the bottom status line so users can tell which
     /// checkout this session belongs to without leaking nested worktree paths.
     pub project_label: String,
@@ -2050,6 +2071,9 @@ impl AppState {
             help_overlay: false,
             help_scroll: 0,
             text_selection_mode: false,
+            transcript_selection: None,
+            transcript_panel_area: None,
+            transcript_panel_grid: Vec::new(),
             project_label: String::new(),
             worktree_label: None,
             additional_roots: 0,

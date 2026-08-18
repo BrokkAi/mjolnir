@@ -23,7 +23,8 @@ use anyhow::{Context, Result};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -48,8 +49,8 @@ use crate::app::{
     PRIMARY_EFFORT_OPTIONS, PastedAttachment, PastedImageAttachment, PendingElicitation,
     PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
     RagnarokFighterUi, RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus,
-    TeamPickerStep, ToolCallOutput, TranscriptSearch, UiExitReason, WorkspaceFile,
-    classify_elicitation, config_option_choices, config_option_current_value_label,
+    TeamPickerStep, ToolCallOutput, TranscriptSearch, TranscriptSelection, UiExitReason,
+    WorkspaceFile, classify_elicitation, config_option_choices, config_option_current_value_label,
     file_mention_text, primary_effort_value, workspace_file_candidates,
 };
 use crate::clipboard::{
@@ -3724,7 +3725,169 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
                 .scroll_offset
                 .saturating_sub(TRANSCRIPT_SCROLL_WHEEL_STEP);
         }
+        MouseEventKind::Down(MouseButton::Left) => {
+            state.transcript_selection = transcript_panel_contains(state, mouse.column, mouse.row)
+                .then_some(TranscriptSelection {
+                    anchor: (mouse.column, mouse.row),
+                    head: (mouse.column, mouse.row),
+                });
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(head) = clamp_to_transcript_panel(state, mouse.column, mouse.row)
+                && let Some(selection) = state.transcript_selection.as_mut()
+            {
+                selection.head = head;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(selection) = state.transcript_selection.take()
+                && selection.anchor != selection.head
+                && let Some(area) = state.transcript_panel_area
+            {
+                let text = selection_text(&state.transcript_panel_grid, area, &selection);
+                if !text.is_empty() {
+                    copy_text_to_clipboard(state, &text, Some("selection"));
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+/// Drop the drag selection and the captured panel geometry whenever another
+/// surface (viewer, arena) replaces the transcript: the previous frame's
+/// coordinates no longer describe what is on screen.
+fn invalidate_transcript_selection(state: &mut AppState) {
+    state.transcript_selection = None;
+    state.transcript_panel_area = None;
+    if !state.transcript_panel_grid.is_empty() {
+        state.transcript_panel_grid = Vec::new();
+    }
+}
+
+fn transcript_panel_contains(state: &AppState, x: u16, y: u16) -> bool {
+    state
+        .transcript_panel_area
+        .is_some_and(|(px, py, width, height)| {
+            width > 0 && height > 0 && x >= px && x < px + width && y >= py && y < py + height
+        })
+}
+
+/// Clamp a pointer position to the transcript panel so a drag that leaves the
+/// panel keeps selecting the nearest edge cell instead of dropping the drag.
+fn clamp_to_transcript_panel(state: &AppState, x: u16, y: u16) -> Option<(u16, u16)> {
+    let (px, py, width, height) = state.transcript_panel_area?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((x.clamp(px, px + width - 1), y.clamp(py, py + height - 1)))
+}
+
+/// Order selection endpoints into reading order: top-to-bottom, then
+/// left-to-right within a row.
+fn ordered_selection(selection: &TranscriptSelection) -> ((u16, u16), (u16, u16)) {
+    let (ax, ay) = selection.anchor;
+    let (hx, hy) = selection.head;
+    if (ay, ax) <= (hy, hx) {
+        (selection.anchor, selection.head)
+    } else {
+        (selection.head, selection.anchor)
+    }
+}
+
+/// Extract the text covered by a screen-space selection from the captured
+/// panel grid. Interior rows are taken whole; the first and last rows are
+/// sliced at the selection endpoints (inclusive). Rows are right-trimmed so
+/// the viewport's width padding never reaches the clipboard.
+fn selection_text(
+    grid: &[Vec<String>],
+    area: (u16, u16, u16, u16),
+    selection: &TranscriptSelection,
+) -> String {
+    let (px, py, _, _) = area;
+    let ((sx, sy), (ex, ey)) = ordered_selection(selection);
+    let mut rows = Vec::new();
+    for y in sy..=ey {
+        let Some(cells) = y.checked_sub(py).and_then(|row| grid.get(usize::from(row))) else {
+            continue;
+        };
+        let start = if y == sy {
+            usize::from(sx.saturating_sub(px))
+        } else {
+            0
+        };
+        let end = if y == ey {
+            usize::from(ex.saturating_sub(px)) + 1
+        } else {
+            cells.len()
+        }
+        .min(cells.len());
+        let row = if start < end {
+            cells[start..end].concat()
+        } else {
+            String::new()
+        };
+        rows.push(row.trim_end().to_string());
+    }
+    let text = rows.join("\n");
+    if text.trim().is_empty() {
+        String::new()
+    } else {
+        text
+    }
+}
+
+/// Snapshot the panel's rendered cells so mouse-up can copy exactly what the
+/// user sees. Continuation cells of wide graphemes become empty strings, which
+/// keeps cell indices aligned with screen columns while `concat` reassembles
+/// the text without phantom padding.
+fn capture_transcript_panel_grid(buf: &ratatui::buffer::Buffer, inner: Rect) -> Vec<Vec<String>> {
+    let mut grid = Vec::with_capacity(usize::from(inner.height));
+    for y in inner.top()..inner.bottom() {
+        let mut row = Vec::with_capacity(usize::from(inner.width));
+        let mut skip = 0usize;
+        for x in inner.left()..inner.right() {
+            if skip > 0 {
+                skip -= 1;
+                row.push(String::new());
+                continue;
+            }
+            let symbol = buf
+                .cell(Position::new(x, y))
+                .map(|cell| cell.symbol().to_string())
+                .unwrap_or_default();
+            skip = symbol.width().saturating_sub(1);
+            row.push(symbol);
+        }
+        grid.push(row);
+    }
+    grid
+}
+
+/// Paint the active drag selection with reversed colors so the user can see
+/// what mouse-up will copy.
+fn apply_selection_highlight(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: Rect,
+    selection: &TranscriptSelection,
+) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let ((sx, sy), (ex, ey)) = ordered_selection(selection);
+    for y in sy..=ey {
+        if y < inner.top() || y >= inner.bottom() {
+            continue;
+        }
+        let from = if y == sy { sx } else { inner.left() }.max(inner.left());
+        let to = if y == ey { ex } else { inner.right() - 1 }.min(inner.right() - 1);
+        if from > to {
+            continue;
+        }
+        buf.set_style(
+            Rect::new(from, y, to - from + 1, 1),
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
     }
 }
 
@@ -7026,6 +7189,7 @@ fn draw(
     // screen. The safety-critical permission/elicitation modals still render
     // on top of it.
     if state.ragnarok.is_some() {
+        invalidate_transcript_selection(state);
         draw_ragnarok(f, f.area(), state);
         if let Some(pending) = state.pending_permission() {
             draw_permission_modal(
@@ -7073,12 +7237,16 @@ fn draw(
         .split(f.area());
 
     if state.review_issue_viewer {
+        invalidate_transcript_selection(state);
         draw_review_issue_viewer(f, chunks[0], state);
     } else if state.nested_agent_viewer {
+        invalidate_transcript_selection(state);
         draw_nested_agent_viewer(f, chunks[0], state, false);
     } else if state.workspace_diff_viewer {
+        invalidate_transcript_selection(state);
         draw_workspace_diff_viewer(f, chunks[0], state, false);
     } else if state.terminals_viewer {
+        invalidate_transcript_selection(state);
         draw_terminals_viewer(f, chunks[0], state, false);
     } else {
         draw_transcript(f, chunks[0], state, transcript_scroll);
@@ -8985,7 +9153,10 @@ fn draw_transcript(
     transcript_scroll: &mut TranscriptScrollState,
 ) {
     let title = transcript_block_title(state);
-    let block = Block::default().borders(Borders::ALL).title(title);
+    // No border glyphs: when the user falls back to native terminal selection
+    // (F12 text selection mode), side borders would be captured into every
+    // copied line. The title still claims the top row on its own.
+    let block = Block::default().borders(Borders::NONE).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -9060,6 +9231,16 @@ fn draw_transcript(
         .wrap(Wrap { trim: false })
         .scroll((inner_scroll, 0));
     f.render_widget(paragraph, inner);
+
+    // Geometry lets mouse events hit-test the panel; the grid snapshot is
+    // only needed while a drag selection is active, so skip it otherwise.
+    state.transcript_panel_area = Some((inner.x, inner.y, inner.width, inner.height));
+    if let Some(selection) = state.transcript_selection {
+        state.transcript_panel_grid = capture_transcript_panel_grid(f.buffer_mut(), inner);
+        apply_selection_highlight(f.buffer_mut(), inner, &selection);
+    } else if !state.transcript_panel_grid.is_empty() {
+        state.transcript_panel_grid = Vec::new();
+    }
 }
 
 /// Render the transcript once and measure it, for either the chat pane
@@ -13926,6 +14107,11 @@ fn help_modal_lines(
     lines.extend(general_help_lines(voice_input_supported, theme));
     if mode == UiMode::FullscreenTui {
         lines.extend([
+            help_binding_line(
+                "mouse drag",
+                "select transcript text; released selection is copied to the clipboard",
+                theme,
+            ),
             help_binding_line(
                 "F12",
                 "toggle mouse text selection / wheel scrolling",
@@ -22436,6 +22622,222 @@ mod tests {
         handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
 
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> CtEvent {
+        CtEvent::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn selection_cells(text: &str) -> Vec<String> {
+        text.chars().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn mouse_drag_selection_tracks_anchor_and_clamps_head_to_panel() {
+        let mut state = AppState::new();
+        state.transcript_panel_area = Some((0, 1, 40, 10));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 2),
+        );
+        assert_eq!(
+            state.transcript_selection,
+            Some(TranscriptSelection {
+                anchor: (5, 2),
+                head: (5, 2),
+            })
+        );
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Drag(MouseButton::Left), 90, 30),
+        );
+        assert_eq!(
+            state.transcript_selection.expect("selection").head,
+            (39, 10),
+            "drag past the panel edge must clamp to the last cell"
+        );
+    }
+
+    #[test]
+    fn mouse_down_outside_transcript_panel_starts_no_selection() {
+        let mut state = AppState::new();
+        state.transcript_panel_area = Some((0, 1, 40, 10));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 20),
+        );
+
+        assert_eq!(state.transcript_selection, None);
+    }
+
+    #[test]
+    fn mouse_click_without_drag_clears_selection_without_copy() {
+        let mut state = AppState::new();
+        state.transcript_panel_area = Some((0, 1, 40, 10));
+        state.transcript_panel_grid = vec![selection_cells("hello")];
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 3, 1),
+        );
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Up(MouseButton::Left), 3, 1),
+        );
+
+        assert_eq!(state.transcript_selection, None);
+    }
+
+    #[test]
+    fn selection_text_extracts_rows_between_endpoints() {
+        let grid = vec![
+            selection_cells("hello world    "),
+            selection_cells("second line    "),
+            selection_cells("third          "),
+        ];
+        let area = (2, 1, 15, 3);
+        let forward = TranscriptSelection {
+            anchor: (8, 1),
+            head: (6, 3),
+        };
+        assert_eq!(
+            selection_text(&grid, area, &forward),
+            "world\nsecond line\nthird"
+        );
+
+        // Dragging upward/backward selects the same span.
+        let backward = TranscriptSelection {
+            anchor: (6, 3),
+            head: (8, 1),
+        };
+        assert_eq!(
+            selection_text(&grid, area, &backward),
+            "world\nsecond line\nthird"
+        );
+    }
+
+    #[test]
+    fn selection_text_single_row_and_whitespace_only() {
+        let grid = vec![selection_cells("alpha beta     ")];
+        let area = (0, 0, 15, 1);
+        let single = TranscriptSelection {
+            anchor: (9, 0),
+            head: (6, 0),
+        };
+        assert_eq!(selection_text(&grid, area, &single), "beta");
+
+        let padding_only = TranscriptSelection {
+            anchor: (11, 0),
+            head: (14, 0),
+        };
+        assert_eq!(selection_text(&grid, area, &padding_only), "");
+    }
+
+    #[test]
+    fn selection_text_skips_wide_char_continuation_cells() {
+        // "宽" occupies two screen cells; the continuation cell is captured
+        // as an empty string so columns stay aligned.
+        let grid = vec![vec![
+            "宽".to_string(),
+            String::new(),
+            "x".to_string(),
+            " ".to_string(),
+        ]];
+        let area = (0, 0, 4, 1);
+        let selection = TranscriptSelection {
+            anchor: (0, 0),
+            head: (3, 0),
+        };
+        assert_eq!(selection_text(&grid, area, &selection), "宽x");
+    }
+
+    #[test]
+    fn capture_transcript_panel_grid_marks_wide_continuations_empty() {
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 6, 1));
+        buf.set_string(0, 0, "a宽b", Style::default());
+
+        let grid = capture_transcript_panel_grid(&buf, Rect::new(0, 0, 6, 1));
+
+        assert_eq!(grid.len(), 1);
+        assert_eq!(grid[0][0], "a");
+        assert_eq!(grid[0][1], "宽");
+        assert_eq!(grid[0][2], "");
+        assert_eq!(grid[0][3], "b");
+    }
+
+    #[test]
+    fn apply_selection_highlight_reverses_selected_cells_only() {
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 10, 3));
+        let selection = TranscriptSelection {
+            anchor: (2, 0),
+            head: (4, 1),
+        };
+
+        apply_selection_highlight(&mut buf, Rect::new(0, 0, 10, 3), &selection);
+
+        let reversed = |x: u16, y: u16| {
+            buf.cell(Position::new(x, y))
+                .expect("cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(!reversed(1, 0), "cell before the anchor must stay normal");
+        assert!(reversed(2, 0));
+        assert!(reversed(9, 0), "first row extends to the panel edge");
+        assert!(reversed(0, 1));
+        assert!(reversed(4, 1));
+        assert!(!reversed(5, 1), "cell after the head must stay normal");
+        assert!(!reversed(0, 2), "rows below the selection must stay normal");
+    }
+
+    #[test]
+    fn transcript_panel_omits_border_glyphs() {
+        let mut state = AppState::new();
+        state
+            .transcript
+            .push(Entry::UserPrompt("hello transcript".to_string()));
+        let mut scroll = TranscriptScrollState::default();
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_transcript(frame, frame.area(), &mut state, &mut scroll))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        for glyph in ['│', '─', '┌', '┐', '└', '┘'] {
+            assert!(
+                !rendered.contains(glyph),
+                "border glyph {glyph:?} rendered:\n{rendered}"
+            );
+        }
+        assert!(rendered.contains("transcript"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("hello transcript"),
+            "rendered:\n{rendered}"
+        );
+        assert_eq!(
+            state.transcript_panel_area,
+            Some((0, 1, 40, 7)),
+            "title row is reserved, everything else belongs to the panel"
+        );
     }
 
     #[test]
