@@ -4587,7 +4587,7 @@ fn start_server_agent_session(
     let (subagent_roles, subagent_codex_home) = match roster.as_ref() {
         Some(resolved) => {
             match crate::isolated_subagent_roles(
-                crate::roster::subagent_failover_roles(&resolved),
+                crate::roster::subagent_failover_roles(resolved),
                 "subagent",
             ) {
                 Ok(pair) => pair,

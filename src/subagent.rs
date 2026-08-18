@@ -3447,6 +3447,47 @@ fn with_workspace_diff(
     result
 }
 
+pub fn runtime_service(config: Config) -> Arc<dyn acp::RuntimeService> {
+    Arc::new(config)
+}
+
+#[async_trait::async_trait]
+impl acp::RuntimeService for Config {
+    async fn start(
+        &self,
+        context: acp::RuntimeServiceContext,
+        events: mpsc::UnboundedSender<UiEvent>,
+    ) -> Result<Box<dyn acp::RunningRuntimeService>> {
+        let context = RunContext {
+            cwd: context.cwd,
+            additional_directories: context.additional_directories,
+            snapshot_exclusions: self.snapshot_exclusions.clone(),
+            fs_max_text_bytes: context.fs_max_text_bytes,
+            access_mode: context.access_mode,
+        };
+        let server =
+            HttpServer::start(self.clone(), context, events, self.controller.clone()).await?;
+        Ok(Box::new(server))
+    }
+
+    async fn cancel(&self) {
+        self.controller.cancel().await;
+    }
+
+    async fn shutdown(&self) {
+        self.controller.shutdown().await;
+    }
+
+    async fn shutdown_and_wait(&self) {
+        self.controller.shutdown_and_wait().await;
+    }
+}
+
+impl acp::RunningRuntimeService for HttpServer {
+    fn advertised(&self) -> &McpServer {
+        self.advertised()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5430,47 +5471,5 @@ mod tests {
 
         run.controller.wait_until_absent(run.subagent_id).await;
         assert_eq!(run.controller.active_count().await, 0);
-    }
-}
-
-pub fn runtime_service(config: Config) -> Arc<dyn acp::RuntimeService> {
-    Arc::new(config)
-}
-
-#[async_trait::async_trait]
-impl acp::RuntimeService for Config {
-    async fn start(
-        &self,
-        context: acp::RuntimeServiceContext,
-        events: mpsc::UnboundedSender<UiEvent>,
-    ) -> Result<Box<dyn acp::RunningRuntimeService>> {
-        let context = RunContext {
-            cwd: context.cwd,
-            additional_directories: context.additional_directories,
-            snapshot_exclusions: self.snapshot_exclusions.clone(),
-            fs_max_text_bytes: context.fs_max_text_bytes,
-            access_mode: context.access_mode,
-        };
-        let server =
-            HttpServer::start(self.clone(), context, events, self.controller.clone()).await?;
-        Ok(Box::new(server))
-    }
-
-    async fn cancel(&self) {
-        self.controller.cancel().await;
-    }
-
-    async fn shutdown(&self) {
-        self.controller.shutdown().await;
-    }
-
-    async fn shutdown_and_wait(&self) {
-        self.controller.shutdown_and_wait().await;
-    }
-}
-
-impl acp::RunningRuntimeService for HttpServer {
-    fn advertised(&self) -> &McpServer {
-        self.advertised()
     }
 }
