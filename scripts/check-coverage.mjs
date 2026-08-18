@@ -19,10 +19,12 @@ if (!data?.totals?.lines || !Array.isArray(data.files)) {
 
 function projectPath(filename) {
   const normalized = filename.replaceAll("\\", "/");
-  const voiceMarker = "/voice-worker/src/";
-  const voiceIndex = normalized.lastIndexOf(voiceMarker);
-  if (voiceIndex >= 0) {
-    return `voice-worker/src/${normalized.slice(voiceIndex + voiceMarker.length)}`;
+  for (const crate of ["mj-agents", "mj-core", "mj-remote", "mj-tui", "voice-worker"]) {
+    const marker = `/${crate}/src/`;
+    const index = normalized.lastIndexOf(marker);
+    if (index >= 0) {
+      return `${crate}/src/${normalized.slice(index + marker.length)}`;
+    }
   }
   const sourceMarker = "/src/";
   const sourceIndex = normalized.lastIndexOf(sourceMarker);
@@ -37,7 +39,7 @@ const moduleLines = new Map(
     .map((file) => [projectPath(file.filename), file.summary?.lines?.percent])
     .filter(
       ([path, percent]) =>
-        /^(src|voice-worker\/src)\/.*\.rs$/.test(path) &&
+        /^(src|(?:mj-agents|mj-core|mj-remote|mj-tui|voice-worker)\/src)\/.*\.rs$/.test(path) &&
         Number.isFinite(percent),
     ),
 );

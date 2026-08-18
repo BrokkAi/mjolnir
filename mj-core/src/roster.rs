@@ -466,17 +466,6 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
                 continue;
             }
         };
-        if !capabilities.http_mcp {
-            adapter_errors.insert(
-                launch.source_id.clone(),
-                "ACP server does not advertise mcpCapabilities.http".to_string(),
-            );
-            tracing::warn!(
-                adapter = %launch.source_id,
-                "roster adapter excluded because HTTP MCP is unavailable"
-            );
-            continue;
-        }
         session_config.insert(
             launch.source_id.clone(),
             capabilities.session_config.clone(),
@@ -593,7 +582,7 @@ fn explicit<'a>(
             "{seat} model '{selector}' is not a ranked DeepSWE model and no connected ACP adapter advertised it"
         );
     }
-    bail!("{seat} model '{selector}' is unavailable: no HTTP-MCP-capable ACP adapter advertised it")
+    bail!("{seat} model '{selector}' is unavailable: no connected ACP adapter advertised it")
 }
 
 fn preferred_route<'a>(
@@ -1168,9 +1157,8 @@ mod tests {
         }
     }
 
-    fn capabilities(http_mcp: bool, values: &[&str]) -> ProbeResult {
+    fn capabilities(values: &[&str]) -> ProbeResult {
         Ok(probe::AdapterCapabilities {
-            http_mcp,
             models: values.iter().map(|value| option(value)).collect(),
             session_config: Vec::new(),
         })
@@ -1755,7 +1743,6 @@ mod tests {
                     .expect("probe call lock")
                     .push(launch.source_id);
                 Ok(probe::AdapterCapabilities {
-                    http_mcp: true,
                     models: Vec::new(),
                     session_config: Vec::new(),
                 })
@@ -1832,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_and_failed_adapters_are_excluded_with_sanitized_reasons() {
+    fn failed_adapters_are_excluded_with_sanitized_reasons() {
         let rows = vec![
             role_at("gpt-5-5", 0.6, 5.0).model,
             role_at("claude-opus-4-8", 0.5, 4.0).model,
@@ -1843,7 +1830,7 @@ mod tests {
                 (
                     0,
                     launch_for(AdapterKind::Codex),
-                    capabilities(false, &["gpt-5-5"]),
+                    Err("probe timed out".to_string()),
                 ),
                 (
                     1,
@@ -1853,10 +1840,7 @@ mod tests {
             ],
         );
         assert!(discovery.available.is_empty());
-        assert_eq!(
-            discovery.adapter_errors["codex-acp"],
-            "ACP server does not advertise mcpCapabilities.http"
-        );
+        assert_eq!(discovery.adapter_errors["codex-acp"], "probe timed out");
         assert_eq!(discovery.adapter_errors["claude-acp"], "needs auth");
     }
 
@@ -1870,7 +1854,7 @@ mod tests {
             vec![(
                 0,
                 launch_for(AdapterKind::Claude),
-                capabilities(true, &["claude-opus-4-8", "haiku"]),
+                capabilities(&["claude-opus-4-8", "haiku"]),
             )],
         );
 
@@ -1920,11 +1904,7 @@ mod tests {
         };
         let error = explicit("Agent", "gpt-5-6-sol", &rows, &[], &[])
             .expect_err("must reject unavailable explicit model");
-        assert!(
-            error
-                .to_string()
-                .contains("no HTTP-MCP-capable ACP adapter")
-        );
+        assert!(error.to_string().contains("no connected ACP adapter"));
         let _ = availability;
     }
 

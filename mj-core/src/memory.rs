@@ -10,15 +10,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol::schema::v1::{HttpHeader, McpServer, McpServerHttp};
+use agent_client_protocol::schema::v1::McpServer;
 use anyhow::{Context, Result, anyhow};
-use axum::{
-    extract::State,
-    http::{Request, StatusCode, header::AUTHORIZATION},
-    middleware::Next,
-    response::Response,
-};
-use base64::Engine;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -28,18 +21,11 @@ use rmcp::{
     },
     service::RequestContext,
     tool, tool_router,
-    transport::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        streamable_http_server::session::local::LocalSessionManager,
-    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 pub const MCP_SERVER_NAME: &str = "mj-memory";
-const MCP_PATH: &str = "/mcp";
 const STORE_VERSION: u32 = 1;
 
 /// Character budget for the injected first-prompt block (roughly 2k tokens).
@@ -1091,86 +1077,23 @@ impl ServerHandler for McpHandler {
     }
 }
 
-/// In-process, loopback-only MCP endpoint advertised to the primary ACP agent.
-/// Dropping it cancels the listener and every open MCP session.
-pub struct HttpServer {
-    advertised: McpServer,
-    cancellation: CancellationToken,
-    task: JoinHandle<()>,
+/// In-process MCP endpoint advertised to the primary ACP agent as a stdio
+/// server via the MCP bridge. Dropping it closes every open MCP session.
+pub struct ToolServer {
+    bridge: crate::mcp_bridge::BridgeServer,
 }
 
-impl HttpServer {
+impl ToolServer {
     pub async fn start(memory: &SessionMemory) -> Result<Self> {
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes)
-            .map_err(|error| anyhow!("generate memory MCP bearer token: {error}"))?;
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
-        let authorization = format!("Bearer {token}");
-
         let handler = McpHandler::new(memory);
-        let cancellation = CancellationToken::new();
-        let mut server_config = StreamableHttpServerConfig::default();
-        server_config.cancellation_token = cancellation.clone();
-        let service = StreamableHttpService::new(
-            move || Ok(handler.clone()),
-            std::sync::Arc::new(LocalSessionManager::default()),
-            server_config,
-        );
-        let protected = axum::Router::new().nest_service(MCP_PATH, service).layer(
-            axum::middleware::from_fn_with_state(authorization.clone(), require_bearer),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let bridge = crate::mcp_bridge::BridgeServer::start(MCP_SERVER_NAME, handler)
             .await
-            .context("bind memory MCP listener")?;
-        let addr = listener
-            .local_addr()
-            .context("read memory MCP listener address")?;
-        let task_cancellation = cancellation.clone();
-        let task = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, protected)
-                .with_graceful_shutdown(task_cancellation.cancelled_owned())
-                .await
-            {
-                tracing::warn!("memory MCP listener stopped: {error}");
-            }
-        });
-        let advertised = McpServer::Http(
-            McpServerHttp::new(MCP_SERVER_NAME, format!("http://{addr}{MCP_PATH}"))
-                .headers(vec![HttpHeader::new("Authorization", authorization)]),
-        );
-        Ok(Self {
-            advertised,
-            cancellation,
-            task,
-        })
+            .context("start memory MCP bridge")?;
+        Ok(Self { bridge })
     }
 
     pub fn advertised(&self) -> &McpServer {
-        &self.advertised
-    }
-}
-
-async fn require_bearer(
-    State(expected): State<String>,
-    request: Request<axum::body::Body>,
-    next: Next,
-) -> std::result::Result<Response, (StatusCode, &'static str)> {
-    let authorized = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.as_bytes() == expected.as_bytes());
-    if authorized {
-        Ok(next.run(request).await)
-    } else {
-        Err((StatusCode::UNAUTHORIZED, "unauthorized"))
-    }
-}
-
-impl Drop for HttpServer {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        self.task.abort();
+        self.bridge.advertised()
     }
 }
 

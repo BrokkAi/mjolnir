@@ -13,15 +13,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
-    HttpHeader, McpServer, McpServerHttp, SessionUpdate, StopReason, ToolCallContent,
-    ToolCallStatus, UsageUpdate,
+    McpServer, SessionUpdate, StopReason, ToolCallContent, ToolCallStatus, UsageUpdate,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use axum::extract::{Request, State};
-use axum::http::{StatusCode, header::AUTHORIZATION};
-use axum::middleware::Next;
-use axum::response::Response;
-use base64::Engine;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
@@ -31,10 +25,6 @@ use rmcp::{
     },
     service::RequestContext,
     tool, tool_router,
-    transport::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        streamable_http_server::session::local::LocalSessionManager,
-    },
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -82,8 +72,6 @@ Prefer your own tools for small local edits, known-path lookups, and quick singl
 </mj-subagent-policy>"#;
 
 const SUBAGENT_PREAMBLE: &str = "You are a subagent working for a primary agent. This is a fresh ACP process and session: you have no memory of the user conversation or of any earlier subagent, including one that ran a moment ago. Treat the standalone brief below and the current workspace as your only task context.\n\nThe brief is a colleague's account, not ground truth. Verify its claims against the repository and any primary sources it quotes; where the code or the stated requirements contradict the brief, follow reality and flag the divergence. Exercise what you build with targeted checks — the specific tests, commands, or repro scripts that cover your changes, including the public surface exactly as the requirements name it (import paths, exported names, signatures). Do NOT run project-wide test suites, formatters, or linters: the primary runs full validation exactly once at the end, and mid-flight suite runs block on other agents' concurrent edits.\n\nOther subagents may be working in this same workspace at the same time. Stay inside the scope you were given and do not clean up or refactor unrelated code.\n\nYour final message is the report your parent reads: state what you did, what you verified and how, any deviation from the brief, and anything you could not verify. Do not write a report file.\n\n";
-
-const MCP_PATH: &str = "/mcp";
 
 const SUBAGENT_ACTIVITY_LOG_LIMIT: usize = 8_000;
 const SUBAGENT_ACTIVITY_LOG_HEAD: usize = 2_500;
@@ -936,15 +924,15 @@ impl ServerHandler for McpHandler {
     }
 }
 
-/// In-process, loopback-only MCP endpoint advertised to the primary ACP agent.
-/// Dropping it cancels the listener and every open MCP session.
-pub struct HttpServer {
-    advertised: McpServer,
-    cancellation: CancellationToken,
-    task: JoinHandle<()>,
+/// In-process MCP endpoint advertised to the primary ACP agent as a stdio
+/// server via the MCP bridge. Dropping it closes every open MCP session.
+/// Each bridge connection is an independent MCP session against the shared
+/// controller, so respawned server commands keep full subagent state.
+pub struct McpService {
+    bridge: mj_core::mcp_bridge::BridgeServer,
 }
 
-impl HttpServer {
+impl McpService {
     pub async fn start(
         config: Config,
         context: RunContext,
@@ -958,86 +946,15 @@ impl HttpServer {
                 config.id_allocator.clone(),
             )
             .await;
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes)
-            .map_err(|error| anyhow!("generate subagent MCP bearer token: {error}"))?;
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
-        let authorization = format!("Bearer {token}");
-
         let handler = McpHandler::new(config, context, ui_tx, controller);
-        let cancellation = CancellationToken::new();
-        let mut server_config = StreamableHttpServerConfig::default();
-        server_config.cancellation_token = cancellation.clone();
-        // rmcp's LocalSessionManager evicts idle sessions after
-        // SessionConfig::keep_alive (default 300s). A retained subagent session
-        // idle past that would 404 every later resume or cancel call. This MCP
-        // server is single-tenant and process-lifetime scoped, so disable idle
-        // eviction entirely rather than tuning the timeout.
-        // (`SessionConfig`/`LocalSessionManager` are `#[non_exhaustive]`, so
-        // they must be built via `Default::default()` plus field assignment
-        // rather than struct-literal syntax.)
-        let mut session_manager = LocalSessionManager::default();
-        session_manager.session_config.keep_alive = None;
-        let service = StreamableHttpService::new(
-            move || Ok(handler.clone()),
-            Arc::new(session_manager),
-            server_config,
-        );
-        let protected = axum::Router::new().nest_service(MCP_PATH, service).layer(
-            axum::middleware::from_fn_with_state(authorization.clone(), require_bearer),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let bridge = mj_core::mcp_bridge::BridgeServer::start(MCP_SERVER_NAME, handler)
             .await
-            .context("bind subagent MCP listener")?;
-        let addr = listener
-            .local_addr()
-            .context("read subagent MCP listener address")?;
-        let task_cancellation = cancellation.clone();
-        let task = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, protected)
-                .with_graceful_shutdown(task_cancellation.cancelled_owned())
-                .await
-            {
-                tracing::warn!("subagent MCP listener stopped: {error}");
-            }
-        });
-        let advertised = McpServer::Http(
-            McpServerHttp::new(MCP_SERVER_NAME, format!("http://{addr}{MCP_PATH}"))
-                .headers(vec![HttpHeader::new("Authorization", authorization)]),
-        );
-        Ok(Self {
-            advertised,
-            cancellation,
-            task,
-        })
+            .context("start subagent MCP bridge")?;
+        Ok(Self { bridge })
     }
 
     pub fn advertised(&self) -> &McpServer {
-        &self.advertised
-    }
-}
-
-impl Drop for HttpServer {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        self.task.abort();
-    }
-}
-
-pub async fn require_bearer(
-    State(expected): State<String>,
-    request: Request,
-    next: Next,
-) -> std::result::Result<Response, (StatusCode, &'static str)> {
-    let authorized = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.as_bytes() == expected.as_bytes());
-    if authorized {
-        Ok(next.run(request).await)
-    } else {
-        Err((StatusCode::UNAUTHORIZED, "unauthorized"))
+        self.bridge.advertised()
     }
 }
 
@@ -3465,7 +3382,7 @@ impl acp::RuntimeService for Config {
             access_mode: context.access_mode,
         };
         let server =
-            HttpServer::start(self.clone(), context, events, self.controller.clone()).await?;
+            McpService::start(self.clone(), context, events, self.controller.clone()).await?;
         Ok(Box::new(server))
     }
 
@@ -3482,7 +3399,7 @@ impl acp::RuntimeService for Config {
     }
 }
 
-impl acp::RunningRuntimeService for HttpServer {
+impl acp::RunningRuntimeService for McpService {
     fn advertised(&self) -> &McpServer {
         self.advertised()
     }

@@ -3,6 +3,7 @@
 // One deterministic ACP fixture plays the primary agent or a subagent according
 // to the model Mjolnir selects before the first prompt. It also makes probe
 // sessions cheap.
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -22,7 +23,8 @@ const subagentPrompt = mode === "details"
 let selectedModel = "gpt-5.6-sol";
 let reasoning = "medium";
 let mcpServer = null;
-let mcpSessionId = null;
+let mcpChild = null;
+const mcpPending = new Map();
 let mcpReady = null;
 let promptRequestId = null;
 let terminalRequestId = null;
@@ -62,37 +64,68 @@ function update(update) { send({ method: "session/update", params: { sessionId: 
 function isSubagent() { return selectedModel === "gpt-5.6-luna"; }
 function log(value) { append(isSubagent() ? nestedLog : primaryLog, value); }
 
-function mcpHeaders(includeAuth = true, sessionId = null) {
-  const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
-  if (includeAuth) for (const header of mcpServer.headers ?? []) headers[header.name] = header.value;
-  if (sessionId) headers["mcp-session-id"] = sessionId;
-  return headers;
+// The advertised server is a stdio command (`mj mcp-bridge`); spawning it with
+// the advertised env (which carries the bridge token) yields one MCP session
+// speaking newline-delimited JSON-RPC over the child's stdin/stdout.
+function spawnMcpCommand(includeAuth = true) {
+  const env = { ...process.env };
+  if (includeAuth) for (const item of mcpServer.env ?? []) env[item.name] = item.value;
+  return spawn(mcpServer.command, mcpServer.args ?? [], { env, stdio: ["pipe", "pipe", "inherit"] });
 }
 
-function parseMcpResponse(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  if (trimmed.startsWith("{")) return JSON.parse(trimmed);
-  return trimmed.split(/\r?\n/).filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim()).filter(Boolean)
-    .map((line) => JSON.parse(line)).at(-1) ?? null;
+// Without the advertised env the bridge has no token, so the parent must end
+// the session without ever answering. Resolves true when the child dies (or
+// closes stdout) without emitting a response line.
+function checkUnauthorized() {
+  return new Promise((resolve) => {
+    const child = spawnMcpCommand(false);
+    let responded = false;
+    child.stdin.on("error", () => {});
+    child.stdout.on("data", () => { responded = true; });
+    child.on("close", () => resolve(!responded));
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: "bad", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } })}\n`);
+    setTimeout(() => child.kill(), 5000);
+  });
 }
 
-async function postMcp(body, includeAuth = true) {
-  const response = await fetch(mcpServer.url, { method: "POST", headers: mcpHeaders(includeAuth, mcpSessionId), body: JSON.stringify(body) });
-  const message = parseMcpResponse(await response.text());
-  mcpSessionId = response.headers.get("mcp-session-id") ?? mcpSessionId;
-  return { status: response.status, message };
+function startMcpChannel() {
+  mcpChild = spawnMcpCommand();
+  mcpChild.stdin.on("error", () => {});
+  let buffer = "";
+  mcpChild.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    let newline;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      const message = JSON.parse(line);
+      const pending = mcpPending.get(message.id);
+      if (pending) { mcpPending.delete(message.id); pending(message); }
+    }
+  });
+}
+
+function callMcp(body) {
+  return new Promise((resolve, reject) => {
+    mcpChild.stdin.write(`${JSON.stringify(body)}\n`);
+    if (body.id === undefined) { resolve(null); return; }
+    mcpPending.set(body.id, resolve);
+    setTimeout(() => {
+      if (mcpPending.delete(body.id)) reject(new Error(`MCP call ${body.id} timed out`));
+    }, 30000);
+  });
 }
 
 async function prepareMcp() {
-  const unauthorized = await postMcp({ jsonrpc: "2.0", id: "bad", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } }, false);
-  const initialized = await postMcp({ jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } });
-  if (initialized.status !== 200 || !mcpSessionId) throw new Error("MCP initialize failed");
-  await postMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+  const unauthorizedRejected = await checkUnauthorized();
+  startMcpChannel();
+  const initialized = await callMcp({ jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } });
+  if (!initialized?.result) throw new Error("MCP initialize failed");
+  await callMcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
   // The subagent policy travels via the MCP server's instructions, not as
   // text appended to the first user prompt.
-  const instructions = initialized.message?.result?.instructions ?? "";
+  const instructions = initialized.result?.instructions ?? "";
   if (!instructions.includes("<mj-subagent-policy>")) {
     throw new Error("mj-subagents server instructions are missing the subagent policy");
   }
@@ -100,8 +133,8 @@ async function prepareMcp() {
     throw new Error("MCP server instructions leaked the model inventory");
   }
   directiveCount += 1; append(primaryLog, `session-directive:${directiveCount}`);
-  const listed = await postMcp({ jsonrpc: "2.0", id: "list", method: "tools/list", params: {} });
-  const tools = listed.message?.result?.tools ?? [];
+  const listed = await callMcp({ jsonrpc: "2.0", id: "list", method: "tools/list", params: {} });
+  const tools = listed?.result?.tools ?? [];
   const spawn = tools.find((tool) => tool.name === SPAWN_TOOL);
   if (!spawn) throw new Error(`${SPAWN_TOOL} missing`);
   if (!tools.some((tool) => tool.name === "subagent_cancel")) throw new Error("subagent_cancel missing");
@@ -113,7 +146,7 @@ async function prepareMcp() {
     throw new Error("create_subagent schema still exposes per-call model routing");
   }
   append(primaryLog, `tools:${tools.map((tool) => tool.name).sort().join(",")}`);
-  return unauthorized.status;
+  return unauthorizedRejected;
 }
 
 function finishPrimary(text) {
@@ -192,19 +225,19 @@ function recordLaunches() {
 // here. It records the started acknowledgement and ends its turn. mj injects
 // each finished subagent's report as a new user message later.
 async function launchSubagents() {
-  const unauthorizedStatus = await mcpReady;
+  const unauthorizedRejected = await mcpReady;
   for (let index = 0; index < subagentCount; index += 1) {
     launchCount += 1;
     const toolSentAt = Date.now();
-    const called = await postMcp({
+    const called = await callMcp({
       jsonrpc: "2.0",
       id: `call-${launchCount}`,
       method: "tools/call",
       params: { name: SPAWN_TOOL, arguments: { prompt: subagentPrompt, label: `lane-${launchCount}` } },
     });
     const toolReceivedAt = Date.now();
-    const response = called.message?.result;
-    launches.push({ response, toolSentAt, toolReceivedAt, unauthorizedStatus });
+    const response = called?.result;
+    launches.push({ response, toolSentAt, toolReceivedAt, unauthorizedRejected });
     recordLaunches();
     const text = response?.content?.map((item) => item.text ?? "").join("") ?? "";
     append(primaryLog, `launched:${response?.structuredContent?.subagentId ?? "?"}`);
@@ -223,13 +256,13 @@ async function launchSubagents() {
       try { if (fs.readFileSync(nestedLog, "utf8").includes("prompt-started")) break; } catch {}
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    const cancelled = await postMcp({
+    const cancelled = await callMcp({
       jsonrpc: "2.0",
       id: "cancel-1",
       method: "tools/call",
       params: { name: "subagent_cancel", arguments: { subagent_id: id } },
     });
-    const result = cancelled.message?.result;
+    const result = cancelled?.result;
     const cancelText = result?.content?.map((item) => item.text ?? "").join("") ?? "";
     append(primaryLog, `cancel-result:${result?.isError ? "ERROR:" : ""}${cancelText.replaceAll("\n", " ")}`);
     finishPrimary("PRIMARY CANCELLED SUBAGENT");
@@ -275,7 +308,9 @@ input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     clientCapabilities = message.params?.clientCapabilities ?? null;
-    send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { mcpCapabilities: { http: process.env.MJ_E2E_HTTP_UNSUPPORTED !== "1", sse: false } }, agentInfo: { name: "subagent-fixture", version: "1" } } });
+    // Stdio MCP servers are baseline ACP; advertising no HTTP support proves
+    // the bridge needs neither mcpCapabilities.http nor sse.
+    send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { mcpCapabilities: { http: false, sse: false } }, agentInfo: { name: "subagent-fixture", version: "1" } } });
   } else if (message.method === "session/new") {
     sessionMcpServers = message.params?.mcpServers ?? [];
     mcpServer = sessionMcpServers.find((server) => server.name === MCP_SERVER);

@@ -212,9 +212,8 @@ addresses the provider executables through their ACP package entry points.
 The ACP Servers panel configures the built-in Codex and Claude routes, which
 are the only supported ACP servers.
 
-Adapters must advertise ACP Streamable HTTP MCP support; Mjolnir uses that
-capability to expose its authenticated `mj-subagents` tools to the primary
-agent.
+Mjolnir exposes its authenticated `mj-subagents` tools to the primary agent as
+a stdio MCP server, so any ACP adapter can use them.
 
 ## Verify the installation
 

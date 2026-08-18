@@ -9,11 +9,9 @@ happens underneath — discovery, probing, and model resolution.
 
 Under the hood, Mjolnir selects a model for the primary agent and a default model for
 subagents, then chooses a launchable Agent Client Protocol adapter that can
-provide each. An adapter must advertise ACP Streamable HTTP MCP support to enter
-the roster at all: that is how Mjolnir attaches the `mj-subagents` server the
-primary agent calls `create_subagent` through. An adapter that does not is
-excluded with `ACP server does not advertise mcpCapabilities.http`, and with no
-qualifying adapter no model is launchable.
+provide each. Mjolnir attaches its `mj-subagents` server — the one the primary
+agent calls `create_subagent` through — as a stdio MCP server, the baseline
+transport every ACP adapter supports.
 
 ## Available routes
 
@@ -31,8 +29,8 @@ launch can require Node.js, npm, network access, and provider authentication.
 
 Selected routes are probed concurrently, and roster resolution waits for all
 of them before returning. Each probe opens an ACP connection and creates a
-disposable session to collect models, HTTP-MCP support, and session options.
-Mjolnir does not persist or reuse ACP capability results between resolutions.
+disposable session to collect models and session options. Mjolnir does not
+persist or reuse ACP capability results between resolutions.
 
 The live DeepSWE ranking is separate from adapter capabilities and remains
 cached for 24 hours. A bundled snapshot is available when the ranking endpoint

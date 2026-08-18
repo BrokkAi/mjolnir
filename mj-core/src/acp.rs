@@ -519,9 +519,6 @@ pub enum LaunchError {
     UnsupportedProtocolVersion { negotiated: ProtocolVersion },
     /// The user requested a lifecycle method the agent did not advertise.
     UnsupportedCapability { capability: &'static str },
-    /// Interactive subagent delegation requires the primary agent to accept
-    /// client-provided Streamable HTTP MCP servers.
-    SubagentHttpUnsupported,
     /// `session/new` failed for some other reason (bad cwd, agent-side
     /// crash, ...).
     SessionCreateFailed {
@@ -576,11 +573,6 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "agent does not advertise ACP capability {capability}\n\
                  hint: choose an agent that supports {capability}, or avoid the command that requires it"
-            ),
-            LaunchError::SubagentHttpUnsupported => write!(
-                f,
-                "configured ACP agent does not support HTTP MCP servers required for subagent delegation\n\
-                 hint: update or choose an ACP adapter that advertises mcpCapabilities.http"
             ),
             LaunchError::SessionCreateFailed {
                 source,
@@ -2454,18 +2446,7 @@ async fn drive_session(
         .await;
         return Err(anyhow::anyhow!(text));
     }
-    let subagent_http = if let Some(service) = subagents.as_ref() {
-        if !init_resp.agent_capabilities.mcp_capabilities.http {
-            let launch_err = LaunchError::SubagentHttpUnsupported;
-            let text = emit_fatal_with_stderr(
-                ui_tx,
-                &fatal_emitted,
-                launch_err.to_string(),
-                stderr_tail.as_ref(),
-            )
-            .await;
-            return Err(anyhow::anyhow!(text));
-        }
+    let subagent_service = if let Some(service) = subagents.as_ref() {
         let context = RuntimeServiceContext {
             cwd: cwd.clone(),
             additional_directories: additional_directories.clone(),
@@ -2478,7 +2459,7 @@ async fn drive_session(
                 let text = emit_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
-                    format!("could not start subagent HTTP MCP server: {error:#}"),
+                    format!("could not start subagent MCP server: {error:#}"),
                     stderr_tail.as_ref(),
                 )
                 .await;
@@ -2488,28 +2469,22 @@ async fn drive_session(
     } else {
         None
     };
-    if let Some(server) = subagent_http.as_ref() {
+    if let Some(server) = subagent_service.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
-    // Memory tools are additive: an adapter without HTTP MCP support or a
-    // failed listener downgrades to injection-only rather than aborting.
-    let memory_http = match memory.as_ref().filter(|memory| memory.tools) {
-        Some(session_memory) if init_resp.agent_capabilities.mcp_capabilities.http => {
-            match crate::memory::HttpServer::start(session_memory).await {
-                Ok(server) => Some(server),
-                Err(error) => {
-                    tracing::warn!("could not start memory MCP server: {error:#}");
-                    None
-                }
+    // Memory tools are additive: a failed listener downgrades to
+    // injection-only rather than aborting.
+    let memory_tools = match memory.as_ref().filter(|memory| memory.tools) {
+        Some(session_memory) => match crate::memory::ToolServer::start(session_memory).await {
+            Ok(server) => Some(server),
+            Err(error) => {
+                tracing::warn!("could not start memory MCP server: {error:#}");
+                None
             }
-        }
-        Some(_) => {
-            tracing::debug!("agent lacks HTTP MCP support; memory tools unavailable");
-            None
-        }
+        },
         None => None,
     };
-    if let Some(server) = memory_http.as_ref() {
+    if let Some(server) = memory_tools.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
     let side_session_unsupported_reason =
@@ -13437,12 +13412,15 @@ mod tests {
 
     #[test]
     fn lifecycle_requests_include_client_mcp_servers() {
-        use agent_client_protocol::schema::v1::McpServerHttp;
+        use agent_client_protocol::schema::v1::McpServerStdio;
 
-        let server = McpServer::Http(McpServerHttp::new(
-            "mj-subagents",
-            "http://127.0.0.1:1234/mcp",
-        ));
+        let server = McpServer::Stdio(
+            McpServerStdio::new("mj-subagents", "/usr/local/bin/mj").args(vec![
+                "mcp-bridge".to_string(),
+                "--addr".to_string(),
+                "127.0.0.1:1234".to_string(),
+            ]),
+        );
         let servers = vec![server.clone()];
         let cwd = PathBuf::from("/tmp/workspace");
         let additional = vec![PathBuf::from("/tmp/other")];
@@ -13466,12 +13444,5 @@ mod tests {
             fork_session_request(session_id, cwd, &additional, &servers).mcp_servers,
             servers
         );
-    }
-
-    #[test]
-    fn missing_http_mcp_capability_has_actionable_error() {
-        let message = LaunchError::SubagentHttpUnsupported.to_string();
-        assert!(message.contains("mcpCapabilities.http"));
-        assert!(message.contains("subagent delegation"));
     }
 }

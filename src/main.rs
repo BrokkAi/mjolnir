@@ -185,6 +185,11 @@ struct Cli {
 enum Commands {
     /// Install repository guidance for coding agents.
     Agents(AgentsArgs),
+    /// Pipe stdin/stdout to an in-process MCP tool server of a parent mj
+    /// process. Spawned by ACP agents as an advertised stdio MCP server;
+    /// not for interactive use.
+    #[command(hide = true)]
+    McpBridge(McpBridgeArgs),
     /// List and manage persistent cross-session memories.
     Memory(MemoryArgs),
     /// Inspect or refresh model discovery state.
@@ -218,6 +223,13 @@ struct AgentsInstallArgs {
     /// Apply the displayed diff without an interactive confirmation.
     #[arg(short = 'y', long)]
     yes: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct McpBridgeArgs {
+    /// Loopback address of the parent mj process's MCP bridge listener.
+    #[arg(long)]
+    addr: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -510,6 +522,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Agents(_)) => false,
+        Some(Commands::McpBridge(_)) => false,
         Some(Commands::Memory(_)) => false,
         Some(Commands::Models(_)) => false,
         Some(Commands::Resume(args)) => !args.list,
@@ -576,6 +589,11 @@ fn run_memory_command(command: MemoryCommand, cwd: &Path) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_file.as_deref())?;
+    // The bridge child must stay a bare stdio pipe: no signal coordinator,
+    // no update check, nothing that could write to stdout.
+    if let Some(Commands::McpBridge(args)) = &cli.command {
+        return mj_core::mcp_bridge::run_bridge(&args.addr).await;
+    }
     // Register the platform adapter before config load or roster resolution.
     #[cfg(target_os = "android")]
     mj_anvil::register();
@@ -609,6 +627,9 @@ async fn main() -> Result<()> {
             Commands::Agents(args) => match args.command {
                 AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
             },
+            // Dispatched before the termination coordinator installs; kept
+            // here only for match exhaustiveness.
+            Commands::McpBridge(args) => mj_core::mcp_bridge::run_bridge(&args.addr).await,
             Commands::Memory(args) => run_memory_command(args.command, &cwd),
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {
@@ -4061,6 +4082,14 @@ mod tests {
         let cli = try_parse_hermetic(&["mj", "server"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
 
+        let cli = try_parse_hermetic(&["mj", "mcp-bridge", "--addr", "127.0.0.1:12345"])
+            .expect("parse hidden MCP bridge");
+        assert!(!should_run_startup_update_check(&cli));
+        let Some(Commands::McpBridge(args)) = cli.command else {
+            panic!("expected MCP bridge subcommand");
+        };
+        assert_eq!(args.addr, "127.0.0.1:12345");
+
         let cli = try_parse_hermetic(&["mj", "models", "refresh"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
     }
@@ -4825,6 +4854,68 @@ mod tests {
             .await
             .expect("future result");
         assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn mcp_bridge_serves_an_initialized_root_session() {
+        use agent_client_protocol::schema::v1::McpServer;
+        use tokio::{
+            io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+            net::TcpStream,
+        };
+
+        let temp = tempfile::tempdir().expect("memory tempdir");
+        let session_memory = memory::SessionMemory {
+            store_path: temp.path().join("memories.json"),
+            project: temp.path().to_path_buf(),
+            inject: true,
+            tools: true,
+            import_claude_auto: false,
+        };
+        let server = memory::ToolServer::start(&session_memory)
+            .await
+            .expect("start bridge");
+        let McpServer::Stdio(stdio) = server.advertised() else {
+            panic!("bridge must advertise stdio");
+        };
+        let addr = stdio
+            .args
+            .iter()
+            .skip_while(|arg| arg.as_str() != "--addr")
+            .nth(1)
+            .expect("bridge address");
+        let token = &stdio
+            .env
+            .iter()
+            .find(|variable| variable.name == mj_core::mcp_bridge::TOKEN_ENV)
+            .expect("bridge token")
+            .value;
+        let stream = TcpStream::connect(addr).await.expect("connect bridge");
+        let (read, mut write) = stream.into_split();
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "root-fixture", "version": "1"}
+            }
+        });
+        write
+            .write_all(format!("{token}\n{initialize}\n").as_bytes())
+            .await
+            .expect("initialize bridge");
+        let response = BufReader::new(read)
+            .lines()
+            .next_line()
+            .await
+            .expect("read response")
+            .expect("bridge remains open");
+        let response: serde_json::Value =
+            serde_json::from_str(&response).expect("response is JSON");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["serverInfo"]["name"], "mj-memory");
     }
 
     #[tokio::test]
