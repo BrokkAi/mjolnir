@@ -969,3 +969,16 @@ pub fn session_option_controls_reasoning_effort(option: &SessionConfigOption) ->
         Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::ThoughtLevel)
     ) || option.id.to_string() == mj_core::acp::REASONING_EFFORT_CONFIG_ID
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn team_input_cycles_the_builtin_preset_without_a_platform_adapter() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert!(TeamPreset::from_config(&editor.config).is_some());
+    }
+}
