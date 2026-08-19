@@ -89,10 +89,11 @@ for behavior, controls, and source ownership.
 ## Requirements
 
 You need credentials for at least one configured model provider. Mjolnir ships
-with built-in Codex and Claude ACP routes and, on macOS, Linux, and Windows,
-manages the Node.js runtime those routes need. A system Node.js installation is
-only required when installing through npm/npx or when using the built-in routes
-on Android. Provider use may incur cost.
+with built-in Codex and Claude ACP routes (and Anvil on Android) and manages
+the Node.js runtime those routes need: an embedded Node 24 on macOS, Linux,
+and Windows, and Termux's nodejs package on Android (installed via `pkg` when
+npx is missing). A system Node.js installation is only required when
+installing through npm/npx. Provider use may incur cost.
 
 Review the
 [data and trust boundaries](https://mjolnir.brokk.ai/data-boundaries/) before

@@ -17,8 +17,6 @@ const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
 const VOICE_WORKER_NAME: &str = "mj-voice-worker";
 const WINDOWS_VOICE_WORKER_NAME: &str = "mj-voice-worker.exe";
-// Android-only sidecar; Windows archives never contain it.
-const ANVIL_NAME: &str = "anvil";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupUpdateResult {
@@ -172,12 +170,6 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
     {
         install_voice_worker(&current_exe, &worker).context("install voice worker")?;
     }
-    if cfg!(target_os = "android")
-        && let Some(anvil) = extract_optional_anvil(&update.asset.name, &archive)
-    {
-        install_sibling_binary(&current_exe, ANVIL_NAME, ANVIL_NAME, &anvil)
-            .context("install bundled Anvil")?;
-    }
     let replacement =
         replace_current_exe(&current_exe, &new_binary).context("replace current executable")?;
 
@@ -257,18 +249,6 @@ fn extract_optional_voice_worker(archive_name: &str, archive_bytes: &[u8]) -> Op
         Ok(worker) => Some(worker),
         Err(e) => {
             eprintln!("mj: skipping voice worker update: {e:#}");
-            None
-        }
-    }
-}
-
-/// Same contract as the voice worker: an archive without the Anvil sidecar
-/// must never block updating `mj` itself.
-fn extract_optional_anvil(archive_name: &str, archive_bytes: &[u8]) -> Option<Vec<u8>> {
-    match extract_named_binary(archive_name, archive_bytes, ANVIL_NAME, ANVIL_NAME) {
-        Ok(anvil) => Some(anvil),
-        Err(e) => {
-            eprintln!("mj: skipping Anvil update: {e:#}");
             None
         }
     }
@@ -883,31 +863,6 @@ mod tests {
 
         let binary = extract_optional_voice_worker(
             "brokk-mjolnir-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
-            &archive,
-        );
-
-        assert!(binary.is_none());
-    }
-
-    #[test]
-    fn optional_anvil_extracts_when_bundled() {
-        let archive = make_tar_gz("brokk-mjolnir/anvil", b"anvil bytes");
-
-        let binary = extract_optional_anvil(
-            "brokk-mjolnir-v0.5.0-aarch64-linux-android.tar.gz",
-            &archive,
-        )
-        .expect("bundled Anvil");
-
-        assert_eq!(binary, b"anvil bytes");
-    }
-
-    #[test]
-    fn optional_anvil_tolerates_archives_without_one() {
-        let archive = make_tar_gz("brokk-mjolnir/mj", b"binary bytes");
-
-        let binary = extract_optional_anvil(
-            "brokk-mjolnir-v0.5.0-aarch64-linux-android.tar.gz",
             &archive,
         );
 

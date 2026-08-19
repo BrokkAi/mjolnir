@@ -629,11 +629,21 @@ impl std::fmt::Display for LaunchError {
                 "uvx is required for this agent, but mj could not install uv automatically: {source}\n\
                  hint: install uv from https://docs.astral.sh/uv/getting-started/installation/ and relaunch mj"
             ),
-            LaunchError::NodeInstallFailed { source } => write!(
-                f,
-                "npx is required, but mj could not install embedded Node 24 automatically: {source}\n\
-                 hint: install Node.js 24 from https://nodejs.org/en/download and relaunch mj"
-            ),
+            LaunchError::NodeInstallFailed { source } => {
+                if cfg!(target_os = "android") {
+                    write!(
+                        f,
+                        "npx is required, but mj could not install Node.js automatically: {source}\n\
+                         hint: run `pkg install nodejs` in Termux and relaunch mj"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "npx is required, but mj could not install embedded Node 24 automatically: {source}\n\
+                         hint: install Node.js 24 from https://nodejs.org/en/download and relaunch mj"
+                    )
+                }
+            }
         }
     }
 }
@@ -1613,6 +1623,27 @@ async fn prepare_npx_command(
         });
     }
 
+    // nodejs.org ships no bionic build, so Termux's package manager owns the
+    // Node runtime on Android.
+    if cfg!(target_os = "android") {
+        let _ = ui_tx.send(UiEvent::Info(
+            "npx not found; installing Node.js with `pkg install nodejs`".to_string(),
+        ));
+        install_termux_nodejs().await?;
+        let Some(npx_path) = find_on_path(&command) else {
+            return Err(LaunchError::NodeInstallFailed {
+                source: "`pkg install nodejs` succeeded but npx is still not on PATH".to_string(),
+            });
+        };
+        let _ = ui_tx.send(UiEvent::Info(
+            "Node.js installed; launching command".to_string(),
+        ));
+        return Ok(PreparedAgentCommand {
+            command: npx_path,
+            env: HashMap::new(),
+        });
+    }
+
     let _ = ui_tx.send(UiEvent::Info(
         "npx not found; installing embedded Node 24 for npx-based commands".to_string(),
     ));
@@ -1774,6 +1805,61 @@ fn uv_install_command(bin_dir: &Path) -> Command {
         cmd.env("UV_UNMANAGED_INSTALL", bin_dir);
         cmd
     }
+}
+
+/// Probe-time resolution: like [`resolve_agent_command_no_install`], except
+/// that on Android a missing `npx` is installed through Termux's pkg first.
+/// The platform route is the only team on that build, so probing it as
+/// "missing" would leave nothing selectable before the first spawn.
+pub async fn resolve_agent_command_for_probe(
+    command: &Path,
+    env: &HashMap<String, String>,
+) -> Option<PreparedAgentCommand> {
+    if let Some(prepared) = resolve_agent_command_no_install(command, env) {
+        return Some(prepared);
+    }
+    let normalized = normalize_spawn_program(command.to_path_buf());
+    if cfg!(target_os = "android") && is_program_name(&normalized, "npx") {
+        if let Err(e) = install_termux_nodejs().await {
+            tracing::warn!("install Node.js for probe: {e}");
+            return None;
+        }
+        return resolve_agent_command_no_install(command, env);
+    }
+    None
+}
+
+/// Termux owns the Node runtime on Android: nodejs.org publishes no bionic
+/// build for the embedded installer to download. Serialized so concurrent
+/// probe and spawn attempts cannot race `pkg` against itself; the winner
+/// installs and the rest see npx on PATH.
+async fn install_termux_nodejs() -> std::result::Result<(), LaunchError> {
+    static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = INSTALL.lock().await;
+    if find_on_path(Path::new("npx")).is_some() {
+        return Ok(());
+    }
+    let mut cmd = termux_nodejs_install_command();
+    let output = tokio::time::timeout(Duration::from_secs(600), cmd.output())
+        .await
+        .map_err(|_| LaunchError::NodeInstallFailed {
+            source: "`pkg install nodejs` timed out after 600 seconds".to_string(),
+        })?
+        .map_err(|e| LaunchError::NodeInstallFailed {
+            source: format!("failed to start `pkg install nodejs`: {e}"),
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(LaunchError::NodeInstallFailed {
+        source: command_failure_summary(&output),
+    })
+}
+
+fn termux_nodejs_install_command() -> Command {
+    let mut cmd = Command::new("pkg");
+    cmd.args(["install", "-y", "nodejs"]);
+    cmd
 }
 
 fn embedded_node_root() -> PathBuf {
@@ -6442,6 +6528,27 @@ mod tests {
     /// waits this long, so passing runs never pay for it; loaded CI runners
     /// (notably Windows) blow well past a few seconds.
     const EVENT_DEADLINE: Duration = Duration::from_secs(60);
+
+    /// Off Android the probe resolver must behave exactly like the pure
+    /// no-install resolver: a missing plain program stays missing.
+    #[tokio::test]
+    async fn probe_resolution_does_not_install_off_android() {
+        let resolved = resolve_agent_command_for_probe(
+            Path::new("definitely-not-a-real-program-mj-test"),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn termux_nodejs_install_is_noninteractive() {
+        let cmd = termux_nodejs_install_command();
+        let cmd = cmd.as_std();
+        assert_eq!(cmd.get_program(), "pkg");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["install", "-y", "nodejs"]);
+    }
 
     /// #737: after a clean `wait()` the caller still runs the tree kill for
     /// surviving descendants. An already-reaped root ("process not found"

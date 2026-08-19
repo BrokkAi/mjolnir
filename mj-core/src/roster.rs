@@ -65,7 +65,8 @@ fn external_server_info(external: &ExternalAdapter, _config: &Config) -> AcpServ
         // The platform adapter cannot be disabled: it is the only route on
         // this build, and normalize() strips any stale policy for it.
         policy: AcpServerPolicy::Auto,
-        // Registration implies the binary exists on this host.
+        // The platform supplies this route by construction; launcher
+        // availability is handled at probe and spawn time.
         detected: true,
         selected: true,
         evidence: external.evidence.clone(),

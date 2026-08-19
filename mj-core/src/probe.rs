@@ -68,7 +68,7 @@ where
         crate::claude_token::ensure_fresh_before_spawn(cwd.clone(), &env).await;
     }
 
-    let Some(prepared) = acp::resolve_agent_command_no_install(&program, &env) else {
+    let Some(prepared) = acp::resolve_agent_command_for_probe(&program, &env).await else {
         return missing();
     };
 
