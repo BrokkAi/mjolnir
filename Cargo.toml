@@ -23,6 +23,24 @@ default-members = [".", "mj-core", "mj-agents", "mj-tui", "mj-remote"]
 # they cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
 version = "1.11.1"
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-3.0-only"
+repository = "https://github.com/BrokkAi/mjolnir"
+homepage = "https://github.com/BrokkAi/mjolnir"
+keywords = ["mjolnir", "acp", "ai", "agents"]
+categories = ["development-tools", "command-line-utilities"]
+
+# Keep every same-release workspace dependency requirement here. Cargo requires
+# published path dependencies to carry a registry version, but release bumps
+# should still change that version in one manifest rather than in every crate.
+[workspace.dependencies]
+mj-core = { package = "brokk-mj-core", path = "mj-core", version = "1.11.1" }
+mj-agents = { package = "brokk-mj-agents", path = "mj-agents", version = "1.11.1" }
+mj-anvil = { package = "brokk-mj-anvil", path = "mj-anvil", version = "1.11.1" }
+mj-tui = { package = "brokk-mj-tui", path = "mj-tui", version = "1.11.1" }
+mj-remote = { package = "brokk-mj-remote", path = "mj-remote", version = "1.11.1" }
+mj-desktop = { package = "brokk-mj-desktop", path = "mj-desktop", version = "1.11.1" }
 
 [[bin]]
 name = "mj"
@@ -35,9 +53,9 @@ default = []
 desktop-app = ["dep:mj-desktop"]
 
 [dependencies]
-mj-core = { path = "mj-core", version = "1.11.1" }
-mj-agents = { path = "mj-agents", version = "1.11.1" }
-mj-tui = { path = "mj-tui", version = "1.11.1" }
+mj-core.workspace = true
+mj-agents.workspace = true
+mj-tui.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
 async-trait = "0.1"
@@ -59,7 +77,7 @@ futures = "0.3"
 hmac = "0.12"
 # Resolves the IANA zone name (e.g. "Europe/Paris") to append to reset times.
 iana-time-zone = "0.1"
-mj-remote = { path = "mj-remote", version = "1.11.1" }
+mj-remote.workspace = true
 libc = "0.2"
 signal-hook = "0.3"
 rcgen = "0.13"
@@ -91,15 +109,13 @@ url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies.mj-desktop]
-path = "mj-desktop"
-version = "1.11.1"
+workspace = true
 optional = true
 
 # Anvil is the self-contained ACP route on Android, where the npx-based
 # built-in adapters cannot run (issue #685). Other targets never compile it.
 [target.'cfg(target_os = "android")'.dependencies.mj-anvil]
-path = "mj-anvil"
-version = "1.11.1"
+workspace = true
 
 [dev-dependencies]
 tempfile = "3"

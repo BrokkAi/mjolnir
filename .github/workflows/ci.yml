@@ -20,6 +20,9 @@ jobs:
       with:
         node-version: 24
 
+    - name: Check workspace release versions
+      run: node scripts/release-version.mjs check
+
     - name: Install pinned license tools
       run: |
         cargo install --locked cargo-about --version 0.9.1 --features cli
@@ -46,14 +49,14 @@ jobs:
         for member in mj-core mj-agents mj-anvil mj-tui mj-remote mj-desktop voice-worker; do
           diff -u LICENSE "$member/LICENSE"
         done
-        cargo package --locked --allow-dirty --no-verify -p mj-desktop
+        cargo package --locked --allow-dirty --no-verify -p brokk-mj-desktop
         # The root package cannot resolve its same-release workspace registry
         # dependencies until publishing; the matrix build below validates it.
         cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/mjolnir-package-files.txt
         grep -Fx LICENSE /tmp/mjolnir-package-files.txt
         grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/mjolnir-package-files.txt
         grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/mjolnir-package-files.txt
-        for member in mj-core mj-agents mj-anvil mj-tui mj-remote mj-desktop brokk-mj-voice-worker; do
+        for member in brokk-mj-core brokk-mj-agents brokk-mj-anvil brokk-mj-tui brokk-mj-remote brokk-mj-desktop brokk-mj-voice-worker; do
           cargo package --locked --allow-dirty --list -p "$member" | grep -Fx LICENSE
         done
 
@@ -105,7 +108,7 @@ jobs:
 
     - name: Verify packaged macOS desktop crate
       if: runner.os == 'macOS'
-      run: cargo package --locked --allow-dirty -p mj-desktop
+      run: cargo package --locked --allow-dirty -p brokk-mj-desktop
 
   voice-worker:
     name: Voice worker (ubuntu-latest)
@@ -145,10 +148,10 @@ jobs:
     # Android binary), so the host matrix job never builds it; its lint and
     # test gate lives here instead.
     - name: Lint Anvil crate
-      run: cargo clippy --locked -p mj-anvil --all-targets -- -D warnings
+      run: cargo clippy --locked -p brokk-mj-anvil --all-targets -- -D warnings
 
     - name: Test Anvil crate
-      run: cargo test --locked -p mj-anvil
+      run: cargo test --locked -p brokk-mj-anvil
 
     - name: Setup Android NDK
       id: setup-ndk

@@ -1,4 +1,4 @@
-//! Ratatui renderer for Ragnarok sprite data owned by `mj-agents`.
+//! Ratatui renderer for Ragnarok sprite data owned by `brokk-mj-agents`.
 
 #![allow(clippy::disallowed_methods)]
 

@@ -1,11 +1,15 @@
 [package]
-name = "mj-desktop"
+name = "brokk-mj-desktop"
 version.workspace = true
-edition = "2024"
-rust-version = "1.97"
+edition.workspace = true
+rust-version.workspace = true
 description = "Native desktop shell for Mjolnir"
-license = "GPL-3.0-only"
-repository = "https://github.com/BrokkAi/mjolnir"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 publish = true
 
 [dependencies]

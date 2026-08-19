@@ -99,7 +99,7 @@ pub struct SettingsEditor {
 
 impl SettingsEditor {
     pub fn new(mut config: Config, choices: Vec<ModelChoice>, notice: Option<String>) -> Self {
-        // Mirror mj-tui's editor: a registered platform adapter owns the
+        // Mirror brokk-mj-tui's editor: a registered platform adapter owns the
         // team, so the editor never shows or saves routes it would reject.
         config.apply_registered_external_team();
         let inventory = mj_core::roster::discover_inventory(&config);

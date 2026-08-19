@@ -502,6 +502,167 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-agents"
+version = "1.11.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "brokk-mj-core",
+ "futures",
+ "getrandom 0.3.4",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "brokk-mj-anvil"
+version = "1.11.1"
+dependencies = [
+ "brokk-mj-core",
+]
+
+[[package]]
+name = "brokk-mj-core"
+version = "1.11.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "dirs",
+ "flate2",
+ "futures",
+ "getrandom 0.3.4",
+ "iana-time-zone",
+ "libc",
+ "reqwest",
+ "rmcp",
+ "rusqlite",
+ "schemars 1.2.1",
+ "semver",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "signal-hook",
+ "similar",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "unicode-width",
+ "url",
+ "zip",
+]
+
+[[package]]
+name = "brokk-mj-desktop"
+version = "1.11.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "block2",
+ "gio",
+ "image",
+ "objc2",
+ "objc2-foundation",
+ "objc2-web-kit",
+ "rustls",
+ "tao",
+ "tracing",
+ "url",
+ "webbrowser",
+ "webkit2gtk",
+ "webview2-com",
+ "windows-core 0.61.2",
+ "wry",
+]
+
+[[package]]
+name = "brokk-mj-remote"
+version = "1.11.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "axum-server",
+ "base64",
+ "brokk-mj-core",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "getrandom 0.3.4",
+ "hmac",
+ "http-body-util",
+ "libc",
+ "qrcode",
+ "rcgen",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shell-words",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-tui"
+version = "1.11.1"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "base64",
+ "brokk-mj-agents",
+ "brokk-mj-core",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "futures",
+ "iana-time-zone",
+ "image",
+ "libc",
+ "qrcode",
+ "ratatui",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "signal-hook",
+ "similar",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "unicode-width",
+ "url",
+]
+
+[[package]]
 name = "brokk-mj-voice-worker"
 version = "1.11.1"
 dependencies = [
@@ -526,6 +687,12 @@ dependencies = [
  "async-trait",
  "axum-server",
  "base64",
+ "brokk-mj-agents",
+ "brokk-mj-anvil",
+ "brokk-mj-core",
+ "brokk-mj-desktop",
+ "brokk-mj-remote",
+ "brokk-mj-tui",
  "chrono",
  "clap",
  "dirs",
@@ -535,12 +702,6 @@ dependencies = [
  "http-body-util",
  "iana-time-zone",
  "libc",
- "mj-agents",
- "mj-anvil",
- "mj-core",
- "mj-desktop",
- "mj-remote",
- "mj-tui",
  "rcgen",
  "reqwest",
  "rusqlite",
@@ -2689,167 +2850,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mj-agents"
-version = "1.11.1"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "async-trait",
- "futures",
- "getrandom 0.3.4",
- "mj-core",
- "rmcp",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "mj-anvil"
-version = "1.11.1"
-dependencies = [
- "mj-core",
-]
-
-[[package]]
-name = "mj-core"
-version = "1.11.1"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "dirs",
- "flate2",
- "futures",
- "getrandom 0.3.4",
- "iana-time-zone",
- "libc",
- "reqwest",
- "rmcp",
- "rusqlite",
- "schemars 1.2.1",
- "semver",
- "serde",
- "serde_json",
- "shell-words",
- "signal-hook",
- "similar",
- "tar",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "unicode-width",
- "url",
- "zip",
-]
-
-[[package]]
-name = "mj-desktop"
-version = "1.11.1"
-dependencies = [
- "anyhow",
- "base64",
- "block2",
- "gio",
- "image",
- "objc2",
- "objc2-foundation",
- "objc2-web-kit",
- "rustls",
- "tao",
- "tracing",
- "url",
- "webbrowser",
- "webkit2gtk",
- "webview2-com",
- "windows-core 0.61.2",
- "wry",
-]
-
-[[package]]
-name = "mj-remote"
-version = "1.11.1"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "async-trait",
- "axum",
- "axum-server",
- "base64",
- "chrono",
- "crossterm",
- "dirs",
- "getrandom 0.3.4",
- "hmac",
- "http-body-util",
- "libc",
- "mj-core",
- "qrcode",
- "rcgen",
- "reqwest",
- "rusqlite",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha2",
- "shell-words",
- "tempfile",
- "time",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "mj-tui"
-version = "1.11.1"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "arboard",
- "async-trait",
- "base64",
- "chrono",
- "crossterm",
- "dirs",
- "flate2",
- "futures",
- "iana-time-zone",
- "image",
- "libc",
- "mj-agents",
- "mj-core",
- "qrcode",
- "ratatui",
- "reqwest",
- "semver",
- "serde",
- "serde_json",
- "shell-words",
- "signal-hook",
- "similar",
- "tempfile",
- "time",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "unicode-width",
- "url",
 ]
 
 [[package]]

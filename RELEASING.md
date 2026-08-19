@@ -8,10 +8,14 @@ tests, and dependency-license maintenance.
 
 The release version is set once, in `[workspace.package]` in the root
 `Cargo.toml`; every workspace crate inherits it via `version.workspace = true`,
-so they cannot drift apart. After bumping it, run `cargo update --workspace` to refresh
-the workspace entries in `Cargo.lock`. `install.sh`'s `SCRIPT_VERSION` is an
-independent installer logging revision and is not automatically synchronized
-to product releases.
+so they cannot drift apart. After changing that one value, run
+`node scripts/release-version.mjs sync` to project it into the published
+internal dependency requirements under `[workspace.dependencies]`, then run
+`cargo update --workspace` to refresh the workspace entries in `Cargo.lock`.
+CI runs the script's `check` mode so generated dependency versions cannot
+drift. Member manifests inherit the dependencies and contain no release
+versions. `install.sh`'s `SCRIPT_VERSION` is an independent installer logging
+revision and is not automatically synchronized to product releases.
 
 `licenses/THIRD_PARTY_LICENSES.html` embeds the workspace crate versions, so a
 version bump must regenerate it. CI diffs the checked-in report against a fresh
@@ -53,9 +57,10 @@ already-published release.
 
 ## crates.io publishing
 
-`publish.yml` publishes `brokk-mj-voice-worker`, `mj-core`, `mj-agents`,
-`mj-tui`, `mj-remote`, `mj-desktop`, and `brokk-mjolnir` in dependency order:
-each library crate must reach the registry before anything that depends on it.
+`publish.yml` publishes `brokk-mj-voice-worker`, `brokk-mj-core`,
+`brokk-mj-agents`, `brokk-mj-anvil`, `brokk-mj-tui`, `brokk-mj-remote`,
+`brokk-mj-desktop`, and `brokk-mjolnir` in dependency order: each library crate
+must reach the registry before anything that depends on it.
 It refuses to publish when the tag differs from any workspace crate version. It
 packages the whole workspace in one `cargo package --workspace` run — so the
 same-release sibling versions resolve against the crates packaged beside them

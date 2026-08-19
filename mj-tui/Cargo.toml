@@ -1,16 +1,20 @@
 [package]
-name = "mj-tui"
+name = "brokk-mj-tui"
 version.workspace = true
-edition = "2024"
-rust-version = "1.97"
+edition.workspace = true
+rust-version.workspace = true
 description = "Ratatui terminal frontend for Mjolnir"
-license = "GPL-3.0-only"
-repository = "https://github.com/BrokkAi/mjolnir"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 publish = true
 
 [dependencies]
-mj-core = { path = "../mj-core", version = "1.11.1" }
-mj-agents = { path = "../mj-agents", version = "1.11.1" }
+mj-core.workspace = true
+mj-agents.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
 async-trait = "0.1"

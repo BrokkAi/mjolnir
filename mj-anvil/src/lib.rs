@@ -1,5 +1,5 @@
 //! Anvil adapter registration for the Android build. Every Anvil-specific
-//! fact lives in this crate; `mj-core` only ever sees a generic external
+//! fact lives in this crate; `brokk-mj-core` only ever sees a generic external
 //! adapter.
 
 use std::collections::HashMap;
