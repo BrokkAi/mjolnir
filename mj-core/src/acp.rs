@@ -6432,11 +6432,10 @@ mod tests {
         ForkSessionResponse, InitializeResponse, LoadSessionResponse, NewSessionResponse,
         PermissionOption, PermissionOptionKind, PromptResponse, ResumeSessionResponse,
         SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionCloseCapabilities,
-        SessionConfigId, SessionConfigOptionValue, SessionConfigValueId,
-        SessionDeleteCapabilities, SessionForkCapabilities,
-        SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-        SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
-        ToolCallUpdate, ToolCallUpdateFields,
+        SessionConfigId, SessionConfigOptionValue, SessionConfigValueId, SessionDeleteCapabilities,
+        SessionForkCapabilities, SessionId, SessionNotification, SessionResumeCapabilities,
+        SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+        TextContent, ToolCallUpdate, ToolCallUpdateFields,
     };
     use std::sync::{
         Arc,
