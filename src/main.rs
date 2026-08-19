@@ -185,6 +185,11 @@ struct Cli {
 enum Commands {
     /// Install repository guidance for coding agents.
     Agents(AgentsArgs),
+    /// Pipe stdin/stdout to an in-process MCP tool server of a parent mj
+    /// process. Spawned by ACP agents as an advertised stdio MCP server;
+    /// not for interactive use.
+    #[command(hide = true)]
+    McpBridge(McpBridgeArgs),
     /// List and manage persistent cross-session memories.
     Memory(MemoryArgs),
     /// Inspect or refresh model discovery state.
@@ -218,6 +223,13 @@ struct AgentsInstallArgs {
     /// Apply the displayed diff without an interactive confirmation.
     #[arg(short = 'y', long)]
     yes: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct McpBridgeArgs {
+    /// Loopback address of the parent mj process's MCP bridge listener.
+    #[arg(long)]
+    addr: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -488,12 +500,29 @@ fn ui_mode(fullscreen_tui: bool) -> UiMode {
     }
 }
 
+/// The chat surface for this run: the configured interface preference, with
+/// the `--fullscreen-tui` flag as a one-run fullscreen override.
+fn effective_ui_mode(cli_fullscreen_tui: bool, cfg: &Config) -> UiMode {
+    ui_mode(cli_fullscreen_tui || cfg.interface == config::InterfaceMode::Fullscreen)
+}
+
+/// Best-effort match for the mode the terminal was left in after a session:
+/// sessions adopt a changed interface preference on /new, so the freshest
+/// config is the closest stand-in for the session that just ended.
+fn post_session_ui_mode(cli_fullscreen_tui: bool) -> UiMode {
+    effective_ui_mode(
+        cli_fullscreen_tui,
+        &Config::load(&config::default_config_path()).unwrap_or_default(),
+    )
+}
+
 fn should_run_startup_update_check(cli: &Cli) -> bool {
     if cli.no_update_check || cli.print.is_some() {
         return false;
     }
     match &cli.command {
         Some(Commands::Agents(_)) => false,
+        Some(Commands::McpBridge(_)) => false,
         Some(Commands::Memory(_)) => false,
         Some(Commands::Models(_)) => false,
         Some(Commands::Resume(args)) => !args.list,
@@ -560,6 +589,14 @@ fn run_memory_command(command: MemoryCommand, cwd: &Path) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.log_file.as_deref())?;
+    // The bridge child must stay a bare stdio pipe: no signal coordinator,
+    // no update check, nothing that could write to stdout.
+    if let Some(Commands::McpBridge(args)) = &cli.command {
+        return mj_core::mcp_bridge::run_bridge(&args.addr).await;
+    }
+    // Register the platform adapter before config load or roster resolution.
+    #[cfg(target_os = "android")]
+    mj_anvil::register();
     let debug_file = cli.log_file.clone();
     let snapshot_exclusions =
         configured_snapshot_exclusions(cli.log_file.as_deref(), cli.agent_stderr.as_deref());
@@ -590,6 +627,9 @@ async fn main() -> Result<()> {
             Commands::Agents(args) => match args.command {
                 AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
             },
+            // Dispatched before the termination coordinator installs; kept
+            // here only for match exhaustiveness.
+            Commands::McpBridge(args) => mj_core::mcp_bridge::run_bridge(&args.addr).await,
             Commands::Memory(args) => run_memory_command(args.command, &cwd),
             Commands::Models(args) => match args.command {
                 ModelsCommand::Refresh => {
@@ -700,18 +740,19 @@ async fn main() -> Result<()> {
         worktree_label.clone(),
         None,
         None,
-        ui_mode(fullscreen_tui),
+        fullscreen_tui,
     )
     .await;
 
-    let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(ui_mode(fullscreen_tui)));
+    let mode = post_session_ui_mode(fullscreen_tui);
+    let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
 
     // Print resume hint so the user can come back to this session.
     match &result {
         Ok(Some(session_id)) => {
             if worktree_kept {
                 print_resume_hint(
-                    ui_mode(fullscreen_tui),
+                    mode,
                     session_id,
                     worktree_label.as_deref(),
                     workspace_roots.additional_directories(),
@@ -919,7 +960,6 @@ async fn run_resume(
     permission_mode: Option<config::PermissionPreset>,
     termination: CancellationToken,
 ) -> Result<()> {
-    let mode = ui_mode(args.fullscreen_tui);
     let cwd = match args.cwd.clone() {
         Some(p) => absolutize_cwd(p)?,
         None => std::env::current_dir().context("current dir")?,
@@ -932,6 +972,7 @@ async fn run_resume(
     let worktree_label = worktree_label(worktree.as_ref());
     let project_label = project_label(&cwd);
     let cfg = Config::load(&config::default_config_path())?;
+    let mode = effective_ui_mode(args.fullscreen_tui, &cfg);
     let mut resume_roster = if args.list {
         roster::resolve(&cfg, &cwd).await?
     } else {
@@ -1055,9 +1096,10 @@ async fn run_resume(
                 title,
             }),
             Some(agent),
-            mode,
+            args.fullscreen_tui,
         )
         .await;
+        let mode = post_session_ui_mode(args.fullscreen_tui);
         let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
         // Show resume hint for the session we just ran
         if let Ok(Some(resumed_id)) = &result
@@ -1148,9 +1190,10 @@ async fn run_resume(
                         title: session_title,
                     }),
                     Some(agent),
-                    mode,
+                    args.fullscreen_tui,
                 )
                 .await;
+                let mode = post_session_ui_mode(args.fullscreen_tui);
                 let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
                 // Show resume hint for the session we just ran
                 if let Ok(Some(resumed_id)) = &result
@@ -1461,13 +1504,13 @@ async fn run_app(
     worktree_label: Option<String>,
     resume_target: Option<ResumeTarget>,
     initial_agent: Option<SelectedAgent>,
-    mode: UiMode,
+    fullscreen_tui: bool,
 ) -> Result<Option<String>> {
     let termination = runtime_options.termination.clone();
     let config_path = config::default_config_path();
     let config_exists = config::Config::path_has_saved_config(&config_path);
     let mut cfg = Config::load(&config_path)?;
-    let team_selection_required = config::TeamPreset::from_config(&cfg).is_none();
+    let team_selection_required = !config::has_valid_team(&cfg);
     let onboarding_kind = onboarding_kind(
         config_exists,
         cfg.onboarding_version,
@@ -1517,6 +1560,9 @@ async fn run_app(
         crate::roster::rebind_auto_review_for_primary(&mut roster, &cfg);
     }
     let mut primary_agent = selected_agent_for_role(&roster.primary);
+    // Computed after onboarding so a freshly picked interface preference
+    // shapes the very first session.
+    let mut mode = effective_ui_mode(fullscreen_tui, &cfg);
 
     // Consume resume_session and any pinned resume launch on the first
     // iteration only. Fresh sessions always use the resolved primary agent.
@@ -1572,6 +1618,7 @@ async fn run_app(
                 }
                 roster = resolved;
                 primary_agent = selected_agent_for_role(&roster.primary);
+                mode = effective_ui_mode(fullscreen_tui, &cfg);
                 initial_agent = Some(primary_agent.clone());
                 pending_new_session_boundary = show_new_session_boundary;
                 if session_result.reason == UiExitReason::ClearSession {
@@ -2255,8 +2302,7 @@ async fn run_session(
         memory: memory::SessionMemory::from_config(
             &memory_config,
             &cwd,
-            launched_adapter_kind(&roster, agent)
-                .is_some_and(|kind| matches!(kind, roster::AdapterKind::Codex)),
+            launched_adapter_kind(&roster, agent),
         ),
         side_prompt_policy: false,
         termination: None,
@@ -3956,6 +4002,17 @@ mod tests {
     }
 
     #[test]
+    fn configured_interface_drives_the_ui_mode_with_a_cli_override() {
+        let mut cfg = Config::default();
+        assert_eq!(effective_ui_mode(false, &cfg), UiMode::InlineChat);
+        assert_eq!(effective_ui_mode(true, &cfg), UiMode::FullscreenTui);
+
+        cfg.interface = config::InterfaceMode::Fullscreen;
+        assert_eq!(effective_ui_mode(false, &cfg), UiMode::FullscreenTui);
+        assert_eq!(effective_ui_mode(true, &cfg), UiMode::FullscreenTui);
+    }
+
+    #[test]
     fn parse_accepts_worktree_short_flag() {
         let cli = try_parse_hermetic(&["mj", "-w"]).expect("parse");
         assert_eq!(cli.worktree, Some(String::new()));
@@ -4024,6 +4081,14 @@ mod tests {
 
         let cli = try_parse_hermetic(&["mj", "server"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
+
+        let cli = try_parse_hermetic(&["mj", "mcp-bridge", "--addr", "127.0.0.1:12345"])
+            .expect("parse hidden MCP bridge");
+        assert!(!should_run_startup_update_check(&cli));
+        let Some(Commands::McpBridge(args)) = cli.command else {
+            panic!("expected MCP bridge subcommand");
+        };
+        assert_eq!(args.addr, "127.0.0.1:12345");
 
         let cli = try_parse_hermetic(&["mj", "models", "refresh"]).expect("parse");
         assert!(!should_run_startup_update_check(&cli));
@@ -4789,6 +4854,68 @@ mod tests {
             .await
             .expect("future result");
         assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn mcp_bridge_serves_an_initialized_root_session() {
+        use agent_client_protocol::schema::v1::McpServer;
+        use tokio::{
+            io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+            net::TcpStream,
+        };
+
+        let temp = tempfile::tempdir().expect("memory tempdir");
+        let session_memory = memory::SessionMemory {
+            store_path: temp.path().join("memories.json"),
+            project: temp.path().to_path_buf(),
+            inject: true,
+            tools: true,
+            import_claude_auto: false,
+        };
+        let server = memory::ToolServer::start(&session_memory)
+            .await
+            .expect("start bridge");
+        let McpServer::Stdio(stdio) = server.advertised() else {
+            panic!("bridge must advertise stdio");
+        };
+        let addr = stdio
+            .args
+            .iter()
+            .skip_while(|arg| arg.as_str() != "--addr")
+            .nth(1)
+            .expect("bridge address");
+        let token = &stdio
+            .env
+            .iter()
+            .find(|variable| variable.name == mj_core::mcp_bridge::TOKEN_ENV)
+            .expect("bridge token")
+            .value;
+        let stream = TcpStream::connect(addr).await.expect("connect bridge");
+        let (read, mut write) = stream.into_split();
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "root-fixture", "version": "1"}
+            }
+        });
+        write
+            .write_all(format!("{token}\n{initialize}\n").as_bytes())
+            .await
+            .expect("initialize bridge");
+        let response = BufReader::new(read)
+            .lines()
+            .next_line()
+            .await
+            .expect("read response")
+            .expect("bridge remains open");
+        let response: serde_json::Value =
+            serde_json::from_str(&response).expect("response is JSON");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["serverInfo"]["name"], "mj-memory");
     }
 
     #[tokio::test]

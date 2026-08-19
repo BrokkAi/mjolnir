@@ -91,7 +91,6 @@ run_case() {
   MJ_E2E_DEBUG_LOG="$root/mj.log" \
   MJ_E2E_AGENT_STDERR="$root/agent.stderr" \
   MJ_E2E_SUBAGENT_PROMPT="Run the deterministic fixture" \
-  MJ_E2E_HTTP_UNSUPPORTED="$([ "$mode" = unsupported ] && printf 1 || printf 0)" \
   MJ_E2E_EXIT_ON_RUNTIME_CLOSE=1 \
     expect "$repo/tests/e2e/drive-mj.exp"
 
@@ -113,21 +112,10 @@ run_case() {
     echo "harness-owned model or reasoning control leaked into the primary's F-key controls" >&2
     exit 1
   fi
-  if [ "$mode" != unsupported ] && [ "$mode" != no-change ]; then
+  if [ "$mode" != no-change ]; then
     grep -a 'tools:create_subagent,subagent_cancel' "$root/primary.log" >/dev/null
   fi
-  if [ "$mode" = unsupported ]; then
-    test ! -e "$root/primary-result.json"
-    # The roster synthesizes codex capabilities from credentials, so a no-HTTP
-    # adapter resolves at roster time and fails at session launch instead,
-    # with a fatal naming the missing capability.
-    grep -a "does not support HTTP MCP" "$root/transcript.log" >/dev/null
-    grep -a "mcpCapabilities.http" "$root/transcript.log" >/dev/null
-    if [ -f "$root/primary.log" ] && grep -a '"method":"session/new"' "$root/primary.log" >/dev/null; then
-      echo "unsupported primary received session/new" >&2
-      exit 1
-    fi
-  elif [ "$mode" = no-change ]; then
+  if [ "$mode" = no-change ]; then
     grep -a 'Agents · primary' "$root/transcript.log" >/dev/null
     test ! -e "$root/primary-result.json"
     grep -a "PRIMARY.*NO.*CHANGE" "$root/transcript.log" >/dev/null
@@ -152,7 +140,7 @@ run_case() {
     grep -a '^launched:2$' "$root/primary.log" >/dev/null
     grep -a 'subagent_result id="1"' "$root/primary.log" >/dev/null
     grep -a 'subagent_result id="2"' "$root/primary.log" >/dev/null
-    "$node" -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.argv[1])); const launches=r.launches??[]; if(r.error || r.unauthorizedStatus!==401 || launches.length!==2) process.exit(1); for(const launch of launches){ const s=launch.response?.structuredContent; if(!s || s.status!=="started" || !s.subagentId || !s.agent || !s.model) process.exit(1); const text=launch.response?.content?.map(x=>x.text||"").join("")??""; if(!text.includes("running in the background") || text.includes("workspace_diff")) process.exit(1);} ' "$root/primary-result.json"
+    "$node" -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.argv[1])); const launches=r.launches??[]; if(r.error || r.unauthorizedRejected!==true || launches.length!==2) process.exit(1); for(const launch of launches){ const s=launch.response?.structuredContent; if(!s || s.status!=="started" || !s.subagentId || !s.agent || !s.model) process.exit(1); const text=launch.response?.content?.map(x=>x.text||"").join("")??""; if(!text.includes("running in the background") || text.includes("workspace_diff")) process.exit(1);} ' "$root/primary-result.json"
   elif [ "$mode" = complete ] || [ "$mode" = review ] || [ "$mode" = details ]; then
     grep -a 'Agents · primary' "$root/transcript.log" >/dev/null
     test "$(grep -ac '^session-directive:' "$root/primary.log")" -eq 1
@@ -161,7 +149,7 @@ run_case() {
     # create_subagent returns before the subagent finishes: the started
     # acknowledgement must carry no report, and the report must arrive later as
     # an injected <subagent_result> user message.
-    "$node" -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.argv[1])); const completions=fs.readFileSync(process.argv[2],"utf8").match(/completion:(\d+)/g)??[]; const done=Number(completions.at(0)?.split(":")[1]); const launch=(r.launches??[r])[0]; const text=launch.response?.content?.map(x=>x.text||"").join("")??""; if(r.error || r.unauthorizedStatus!==401 || launch.response?.isError) process.exit(1); if(!text.includes("running in the background") || text.includes("workspace_diff") || text.includes("SUBAGENT_E2E_OK")) process.exit(1); if(launch.response?.structuredContent?.status!=="started") process.exit(1); if(done && launch.toolReceivedAt>done) process.exit(1);' "$root/primary-result.json" "$root/nested.log"
+    "$node" -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.argv[1])); const completions=fs.readFileSync(process.argv[2],"utf8").match(/completion:(\d+)/g)??[]; const done=Number(completions.at(0)?.split(":")[1]); const launch=(r.launches??[r])[0]; const text=launch.response?.content?.map(x=>x.text||"").join("")??""; if(r.error || r.unauthorizedRejected!==true || launch.response?.isError) process.exit(1); if(!text.includes("running in the background") || text.includes("workspace_diff") || text.includes("SUBAGENT_E2E_OK")) process.exit(1); if(launch.response?.structuredContent?.status!=="started") process.exit(1); if(done && launch.toolReceivedAt>done) process.exit(1);' "$root/primary-result.json" "$root/nested.log"
     grep -a '^injection:1:' "$root/primary.log" >/dev/null
     grep -a 'subagent_result id="1"' "$root/primary.log" >/dev/null
     grep -a 'outcome="completed"' "$root/primary.log" >/dev/null
@@ -226,7 +214,7 @@ run_case() {
     grep -a 'Agents · primary' "$root/transcript.log" >/dev/null
     test -s "$root/primary-result.json"
     # The launch itself still succeeds; the failure travels in the report.
-    "$node" -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1])); const launch=(r.launches??[r])[0]; if(r.error || r.unauthorizedStatus!==401 || launch.response?.isError) process.exit(1);' "$root/primary-result.json"
+    "$node" -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1])); const launch=(r.launches??[r])[0]; if(r.error || r.unauthorizedRejected!==true || launch.response?.isError) process.exit(1);' "$root/primary-result.json"
     grep -a 'outcome="failed"' "$root/primary.log" >/dev/null
     grep -a 'fixture subagent failure' "$root/primary.log" >/dev/null
   elif [ "$mode" = inline-stream ]; then
@@ -272,14 +260,13 @@ case ${MJ_E2E_CASE:-both} in
   inline-stream) run_case inline-stream ;;
   cancel) run_case cancel ;;
   failed) run_case failed ;;
-  unsupported) run_case unsupported ;;
   no-change) run_case no-change ;;
   terminal-output) run_case terminal-output ;;
   review) run_case review ;;
   details) run_case details ;;
   parallel) run_case parallel ;;
-  both) run_case complete; run_case terminal-output; run_case cancel; run_case unsupported ;;
-  subagents) run_case complete; run_case no-change; run_case terminal-output; run_case inline-stream; run_case cancel; run_case failed; run_case unsupported; run_case review; run_case details; run_case parallel ;;
-  *) echo "MJ_E2E_CASE must be complete, no-change, terminal-output, inline-stream, cancel, failed, unsupported, review, details, parallel, both, or subagents" >&2; exit 2 ;;
+  both) run_case complete; run_case terminal-output; run_case cancel ;;
+  subagents) run_case complete; run_case no-change; run_case terminal-output; run_case inline-stream; run_case cancel; run_case failed; run_case review; run_case details; run_case parallel ;;
+  *) echo "MJ_E2E_CASE must be complete, no-change, terminal-output, inline-stream, cancel, failed, review, details, parallel, both, or subagents" >&2; exit 2 ;;
 esac
 echo "deterministic subagent PTY E2E passed"

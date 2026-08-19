@@ -148,16 +148,33 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target aarch64-linux-android
 
+      # Keep in sync with mj_anvil::VERSION; Android ships Anvil as the
+      # self-contained ACP route because the npx-based built-ins cannot run
+      # there (issue #685).
+      - name: Download pinned Anvil
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANVIL_VERSION: "0.25.0"
+        run: |
+          asset="brokk-anvil-v${ANVIL_VERSION}-aarch64-linux-android.zip"
+          gh release download "v${ANVIL_VERSION}" --repo BrokkAi/anvil --pattern "$asset" --pattern "$asset.sha256"
+          sha256sum -c "$asset.sha256"
+          unzip -j "$asset" '*/anvil' -d target/aarch64-linux-android/release
+          mkdir -p "anvil-licenses/anvil-v${ANVIL_VERSION}"
+          unzip -j "$asset" '*/LICENSE' '*/SOURCE.md' '*/THIRD_PARTY_LICENSES.html' '*/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt' '*/GPL-3.0.md' -d "anvil-licenses/anvil-v${ANVIL_VERSION}"
+
       - name: Package archive
         shell: bash
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-linux-android"
           mkdir "$name"
           cp "target/aarch64-linux-android/release/mj" "$name/"
+          cp "target/aarch64-linux-android/release/anvil" "$name/"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
           cp -R licenses/native "$name/licenses/"
+          cp -R anvil-licenses/. "$name/licenses/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 

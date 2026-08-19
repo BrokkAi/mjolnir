@@ -1293,10 +1293,16 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     != Some(reviewed.fingerprint.as_str())
             });
             if correction_review_base.is_some() {
-                let status = if correction_changed {
-                    crate::workflow::ReviewIssueStatus::Fixed
+                let (status, reason) = if correction_changed {
+                    (
+                        crate::workflow::ReviewIssueStatus::Fixed,
+                        "correction turn changed the workspace",
+                    )
                 } else {
-                    crate::workflow::ReviewIssueStatus::Invalidated
+                    (
+                        crate::workflow::ReviewIssueStatus::Invalidated,
+                        "correction turn changed nothing in the workspace",
+                    )
                 };
                 emit_workflow(
                     &workflow,
@@ -1305,6 +1311,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         WorkflowTransition::IssuesResolved {
                             pass: review_pass.saturating_sub(1),
                             status,
+                            reason: Some(reason.to_string()),
                         },
                     ),
                 );

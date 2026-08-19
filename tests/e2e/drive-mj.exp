@@ -59,17 +59,6 @@ if {$inline_mode} {
     }
 }
 
-if {$mode eq "unsupported"} {
-    # Codex capabilities are synthesized from credentials at roster time, so
-    # an adapter that turns out not to advertise HTTP MCP fails at session
-    # launch with a fatal + hint rather than being excluded from the roster.
-    expect {
-        -re {does not support HTTP MCP} {}
-        timeout { exit 18 }
-    }
-    exit 0
-}
-
 # The roster banner is the only textual startup signal; there is no
 # "connected" message anymore. A prompt sent while the session is still
 # starting is staged and auto-submitted once the session is ready.

@@ -83,6 +83,9 @@ impl Gate {
         }
 
         let result = match role.launch.kind {
+            // External adapters expose no usage backend; unknown quota never
+            // triggers failover.
+            AdapterKind::External => Check::Unavailable,
             AdapterKind::Claude => {
                 // A forced recheck (after an agent failure) must not be
                 // satisfied by a minute-old shared fact.

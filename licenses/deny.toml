@@ -40,6 +40,7 @@ exceptions = [
     { crate = "brokk-mjolnir", allow = ["GPL-3.0-only"] },
     { crate = "mj-core", allow = ["GPL-3.0-only"] },
     { crate = "mj-agents", allow = ["GPL-3.0-only"] },
+    { crate = "mj-anvil", allow = ["GPL-3.0-only"] },
     { crate = "mj-desktop", allow = ["GPL-3.0-only"] },
     { crate = "mj-remote", allow = ["GPL-3.0-only"] },
     { crate = "mj-tui", allow = ["GPL-3.0-only"] },

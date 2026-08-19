@@ -527,9 +527,6 @@ pub enum LaunchError {
     UnsupportedProtocolVersion { negotiated: ProtocolVersion },
     /// The user requested a lifecycle method the agent did not advertise.
     UnsupportedCapability { capability: &'static str },
-    /// Interactive subagent delegation requires the primary agent to accept
-    /// client-provided Streamable HTTP MCP servers.
-    SubagentHttpUnsupported,
     /// `session/new` failed for some other reason (bad cwd, agent-side
     /// crash, ...).
     SessionCreateFailed {
@@ -589,11 +586,6 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "agent does not advertise ACP capability {capability}\n\
                  hint: choose an agent that supports {capability}, or avoid the command that requires it"
-            ),
-            LaunchError::SubagentHttpUnsupported => write!(
-                f,
-                "configured ACP agent does not support HTTP MCP servers required for subagent delegation\n\
-                 hint: update or choose an ACP adapter that advertises mcpCapabilities.http"
             ),
             LaunchError::SessionCreateFailed {
                 source,
@@ -2473,18 +2465,7 @@ async fn drive_session(
         .await;
         return Err(anyhow::anyhow!(text));
     }
-    let subagent_http = if let Some(service) = subagents.as_ref() {
-        if !init_resp.agent_capabilities.mcp_capabilities.http {
-            let launch_err = LaunchError::SubagentHttpUnsupported;
-            let text = emit_fatal_with_stderr(
-                ui_tx,
-                &fatal_emitted,
-                launch_err.to_string(),
-                stderr_tail.as_ref(),
-            )
-            .await;
-            return Err(anyhow::anyhow!(text));
-        }
+    let subagent_service = if let Some(service) = subagents.as_ref() {
         let context = RuntimeServiceContext {
             cwd: cwd.clone(),
             additional_directories: additional_directories.clone(),
@@ -2497,7 +2478,7 @@ async fn drive_session(
                 let text = emit_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
-                    format!("could not start subagent HTTP MCP server: {error:#}"),
+                    format!("could not start subagent MCP server: {error:#}"),
                     stderr_tail.as_ref(),
                 )
                 .await;
@@ -2507,28 +2488,22 @@ async fn drive_session(
     } else {
         None
     };
-    if let Some(server) = subagent_http.as_ref() {
+    if let Some(server) = subagent_service.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
-    // Memory tools are additive: an adapter without HTTP MCP support or a
-    // failed listener downgrades to injection-only rather than aborting.
-    let memory_http = match memory.as_ref().filter(|memory| memory.tools) {
-        Some(session_memory) if init_resp.agent_capabilities.mcp_capabilities.http => {
-            match crate::memory::HttpServer::start(session_memory).await {
-                Ok(server) => Some(server),
-                Err(error) => {
-                    tracing::warn!("could not start memory MCP server: {error:#}");
-                    None
-                }
+    // Memory tools are additive: a failed listener downgrades to
+    // injection-only rather than aborting.
+    let memory_tools = match memory.as_ref().filter(|memory| memory.tools) {
+        Some(session_memory) => match crate::memory::ToolServer::start(session_memory).await {
+            Ok(server) => Some(server),
+            Err(error) => {
+                tracing::warn!("could not start memory MCP server: {error:#}");
+                None
             }
-        }
-        Some(_) => {
-            tracing::debug!("agent lacks HTTP MCP support; memory tools unavailable");
-            None
-        }
+        },
         None => None,
     };
-    if let Some(server) = memory_http.as_ref() {
+    if let Some(server) = memory_tools.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
     let side_session_unsupported_reason =
@@ -2744,11 +2719,9 @@ async fn drive_session(
     workspace_roots.extend(additional_directories.iter().cloned());
     let mut next_turn_diff_id = 1_u64;
     let mut session_has_history = resumed;
-    // Stored memories ride the first prompt of this runtime rather than every
-    // turn; entries saved mid-session reach the next session.
-    let mut memory_preamble = memory
-        .as_ref()
-        .and_then(crate::memory::SessionMemory::preamble);
+    // Reread shared knowledge at every turn boundary so concurrent Claude and
+    // Codex sessions observe one another's durable discoveries without restart.
+    let mut last_memory_entries: Option<Vec<crate::memory::MemoryEntry>> = None;
     // Prompts that arrived while another operation owned `ui_rx` (a turn, a
     // config update, a session fork). They are replayed here, ahead of any
     // command still sitting in the channel, instead of being dropped: an
@@ -2802,8 +2775,27 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let text = match memory_preamble.take() {
-                    Some(preamble) if text.is_empty() => preamble,
+                let current_memory_entries = if let Some(memory) = memory.clone() {
+                    tokio::task::spawn_blocking(move || memory.refresh_entries())
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!("memory refresh task failed: {error}");
+                            None
+                        })
+                } else {
+                    None
+                };
+                let pending_memory = current_memory_entries.as_deref().and_then(|entries| {
+                    memory.as_ref().and_then(|memory| {
+                        crate::memory::render_preamble_update(
+                            entries,
+                            last_memory_entries.as_deref(),
+                            &memory.project,
+                        )
+                    })
+                });
+                let text = match pending_memory.as_ref().map(|update| update.text.as_str()) {
+                    Some(preamble) if text.is_empty() => preamble.to_string(),
                     Some(preamble) => format!("{preamble}\n\n{text}"),
                     None => text,
                 };
@@ -2828,6 +2820,16 @@ async fn drive_session(
                 )
                 .await?;
                 session_has_history = true;
+                if let Some(update) = pending_memory {
+                    let delivered = last_memory_entries.get_or_insert_with(Vec::new);
+                    for entry in update.delivered {
+                        if let Some(old) = delivered.iter_mut().find(|old| old.id == entry.id) {
+                            *old = entry;
+                        } else {
+                            delivered.push(entry);
+                        }
+                    }
+                }
                 if !keep_running {
                     break;
                 }
@@ -2907,11 +2909,7 @@ async fn drive_session(
                         context_usage.reset_for_session();
                         session_has_history = false;
                         next_turn_diff_id = 1;
-                        // The previous session consumed the first-prompt
-                        // memory copy; a fresh session must get one again.
-                        memory_preamble = memory
-                            .as_ref()
-                            .and_then(crate::memory::SessionMemory::preamble);
+                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(message) => {
@@ -3007,11 +3005,7 @@ async fn drive_session(
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
-                        // A switched-in session behaves like a resume: its
-                        // next prompt carries the current stored memories.
-                        memory_preamble = memory
-                            .as_ref()
-                            .and_then(crate::memory::SessionMemory::preamble);
+                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
@@ -13121,10 +13115,11 @@ mod tests {
             None,
             None,
             Some(crate::memory::SessionMemory {
-                store_path: store,
+                store_path: store.clone(),
                 project: PathBuf::from("/tmp/proj"),
                 inject: true,
                 tools: false,
+                import_claude_auto: false,
             }),
             false,
             None,
@@ -13148,6 +13143,25 @@ mod tests {
             assert_eq!(log[1], "second");
         }
 
+        crate::memory::add(
+            &store,
+            "parser paths are normalized",
+            Some(PathBuf::from("/tmp/proj")),
+        )
+        .expect("publish concurrent knowledge");
+        cmd_tx
+            .send(send("after update"))
+            .expect("send after update");
+        wait_for_prompt_count(&prompts, 3).await;
+        {
+            let log = prompts.lock().expect("prompt log");
+            assert!(
+                log[2].contains("parser paths are normalized"),
+                "live update: {:?}",
+                log[2]
+            );
+        }
+
         let (responder, response) = oneshot::channel();
         cmd_tx
             .send(UiCommand::NewSession { responder })
@@ -13158,15 +13172,15 @@ mod tests {
         );
         wait_for_session_started(&mut ui_rx, "fresh-session").await;
         cmd_tx.send(send("third")).expect("send third");
-        wait_for_prompt_count(&prompts, 3).await;
+        wait_for_prompt_count(&prompts, 4).await;
         {
             let log = prompts.lock().expect("prompt log");
             assert!(
-                log[2].contains("<mj-memory>"),
+                log[3].contains("<mj-memory>"),
                 "fresh-session prompt must carry memories again: {:?}",
-                log[2]
+                log[3]
             );
-            assert!(log[2].ends_with("third"));
+            assert!(log[3].ends_with("third"));
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
@@ -13460,12 +13474,15 @@ mod tests {
 
     #[test]
     fn lifecycle_requests_include_client_mcp_servers() {
-        use agent_client_protocol::schema::v1::McpServerHttp;
+        use agent_client_protocol::schema::v1::McpServerStdio;
 
-        let server = McpServer::Http(McpServerHttp::new(
-            "mj-subagents",
-            "http://127.0.0.1:1234/mcp",
-        ));
+        let server = McpServer::Stdio(
+            McpServerStdio::new("mj-subagents", "/usr/local/bin/mj").args(vec![
+                "mcp-bridge".to_string(),
+                "--addr".to_string(),
+                "127.0.0.1:1234".to_string(),
+            ]),
+        );
         let servers = vec![server.clone()];
         let cwd = PathBuf::from("/tmp/workspace");
         let additional = vec![PathBuf::from("/tmp/other")];
@@ -13489,12 +13506,5 @@ mod tests {
             fork_session_request(session_id, cwd, &additional, &servers).mcp_servers,
             servers
         );
-    }
-
-    #[test]
-    fn missing_http_mcp_capability_has_actionable_error() {
-        let message = LaunchError::SubagentHttpUnsupported.to_string();
-        assert!(message.contains("mcpCapabilities.http"));
-        assert!(message.contains("subagent delegation"));
     }
 }

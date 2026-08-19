@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -22,6 +22,59 @@ pub use crate::roster_types::{
     AcpInventory, AcpServerInfo, AdapterKind, AdapterLaunch, Availability, ClaudeAuthStatus,
     ModelChoice, ModelRow as Row, ResolvedAgent, Roster, configure_permissions,
 };
+
+/// An ACP adapter contributed by the embedding binary (e.g. a platform-only
+/// sidecar). Registered once at startup, before the first roster resolution.
+#[derive(Debug, Clone)]
+pub struct ExternalAdapter {
+    pub id: String,
+    pub label: String,
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    /// Shown in the adapter inventory, e.g. the path the binary was found at.
+    pub evidence: String,
+}
+
+static EXTERNAL_ADAPTER: OnceLock<ExternalAdapter> = OnceLock::new();
+
+/// Register an adapter the embedding binary discovered. Only the first
+/// registration wins; call before the first roster resolution.
+pub fn register_external_adapter(adapter: ExternalAdapter) {
+    let _ = EXTERNAL_ADAPTER.set(adapter);
+}
+
+pub fn external_adapter() -> Option<&'static ExternalAdapter> {
+    EXTERNAL_ADAPTER.get()
+}
+
+fn external_launch(external: &ExternalAdapter) -> AdapterLaunch {
+    AdapterLaunch {
+        kind: AdapterKind::External,
+        source_id: external.id.clone(),
+        command: external.command.clone(),
+        args: external.args.clone(),
+        env: external.env.clone(),
+    }
+}
+
+fn external_server_info(external: &ExternalAdapter, config: &Config) -> AcpServerInfo {
+    let policy = config.acp.policy(&external.id);
+    AcpServerInfo {
+        id: external.id.clone(),
+        label: external.label.clone(),
+        policy,
+        // Registration implies the binary exists on this host.
+        detected: true,
+        selected: policy != AcpServerPolicy::Disabled,
+        evidence: external.evidence.clone(),
+        launch: external_launch(external),
+        model_count: 0,
+        error: None,
+        session_config: Vec::new(),
+        subscription: None,
+    }
+}
 
 pub fn subagent_failover_roles(roster: &Roster) -> Vec<ResolvedAgent> {
     let Some(initial) = roster.subagent_default.clone() else {
@@ -245,6 +298,9 @@ fn adapter_accepts_model(kind: AdapterKind, model: &str) -> bool {
     match kind {
         AdapterKind::Codex => deepswe::model_provider(model) == "openai",
         AdapterKind::Claude => deepswe::model_provider(model) == "anthropic",
+        // External adapters never claim ranked leaderboard rows; everything
+        // they advertise surfaces as unranked entries instead.
+        AdapterKind::External => false,
     }
 }
 
@@ -270,10 +326,20 @@ fn launch_for(kind: AdapterKind) -> AdapterLaunch {
             ],
             env: HashMap::new(),
         },
+        // Only reachable when an external adapter is registered: nothing maps
+        // a model or source id to External without one.
+        AdapterKind::External => {
+            external_launch(external_adapter().expect("an external adapter is registered"))
+        }
     }
 }
 
 pub fn discover_inventory(config: &Config) -> AcpInventory {
+    if let Some(external) = external_adapter() {
+        return AcpInventory {
+            servers: vec![external_server_info(external, config)],
+        };
+    }
     let availability = detect_availability();
     let detections = [
         (
@@ -400,17 +466,6 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
                 continue;
             }
         };
-        if !capabilities.http_mcp {
-            adapter_errors.insert(
-                launch.source_id.clone(),
-                "ACP server does not advertise mcpCapabilities.http".to_string(),
-            );
-            tracing::warn!(
-                adapter = %launch.source_id,
-                "roster adapter excluded because HTTP MCP is unavailable"
-            );
-            continue;
-        }
         session_config.insert(
             launch.source_id.clone(),
             capabilities.session_config.clone(),
@@ -461,7 +516,13 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
             .cmp(&a.ranked)
             .then_with(|| b.model.pass_at_1.total_cmp(&a.model.pass_at_1))
             .then_with(|| a.model.mean_cost_usd.total_cmp(&b.model.mean_cost_usd))
-            .then_with(|| a.model.model.cmp(&b.model.model))
+            .then_with(|| {
+                if a.ranked {
+                    a.model.model.cmp(&b.model.model)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
     });
     Discovery {
         available: resolved,
@@ -527,7 +588,7 @@ fn explicit<'a>(
             "{seat} model '{selector}' is not a ranked DeepSWE model and no connected ACP adapter advertised it"
         );
     }
-    bail!("{seat} model '{selector}' is unavailable: no HTTP-MCP-capable ACP adapter advertised it")
+    bail!("{seat} model '{selector}' is unavailable: no connected ACP adapter advertised it")
 }
 
 fn preferred_route<'a>(
@@ -735,11 +796,11 @@ fn unavailable_reason(
                     availability.claude_status.logged_in()
                         || config.acp.policy("claude-acp") == AcpServerPolicy::Enabled
                 }
+                // Unreachable via adapter_kind(); a registered external
+                // adapter is detected by definition.
+                AdapterKind::External => true,
             };
-            let native_enabled = match native {
-                AdapterKind::Codex => config.acp.policy("codex-acp") != AcpServerPolicy::Disabled,
-                AdapterKind::Claude => config.acp.policy("claude-acp") != AcpServerPolicy::Disabled,
-            };
+            let native_enabled = config.acp.policy(&native_source) != AcpServerPolicy::Disabled;
             if !native_enabled {
                 reasons.push(format!("{native_source} is disabled in config"));
             } else if native_detected {
@@ -899,6 +960,16 @@ fn assemble_roster(
             .next()
             .map(|reason| format!(" ({reason})"))
             .unwrap_or_default();
+        if let Some(external) = inventory
+            .servers
+            .iter()
+            .find(|server| server.launch.kind == AdapterKind::External)
+        {
+            bail!(
+                "no model is launchable{diagnostic}: {} did not advertise a usable model",
+                external.label
+            );
+        }
         bail!("no model is launchable{diagnostic}: install or authenticate Codex or Claude Code");
     }
 
@@ -925,6 +996,14 @@ fn assemble_roster(
             &availability.subscriptions,
             &config.agent.acp_priority,
         )
+        .or_else(|| {
+            // When only an external adapter is connected (e.g. the Android
+            // sidecar), no ranked DeepSWE row is launchable; fall back to its
+            // first advertised model instead of failing Auto outright.
+            primary_available
+                .iter()
+                .find(|candidate| candidate.launch.kind == AdapterKind::External)
+        })
         .ok_or_else(|| anyhow!("Agent Auto requires at least one ranked DeepSWE model"))?
     } else {
         explicit(
@@ -1094,9 +1173,8 @@ mod tests {
         }
     }
 
-    fn capabilities(http_mcp: bool, values: &[&str]) -> ProbeResult {
+    fn capabilities(values: &[&str]) -> ProbeResult {
         Ok(probe::AdapterCapabilities {
-            http_mcp,
             models: values.iter().map(|value| option(value)).collect(),
             session_config: Vec::new(),
         })
@@ -1136,6 +1214,156 @@ mod tests {
                 capacity: if codex == "pro" { 20.0 } else { 1.0 },
             }),
         }
+    }
+
+    fn sidecar_adapter() -> ExternalAdapter {
+        ExternalAdapter {
+            id: "sidecar".to_string(),
+            label: "Sidecar".to_string(),
+            command: PathBuf::from("/opt/sidecar/acp"),
+            args: vec!["--serve".to_string()],
+            env: HashMap::new(),
+            evidence: "bundled sibling /opt/sidecar/acp".to_string(),
+        }
+    }
+
+    fn external_role(model: &str) -> ResolvedAgent {
+        ResolvedAgent {
+            model: Row {
+                model: model.to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.0,
+                mean_cost_usd: 0.0,
+            },
+            model_value: model.to_string(),
+            launch: external_launch(&sidecar_adapter()),
+            ranked: false,
+            reasoning_effort: None,
+        }
+    }
+
+    #[test]
+    fn external_server_is_selected_unless_disabled() {
+        let external = sidecar_adapter();
+        let mut config = Config::default();
+
+        let info = external_server_info(&external, &config);
+        assert!(info.detected);
+        assert!(info.selected);
+        assert_eq!(info.launch.kind, AdapterKind::External);
+        assert_eq!(info.launch.command, PathBuf::from("/opt/sidecar/acp"));
+
+        config
+            .acp
+            .policies
+            .insert("sidecar".to_string(), AcpServerPolicy::Disabled);
+        assert!(!external_server_info(&external, &config).selected);
+    }
+
+    #[test]
+    fn external_probe_results_surface_every_model_unranked() {
+        let rows = vec![Row {
+            model: "gpt-5-5".to_string(),
+            reasoning_effort: None,
+            pass_at_1: 0.9,
+            mean_cost_usd: 1.0,
+        }];
+        let launch = external_launch(&sidecar_adapter());
+
+        let discovery = resolve_probes(&rows, vec![(0, launch, capabilities(&["local-coder"]))]);
+
+        let candidate = discovery.available.first().expect("advertised model");
+        assert_eq!(discovery.available.len(), 1);
+        assert!(
+            !candidate.ranked,
+            "external adapters never claim ranked rows"
+        );
+        assert_eq!(candidate.model.model, "local-coder");
+        assert_eq!(candidate.launch.kind, AdapterKind::External);
+    }
+
+    #[test]
+    fn auto_primary_falls_back_to_an_external_model_when_nothing_is_ranked() {
+        let discovery = Discovery {
+            available: vec![external_role("anvil-coder"), external_role("anvil-mini")],
+            adapter_errors: HashMap::new(),
+            session_config: HashMap::new(),
+        };
+        let availability = Availability {
+            codex_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            subscriptions: Subscriptions::default(),
+        };
+
+        let roster = assemble_roster(
+            &Config::default(),
+            &[],
+            &availability,
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect("external models keep Auto launchable");
+
+        assert_eq!(roster.primary.launch.kind, AdapterKind::External);
+        assert_eq!(roster.primary.model.model, "anvil-coder");
+    }
+
+    #[test]
+    fn external_auto_preserves_the_adapters_default_model_order() {
+        let launch = external_launch(&sidecar_adapter());
+        let discovery = resolve_probes(
+            &[],
+            vec![(0, launch, capabilities(&["zeta-default", "alpha-other"]))],
+        );
+        let availability = Availability {
+            codex_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            subscriptions: Subscriptions::default(),
+        };
+
+        let roster = assemble_roster(
+            &Config::default(),
+            &[],
+            &availability,
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect("external models keep Auto launchable");
+
+        assert_eq!(roster.primary.model.model, "zeta-default");
+    }
+
+    #[test]
+    fn external_probe_failure_names_the_platform_team() {
+        let external = sidecar_adapter();
+        let inventory = AcpInventory {
+            servers: vec![external_server_info(&external, &Config::default())],
+        };
+        let discovery = Discovery {
+            available: Vec::new(),
+            adapter_errors: HashMap::from([(external.id.clone(), "probe timed out".to_string())]),
+            session_config: HashMap::new(),
+        };
+
+        let error = assemble_roster(
+            &Config::default(),
+            &[],
+            &Availability {
+                codex_credentials: false,
+                claude_status: ClaudeAuthStatus::NotLoggedIn,
+                subscriptions: Subscriptions::default(),
+            },
+            inventory,
+            discovery,
+        )
+        .expect_err("missing external models must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Sidecar did not advertise a usable model")
+        );
+        assert!(error.to_string().contains("probe timed out"));
     }
 
     #[test]
@@ -1586,7 +1814,6 @@ mod tests {
                     .expect("probe call lock")
                     .push(launch.source_id);
                 Ok(probe::AdapterCapabilities {
-                    http_mcp: true,
                     models: Vec::new(),
                     session_config: Vec::new(),
                 })
@@ -1663,7 +1890,7 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_and_failed_adapters_are_excluded_with_sanitized_reasons() {
+    fn failed_adapters_are_excluded_with_sanitized_reasons() {
         let rows = vec![
             role_at("gpt-5-5", 0.6, 5.0).model,
             role_at("claude-opus-4-8", 0.5, 4.0).model,
@@ -1674,7 +1901,7 @@ mod tests {
                 (
                     0,
                     launch_for(AdapterKind::Codex),
-                    capabilities(false, &["gpt-5-5"]),
+                    Err("probe timed out".to_string()),
                 ),
                 (
                     1,
@@ -1684,10 +1911,7 @@ mod tests {
             ],
         );
         assert!(discovery.available.is_empty());
-        assert_eq!(
-            discovery.adapter_errors["codex-acp"],
-            "ACP server does not advertise mcpCapabilities.http"
-        );
+        assert_eq!(discovery.adapter_errors["codex-acp"], "probe timed out");
         assert_eq!(discovery.adapter_errors["claude-acp"], "needs auth");
     }
 
@@ -1701,7 +1925,7 @@ mod tests {
             vec![(
                 0,
                 launch_for(AdapterKind::Claude),
-                capabilities(true, &["claude-opus-4-8", "haiku"]),
+                capabilities(&["claude-opus-4-8", "haiku"]),
             )],
         );
 
@@ -1751,11 +1975,7 @@ mod tests {
         };
         let error = explicit("Agent", "gpt-5-6-sol", &rows, &[], &[])
             .expect_err("must reject unavailable explicit model");
-        assert!(
-            error
-                .to_string()
-                .contains("no HTTP-MCP-capable ACP adapter")
-        );
+        assert!(error.to_string().contains("no connected ACP adapter"));
         let _ = availability;
     }
 

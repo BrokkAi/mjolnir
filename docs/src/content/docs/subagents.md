@@ -11,8 +11,8 @@ for one task and then reports back.
 ## The two tools
 
 Mjolnir advertises a local MCP server named `mj-subagents` to the primary
-session over ACP Streamable HTTP (loopback URL, bearer token). It exposes
-exactly two tools:
+session as a stdio command (`mj mcp-bridge`, authenticated to the parent
+process with a private token). It exposes exactly two tools:
 
 | Tool | Arguments | Purpose |
 | --- | --- | --- |
