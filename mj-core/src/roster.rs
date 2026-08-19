@@ -58,15 +58,16 @@ fn external_launch(external: &ExternalAdapter) -> AdapterLaunch {
     }
 }
 
-fn external_server_info(external: &ExternalAdapter, config: &Config) -> AcpServerInfo {
-    let policy = config.acp.policy(&external.id);
+fn external_server_info(external: &ExternalAdapter, _config: &Config) -> AcpServerInfo {
     AcpServerInfo {
         id: external.id.clone(),
         label: external.label.clone(),
-        policy,
+        // The platform adapter cannot be disabled: it is the only route on
+        // this build, and normalize() strips any stale policy for it.
+        policy: AcpServerPolicy::Auto,
         // Registration implies the binary exists on this host.
         detected: true,
-        selected: policy != AcpServerPolicy::Disabled,
+        selected: true,
         evidence: external.evidence.clone(),
         launch: external_launch(external),
         model_count: 0,
@@ -851,6 +852,20 @@ fn recover_unavailable_explicit_models(
     inventory: &AcpInventory,
     discovery: &Discovery,
 ) -> Vec<String> {
+    recover_unavailable_explicit_models_with_external(
+        config,
+        inventory,
+        discovery,
+        external_adapter().is_some(),
+    )
+}
+
+fn recover_unavailable_explicit_models_with_external(
+    config: &mut Config,
+    inventory: &AcpInventory,
+    discovery: &Discovery,
+    external_registered: bool,
+) -> Vec<String> {
     let mut notices = Vec::new();
     let source_was_probed = |source: &str| {
         inventory
@@ -870,9 +885,16 @@ fn recover_unavailable_explicit_models(
             .iter()
             .any(|candidate| candidate.model.model == model)
     };
+    // With a platform adapter registered it is the only route, so a model's
+    // native source (codex-acp/claude-acp) is never in the inventory and
+    // "was that source probed?" would always answer no — leaving a stale pin
+    // to fail resolution on every launch with no way to reset it in-app.
+    // Judge such pins against the sources that actually were probed.
     let conclusively_missing = |model: &str| match adapter_kind(model) {
-        Some(kind) => model_is_missing(model) && source_was_probed(&launch_for(kind).source_id),
-        None => model_is_missing(model) && all_selected_sources_were_probed,
+        Some(kind) if !external_registered => {
+            model_is_missing(model) && source_was_probed(&launch_for(kind).source_id)
+        }
+        _ => model_is_missing(model) && all_selected_sources_were_probed,
     };
 
     for (label, model) in [
@@ -1243,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn external_server_is_selected_unless_disabled() {
+    fn external_server_is_always_selected() {
         let external = sidecar_adapter();
         let mut config = Config::default();
 
@@ -1253,11 +1275,14 @@ mod tests {
         assert_eq!(info.launch.kind, AdapterKind::External);
         assert_eq!(info.launch.command, PathBuf::from("/opt/sidecar/acp"));
 
+        // The platform adapter is the only route on its build; even a stale
+        // Disabled policy in the config must not deselect it, or nothing is
+        // launchable and every start fails.
         config
             .acp
             .policies
             .insert("sidecar".to_string(), AcpServerPolicy::Disabled);
-        assert!(!external_server_info(&external, &config).selected);
+        assert!(external_server_info(&external, &config).selected);
     }
 
     #[test]
@@ -1996,6 +2021,55 @@ mod tests {
         assert_eq!(config.agent.model, "auto");
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("gpt-5-6-terra"));
+    }
+
+    #[test]
+    fn platform_adapter_resets_stale_pins_from_other_builds() {
+        // On a platform build (e.g. Android/Anvil) the external server is
+        // the only probed route. A pin whose name maps to a built-in
+        // adapter (here openai -> codex-acp) must still reset to auto when
+        // the probe didn't offer it — codex-acp is never in this inventory,
+        // so waiting for it to be probed would keep the pin forever and
+        // fail every launch.
+        let mut config = Config::default();
+        config.agent.model = "gpt-5-6-terra".to_string();
+        let external = ExternalAdapter {
+            id: "sidecar".to_string(),
+            label: "Sidecar".to_string(),
+            command: PathBuf::from("/opt/sidecar"),
+            args: Vec::new(),
+            env: HashMap::new(),
+            evidence: "bundled".to_string(),
+        };
+        let inventory = AcpInventory {
+            servers: vec![external_server_info(&external, &config)],
+        };
+        let discovery = Discovery {
+            available: vec![role("gpt-5-6-sol", 0.7)],
+            adapter_errors: HashMap::new(),
+            session_config: HashMap::new(),
+        };
+
+        let notices = recover_unavailable_explicit_models_with_external(
+            &mut config,
+            &inventory,
+            &discovery,
+            true,
+        );
+        assert_eq!(config.agent.model, "auto");
+        assert_eq!(notices.len(), 1);
+
+        // Control: without a platform adapter the same shape keeps the pin,
+        // because codex-acp itself was never probed.
+        config.agent.model = "gpt-5-6-terra".to_string();
+        let notices = recover_unavailable_explicit_models_with_external(
+            &mut config,
+            &inventory,
+            &discovery,
+            false,
+        );
+        assert_eq!(config.agent.model, "gpt-5-6-terra");
+        assert!(notices.is_empty());
     }
 
     #[test]

@@ -662,6 +662,10 @@ pub struct FeatureHintCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeatureHintRequirement {
     Always,
+    /// Only when more than one team exists: a registered platform adapter
+    /// (e.g. Anvil on Android) is the sole team, so advertising the team
+    /// switcher would point at a key that does nothing.
+    TeamChoice,
     Subagents,
     Ragnarok,
     Voice,
@@ -681,7 +685,7 @@ struct FeatureHint {
 const FEATURE_HINTS: &[FeatureHint] = &[
     FeatureHint {
         text: "Press Ctrl+Tab to switch coding teams, or open /mjconfig for models and session options.",
-        requirement: FeatureHintRequirement::Always,
+        requirement: FeatureHintRequirement::TeamChoice,
     },
     FeatureHint {
         text: "Use /new for another workspace, /clear for a fresh thread, /load to resume, and /export to save this transcript.",
@@ -3404,6 +3408,7 @@ impl AppState {
             let hint = FEATURE_HINTS[index];
             let eligible = match hint.requirement {
                 FeatureHintRequirement::Always => true,
+                FeatureHintRequirement::TeamChoice => crate::roster::external_adapter().is_none(),
                 FeatureHintRequirement::Subagents => capabilities.subagents,
                 FeatureHintRequirement::Ragnarok => capabilities.ragnarok,
                 FeatureHintRequirement::Voice => capabilities.voice,
@@ -12019,6 +12024,10 @@ mod tests {
         };
         match requirement {
             FeatureHintRequirement::Always => {}
+            // Depends on the process-global external adapter, which tests
+            // cannot register per-case; no external adapter runs in this
+            // test binary, so the hint behaves like Always here.
+            FeatureHintRequirement::TeamChoice => {}
             FeatureHintRequirement::Subagents => caps.subagents = enabled,
             FeatureHintRequirement::Ragnarok => caps.ragnarok = enabled,
             FeatureHintRequirement::Voice => caps.voice = enabled,
@@ -12034,7 +12043,14 @@ mod tests {
     #[test]
     fn every_gated_feature_hint_follows_its_own_capability() {
         for (index, hint) in FEATURE_HINTS.iter().enumerate() {
-            if hint.requirement == FeatureHintRequirement::Always {
+            // TeamChoice reads the process-global external adapter, which a
+            // test cannot register per-case; none is registered in this test
+            // binary, so it cannot be exercised through capabilities here.
+            // gated_feature_hints_keep_their_capability_requirements pins it.
+            if matches!(
+                hint.requirement,
+                FeatureHintRequirement::Always | FeatureHintRequirement::TeamChoice
+            ) {
                 continue;
             }
 
@@ -12072,6 +12088,10 @@ mod tests {
     #[test]
     fn gated_feature_hints_keep_their_capability_requirements() {
         let expected = [
+            (
+                "Press Ctrl+Tab to switch coding teams",
+                FeatureHintRequirement::TeamChoice,
+            ),
             (
                 "F8 opens the nested-agent viewer",
                 FeatureHintRequirement::Subagents,

@@ -507,8 +507,9 @@ pub fn has_valid_team(config: &Config) -> bool {
 }
 
 fn has_valid_team_with_external(config: &Config, external_id: Option<&str>) -> bool {
-    external_id.is_some_and(|id| config.acp.policy(id) != AcpServerPolicy::Disabled)
-        || TeamPreset::from_config(config).is_some()
+    // A registered platform adapter can never be disabled, so its presence
+    // alone makes the team valid.
+    external_id.is_some() || TeamPreset::from_config(config).is_some()
 }
 
 /// How much machinery one discrete review is allowed to spend.
@@ -947,9 +948,7 @@ impl Config {
     }
 
     pub fn set_acp_server_policy(&mut self, id: &str, policy: AcpServerPolicy) -> bool {
-        if matches!(id, "codex-acp" | "claude-acp")
-            || crate::roster::external_adapter().is_some_and(|external| external.id == id)
-        {
+        if matches!(id, "codex-acp" | "claude-acp") {
             if policy == AcpServerPolicy::Auto {
                 self.acp.policies.remove(id);
             } else {
@@ -1201,6 +1200,10 @@ impl Config {
         self.agent.acp_source = Some(source_id.to_string());
         self.review.acp_source = Some(source_id.to_string());
         self.subagents.acp_source = Some(source_id.to_string());
+        // The platform adapter is the only route on this build, so a
+        // Disabled policy (written by an older build or a synced config)
+        // would make every launch fail with nothing selectable.
+        self.acp.policies.remove(source_id);
     }
 }
 
@@ -1891,7 +1894,11 @@ kimi = "disabled"
     }
 
     #[test]
-    fn disabled_external_adapter_is_not_a_valid_team() {
+    fn platform_adapter_cannot_be_disabled() {
+        // The platform adapter is the only route on its build. A stale
+        // Disabled policy (older build, synced config) must neither
+        // invalidate the team nor survive route application — otherwise
+        // every launch fails with nothing selectable and no UI to fix it.
         let mut config = Config {
             team: None,
             ..Config::default()
@@ -1901,7 +1908,13 @@ kimi = "disabled"
             .policies
             .insert("sidecar".to_string(), AcpServerPolicy::Disabled);
 
-        assert!(!has_valid_team_with_external(&config, Some("sidecar")));
+        assert!(has_valid_team_with_external(&config, Some("sidecar")));
+        config.apply_external_team_routes("sidecar");
+        assert_eq!(config.acp.policy("sidecar"), AcpServerPolicy::Auto);
+
+        // And nothing can write a policy for a non-builtin server id.
+        assert!(!config.set_acp_server_policy("sidecar", AcpServerPolicy::Disabled));
+        assert!(config.acp.policies.is_empty());
     }
 
     #[test]

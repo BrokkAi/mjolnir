@@ -5000,16 +5000,27 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         })
         .collect();
 
+    let external_id = roster::external_adapter().map(|external| external.id.as_str());
     let servers = inventory
         .servers
         .iter()
-        .filter(|server| crate::settings::is_configurable_acp_server(&server.id))
+        .filter(|server| {
+            crate::settings::is_configurable_acp_server(&server.id)
+                || external_id == Some(server.id.as_str())
+        })
         .map(|server| {
-            let allowed: &[config::AcpServerPolicy] = &[
-                config::AcpServerPolicy::Auto,
-                config::AcpServerPolicy::Enabled,
-                config::AcpServerPolicy::Disabled,
-            ];
+            // A platform adapter cannot be disabled, so its row offers only
+            // its current policy; the panel then shows the adapter without
+            // pretending it can be changed.
+            let allowed: &[config::AcpServerPolicy] = if external_id == Some(server.id.as_str()) {
+                &[config::AcpServerPolicy::Auto]
+            } else {
+                &[
+                    config::AcpServerPolicy::Auto,
+                    config::AcpServerPolicy::Enabled,
+                    config::AcpServerPolicy::Disabled,
+                ]
+            };
             MjServerEntry {
                 id: server.id.clone(),
                 label: server.label.clone(),
@@ -5086,8 +5097,20 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         (None, notice) => notice,
     };
 
-    MjConfigSnapshot {
-        team: MjTeamPanel {
+    // A registered platform adapter (e.g. Anvil on Android) is the only
+    // team: show it as the fixed selection instead of offering built-in
+    // presets that cannot run on this build.
+    let team = match roster::external_adapter() {
+        Some(external) => MjTeamPanel {
+            selected: Some(external.id.clone()),
+            presets: vec![MjTeamPresetEntry {
+                id: external.id.clone(),
+                label: external.label.clone(),
+                description: "Provided by this platform; other teams are unavailable here."
+                    .to_string(),
+            }],
+        },
+        None => MjTeamPanel {
             selected: config::TeamPreset::from_config(config).map(|preset| preset.id().to_string()),
             presets: config::TeamPreset::ALL
                 .into_iter()
@@ -5098,6 +5121,10 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 })
                 .collect(),
         },
+    };
+
+    MjConfigSnapshot {
+        team,
         agents: MjAgentsPanel {
             roles,
             discrete_review: config.agent.discrete_review,
@@ -5163,6 +5190,12 @@ fn mjconfig_apply_edits(
 ) -> std::result::Result<(), (StatusCode, String)> {
     let bad_request = |message: String| (StatusCode::UNPROCESSABLE_ENTITY, message);
     if let Some(team) = request.team {
+        if let Some(external) = roster::external_adapter() {
+            return Err(bad_request(format!(
+                "the team is fixed to {} on this platform",
+                external.label
+            )));
+        }
         let preset = config::TeamPreset::from_id(&team)
             .ok_or_else(|| bad_request(format!("unknown team: {team}")))?;
         preset.apply(config);

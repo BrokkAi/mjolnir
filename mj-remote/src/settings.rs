@@ -98,7 +98,10 @@ pub struct SettingsEditor {
 }
 
 impl SettingsEditor {
-    pub fn new(config: Config, choices: Vec<ModelChoice>, notice: Option<String>) -> Self {
+    pub fn new(mut config: Config, choices: Vec<ModelChoice>, notice: Option<String>) -> Self {
+        // Mirror mj-tui's editor: a registered platform adapter owns the
+        // team, so the editor never shows or saves routes it would reject.
+        config.apply_registered_external_team();
         let inventory = mj_core::roster::discover_inventory(&config);
         Self {
             config,
@@ -700,6 +703,12 @@ impl SettingsEditor {
     }
 
     fn cycle_team(&mut self, delta: i32) {
+        // A registered platform adapter (e.g. Anvil on Android) is the only
+        // team; applying a built-in preset would wipe seat model pins and
+        // enable adapters that cannot run on this build.
+        if self.config.apply_registered_external_team() {
+            return;
+        }
         let current = TeamPreset::from_config(&self.config)
             .and_then(|active| TeamPreset::ALL.iter().position(|preset| *preset == active))
             .unwrap_or_else(|| {

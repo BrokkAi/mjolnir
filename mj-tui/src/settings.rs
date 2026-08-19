@@ -28,14 +28,9 @@ pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT;
 pub(crate) const CONFIGURABLE_ACP_SERVERS: [&str; 2] = ["codex-acp", "claude-acp"];
 
 pub(crate) fn is_configurable_acp_server(id: &str) -> bool {
-    is_configurable_acp_server_with_external(
-        id,
-        crate::roster::external_adapter().map(|adapter| adapter.id.as_str()),
-    )
-}
-
-fn is_configurable_acp_server_with_external(id: &str, external_id: Option<&str>) -> bool {
-    CONFIGURABLE_ACP_SERVERS.contains(&id) || external_id == Some(id)
+    // The platform adapter (e.g. Anvil on Android) is deliberately absent:
+    // it is the only route on its build, so disabling it can never be valid.
+    CONFIGURABLE_ACP_SERVERS.contains(&id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2460,15 +2455,14 @@ mod tests {
     }
 
     #[test]
-    fn registered_external_server_is_configurable_without_naming_its_product() {
-        assert!(is_configurable_acp_server_with_external(
-            "sidecar",
-            Some("sidecar")
-        ));
-        assert!(!is_configurable_acp_server_with_external(
-            "other",
-            Some("sidecar")
-        ));
+    fn only_builtin_servers_are_configurable() {
+        // A platform adapter is the sole route on its build, so offering a
+        // Disabled toggle for it would break every launch; it must never
+        // appear as configurable.
+        assert!(is_configurable_acp_server("codex-acp"));
+        assert!(is_configurable_acp_server("claude-acp"));
+        assert!(!is_configurable_acp_server("anvil"));
+        assert!(!is_configurable_acp_server("sidecar"));
     }
 
     #[test]
