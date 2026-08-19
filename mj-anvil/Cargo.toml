@@ -9,4 +9,4 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
 [dependencies]
-mj-core = { path = "../mj-core", version = "1.10.1" }
+mj-core = { path = "../mj-core", version = "1.11.0" }
