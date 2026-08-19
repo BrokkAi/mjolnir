@@ -9,7 +9,7 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
 [dependencies]
-mj-core = { path = "../mj-core", version = "1.11.0" }
+mj-core = { path = "../mj-core", version = "1.11.1" }
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
 async-trait = "0.1"

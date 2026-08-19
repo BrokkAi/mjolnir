@@ -900,7 +900,9 @@ mod tests {
         };
 
         assert!(matches!(
-            run_cli(&prepared, temp.path(), &[], Duration::from_millis(100)).await,
+            // Give the wrapper enough time to start and record its child on
+            // slower macOS runners before exercising timeout cleanup.
+            run_cli(&prepared, temp.path(), &[], Duration::from_secs(1)).await,
             Err(ClaudeUsageError::TimedOut)
         ));
         let pid = std::fs::read_to_string(child_pid)
