@@ -139,6 +139,16 @@ jobs:
       uses: dtolnay/rust-toolchain@1.97.1
       with:
         targets: aarch64-linux-android
+        components: clippy
+
+    # mj-anvil is out of the workspace default-members (it only ships in the
+    # Android binary), so the host matrix job never builds it; its lint and
+    # test gate lives here instead.
+    - name: Lint Anvil crate
+      run: cargo clippy --locked -p mj-anvil --all-targets -- -D warnings
+
+    - name: Test Anvil crate
+      run: cargo test --locked -p mj-anvil
 
     - name: Setup Android NDK
       id: setup-ndk
