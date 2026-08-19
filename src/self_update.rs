@@ -889,6 +889,31 @@ mod tests {
         assert!(binary.is_none());
     }
 
+    #[test]
+    fn optional_anvil_extracts_when_bundled() {
+        let archive = make_tar_gz("brokk-mjolnir/anvil", b"anvil bytes");
+
+        let binary = extract_optional_anvil(
+            "brokk-mjolnir-v0.5.0-aarch64-linux-android.tar.gz",
+            &archive,
+        )
+        .expect("bundled Anvil");
+
+        assert_eq!(binary, b"anvil bytes");
+    }
+
+    #[test]
+    fn optional_anvil_tolerates_archives_without_one() {
+        let archive = make_tar_gz("brokk-mjolnir/mj", b"binary bytes");
+
+        let binary = extract_optional_anvil(
+            "brokk-mjolnir-v0.5.0-aarch64-linux-android.tar.gz",
+            &archive,
+        );
+
+        assert!(binary.is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn install_voice_worker_writes_executable_beside_mj() {

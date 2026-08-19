@@ -500,11 +500,15 @@ impl TeamPreset {
 /// adapter is the embedding platform's implicit team; otherwise one of the
 /// user-selectable built-in presets must be configured.
 pub fn has_valid_team(config: &Config) -> bool {
-    has_valid_team_with_external(config, crate::roster::external_adapter().is_some())
+    has_valid_team_with_external(
+        config,
+        crate::roster::external_adapter().map(|adapter| adapter.id.as_str()),
+    )
 }
 
-fn has_valid_team_with_external(config: &Config, external_registered: bool) -> bool {
-    external_registered || TeamPreset::from_config(config).is_some()
+fn has_valid_team_with_external(config: &Config, external_id: Option<&str>) -> bool {
+    external_id.is_some_and(|id| config.acp.policy(id) != AcpServerPolicy::Disabled)
+        || TeamPreset::from_config(config).is_some()
 }
 
 /// How much machinery one discrete review is allowed to spend.
@@ -1873,7 +1877,7 @@ kimi = "disabled"
         config.review.model = "review-model".to_string();
         config.subagents.model = "worker-model".to_string();
 
-        assert!(has_valid_team_with_external(&config, true));
+        assert!(has_valid_team_with_external(&config, Some("sidecar")));
         config.apply_external_team_routes("sidecar");
 
         assert_eq!(config.agent.acp_source.as_deref(), Some("sidecar"));
@@ -1884,6 +1888,20 @@ kimi = "disabled"
         assert_eq!(config.review.model, "review-model");
         assert_eq!(config.subagents.model, "worker-model");
         assert!(config.agent.discrete_review);
+    }
+
+    #[test]
+    fn disabled_external_adapter_is_not_a_valid_team() {
+        let mut config = Config {
+            team: None,
+            ..Config::default()
+        };
+        config
+            .acp
+            .policies
+            .insert("sidecar".to_string(), AcpServerPolicy::Disabled);
+
+        assert!(!has_valid_team_with_external(&config, Some("sidecar")));
     }
 
     #[test]

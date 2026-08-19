@@ -126,4 +126,13 @@ mod tests {
         assert_eq!(inventory.servers[0].id, SOURCE_ID);
         std::fs::remove_file(anvil).ok();
     }
+
+    #[test]
+    fn release_workflow_pin_matches_the_adapter_version() {
+        let workflow = include_str!("../../.github/workflows/release.yml");
+        assert!(
+            workflow.contains(&format!("ANVIL_VERSION: \"{VERSION}\"")),
+            "release.yml must download the Anvil version registered by mj-anvil"
+        );
+    }
 }

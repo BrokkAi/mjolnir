@@ -44,4 +44,8 @@ test("generates platform constraints without committed manifests", () => {
   assert.deepEqual(manifest.os, ["linux"]);
   assert.deepEqual(manifest.cpu, ["x64"]);
   assert.deepEqual(manifest.libc, ["glibc"]);
+
+  const android = PLATFORMS.find((platform) => platform.target === "aarch64-linux-android");
+  assert.deepEqual(android.sidecars, ["anvil"]);
+  assert.ok(PLATFORMS.filter((platform) => platform !== android).every((platform) => !platform.sidecars));
 });

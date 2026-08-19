@@ -516,7 +516,13 @@ fn resolve_probes(rows: &[Row], mut probes: Vec<(usize, AdapterLaunch, ProbeResu
             .cmp(&a.ranked)
             .then_with(|| b.model.pass_at_1.total_cmp(&a.model.pass_at_1))
             .then_with(|| a.model.mean_cost_usd.total_cmp(&b.model.mean_cost_usd))
-            .then_with(|| a.model.model.cmp(&b.model.model))
+            .then_with(|| {
+                if a.ranked {
+                    a.model.model.cmp(&b.model.model)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
     });
     Discovery {
         available: resolved,
@@ -954,6 +960,16 @@ fn assemble_roster(
             .next()
             .map(|reason| format!(" ({reason})"))
             .unwrap_or_default();
+        if let Some(external) = inventory
+            .servers
+            .iter()
+            .find(|server| server.launch.kind == AdapterKind::External)
+        {
+            bail!(
+                "no model is launchable{diagnostic}: {} did not advertise a usable model",
+                external.label
+            );
+        }
         bail!("no model is launchable{diagnostic}: install or authenticate Codex or Claude Code");
     }
 
@@ -1254,10 +1270,7 @@ mod tests {
         }];
         let launch = external_launch(&sidecar_adapter());
 
-        let discovery = resolve_probes(
-            &rows,
-            vec![(0, launch, capabilities(true, &["local-coder"]))],
-        );
+        let discovery = resolve_probes(&rows, vec![(0, launch, capabilities(&["local-coder"]))]);
 
         let candidate = discovery.available.first().expect("advertised model");
         assert_eq!(discovery.available.len(), 1);
@@ -1293,6 +1306,64 @@ mod tests {
 
         assert_eq!(roster.primary.launch.kind, AdapterKind::External);
         assert_eq!(roster.primary.model.model, "anvil-coder");
+    }
+
+    #[test]
+    fn external_auto_preserves_the_adapters_default_model_order() {
+        let launch = external_launch(&sidecar_adapter());
+        let discovery = resolve_probes(
+            &[],
+            vec![(0, launch, capabilities(&["zeta-default", "alpha-other"]))],
+        );
+        let availability = Availability {
+            codex_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            subscriptions: Subscriptions::default(),
+        };
+
+        let roster = assemble_roster(
+            &Config::default(),
+            &[],
+            &availability,
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect("external models keep Auto launchable");
+
+        assert_eq!(roster.primary.model.model, "zeta-default");
+    }
+
+    #[test]
+    fn external_probe_failure_names_the_platform_team() {
+        let external = sidecar_adapter();
+        let inventory = AcpInventory {
+            servers: vec![external_server_info(&external, &Config::default())],
+        };
+        let discovery = Discovery {
+            available: Vec::new(),
+            adapter_errors: HashMap::from([(external.id.clone(), "probe timed out".to_string())]),
+            session_config: HashMap::new(),
+        };
+
+        let error = assemble_roster(
+            &Config::default(),
+            &[],
+            &Availability {
+                codex_credentials: false,
+                claude_status: ClaudeAuthStatus::NotLoggedIn,
+                subscriptions: Subscriptions::default(),
+            },
+            inventory,
+            discovery,
+        )
+        .expect_err("missing external models must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Sidecar did not advertise a usable model")
+        );
+        assert!(error.to_string().contains("probe timed out"));
     }
 
     #[test]
