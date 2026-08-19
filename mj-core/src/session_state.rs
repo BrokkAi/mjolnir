@@ -146,7 +146,7 @@ pub fn classify_elicitation(prompt: &ElicitationPrompt) -> ElicitationView {
                         ElicitationPropertySchema::Array(array_schema) => {
                             let options = match &array_schema.items {
                                 MultiSelectItems::Titled(items) => items.options.clone(),
-                                MultiSelectItems::Untitled(items) => items
+                                MultiSelectItems::String(items) => items
                                     .values
                                     .iter()
                                     .map(|value| EnumOption::new(value.clone(), value.clone()))

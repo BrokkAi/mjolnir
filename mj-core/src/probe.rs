@@ -159,6 +159,12 @@ where
                 Err(err) if err.code == ErrorCode::AuthRequired => {
                     return Ok(Err("needs auth".to_string()));
                 }
+                // Since ACP 2.0 a transport that dies mid-request fails the
+                // pending request instead of the connection; keep reporting it
+                // as a connection problem, not a protocol failure.
+                Err(err) if agent_client_protocol::is_incoming_transport_closed(&err) => {
+                    return Ok(Err(format!("connection error: {err}")));
+                }
                 Err(err) => return Ok(Err(format!("initialize failed: {err}"))),
             };
             if init_resp.protocol_version != ProtocolVersion::LATEST {
@@ -175,6 +181,9 @@ where
                 Ok(session) => session,
                 Err(err) if err.code == ErrorCode::AuthRequired => {
                     return Ok(Err("needs auth".to_string()));
+                }
+                Err(err) if agent_client_protocol::is_incoming_transport_closed(&err) => {
+                    return Ok(Err(format!("connection error: {err}")));
                 }
                 Err(err) => return Ok(Err(format!("session/new failed: {err}"))),
             };

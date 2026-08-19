@@ -511,6 +511,14 @@ pub enum LaunchError {
     InitializeFailed {
         source: agent_client_protocol::Error,
     },
+    /// The agent closed its end of the transport while a launch-phase
+    /// request was still pending. Since ACP 2.0 the SDK fails the pending
+    /// request instead of the connection, so without this variant a dead
+    /// agent would masquerade as a protocol or session failure (and
+    /// `session/new` would be retried on the closed connection).
+    ConnectionClosed {
+        source: agent_client_protocol::Error,
+    },
     /// The agent returned `auth_required` (-32000) during initialize or
     /// session lifecycle setup. The agent is healthy; the user just needs
     /// to authenticate first.
@@ -557,6 +565,11 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "agent did not complete the ACP initialize handshake: {source}\n\
                  hint: confirm the agent speaks ACP v1; capture --agent-stderr for detail"
+            ),
+            LaunchError::ConnectionClosed { source } => write!(
+                f,
+                "agent closed the ACP connection while a request was pending: {source}\n\
+                 hint: the agent process likely crashed or exited; capture --agent-stderr to see its last output"
             ),
             LaunchError::AuthRequired { detail } => {
                 let detail = detail.as_deref().unwrap_or("no detail provided");
@@ -912,6 +925,9 @@ fn stdio_mcp_server_descriptions(mcp_servers: &[McpServer]) -> Box<[String]> {
 fn classify_initialize_error(source: agent_client_protocol::Error) -> LaunchError {
     match auth_required_detail(&source) {
         Some(detail) => LaunchError::AuthRequired { detail },
+        None if agent_client_protocol::is_incoming_transport_closed(&source) => {
+            LaunchError::ConnectionClosed { source }
+        }
         None => LaunchError::InitializeFailed { source },
     }
 }
@@ -928,6 +944,9 @@ fn classify_session_error_with_mcp_servers(
 ) -> LaunchError {
     match auth_required_detail(&source) {
         Some(detail) => LaunchError::AuthRequired { detail },
+        None if agent_client_protocol::is_incoming_transport_closed(&source) => {
+            LaunchError::ConnectionClosed { source }
+        }
         None => LaunchError::SessionCreateFailed {
             source,
             stdio_mcp_servers: stdio_mcp_server_descriptions(mcp_servers),
@@ -6413,7 +6432,8 @@ mod tests {
         ForkSessionResponse, InitializeResponse, LoadSessionResponse, NewSessionResponse,
         PermissionOption, PermissionOptionKind, PromptResponse, ResumeSessionResponse,
         SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionCloseCapabilities,
-        SessionConfigId, SessionConfigValueId, SessionDeleteCapabilities, SessionForkCapabilities,
+        SessionConfigId, SessionConfigOptionValue, SessionConfigValueId,
+        SessionDeleteCapabilities, SessionForkCapabilities,
         SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
         SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
         ToolCallUpdate, ToolCallUpdateFields,
@@ -8287,7 +8307,10 @@ mod tests {
             .on_receive_request(
                 async move |req: SetSessionConfigOptionRequest, _responder, _cx| {
                     assert_eq!(req.config_id.to_string(), "permission_mode");
-                    assert_eq!(req.value.to_string(), "bypassPermissions");
+                    assert_eq!(
+                        req.value,
+                        SessionConfigOptionValue::value_id("bypassPermissions")
+                    );
                     saw_permission_update.store(true, Ordering::SeqCst);
                     Err::<(), _>(agent_client_protocol::Error::invalid_params())
                 },
@@ -8362,7 +8385,10 @@ mod tests {
             .on_receive_request(
                 async move |req: SetSessionConfigOptionRequest, responder, _cx| {
                     assert_eq!(req.config_id.to_string(), config_id);
-                    assert_eq!(req.value.to_string(), read_only_value);
+                    assert_eq!(
+                        req.value,
+                        SessionConfigOptionValue::value_id(read_only_value)
+                    );
                     assert_eq!(config_stage.swap(1, Ordering::SeqCst), 0);
                     responder.respond(SetSessionConfigOptionResponse::new(
                         confirmed_options.clone(),
@@ -12665,6 +12691,43 @@ mod tests {
             matches!(other, LaunchError::InitializeFailed { .. }),
             "non-auth errors must remain InitializeFailed, got {other:?}"
         );
+    }
+
+    #[test]
+    fn classify_launch_errors_route_transport_closed_to_connection_closed() {
+        // Since ACP 2.0 a transport that reaches EOF mid-request fails the
+        // pending request instead of the connection. Both launch-phase
+        // classifiers must report that as a dead connection, not as a
+        // protocol handshake or session/new failure (the latter would also
+        // trigger a futile retry on the closed connection).
+        let transport_closed = || {
+            agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                "reason": "incoming_transport_closed",
+                "method": "initialize",
+            }))
+        };
+        assert!(agent_client_protocol::is_incoming_transport_closed(
+            &transport_closed()
+        ));
+
+        let init = classify_initialize_error(transport_closed());
+        assert!(
+            matches!(init, LaunchError::ConnectionClosed { .. }),
+            "expected ConnectionClosed, got {init:?}"
+        );
+
+        let session = classify_session_error(transport_closed());
+        assert!(
+            matches!(session, LaunchError::ConnectionClosed { .. }),
+            "expected ConnectionClosed, got {session:?}"
+        );
+
+        let message = init.to_string();
+        assert!(
+            message.contains("agent closed the ACP connection"),
+            "{message}"
+        );
+        assert!(message.contains("--agent-stderr"), "{message}");
     }
 
     #[test]
