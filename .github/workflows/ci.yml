@@ -100,11 +100,20 @@ jobs:
     - name: Run Clippy lints
       run: cargo clippy --all-targets --features desktop-app -- -D warnings
 
+    # `--features desktop-app` only pulls `mj-desktop` in as a library dependency,
+    # so its test targets never compile above. It is a workspace member but not a
+    # default member, so it needs its own gate like `voice-worker` and `mj-anvil`.
+    - name: Lint desktop crate
+      run: cargo clippy -p brokk-mj-desktop --all-targets -- -D warnings
+
     - name: Build mjolnir
       run: cargo build --release --features desktop-app
 
     - name: Run tests
       run: cargo test --features desktop-app
+
+    - name: Test desktop crate
+      run: cargo test -p brokk-mj-desktop
 
     - name: Verify packaged macOS desktop crate
       if: runner.os == 'macOS'
