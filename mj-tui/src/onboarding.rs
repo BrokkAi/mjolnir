@@ -323,15 +323,17 @@ mod tests {
         assert_eq!(TeamPreset::from_config(&state.editor.config), None);
         assert_eq!(state.handle_key(KeyCode::Enter), Action::None);
         assert_eq!(state.editor.tab, SettingsTab::Team);
+        // The first press lands on the default team, not on whichever preset
+        // happens to sit at the head of the list.
         assert_eq!(state.handle_key(KeyCode::Right), Action::None);
         assert_eq!(
             TeamPreset::from_config(&state.editor.config),
-            Some(TeamPreset::Codex)
+            Some(TeamPreset::ClaudeWithCodexReviewer)
         );
         assert_eq!(state.handle_key(KeyCode::Right), Action::None);
         assert_eq!(
             TeamPreset::from_config(&state.editor.config),
-            Some(TeamPreset::Claude)
+            Some(TeamPreset::CodexWithClaudeReviewer)
         );
         assert_eq!(state.handle_key(KeyCode::Tab), Action::None);
         assert_eq!(state.editor.tab, SettingsTab::Agents);
@@ -383,7 +385,7 @@ mod tests {
         assert_eq!(state.handle_key(KeyCode::Right), Action::None);
         assert_eq!(
             TeamPreset::from_config(&state.editor.config),
-            Some(TeamPreset::Codex)
+            Some(TeamPreset::ClaudeWithCodexReviewer)
         );
         assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
     }

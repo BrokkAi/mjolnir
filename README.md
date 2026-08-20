@@ -43,10 +43,10 @@ and remote-control surface.
 Choose one of four teams during onboarding, from `/mjconfig`, or with
 **Ctrl+Tab** in a session:
 
-- **Codex**
-- **Claude**
+- **Claude coder + Codex reviewer** (default)
 - **Codex coder + Claude reviewer**
-- **Claude coder + Codex reviewer**
+- **Claude**
+- **Codex**
 
 The coder owns the primary session. The reviewer backs the independent review
 pass that challenges changed turns, plus the default subagent pool. Switching

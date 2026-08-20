@@ -26,10 +26,10 @@ offer the same four configurations:
 
 | Team | What it does |
 | --- | --- |
-| **Codex** | Codex handles primary, subagents, and review |
-| **Claude** | Claude handles primary, subagents, and review |
+| **Claude coder + Codex reviewer** (default) | Claude is primary; Codex handles subagents and review |
 | **Codex coder + Claude reviewer** | Codex is primary; Claude handles subagents and review |
-| **Claude coder + Codex reviewer** | Claude is primary; Codex handles subagents and review |
+| **Claude** | Claude handles primary, subagents, and review |
+| **Codex** | Codex handles primary, subagents, and review |
 
 Choosing a team keeps every model selection on Auto, pins the primary seat to
 the coder's adapter and the review and subagent seats to the reviewer's,
@@ -43,12 +43,13 @@ independent session with its own context, just not an independent provider.
 
 ## The default team
 
-A machine signed in to both providers, with neither ACP server switched off,
-starts on **Claude coder + Codex reviewer** — the mixed team gives adversarial
-review out of the box. Setup opens on that selection, and runs that never see
-setup (headless `mj --print`, `mj server`) use it too. Sign in to only one
-provider and Mjolnir still asks which team to run; pick a team yourself and it
-keeps that choice instead of applying the default.
+**Claude coder + Codex reviewer** leads every list and is where each picker
+starts, so it is what you get by pressing through setup. A machine signed in to
+both providers, with neither ACP server switched off, also adopts it without
+being asked: setup opens on that selection, and runs that never see setup
+(headless `mj --print`, `mj server`) use it too. Sign in to only one provider
+and Mjolnir still asks which team to run; pick a team yourself and it keeps
+that choice instead of applying the default.
 
 ## What a team does not change
 

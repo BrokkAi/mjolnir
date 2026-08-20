@@ -193,11 +193,12 @@ Mjolnir's Codex quota poller to use a specific compatible Codex executable.
 Without that override, both use the version supplied transitively by
 `@agentclientprotocol/codex-acp`.
 
-Run `mj`. First launch opens onboarding on the Team tab and asks you to choose
-one of four teams: **Codex**, **Claude**, **Codex coder + Claude reviewer**,
-or **Claude coder + Codex reviewer**. The coder backs the primary session; the
-reviewer backs the independent review pass and the default subagent pool. The
-other tabs hold model, review, parallelism, and appearance controls.
+Run `mj`. First launch opens onboarding on the Team tab, preselected on
+**Claude coder + Codex reviewer** when both providers are signed in. The other
+three teams are **Codex coder + Claude reviewer**, **Claude**, and **Codex**.
+The coder backs the primary session; the reviewer backs the independent review
+pass and the default subagent pool. The other tabs hold model, review,
+parallelism, and appearance controls.
 
 Press **Ctrl+Tab** during a session to switch between the four teams, or return
 to the same choice on the **Team** tab in `/mjconfig`. Start a new session after

@@ -2378,12 +2378,16 @@ mod tests {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Team;
 
+        // A config with no team starts the cycle at the default team.
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(
             TeamPreset::from_config(&editor.config),
-            Some(TeamPreset::Codex)
+            Some(TeamPreset::ClaudeWithCodexReviewer)
         );
-        assert_eq!(editor.config.agent.acp_source.as_deref(), Some("codex-acp"));
+        assert_eq!(
+            editor.config.agent.acp_source.as_deref(),
+            Some("claude-acp")
+        );
         assert_eq!(
             editor.config.subagents.acp_source.as_deref(),
             Some("codex-acp")

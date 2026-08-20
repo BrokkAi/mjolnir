@@ -19574,19 +19574,35 @@ mod tests {
         state.review_enabled = false;
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
+        let position = |preset: config::TeamPreset| {
+            config::TeamPreset::ALL
+                .iter()
+                .position(|candidate| *candidate == preset)
+                .expect("preset is listed")
+        };
+
+        // The picker opens on the saved team, wherever it sits in the list.
         handle_crossterm(
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
         );
-        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 0);
+        assert_eq!(
+            state.team_picker.as_ref().expect("team picker").selected,
+            position(config::TeamPreset::Codex)
+        );
 
         handle_crossterm(
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
         );
-        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 1);
+        let next = state.team_picker.as_ref().expect("team picker").selected;
+        assert_eq!(
+            next,
+            (position(config::TeamPreset::Codex) + 1) % config::TeamPreset::ALL.len()
+        );
+        let expected = config::TeamPreset::ALL[next];
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
         assert!(
@@ -19596,10 +19612,7 @@ mod tests {
                 .is_some_and(|picker| picker.step == TeamPickerStep::StartNewSession)
         );
         let saved = config::Config::load(&config_path).expect("load config");
-        assert_eq!(
-            config::TeamPreset::from_config(&saved),
-            Some(config::TeamPreset::Claude)
-        );
+        assert_eq!(config::TeamPreset::from_config(&saved), Some(expected));
         assert!(!state.review_enabled, "active session policy is unchanged");
         assert!(cmd_rx.try_recv().is_err(), "no live policy update is sent");
 

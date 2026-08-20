@@ -401,11 +401,14 @@ pub enum TeamPreset {
 }
 
 impl TeamPreset {
+    /// Display and cycle order. The default team leads: every path that has
+    /// no team yet — the Ctrl+Tab picker, the first press in setup, the top
+    /// of every presets list — lands on the first entry.
     pub const ALL: [Self; 4] = [
-        Self::Codex,
-        Self::Claude,
-        Self::CodexWithClaudeReviewer,
         Self::ClaudeWithCodexReviewer,
+        Self::CodexWithClaudeReviewer,
+        Self::Claude,
+        Self::Codex,
     ];
 
     pub const fn id(self) -> &'static str {
