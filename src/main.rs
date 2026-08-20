@@ -1514,6 +1514,9 @@ async fn run_app(
     let config_path = config::default_config_path();
     let config_exists = config::Config::path_has_saved_config(&config_path);
     let mut cfg = Config::load(&config_path)?;
+    // A machine signed in to both providers starts on the default team
+    // instead of being asked to pick one.
+    cfg.apply_default_team();
     let team_selection_required = !config::has_valid_team(&cfg);
     let onboarding_kind = onboarding_kind(
         config_exists,

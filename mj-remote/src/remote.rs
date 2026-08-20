@@ -2952,13 +2952,7 @@ impl RemoteSessionTracker {
         actor: Option<&str>,
     ) -> PermissionPrompt {
         let request_id = prompt.tool_call.tool_call_id.to_string();
-        let title = prompt
-            .tool_call
-            .fields
-            .title
-            .clone()
-            .map(|title| title.replace("\\n", "\n"))
-            .unwrap_or_else(|| request_id.clone());
+        let title = mj_core::session_state::permission_prompt_title(&prompt.tool_call);
         let record = PendingPermissionRecord {
             request_id: request_id.clone(),
             title: actor.map_or(title.clone(), |actor| format!("{actor} · {title}")),
@@ -4856,7 +4850,11 @@ struct MjLoginRequest {
 }
 
 fn mjconfig_load(state: &ServerState) -> config::Config {
-    config::Config::load(&state.mjconfig.config_path).unwrap_or_default()
+    let mut config = config::Config::load(&state.mjconfig.config_path).unwrap_or_default();
+    // The host resolved its roster with the same default, so the panel shows
+    // the team this server is actually running.
+    config.apply_default_team();
+    config
 }
 
 fn mjconfig_editor(
@@ -7574,8 +7572,9 @@ pub(crate) async fn prepare_desktop_server(
         session_manager,
     } = options;
     let config_path = config::default_config_path();
-    let cfg = config::Config::load(&config_path)
+    let mut cfg = config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
+    cfg.apply_default_team();
     let resolved = roster::resolve(&cfg, &cwd).await?;
     let workspace_roots =
         mj_core::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
@@ -9802,7 +9801,13 @@ mod tests {
     #[tokio::test]
     async fn mjconfig_snapshot_reports_every_panel() {
         let token = "mjconfig-token";
-        let app = mjconfig_test_router(test_mjconfig_runtime(), token);
+        let runtime = test_mjconfig_runtime();
+        // A saved team keeps the panel independent of whichever providers the
+        // host running these tests happens to be signed in to.
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&runtime.config_path).expect("seed config");
+        let app = mjconfig_test_router(runtime, token);
 
         let unauthorized = app
             .clone()
@@ -9828,7 +9833,7 @@ mod tests {
             .as_array()
             .expect("team presets");
         assert_eq!(presets.len(), config::TeamPreset::ALL.len());
-        assert!(snapshot["team"]["selected"].is_null());
+        assert_eq!(snapshot["team"]["selected"], "codex");
         assert!(snapshot.get("acp_priority").is_none());
 
         let accounts = snapshot["acp_servers"]["accounts"]
@@ -9928,7 +9933,10 @@ mod tests {
         // The snapshot re-derives the inventory from the *saved* config, so
         // the explicit policy has to be on disk: an undetected built-in left
         // on `Auto` is hidden, and rediscovery would drop the seeded options.
-        let config = roster::config_with_a_visible_builtin();
+        // The saved team also keeps every seat on that server instead of the
+        // default team the host's own credentials would otherwise supply.
+        let mut config = roster::config_with_a_visible_builtin();
+        config::TeamPreset::Codex.apply(&mut config);
         config.save(&runtime.config_path).expect("seed config");
         let mut inventory = roster::discover_inventory(&config);
         let server = inventory.servers.first_mut().expect("visible ACP server");
@@ -14673,6 +14681,57 @@ mod tests {
             .snapshot()
             .expect("snapshot");
         assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    /// codex-acp asks for command approval with no `title`: the payload is an
+    /// opaque exec id plus `rawInput.command`. The viewer renders
+    /// `PendingPermissionRecord::title` verbatim, so publishing the id there
+    /// leaves a remote approver looking at `exec-<uuid>` with no way to tell
+    /// what they are allowing.
+    #[tokio::test]
+    async fn published_permission_shows_the_command_a_codex_exec_asks_to_run() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let prompt = PermissionPrompt {
+            tool_call: ToolCallUpdate::new(
+                "exec-a18aaa9c-a65e-4a8f-8a96-e9d93a21ab91".to_string(),
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Execute)
+                    .raw_input(serde_json::json!({
+                        "command": "rm -rf target",
+                        "cwd": "/repo",
+                    })),
+            ),
+            options: vec![
+                PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+            ],
+            responder,
+        };
+
+        let _event = tracker.intercept_event(UiEvent::PermissionRequest(prompt));
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        let pending = &snapshot.pending_permissions[0];
+        assert_eq!(pending.title, "rm -rf target");
+        // The id still identifies the prompt a decision answers; it just is
+        // not what the approver reads.
+        assert_eq!(
+            pending.request_id,
+            "exec-a18aaa9c-a65e-4a8f-8a96-e9d93a21ab91"
+        );
     }
 
     #[tokio::test]
