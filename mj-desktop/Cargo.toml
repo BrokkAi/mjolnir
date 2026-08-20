@@ -20,6 +20,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tracing = "0.1"
 url = "2"
 
+[dev-dependencies]
+rcgen = "0.13"
+
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tao = { version = "0.35", default-features = false, features = ["rwh_06", "x11"] }
 webbrowser = "1.2"

@@ -338,6 +338,24 @@ mod tests {
     }
 
     #[test]
+    fn a_defaulted_team_is_preselected_without_demanding_a_choice() {
+        // Startup applies the default team on a machine signed in to both
+        // providers, so setup opens on that team with nothing to answer.
+        let mut config = Config::default();
+        TeamPreset::ClaudeWithCodexReviewer.apply(&mut config);
+        let mut state = State::new(Kind::Fresh, config, Some(roster()), None);
+
+        assert_eq!(state.editor.notice, None);
+        let rendered = render(&state);
+        assert!(
+            rendered.contains("Team  < Claude coder + Codex reviewer >"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(TEAM_SELECTION_REQUIRED), "{rendered}");
+        assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
+    }
+
+    #[test]
     fn enter_saves_and_validates_the_complete_configuration() {
         let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
         TeamPreset::Claude.apply(&mut state.editor.config);

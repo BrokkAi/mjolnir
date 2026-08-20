@@ -311,7 +311,118 @@ fn config_select_choices(select: &SessionConfigSelect) -> Vec<ConfigValueChoice>
     }
 }
 
-use agent_client_protocol::schema::v1::{ToolCall, ToolCallUpdate};
+use agent_client_protocol::schema::v1::{ToolCall, ToolCallUpdate, ToolKind};
+
+/// Human-readable label for the tool call a permission request is asking about.
+///
+/// `session/request_permission` carries a `ToolCallUpdate`, and its `title` is
+/// optional: claude-acp fills it in ("Edit fizzbuzz.py"), while codex-acp's
+/// command approvals leave it unset and carry the command in
+/// `rawInput.command` alongside an opaque exec id
+/// (`exec-a18aaa9c-a65e-4a8f-8a96-e9d93a21ab91`). Falling straight through to
+/// the id shows whoever is approving — on a phone, with nothing else on the
+/// card — a uuid instead of the command they are about to run, so derive the
+/// most specific label the payload actually carries and keep the id only as
+/// the last resort.
+pub fn permission_prompt_title(tool_call: &ToolCallUpdate) -> String {
+    permission_prompt_label(tool_call).unwrap_or_else(|| tool_call.tool_call_id.to_string())
+}
+
+fn permission_prompt_label(tool_call: &ToolCallUpdate) -> Option<String> {
+    let fields = &tool_call.fields;
+    if let Some(title) = fields
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        // Some adapters escape newlines into the title rather than sending
+        // them raw; both renderers wrap on real newlines.
+        return Some(title.replace("\\n", "\n"));
+    }
+    if let Some(command) = fields.raw_input.as_ref().and_then(raw_input_command) {
+        return Some(command);
+    }
+    let path = fields
+        .raw_input
+        .as_ref()
+        .and_then(raw_input_path)
+        .or_else(|| {
+            fields
+                .locations
+                .as_ref()?
+                .first()
+                .map(|location| location.path.display().to_string())
+        });
+    match (fields.kind.and_then(tool_kind_verb), path) {
+        (Some(verb), Some(path)) => Some(format!("{verb} {path}")),
+        (Some(_), None) => fields.kind.and_then(tool_kind_label).map(str::to_string),
+        (None, Some(path)) => Some(path),
+        (None, None) => None,
+    }
+}
+
+/// Verb to put in front of a path the payload named.
+fn tool_kind_verb(kind: ToolKind) -> Option<&'static str> {
+    match kind {
+        ToolKind::Read => Some("Read"),
+        ToolKind::Edit => Some("Edit"),
+        ToolKind::Delete => Some("Delete"),
+        ToolKind::Move => Some("Move"),
+        ToolKind::Search => Some("Search"),
+        ToolKind::Execute => Some("Run"),
+        ToolKind::Fetch => Some("Fetch"),
+        _ => None,
+    }
+}
+
+/// Standalone label for a payload that named no command and no path — all the
+/// codex-acp file-change approval carries is `kind: "edit"`.
+fn tool_kind_label(kind: ToolKind) -> Option<&'static str> {
+    match kind {
+        ToolKind::Read => Some("Read file"),
+        ToolKind::Edit => Some("Edit file"),
+        ToolKind::Delete => Some("Delete file"),
+        ToolKind::Move => Some("Move file"),
+        ToolKind::Search => Some("Search files"),
+        ToolKind::Execute => Some("Run command"),
+        ToolKind::Fetch => Some("Fetch resource"),
+        _ => None,
+    }
+}
+
+/// The command an `execute` payload is asking to run. Accepts both the string
+/// form codex-acp sends and the argv-array form other agents use.
+fn raw_input_command(raw_input: &serde_json::Value) -> Option<String> {
+    let object = raw_input.as_object()?;
+    ["command", "cmd"].into_iter().find_map(|key| {
+        let value = object.get(key)?;
+        let command = match value {
+            serde_json::Value::String(command) => command.trim().to_string(),
+            serde_json::Value::Array(argv) => argv
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string(),
+            _ => return None,
+        };
+        (!command.is_empty()).then_some(command)
+    })
+}
+
+/// The file an `edit`/`read` payload names, under any of the spellings agents
+/// use for it.
+fn raw_input_path(raw_input: &serde_json::Value) -> Option<String> {
+    let object = raw_input.as_object()?;
+    ["path", "file_path", "filePath", "abs_path"]
+        .into_iter()
+        .find_map(|key| {
+            let path = object.get(key)?.as_str()?.trim();
+            (!path.is_empty()).then(|| path.to_string())
+        })
+}
 
 /// Whether a tool call is the transport wrapper for a Mjolnir subagent command.
 pub fn is_subagent_transport_call(tool_call: &ToolCall) -> bool {
@@ -489,7 +600,8 @@ pub fn remote_elicitation_outcome(
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        SessionConfigOptionCategory, SessionConfigSelectOption,
+        SessionConfigOptionCategory, SessionConfigSelectOption, ToolCallLocation,
+        ToolCallUpdateFields,
     };
 
     #[test]
@@ -508,5 +620,95 @@ mod tests {
             "sonnet"
         );
         assert_eq!(config_option_choices(&option).unwrap()[0].name, "Sonnet");
+    }
+
+    /// The exact payload codex-acp sends for a command approval: no title, the
+    /// command in `rawInput`, and an opaque exec id as the tool-call id. The
+    /// approver must read the command, never the id.
+    #[test]
+    fn permission_title_falls_back_to_the_raw_input_command() {
+        let tool_call = ToolCallUpdate::new(
+            "exec-a18aaa9c-a65e-4a8f-8a96-e9d93a21ab91".to_string(),
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Execute)
+                .raw_input(serde_json::json!({
+                    "command": "cargo test -p brokk-mj-remote",
+                    "cwd": "/repo",
+                })),
+        );
+
+        assert_eq!(
+            permission_prompt_title(&tool_call),
+            "cargo test -p brokk-mj-remote"
+        );
+    }
+
+    #[test]
+    fn permission_title_joins_an_argv_command() {
+        let tool_call = ToolCallUpdate::new(
+            "exec-1".to_string(),
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Execute)
+                .raw_input(serde_json::json!({ "command": ["rm", "-rf", "build"] })),
+        );
+
+        assert_eq!(permission_prompt_title(&tool_call), "rm -rf build");
+    }
+
+    /// An adapter-supplied title always wins: claude-acp already sends the
+    /// readable one, and it is more specific than anything derived here.
+    #[test]
+    fn permission_title_prefers_the_adapter_title_and_unescapes_newlines() {
+        let tool_call = ToolCallUpdate::new(
+            "call-1".to_string(),
+            ToolCallUpdateFields::new()
+                .title("Edit fizzbuzz.py\\nline two")
+                .raw_input(serde_json::json!({ "command": "ignored" })),
+        );
+
+        assert_eq!(
+            permission_prompt_title(&tool_call),
+            "Edit fizzbuzz.py\nline two"
+        );
+    }
+
+    #[test]
+    fn permission_title_names_the_file_a_payload_points_at() {
+        let from_raw_input = ToolCallUpdate::new(
+            "call-1".to_string(),
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Edit)
+                .raw_input(serde_json::json!({ "file_path": "src/lib.rs" })),
+        );
+        assert_eq!(permission_prompt_title(&from_raw_input), "Edit src/lib.rs");
+
+        let from_locations = ToolCallUpdate::new(
+            "call-2".to_string(),
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Read)
+                .locations(vec![ToolCallLocation::new("src/main.rs")]),
+        );
+        assert_eq!(permission_prompt_title(&from_locations), "Read src/main.rs");
+    }
+
+    /// codex-acp's file-change approval carries only `kind: "edit"` and the
+    /// patch id, so the kind is the only readable thing left.
+    #[test]
+    fn permission_title_falls_back_to_the_tool_kind() {
+        let tool_call = ToolCallUpdate::new(
+            "patch-1".to_string(),
+            ToolCallUpdateFields::new().kind(ToolKind::Edit),
+        );
+
+        assert_eq!(permission_prompt_title(&tool_call), "Edit file");
+    }
+
+    /// A payload with nothing readable in it keeps the id: it is at least the
+    /// handle that correlates the card with the transcript.
+    #[test]
+    fn permission_title_keeps_the_id_when_the_payload_says_nothing() {
+        let tool_call = ToolCallUpdate::new("call-1".to_string(), ToolCallUpdateFields::default());
+
+        assert_eq!(permission_prompt_title(&tool_call), "call-1");
     }
 }
