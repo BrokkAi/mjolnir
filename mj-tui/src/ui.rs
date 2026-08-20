@@ -28762,6 +28762,7 @@ mod tests {
         let mut state = AppState::new();
         state.agent_source_id = "custom:bridge".to_string();
         state.active_agent_launch = Some(ragnarok::Launch {
+            source_id: "custom:bridge".to_string(),
             program: PathBuf::from("bridge"),
             args: vec!["--max-turns".to_string(), "7".to_string()],
             env: HashMap::from([("BRIDGE_TEST".to_string(), "1".to_string())]),

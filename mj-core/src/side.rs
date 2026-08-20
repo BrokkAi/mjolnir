@@ -49,6 +49,14 @@ pub async fn start(
     let fork_source = source.has_history;
     let resume_session = fork_source.then_some(source.session_id);
 
+    // A forked side session inherits the primary's injected memory through
+    // its history; one started before the primary's first prompt has no
+    // history to fork, so it gets the worker-lane injection instead.
+    let memory = if fork_source {
+        None
+    } else {
+        crate::memory::worker_lane_memory(&launch.agent.source_id, &launch.cwd)
+    };
     let (side_event_tx, mut side_event_rx) = mpsc::unbounded_channel();
     let (side_cmd_tx, side_cmd_rx) = mpsc::unbounded_channel();
     let side_cfg = isolated_runtime_config(
@@ -58,6 +66,7 @@ pub async fn start(
         launch.additional_directories,
         launch.agent_stderr,
         launch.fs_max_text_bytes,
+        memory,
     );
     let runtime_task = tokio::spawn(async move {
         let _ = acp::run(side_cfg, side_event_tx, side_cmd_rx).await;
@@ -140,6 +149,7 @@ pub fn isolated_runtime_config(
     additional_directories: Vec<PathBuf>,
     agent_stderr: Option<PathBuf>,
     fs_max_text_bytes: u64,
+    memory: Option<crate::memory::SessionMemory>,
 ) -> acp::AcpRuntimeConfig {
     acp::AcpRuntimeConfig {
         command: agent.program.clone(),
@@ -158,9 +168,7 @@ pub fn isolated_runtime_config(
         saved_session_config: std::collections::HashMap::new(),
         role_config: None,
         subagents: None,
-        // Side conversations fork the primary session, so the primary's
-        // injected memory already sits in the forked history.
-        memory: None,
+        memory,
         side_prompt_policy: true,
         termination: None,
     }
@@ -219,6 +227,7 @@ mod tests {
             vec![PathBuf::from("/extra")],
             None,
             acp::DEFAULT_FS_TEXT_BYTES,
+            None,
         );
 
         assert!(cfg.mcp_servers.is_empty());
@@ -229,5 +238,26 @@ mod tests {
         assert!(cfg.saved_session_config.is_empty());
         assert!(cfg.side_prompt_policy);
         assert_eq!(cfg.resume_session.as_deref(), Some("child-session"));
+        assert!(cfg.memory.is_none(), "forked side sessions carry no memory");
+
+        let memory = crate::memory::SessionMemory {
+            store_path: PathBuf::from("/tmp/memories.json"),
+            project: PathBuf::from("/workspace"),
+            inject: true,
+            tools: false,
+            import_claude_auto: false,
+        };
+        let cfg = isolated_runtime_config(
+            &agent,
+            None,
+            PathBuf::from("/workspace"),
+            Vec::new(),
+            None,
+            acp::DEFAULT_FS_TEXT_BYTES,
+            Some(memory),
+        );
+        let memory = cfg.memory.expect("fresh side sessions carry memory");
+        assert!(memory.inject);
+        assert!(!memory.tools);
     }
 }

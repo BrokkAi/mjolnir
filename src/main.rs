@@ -2617,6 +2617,7 @@ async fn run_session(
                 feature_hints_enabled: ui_config.feature_hints,
                 keep_awake_enabled: ui_config.keep_awake,
                 active_agent_launch: Some(ragnarok::Launch {
+                    source_id: agent.source_id.clone(),
                     program: agent.program.clone(),
                     args: agent.args.clone(),
                     env: agent.env.clone(),

@@ -5,8 +5,9 @@
 //! `memory_forget` MCP tools. Claude Code's native auto-memory is imported
 //! into the same store. Worker lanes (subagents, review lanes, ragnarok
 //! combatants) receive the same knowledge injection-only: they never get the
-//! save tools. Side conversations fork the primary session and inherit its
-//! injected knowledge through history.
+//! save tools. Side conversations inherit the primary's injected knowledge by
+//! forking its session, or fall back to the worker-lane injection when the
+//! primary has no history to fork yet.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -597,8 +598,8 @@ fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
 
 // ---------------------------------------------------------------------------
 /// Memory behavior for one ACP runtime, carried on `AcpRuntimeConfig`.
-/// `None` there disables the feature entirely (side conversations, which
-/// inherit the primary's injected knowledge by forking its session).
+/// `None` there disables the feature entirely (forked side conversations,
+/// which inherit the primary's injected knowledge through their history).
 #[derive(Debug, Clone)]
 pub struct SessionMemory {
     pub store_path: PathBuf,
@@ -642,8 +643,9 @@ impl SessionMemory {
     }
 
     /// Injection-only memory for worker lanes (subagents, review lanes,
-    /// ragnarok combatants): shared knowledge flows in, but the save tools
-    /// stay with primary sessions so workers cannot write to the store.
+    /// ragnarok combatants, fresh side sessions): shared knowledge flows in,
+    /// but the save tools stay with primary sessions so workers cannot write
+    /// to the store.
     pub fn inject_only(
         config: &crate::config::MemoryConfig,
         cwd: &Path,
@@ -715,6 +717,27 @@ impl SessionMemory {
             }
         }
     }
+}
+
+/// Injection-only memory for a worker lane identified by its adapter source
+/// id, reading the user's `[memory]` toggles from the default config path.
+pub fn worker_lane_memory(source_id: &str, cwd: &Path) -> Option<SessionMemory> {
+    let memory_config = crate::config::Config::load(&crate::config::default_config_path())
+        .map(|config| config.memory)
+        .unwrap_or_default();
+    worker_lane_memory_with(&memory_config, source_id, cwd)
+}
+
+fn worker_lane_memory_with(
+    config: &crate::config::MemoryConfig,
+    source_id: &str,
+    cwd: &Path,
+) -> Option<SessionMemory> {
+    SessionMemory::inject_only(
+        config,
+        cwd,
+        crate::roster::AdapterKind::from_source_id(source_id),
+    )
 }
 
 const PREAMBLE_HEADER: &str = "<mj-memory>\nShared project knowledge from Claude, Codex, and the \
@@ -1642,6 +1665,21 @@ mod tests {
             generate_memories: true,
         };
         assert!(SessionMemory::inject_only(&config, project, Some(AdapterKind::Codex)).is_none());
+    }
+
+    #[test]
+    fn worker_lane_memory_maps_adapter_source_ids() {
+        let defaults = crate::config::MemoryConfig::default();
+        let project = Path::new("/tmp/proj");
+        let memory = worker_lane_memory_with(&defaults, "codex-acp", project)
+            .expect("codex lanes receive memory");
+        assert!(memory.inject);
+        assert!(!memory.tools);
+        assert!(memory.import_claude_auto);
+        let memory = worker_lane_memory_with(&defaults, "claude-acp", project)
+            .expect("claude lanes receive memory");
+        assert!(!memory.import_claude_auto);
+        assert!(worker_lane_memory_with(&defaults, "custom:bridge", project).is_none());
     }
 
     #[test]
