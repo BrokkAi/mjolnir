@@ -1434,7 +1434,7 @@ fn draw_team(
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "Ctrl+Tab opens the same team switcher from a session.",
+        "Shift+Tab opens the same team switcher from a session.",
         Style::default().ink(theme.muted),
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);

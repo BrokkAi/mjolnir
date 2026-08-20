@@ -199,7 +199,7 @@ or **Claude coder + Codex reviewer**. The coder backs the primary session; the
 reviewer backs the independent review pass and the default subagent pool. The
 other tabs hold model, review, parallelism, and appearance controls.
 
-Press **Ctrl+Tab** during a session to switch between the four teams, or return
+Press **Shift+Tab** during a session to switch between the four teams, or return
 to the same choice on the **Team** tab in `/mjconfig`. Start a new session after
 switching so the new coder owns the complete turn.
 

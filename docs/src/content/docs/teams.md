@@ -21,7 +21,7 @@ coder, and a clean review is a normal outcome.
 
 ## The four teams
 
-Onboarding, the **Team** tab in `/mjconfig`, and **Ctrl+Tab** during a session
+Onboarding, the **Team** tab in `/mjconfig`, and **Shift+Tab** during a session
 offer the same four configurations:
 
 | Team | What it does |
@@ -35,7 +35,7 @@ Choosing a team keeps every model selection on Auto, pins the primary seat to
 the coder's adapter and the review and subagent seats to the reviewer's,
 enables discrete review and subagent failover, and enables the built-in ACP
 routes its seats use — both routes for a mixed team, only that provider's
-route for a single-provider team. Team changes apply to a new session; after saving from **Ctrl+Tab**,
+route for a single-provider team. Team changes apply to a new session; after saving from **Shift+Tab**,
 start the offered session to use the new team immediately.
 
 A single-provider team still gets discrete review — the reviewer is an

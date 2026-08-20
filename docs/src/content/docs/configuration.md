@@ -84,7 +84,7 @@ Explicit model IDs can be selected in `/mjconfig`; availability is checked
 when the next session starts. A `max_parallel` above 16 is a configuration
 error, not a silently clamped value.
 
-Onboarding, the **Team** tab in `/mjconfig`, and **Ctrl+Tab** during a session
+Onboarding, the **Team** tab in `/mjconfig`, and **Shift+Tab** during a session
 all offer the same four configurations:
 
 | Team | Primary (coder) | Subagents and review (reviewer) |
@@ -97,7 +97,7 @@ all offer the same four configurations:
 Choosing a team keeps all three model selections on Auto, pins the primary
 seat to the coder, pins the subagent and review seats to the reviewer, enables
 discrete review and subagent failover, and enables the required built-in ACP
-routes. After saving from **Ctrl+Tab**, start the offered new session to use the
+routes. After saving from **Shift+Tab**, start the offered new session to use the
 new team immediately. See [Teams and adversarial review](/teams/).
 
 ACP priority lists default to `codex-acp`, then `claude-acp`,

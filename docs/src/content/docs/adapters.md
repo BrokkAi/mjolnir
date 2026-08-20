@@ -43,7 +43,7 @@ enabled adapter, and reports the available model count. Normal startup and
 
 ## Team selection and automatic models
 
-Onboarding, `/mjconfig`, and **Ctrl+Tab** expose four first-class teams: Codex,
+Onboarding, `/mjconfig`, and **Shift+Tab** expose four first-class teams: Codex,
 Claude, Codex coder + Claude reviewer, and Claude coder + Codex reviewer. A
 team pins the primary route to its coder and the review and subagent routes to
 its reviewer while leaving model selection on Auto.

@@ -684,7 +684,7 @@ struct FeatureHint {
 
 const FEATURE_HINTS: &[FeatureHint] = &[
     FeatureHint {
-        text: "Press Ctrl+Tab to switch coding teams, or open /mjconfig for models and session options.",
+        text: "Press Shift+Tab to switch coding teams, or open /mjconfig for models and session options.",
         requirement: FeatureHintRequirement::TeamChoice,
     },
     FeatureHint {
@@ -768,7 +768,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Fullscreen,
     },
     FeatureHint {
-        text: "Press Shift+Tab to choose the primary model and reasoning effort.",
+        text: "Choose models and reasoning effort per seat under /mjconfig.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -1378,7 +1378,6 @@ pub struct AppState {
     /// cancelling) its responder. Private; accessed via the
     /// `*_pending_elicitation*` helpers.
     elicitation_queue: VecDeque<PendingElicitation>,
-    pub agent_picker: Option<AgentPicker>,
     pub team_picker: Option<TeamPicker>,
     pub config_picker: Option<ConfigPicker>,
     pub review_picker: Option<ReviewPicker>,
@@ -1858,51 +1857,14 @@ impl InputPasteBurst {
     }
 }
 
-/// Steps in the deferred primary model and effort picker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentPickerStep {
-    Model,
-    Effort,
-    ConfirmSave,
-    StartNewSession,
-}
-
-/// Persisted primary-agent effort choices. `None` retains the ACP adapter's
-/// own default rather than forcing a reasoning level.
-pub const PRIMARY_EFFORT_OPTIONS: &[Option<&str>] = &[
-    None,
-    Some("off"),
-    Some("minimal"),
-    Some("low"),
-    Some("medium"),
-    Some("high"),
-    Some("xhigh"),
-    Some("max"),
-];
-
-pub fn primary_effort_value(index: usize) -> Option<&'static str> {
-    PRIMARY_EFFORT_OPTIONS.get(index).copied().flatten()
-}
-
-/// Deferred primary-agent model picker overlay state.
-#[derive(Debug, Clone)]
-pub struct AgentPicker {
-    pub selected: usize,
-    /// Indices into `ragnarok_models`, deduplicated by configured model ID.
-    pub role_indices: Vec<usize>,
-    pub effort_selected: usize,
-    pub step: AgentPickerStep,
-    /// Whether the post-save new-session offer selects its affirmative action.
-    pub start_new_session: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamPickerStep {
     Choose,
     StartNewSession,
 }
 
-/// Deferred four-configuration team picker opened by Ctrl+Tab.
+/// Deferred four-configuration team picker opened by Shift+Tab (or Ctrl+Tab
+/// in terminals that can encode it).
 #[derive(Debug, Clone)]
 pub struct TeamPicker {
     pub selected: usize,
@@ -2217,7 +2179,6 @@ impl AppState {
             history_saved_file_attachments: Vec::new(),
             permission_queue: VecDeque::new(),
             elicitation_queue: VecDeque::new(),
-            agent_picker: None,
             team_picker: None,
             config_picker: None,
             review_picker: None,
@@ -2359,37 +2320,12 @@ impl AppState {
         self.thought_output = thought_output;
     }
 
-    pub fn open_agent_picker(&mut self) -> bool {
-        let mut seen = HashSet::new();
-        let role_indices = self
-            .ragnarok_models
-            .iter()
-            .enumerate()
-            .filter_map(|(index, role)| seen.insert(role.model.model.as_str()).then_some(index))
-            .collect::<Vec<_>>();
-        if role_indices.is_empty() {
-            return false;
-        }
-        let selected = role_indices
-            .iter()
-            .position(|&index| {
-                self.ragnarok_models[index].model.model == self.active_models.primary
-            })
-            .unwrap_or(0);
-        self.agent_picker = Some(AgentPicker {
-            selected,
-            role_indices,
-            // Effort is chosen for the model being selected. Do not carry a
-            // previous model's override into a new selection implicitly.
-            effort_selected: 0,
-            step: AgentPickerStep::Model,
-            start_new_session: true,
-        });
-        true
-    }
-
     pub fn open_team_picker(&mut self) {
         if crate::roster::external_adapter().is_some() {
+            self.record_status_message(
+                StatusKind::Info,
+                "team switching is unavailable while an external adapter is active",
+            );
             return;
         }
         // Reflect the team this run is actually on, including a default the
@@ -2435,64 +2371,6 @@ impl AppState {
         if let Some(picker) = self.team_picker.as_mut() {
             picker.start_new_session = !picker.start_new_session;
         }
-    }
-
-    pub fn agent_picker_move(&mut self, delta: i32) {
-        let Some(picker) = self.agent_picker.as_mut() else {
-            return;
-        };
-        move_wrapped(&mut picker.selected, delta, picker.role_indices.len());
-    }
-
-    pub fn agent_picker_move_effort(&mut self, delta: i32) {
-        let Some(picker) = self.agent_picker.as_mut() else {
-            return;
-        };
-        move_wrapped(
-            &mut picker.effort_selected,
-            delta,
-            PRIMARY_EFFORT_OPTIONS.len(),
-        );
-    }
-
-    pub fn agent_picker_toggle_start_new_session(&mut self) {
-        if let Some(picker) = self.agent_picker.as_mut() {
-            picker.start_new_session = !picker.start_new_session;
-        }
-    }
-
-    pub fn agent_picker_advance(&mut self) -> bool {
-        let Some(picker) = self.agent_picker.as_mut() else {
-            return false;
-        };
-        picker.step = match picker.step {
-            AgentPickerStep::Model => AgentPickerStep::Effort,
-            AgentPickerStep::Effort => AgentPickerStep::ConfirmSave,
-            AgentPickerStep::ConfirmSave | AgentPickerStep::StartNewSession => return false,
-        };
-        true
-    }
-
-    pub fn agent_picker_selection(&self) -> Option<(crate::roster::ResolvedAgent, Option<String>)> {
-        let picker = self.agent_picker.as_ref()?;
-        let role_index = picker.role_indices.get(picker.selected).copied()?;
-        Some((
-            self.ragnarok_models.get(role_index).cloned()?,
-            primary_effort_value(picker.effort_selected).map(str::to_string),
-        ))
-    }
-
-    pub fn agent_picker_back(&mut self) -> bool {
-        let Some(picker) = self.agent_picker.as_mut() else {
-            return false;
-        };
-        picker.step = match picker.step {
-            AgentPickerStep::Model => return false,
-            AgentPickerStep::Effort => AgentPickerStep::Model,
-            AgentPickerStep::ConfirmSave => AgentPickerStep::Effort,
-            AgentPickerStep::StartNewSession => return false,
-        };
-        true
     }
 
     /// Open `/mjconfig`, seeded from the same persisted config startup edits.
@@ -3443,7 +3321,6 @@ impl AppState {
         self.finish_turn_timer();
         self.cancel_all_pending_permissions();
         self.cancel_all_pending_elicitations();
-        self.agent_picker = None;
         self.team_picker = None;
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
@@ -12098,7 +11975,7 @@ mod tests {
     fn gated_feature_hints_keep_their_capability_requirements() {
         let expected = [
             (
-                "Press Ctrl+Tab to switch coding teams",
+                "Press Shift+Tab to switch coding teams",
                 FeatureHintRequirement::TeamChoice,
             ),
             (

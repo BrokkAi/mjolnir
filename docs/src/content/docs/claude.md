@@ -56,7 +56,7 @@ all three seats to the Claude adapter. Then confirm:
 4. **Discrete review** is on if you want workspace-changing turns reviewed
    before they are released.
 
-Press **Ctrl+Tab** during a session to switch among all four teams, or return to
+Press **Shift+Tab** during a session to switch among all four teams, or return to
 the same choice on the **Team** tab in `/mjconfig`. Start a new session after
 switching so the new coder and reviewer routes apply together.
 

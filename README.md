@@ -41,7 +41,7 @@ and remote-control surface.
 ## Four teams, one shortcut
 
 Choose one of four teams during onboarding, from `/mjconfig`, or with
-**Ctrl+Tab** in a session:
+**Shift+Tab** in a session:
 
 - **Codex**
 - **Claude**
@@ -155,7 +155,7 @@ mj
 
 First launch discovers available provider credentials and opens setup on the
 team those credentials support: **Claude coder + Codex reviewer** with both
-providers signed in, or that provider's own team with one. Press **Ctrl+Tab**
+providers signed in, or that provider's own team with one. Press **Shift+Tab**
 to switch teams later, or open the **Team** tab in `/mjconfig`. Team, model,
 and adapter changes apply to a new session.
 

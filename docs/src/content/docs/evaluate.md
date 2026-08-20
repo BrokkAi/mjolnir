@@ -144,7 +144,7 @@ subagent report has been delivered.
 
 A successful run proves the selected team can support the core
 delegation path on one small repository. Compare teams by pressing
-**Ctrl+Tab**, choosing another of the four configurations, and repeating the
+**Shift+Tab**, choosing another of the four configurations, and repeating the
 same fixture — the mixed teams are the quickest way to watch one provider's
 reviewer challenge the other provider's change. Record model IDs, elapsed
 time, token/cost telemetry, whether the

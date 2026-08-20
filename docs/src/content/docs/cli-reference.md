@@ -66,8 +66,9 @@ installed version.
 - Enter sends a prompt or accepts the selected action.
 - Up/Down navigate autocomplete and permission choices.
 - PageUp/PageDown scroll the transcript.
-- Ctrl+Tab switches between the four Codex and Claude coder/reviewer teams.
-- Shift+Tab changes the current agent's model and effort.
+- Shift+Tab (or Ctrl+Tab in terminals that can send it) switches between the
+  four Codex and Claude coder/reviewer teams. Models and reasoning effort are
+  configured per seat in `/mjconfig`.
 - Typing `@` opens workspace file autocomplete; the chosen file is attached to
   the prompt as an ACP resource link.
 - Alt+Up (or Shift+Left) pulls the newest queued prompt back into the composer

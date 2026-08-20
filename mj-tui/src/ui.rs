@@ -44,14 +44,14 @@ use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AgentPickerStep, AppState, ArenaPane, AutocompleteKind, ConfigValueChoice, ConnectionState,
+    AppState, ArenaPane, AutocompleteKind, ConfigValueChoice, ConnectionState,
     CurrentBranchPullRequest, ElicitationFormFieldKind, ElicitationView, Entry, FileAttachment,
-    PRIMARY_EFFORT_OPTIONS, PastedAttachment, PastedImageAttachment, PendingElicitation,
-    PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus,
-    RagnarokFighterUi, RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus,
-    TeamPickerStep, ToolCallOutput, TranscriptSearch, TranscriptSelection, UiExitReason,
-    WorkspaceFile, classify_elicitation, config_option_choices, config_option_current_value_label,
-    file_mention_text, primary_effort_value, workspace_file_candidates,
+    PastedAttachment, PastedImageAttachment, PendingElicitation, PendingPermission,
+    QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus, RagnarokFighterUi,
+    RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus, TeamPickerStep,
+    ToolCallOutput, TranscriptSearch, TranscriptSelection, UiExitReason, WorkspaceFile,
+    classify_elicitation, config_option_choices, config_option_current_value_label,
+    file_mention_text, workspace_file_candidates,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -2909,8 +2909,6 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
         usize::from(INLINE_MJCONFIG_HEIGHT)
     } else if state.team_picker.is_some() {
         8
-    } else if let Some(picker) = state.agent_picker.as_ref() {
-        picker.role_indices.len().saturating_add(4)
     } else if state.review_picker.is_some() {
         6
     } else if let Some(pending) = state.pending_permission() {
@@ -2964,7 +2962,6 @@ fn handle_crossterm(
                 && !state.has_pending_elicitation()
                 && !state.help_overlay
                 && state.mjconfig_menu.is_none()
-                && state.agent_picker.is_none()
                 && state.team_picker.is_none()
                 && state.review_picker.is_none()
                 && state.config_picker.is_none()
@@ -2998,7 +2995,6 @@ fn handle_crossterm(
             if state.help_overlay
                 || state.has_pending_permission()
                 || state.has_pending_elicitation()
-                || state.agent_picker.is_some()
                 || state.team_picker.is_some()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
@@ -3088,7 +3084,6 @@ fn handle_crossterm(
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
         && state.ragnarok.is_none()
-        && state.agent_picker.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
@@ -3105,7 +3100,6 @@ fn handle_crossterm(
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
         && state.ragnarok.is_none()
-        && state.agent_picker.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
@@ -3122,7 +3116,6 @@ fn handle_crossterm(
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
         && state.ragnarok.is_none()
-        && state.agent_picker.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers == KeyModifiers::CONTROL
@@ -3287,10 +3280,6 @@ fn handle_crossterm(
         return handle_ragnarok_key(state, key.modifiers, key.code, mode);
     }
 
-    if state.agent_picker.is_some() {
-        return handle_agent_picker_key(state, key.modifiers, key.code, mode);
-    }
-
     if state.team_picker.is_some() {
         return handle_team_picker_key(state, key.modifiers, key.code, mode);
     }
@@ -3321,15 +3310,14 @@ fn handle_crossterm(
         }
     }
 
-    if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Tab) {
+    // Shift+Tab is the primary team-switch binding: unlike Ctrl+Tab it has a
+    // universal escape sequence (CSI Z), so terminals such as Terminal.app
+    // that cannot encode Ctrl+Tab still reach the picker. Ctrl+Tab stays as
+    // an alias for terminals that do deliver it.
+    if matches!(key.code, KeyCode::BackTab)
+        || (key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Tab))
+    {
         state.open_team_picker();
-        return TerminalRequest::None;
-    }
-
-    if matches!(key.code, KeyCode::BackTab) {
-        if !state.open_agent_picker() {
-            state.status_line = Some(StatusMessage::info("no ACP agent is currently available"));
-        }
         return TerminalRequest::None;
     }
 
@@ -3712,7 +3700,6 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
         || state.help_overlay
         || state.has_pending_permission()
         || state.has_pending_elicitation()
-        || state.agent_picker.is_some()
         || state.team_picker.is_some()
         || state.config_picker.is_some()
     {
@@ -6656,71 +6643,6 @@ fn picker_key_action(modifiers: KeyModifiers, code: KeyCode) -> PickerKeyAction 
     }
 }
 
-fn handle_agent_picker_key(
-    state: &mut AppState,
-    modifiers: KeyModifiers,
-    code: KeyCode,
-    mode: UiMode,
-) -> TerminalRequest {
-    let Some(step) = state.agent_picker.as_ref().map(|picker| picker.step) else {
-        return TerminalRequest::None;
-    };
-    let action = match code {
-        KeyCode::BackTab => PickerKeyAction::Move(-1),
-        KeyCode::Tab => PickerKeyAction::Move(1),
-        _ => picker_key_action(modifiers, code),
-    };
-    match action {
-        PickerKeyAction::Cancel => {
-            if !state.agent_picker_back() {
-                state.agent_picker = None;
-            }
-            inline_repair_request(mode)
-        }
-        PickerKeyAction::Accept => {
-            match step {
-                AgentPickerStep::ConfirmSave => {
-                    if let Some((role, effort)) = state.agent_picker_selection()
-                        && persist_primary_picker_selection(state, role, effort)
-                        && let Some(picker) = state.agent_picker.as_mut()
-                    {
-                        picker.step = AgentPickerStep::StartNewSession;
-                    }
-                }
-                AgentPickerStep::StartNewSession => {
-                    let start_new_session = state
-                        .agent_picker
-                        .as_ref()
-                        .is_some_and(|picker| picker.start_new_session);
-                    state.agent_picker = None;
-                    if start_new_session {
-                        state.exit_reason = Some(UiExitReason::NewSession);
-                    } else {
-                        state.record_status_message(
-                            StatusKind::Info,
-                            "model and effort saved; start /new or /clear when ready",
-                        );
-                    }
-                }
-                AgentPickerStep::Model | AgentPickerStep::Effort => {
-                    state.agent_picker_advance();
-                }
-            }
-            inline_repair_request(mode)
-        }
-        PickerKeyAction::Move(delta) => {
-            match step {
-                AgentPickerStep::Model => state.agent_picker_move(delta),
-                AgentPickerStep::Effort => state.agent_picker_move_effort(delta),
-                AgentPickerStep::StartNewSession => state.agent_picker_toggle_start_new_session(),
-                AgentPickerStep::ConfirmSave => {}
-            }
-            TerminalRequest::None
-        }
-        PickerKeyAction::Other => TerminalRequest::None,
-    }
-}
-
 fn handle_team_picker_key(
     state: &mut AppState,
     modifiers: KeyModifiers,
@@ -6818,46 +6740,6 @@ fn persist_team_picker_selection(state: &mut AppState, preset: config::TeamPrese
             state.record_status_message(
                 StatusKind::Warning,
                 format!("team was not saved: {error:#}"),
-            );
-            false
-        }
-    }
-}
-
-fn persist_primary_picker_selection(
-    state: &mut AppState,
-    role: crate::roster::ResolvedAgent,
-    effort: Option<String>,
-) -> bool {
-    let Some(path) = state.config_path.as_deref() else {
-        state.record_status_message(StatusKind::Warning, "config path is unavailable");
-        return false;
-    };
-    let mut config = match config::Config::load(path) {
-        Ok(config) => config,
-        Err(error) => {
-            state.record_status_message(
-                StatusKind::Warning,
-                format!("could not load config: {error:#}"),
-            );
-            return false;
-        }
-    };
-    config.agent.model.clone_from(&role.model.model);
-    config.agent.reasoning_effort = effort;
-    match config.save(path) {
-        Ok(()) => {
-            state.configured_models = config.model_names();
-            state.record_status_message(
-                StatusKind::Info,
-                format!("{} and reasoning effort saved", role.model.model),
-            );
-            true
-        }
-        Err(error) => {
-            state.record_status_message(
-                StatusKind::Warning,
-                format!("model and effort were not saved: {error:#}"),
             );
             false
         }
@@ -7292,10 +7174,6 @@ fn draw(
         draw_autocomplete_popover(f, chunks[1], state);
     }
 
-    if state.agent_picker.is_some() {
-        draw_agent_picker_modal(f, f.area(), state);
-    }
-
     if state.team_picker.is_some() {
         draw_team_picker_modal(f, f.area(), state);
     }
@@ -7439,11 +7317,6 @@ fn draw_inline_chat(
 
     if state.ragnarok.is_some() {
         draw_ragnarok(f, f.area(), state);
-        return;
-    }
-
-    if state.agent_picker.is_some() {
-        draw_inline_agent_picker(f, f.area(), state);
         return;
     }
 
@@ -7658,149 +7531,8 @@ fn draw_inline_team_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState)
         }
     }
     let footer = match step {
-        TeamPickerStep::Choose => "Ctrl+Tab/Up/Down choose | Enter save | Esc cancel",
+        TeamPickerStep::Choose => "Shift+Tab/Up/Down choose | Enter save | Esc cancel",
         TeamPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
-    };
-    f.render_widget(
-        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
-        layout[3],
-    );
-}
-
-fn agent_picker_items(state: &AppState, width: u16, visible: usize) -> Vec<ListItem<'static>> {
-    let Some(picker) = state.agent_picker.as_ref() else {
-        return Vec::new();
-    };
-    if picker.step == AgentPickerStep::Effort {
-        let range = centered_visible_range(
-            PRIMARY_EFFORT_OPTIONS.len(),
-            picker.effort_selected,
-            visible,
-        );
-        return range
-            .map(|index| {
-                let label = primary_effort_label(index);
-                truncate_line(label, width, index == picker.effort_selected, state.theme)
-            })
-            .collect();
-    }
-    let range = centered_visible_range(picker.role_indices.len(), picker.selected, visible);
-    picker.role_indices[range.clone()]
-        .iter()
-        .enumerate()
-        .filter_map(|(offset, &role_index)| {
-            let position = range.start + offset;
-            let role = state.ragnarok_models.get(role_index)?;
-            let current = role.model.model == state.active_models.primary;
-            let suffix = if current { "  current" } else { "" };
-            Some(truncate_line(
-                format!("{} via {}{suffix}", role.model.model, role.launch.source_id),
-                width,
-                position == picker.selected,
-                state.theme,
-            ))
-        })
-        .collect()
-}
-
-fn primary_effort_label(index: usize) -> String {
-    match primary_effort_value(index) {
-        Some(effort) => effort.to_string(),
-        None => "adapter default".to_string(),
-    }
-}
-
-fn agent_picker_selection_summary(state: &AppState) -> String {
-    let Some(picker) = state.agent_picker.as_ref() else {
-        return String::new();
-    };
-    let model = picker
-        .role_indices
-        .get(picker.selected)
-        .and_then(|&index| state.ragnarok_models.get(index))
-        .map(|role| role.model.model.as_str())
-        .unwrap_or("primary model");
-    format!("{model} · {}", primary_effort_label(picker.effort_selected))
-}
-
-fn draw_inline_agent_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    f.render_widget(Clear, area);
-    let content = inline_content_rect(area);
-    if content.width == 0 || content.height < 4 {
-        return;
-    }
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(content);
-    f.render_widget(
-        Paragraph::new("Configure primary model").style(
-            Style::default()
-                .ink(state.theme.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        layout[0],
-    );
-    let step = state
-        .agent_picker
-        .as_ref()
-        .map(|picker| picker.step)
-        .unwrap_or(AgentPickerStep::Model);
-    let detail = match step {
-        AgentPickerStep::Model => "Choose a model for the primary agent",
-        AgentPickerStep::Effort => "Choose its reasoning effort",
-        AgentPickerStep::ConfirmSave => "Save this model and effort?",
-        AgentPickerStep::StartNewSession => "Saved. Start a new session now to apply the change?",
-    };
-    f.render_widget(
-        Paragraph::new(detail).style(Style::default().ink(state.theme.muted)),
-        layout[1],
-    );
-    if step == AgentPickerStep::ConfirmSave {
-        f.render_widget(
-            Paragraph::new(agent_picker_selection_summary(state)),
-            layout[2],
-        );
-    } else if step == AgentPickerStep::StartNewSession {
-        let start_new_session = state
-            .agent_picker
-            .as_ref()
-            .is_some_and(|picker| picker.start_new_session);
-        let start = if start_new_session {
-            "› start new session"
-        } else {
-            "  start new session"
-        };
-        let keep = if start_new_session {
-            "  keep current session"
-        } else {
-            "› keep current session"
-        };
-        f.render_widget(
-            Paragraph::new(vec![Line::from(start), Line::from(keep)]),
-            layout[2],
-        );
-    } else {
-        f.render_widget(
-            List::new(agent_picker_items(
-                state,
-                layout[2].width,
-                usize::from(layout[2].height),
-            )),
-            layout[2],
-        );
-    }
-    let footer = match step {
-        AgentPickerStep::Model | AgentPickerStep::Effort => {
-            "Up/Down or Tab/Shift-Tab choose | Enter continue | Esc back"
-        }
-        AgentPickerStep::ConfirmSave => "Enter save | Esc back",
-        AgentPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
@@ -12547,11 +12279,11 @@ fn idle_prompt_title(
 ) -> Line<'static> {
     let hint = if voice_input_supported {
         format!(
-            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Ctrl-Tab team | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab team | 🎙 Ctrl-R voice | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     } else {
         format!(
-            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Ctrl-Tab team | F10 help | Ctrl-C quit{text_selection_hint}) "
+            " (Enter send | {PROMPT_NEWLINE_HINT} newline | Shift-Tab team | F10 help | Ctrl-C quit{text_selection_hint}) "
         )
     };
     prompt_title_line(state, hint)
@@ -14351,13 +14083,8 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_binding_line("Ctrl-N", "new session", theme),
         help_binding_line("Ctrl-O", "load session", theme),
         help_binding_line(
-            "Ctrl-Tab",
-            "switch between Codex, Claude, and the two coder/reviewer pairings",
-            theme,
-        ),
-        help_binding_line(
             "Shift-Tab",
-            "choose the primary model and reasoning effort",
+            "switch between Codex, Claude, and the two coder/reviewer pairings",
             theme,
         ),
         help_binding_line("Enter", "send prompt / accept selected item", theme),
@@ -14649,101 +14376,8 @@ fn draw_team_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
         }
     }
     let footer = match picker.step {
-        TeamPickerStep::Choose => "Ctrl+Tab/Up/Down choose | Enter save | Esc cancel",
+        TeamPickerStep::Choose => "Shift+Tab/Up/Down choose | Enter save | Esc cancel",
         TeamPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
-    };
-    f.render_widget(
-        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
-        layout[2],
-    );
-}
-
-fn draw_agent_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let Some(picker) = state.agent_picker.as_ref() else {
-        return;
-    };
-    let item_count = match picker.step {
-        AgentPickerStep::Model => picker.role_indices.len(),
-        AgentPickerStep::Effort => PRIMARY_EFFORT_OPTIONS.len(),
-        AgentPickerStep::ConfirmSave => 1,
-        AgentPickerStep::StartNewSession => 2,
-    };
-    let rows = (item_count as u16).min(8);
-    let height = (rows + 5).min(area.height.saturating_sub(2));
-    let width = area.width.saturating_sub(8).min(72);
-    if height < 6 || width < 20 {
-        return;
-    }
-    let rect = centered_modal_rect(area, width, height);
-    f.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Configure primary model and effort ")
-        .style(Style::default().ink(state.theme.primary));
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-    let header = match picker.step {
-        AgentPickerStep::Model => vec![
-            Line::from("Choose a model for the primary agent."),
-            Line::from("Enter continues to reasoning effort."),
-        ],
-        AgentPickerStep::Effort => vec![
-            Line::from("Choose the primary agent's reasoning effort."),
-            Line::from("Enter continues to save."),
-        ],
-        AgentPickerStep::ConfirmSave => vec![
-            Line::from("Save this model and reasoning effort?"),
-            Line::from(agent_picker_selection_summary(state)),
-        ],
-        AgentPickerStep::StartNewSession => vec![
-            Line::from("Saved. Start a new session now to apply the change?"),
-            Line::from("Choose an action below."),
-        ],
-    };
-    f.render_widget(Paragraph::new(header), layout[0]);
-    match picker.step {
-        AgentPickerStep::ConfirmSave => {
-            f.render_widget(Paragraph::new("Press Enter to save."), layout[1]);
-        }
-        AgentPickerStep::StartNewSession => {
-            let start = if picker.start_new_session {
-                "› start new session"
-            } else {
-                "  start new session"
-            };
-            let keep = if picker.start_new_session {
-                "  keep current session"
-            } else {
-                "› keep current session"
-            };
-            f.render_widget(
-                Paragraph::new(vec![Line::from(start), Line::from(keep)]),
-                layout[1],
-            );
-        }
-        AgentPickerStep::Model | AgentPickerStep::Effort => {
-            f.render_widget(
-                List::new(agent_picker_items(
-                    state,
-                    layout[1].width,
-                    usize::from(layout[1].height),
-                )),
-                layout[1],
-            );
-        }
-    }
-    let footer = match picker.step {
-        AgentPickerStep::Model | AgentPickerStep::Effort => "Up/Down or Tab/Shift-Tab to choose",
-        AgentPickerStep::ConfirmSave => "Enter save | Esc back",
-        AgentPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
@@ -19602,367 +19236,24 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_saves_primary_model_and_effort_then_offers_a_new_session() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        config::Config::default()
-            .save(&config_path)
-            .expect("save config");
-        let mut state = AppState::new();
-        state.config_path = Some(config_path.clone());
-        state.agent_source_id = "codex-acp".to_string();
-        state.active_models.primary = "codex-acp".to_string();
-        state.ragnarok_models = [
-            (crate::roster::AdapterKind::Codex, "codex-acp"),
-            (crate::roster::AdapterKind::Claude, "claude-acp"),
-        ]
-        .into_iter()
-        .map(|(kind, source_id)| crate::roster::ResolvedAgent {
-            model: crate::deepswe::Row {
-                model: source_id.to_string(),
-                reasoning_effort: None,
-                pass_at_1: 0.5,
-                mean_cost_usd: 1.0,
-            },
-            model_value: source_id.to_string(),
-            launch: crate::roster::AdapterLaunch {
-                kind,
-                source_id: source_id.to_string(),
-                command: PathBuf::from(source_id),
-                args: Vec::new(),
-                env: Default::default(),
-            },
-            ranked: true,
-            reasoning_effort: None,
-        })
-        .collect();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
-
-        let picker = state.agent_picker.as_ref().expect("agent selector");
-        assert_eq!(picker.role_indices, vec![0, 1]);
-        assert_eq!(picker.selected, 0);
-        assert_eq!(state.exit_reason, None);
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-
-        assert!(
-            state
-                .agent_picker
-                .as_ref()
-                .is_some_and(|picker| picker.step == AgentPickerStep::Effort)
-        );
-        assert_eq!(state.exit_reason, None);
-
-        for _ in 0..5 {
-            handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
-        }
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        assert!(
-            state
-                .agent_picker
-                .as_ref()
-                .is_some_and(|picker| picker.step == AgentPickerStep::ConfirmSave)
-        );
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-
-        assert!(
-            state
-                .agent_picker
-                .as_ref()
-                .is_some_and(|picker| picker.step == AgentPickerStep::StartNewSession)
-        );
-        let saved = config::Config::load(&config_path).expect("load config");
-        assert_eq!(saved.agent.model, "claude-acp");
-        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("high"));
-        assert!(
-            state
-                .status_line
-                .as_ref()
-                .is_some_and(|status| status.text.contains("reasoning effort saved"))
-        );
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        assert!(state.agent_picker.is_none());
-        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
-    }
-
-    #[test]
-    fn declining_new_session_offer_keeps_current_session() {
-        let mut state = AppState::new();
-        state.agent_picker = Some(crate::app::AgentPicker {
-            selected: 0,
-            role_indices: Vec::new(),
-            effort_selected: 0,
-            step: AgentPickerStep::StartNewSession,
-            start_new_session: true,
-        });
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-
-        assert!(state.agent_picker.is_none());
-        assert_eq!(state.exit_reason, None);
-        assert!(
-            state
-                .status_line
-                .as_ref()
-                .is_some_and(|status| { status.text.contains("start /new or /clear when ready") })
-        );
-    }
-
-    #[test]
-    fn agent_selector_navigation_wraps() {
-        let mut state = AppState::new();
-        state.agent_source_id = "codex-acp".to_string();
-        state.active_models.primary = "codex-acp".to_string();
-        state.ragnarok_models = ["codex-acp", "claude-acp"]
-            .into_iter()
-            .map(|source_id| crate::roster::ResolvedAgent {
-                model: crate::deepswe::Row {
-                    model: source_id.to_string(),
-                    reasoning_effort: None,
-                    pass_at_1: 0.5,
-                    mean_cost_usd: 1.0,
-                },
-                model_value: source_id.to_string(),
-                launch: crate::roster::AdapterLaunch {
-                    kind: crate::roster::AdapterKind::from_source_id(source_id)
-                        .unwrap_or(crate::roster::AdapterKind::Claude),
-                    source_id: source_id.to_string(),
-                    command: PathBuf::from(source_id),
-                    args: Vec::new(),
-                    env: Default::default(),
-                },
-                ranked: true,
-                reasoning_effort: None,
-            })
-            .collect();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
-        assert_eq!(state.agent_picker.as_ref().expect("picker").selected, 1);
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
-        assert_eq!(state.agent_picker.as_ref().expect("picker").selected, 0);
-    }
-
-    #[test]
-    fn selecting_current_agent_advances_to_effort() {
-        let mut state = AppState::new();
-        state.agent_source_id = "codex-acp".to_string();
-        state.active_models.primary = "codex-acp".to_string();
-        state.ragnarok_models = ["codex-acp", "claude-acp"]
-            .into_iter()
-            .map(|source_id| crate::roster::ResolvedAgent {
-                model: crate::deepswe::Row {
-                    model: source_id.to_string(),
-                    reasoning_effort: None,
-                    pass_at_1: 0.5,
-                    mean_cost_usd: 1.0,
-                },
-                model_value: source_id.to_string(),
-                launch: crate::roster::AdapterLaunch {
-                    kind: crate::roster::AdapterKind::from_source_id(source_id)
-                        .unwrap_or(crate::roster::AdapterKind::Claude),
-                    source_id: source_id.to_string(),
-                    command: PathBuf::from(source_id),
-                    args: Vec::new(),
-                    env: Default::default(),
-                },
-                ranked: true,
-                reasoning_effort: None,
-            })
-            .collect();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-
-        assert!(
-            state
-                .agent_picker
-                .as_ref()
-                .is_some_and(|picker| picker.step == AgentPickerStep::Effort)
-        );
-        assert_eq!(state.exit_reason, None);
-    }
-
-    #[test]
-    fn primary_model_picker_defaults_effort_for_every_model() {
+    fn shift_tab_opens_the_team_picker_and_cycles_teams() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
         let mut config = config::Config::default();
-        config.agent.reasoning_effort = Some("high".to_string());
+        config::TeamPreset::Codex.apply(&mut config);
         config.save(&config_path).expect("save config");
-
         let mut state = AppState::new();
         state.config_path = Some(config_path);
-        state.ragnarok_models = ["codex-acp", "claude-acp"]
-            .into_iter()
-            .map(|source_id| crate::roster::ResolvedAgent {
-                model: crate::deepswe::Row {
-                    model: source_id.to_string(),
-                    reasoning_effort: None,
-                    pass_at_1: 0.5,
-                    mean_cost_usd: 1.0,
-                },
-                model_value: source_id.to_string(),
-                launch: crate::roster::AdapterLaunch {
-                    kind: crate::roster::AdapterKind::from_source_id(source_id)
-                        .unwrap_or(crate::roster::AdapterKind::Claude),
-                    source_id: source_id.to_string(),
-                    command: PathBuf::from(source_id),
-                    args: Vec::new(),
-                    env: Default::default(),
-                },
-                ranked: true,
-                reasoning_effort: None,
-            })
-            .collect();
-
-        assert!(state.open_agent_picker());
-        assert_eq!(
-            state.agent_picker.as_ref().expect("picker").effort_selected,
-            0
-        );
-
-        state.agent_picker = None;
-        state.active_models.primary = "claude-acp".to_string();
-        assert!(state.open_agent_picker());
-        assert_eq!(
-            state.agent_picker.as_ref().expect("picker").effort_selected,
-            0
-        );
-    }
-
-    #[test]
-    fn primary_effort_picker_uses_concise_option_labels() {
-        let labels = (0..PRIMARY_EFFORT_OPTIONS.len())
-            .map(primary_effort_label)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            labels,
-            [
-                "adapter default",
-                "off",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max"
-            ]
-        );
-    }
-
-    #[test]
-    fn shift_tab_opens_effort_picker_with_only_one_primary_model() {
-        let mut state = AppState::new();
-        state.active_models.primary = "codex-acp".to_string();
-        state.ragnarok_models = vec![crate::roster::ResolvedAgent {
-            model: crate::deepswe::Row {
-                model: "codex-acp".to_string(),
-                reasoning_effort: None,
-                pass_at_1: 0.5,
-                mean_cost_usd: 1.0,
-            },
-            model_value: "codex-acp".to_string(),
-            launch: crate::roster::AdapterLaunch {
-                kind: crate::roster::AdapterKind::Codex,
-                source_id: "codex-acp".to_string(),
-                command: PathBuf::from("codex-acp"),
-                args: Vec::new(),
-                env: Default::default(),
-            },
-            ranked: true,
-            reasoning_effort: None,
-        }];
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 0);
 
-        assert!(
-            state
-                .agent_picker
-                .as_ref()
-                .is_some_and(|picker| picker.step == AgentPickerStep::Effort)
-        );
-    }
-
-    #[test]
-    fn shift_tab_can_stage_a_primary_model_change_during_a_turn() {
-        let mut state = AppState::new();
-        state.ragnarok_models = ["codex-acp", "claude-acp"]
-            .into_iter()
-            .map(|source_id| crate::roster::ResolvedAgent {
-                model: crate::deepswe::Row {
-                    model: source_id.to_string(),
-                    reasoning_effort: None,
-                    pass_at_1: 0.5,
-                    mean_cost_usd: 1.0,
-                },
-                model_value: source_id.to_string(),
-                launch: crate::roster::AdapterLaunch {
-                    kind: crate::roster::AdapterKind::from_source_id(source_id)
-                        .unwrap_or(crate::roster::AdapterKind::Claude),
-                    source_id: source_id.to_string(),
-                    command: PathBuf::from(source_id),
-                    args: Vec::new(),
-                    env: Default::default(),
-                },
-                ranked: true,
-                reasoning_effort: None,
-            })
-            .collect();
-        state.set_connection_state(ConnectionState::Streaming);
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
+        // A repeated Shift+Tab cycles the selection just like Ctrl+Tab.
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::BackTab));
-
-        assert_eq!(state.exit_reason, None);
-        assert!(state.agent_picker.is_some());
-    }
-
-    #[test]
-    fn picker_save_does_not_persist_an_acp_source_pin() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let mut config = crate::config::Config::default();
-        config.agent.acp_source = Some("codex-acp".to_string());
-        config.save(&path).expect("seed config");
-
-        let mut state = AppState::new();
-        state.config_path = Some(path.clone());
-        let role = crate::roster::ResolvedAgent {
-            model: crate::deepswe::Row {
-                model: "haiku".to_string(),
-                reasoning_effort: None,
-                pass_at_1: 0.0,
-                mean_cost_usd: 0.0,
-            },
-            model_value: "haiku".to_string(),
-            launch: crate::roster::AdapterLaunch {
-                kind: crate::roster::AdapterKind::Claude,
-                source_id: "claude-acp".to_string(),
-                command: PathBuf::from("claude-acp"),
-                args: Vec::new(),
-                env: Default::default(),
-            },
-            ranked: false,
-            reasoning_effort: None,
-        };
-
-        assert!(persist_primary_picker_selection(&mut state, role, None));
-
-        let saved = crate::config::Config::load(&path).expect("reload");
-        assert_eq!(saved.agent.model, "haiku");
-        assert_eq!(saved.agent.acp_source, None);
+        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 3);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Tab));
+        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 0);
     }
 
     #[test]
@@ -23435,17 +22726,15 @@ mod tests {
         let ctrl_g = || key_with_modifiers(KeyCode::Char('g'), KeyModifiers::CONTROL);
         let mut state = AppState::new();
 
-        state.agent_picker = Some(crate::app::AgentPicker {
+        state.team_picker = Some(crate::app::TeamPicker {
             selected: 0,
-            role_indices: Vec::new(),
-            effort_selected: 0,
-            step: AgentPickerStep::Model,
+            step: TeamPickerStep::Choose,
             start_new_session: true,
         });
         handle_crossterm(&mut state, &cmd_tx, ctrl_g());
         assert!(!state.workspace_diff_viewer);
 
-        state.agent_picker = None;
+        state.team_picker = None;
         let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
         let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
         state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
@@ -24790,7 +24079,7 @@ mod tests {
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Ctrl-Tab team"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Shift-Tab team"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("F12 select text"),
             "rendered:\n{rendered}"
@@ -24858,7 +24147,7 @@ mod tests {
         );
         assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
         assert!(rendered.contains("F10 help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Ctrl-Tab team"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Shift-Tab team"), "rendered:\n{rendered}");
         assert!(!rendered.contains("F12"), "rendered:\n{rendered}");
         assert!(!rendered.contains("prompt"), "rendered:\n{rendered}");
         assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
