@@ -778,6 +778,17 @@ pub(crate) fn render_preamble_update(
             .cloned()
             .collect(),
     };
+    // A worker's first injection must deliver the relay contract even when
+    // the store is empty: the preamble is its only channel for learning how
+    // discoveries reach shared memory. Primaries learn the saving policy
+    // from the memory MCP server instructions, so their empty block stays
+    // suppressed, as do later refreshes with nothing new.
+    if changed.is_empty() && previous.is_none() && !save_tools {
+        return Some(RenderedPreambleUpdate {
+            text: render_preamble_block(&[], project, 0, false, false),
+            delivered: Vec::new(),
+        });
+    }
     render_preamble_selection(&changed, project, previous.is_some(), save_tools)
 }
 
@@ -1677,6 +1688,21 @@ mod tests {
             generate_memories: true,
         };
         assert!(SessionMemory::inject_only(&config, project, Some(AdapterKind::Codex)).is_none());
+    }
+
+    #[test]
+    fn empty_store_still_delivers_the_relay_contract_to_workers() {
+        let update = render_preamble_update(&[], None, Path::new("/proj"), false)
+            .expect("worker first injection renders");
+        assert!(update.text.contains("cannot save memories"));
+        assert!(update.text.starts_with("<mj-memory>"));
+        assert!(update.text.ends_with("</mj-memory>"));
+        assert!(update.delivered.is_empty());
+        // Primaries learn the saving policy from the MCP server guidance, so
+        // their empty first block stays suppressed.
+        assert!(render_preamble_update(&[], None, Path::new("/proj"), true).is_none());
+        // Later refreshes with nothing new stay silent for workers too.
+        assert!(render_preamble_update(&[], Some(&[]), Path::new("/proj"), false).is_none());
     }
 
     #[test]
