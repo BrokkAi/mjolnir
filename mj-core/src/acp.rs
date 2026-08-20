@@ -6037,9 +6037,10 @@ enum SteerFallbackDisposition {
 
 /// Fold a finished steering request into the turn: confirm delivery, or hand
 /// the undelivered payload back to the caller, narrating the chosen fallback.
-fn apply_steer_outcome(
+async fn apply_steer_outcome(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
+    session_state: &RuntimeSessionState,
     steer: PendingSteer,
     outcome: Result<serde_json::Value, agent_client_protocol::Error>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
@@ -6073,6 +6074,11 @@ fn apply_steer_outcome(
             // cancel makes the requeue safe — without it the message would
             // run twice.
             Some("startedNewTurn") => {
+                // Full cancel sequence, mirroring the user-cancel path: the
+                // detached turn may already have raised a permission request,
+                // which must not stay actionable after its turn is cancelled.
+                session_state.mark_permissions_cancelled(session_id).await;
+                let _ = ui_tx.send(UiEvent::CancelPendingPermissions);
                 if let Err(error) =
                     conn.send_notification(CancelNotification::new(session_id.clone()))
                 {
@@ -6131,6 +6137,7 @@ struct TurnSteerState {
 async fn flush_pending_steers(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
+    session_state: &RuntimeSessionState,
     steers: TurnSteerState,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
@@ -6153,8 +6160,16 @@ async fn flush_pending_steers(
         match tokio::time::timeout(std::time::Duration::from_secs(2), steer.response.as_mut()).await
         {
             Ok(outcome) => {
-                undelivered_in_flight =
-                    apply_steer_outcome(conn, session_id, steer, outcome, ui_tx, disposition);
+                undelivered_in_flight = apply_steer_outcome(
+                    conn,
+                    session_id,
+                    session_state,
+                    steer,
+                    outcome,
+                    ui_tx,
+                    disposition,
+                )
+                .await;
             }
             Err(_elapsed) => {
                 let PendingSteer {
@@ -6258,6 +6273,7 @@ async fn drive_prompt_turn(
                 flush_pending_steers(
                     conn,
                     session_id,
+                    session_state,
                     std::mem::take(&mut steers),
                     ui_tx,
                     deferred_prompts,
@@ -6284,11 +6300,14 @@ async fn drive_prompt_turn(
                 if let Some(parts) = apply_steer_outcome(
                     conn,
                     session_id,
+                    session_state,
                     steer,
                     steer_outcome,
                     ui_tx,
                     SteerFallbackDisposition::Resend,
-                ) {
+                )
+                .await
+                {
                     steers.fallbacks.push_back(parts);
                 }
                 if let Some((text, images, resources)) = steers.queued.pop_front() {
@@ -9385,6 +9404,7 @@ mod tests {
         let transport = ByteStreams::new(w.compat_write(), r.compat());
         let release = Arc::new(tokio::sync::Notify::new());
         let prompt_release = Arc::clone(&release);
+        let cancel_prompts = Arc::clone(&prompts);
         let _ = AgentRole
             .builder()
             .on_receive_request(
@@ -9468,6 +9488,14 @@ mod tests {
             .on_receive_notification(
                 async move |_notif: agent_client_protocol::schema::v1::CancelNotification, _cx| {
                     cancels.fetch_add(1, Ordering::SeqCst);
+                    // Record into the shared event log so tests can assert
+                    // the cancel's ORDER relative to prompt requests: a
+                    // cancel arriving after the owned resend would kill the
+                    // resent turn instead of the detached one.
+                    cancel_prompts
+                        .lock()
+                        .expect("prompt log")
+                        .push("«session/cancel»".to_string());
                     Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
@@ -11249,23 +11277,44 @@ mod tests {
         // owned prompt with a real completion path.
         let mut rig = steering_rig(true, "startedNewTurn").await;
 
-        let notices = collect_until_prompt_done(&mut rig.ui_rx, 2).await;
+        let mut notices = Vec::new();
+        let mut saw_permission_clear = false;
+        let mut done = 0;
+        while done < 2 {
+            let ev = tokio::time::timeout(EVENT_DEADLINE, rig.ui_rx.recv())
+                .await
+                .expect("timed out waiting for the owned resend")
+                .expect("ui event channel closed");
+            match ev {
+                UiEvent::Info(text) | UiEvent::Warning(text) => notices.push(text),
+                UiEvent::PromptDone { .. } => done += 1,
+                // The detached turn may already have raised a permission
+                // request; its prompt must not stay actionable.
+                UiEvent::CancelPendingPermissions => saw_permission_clear = true,
+                UiEvent::PromptFailed { message } => panic!("prompt failed: {message}"),
+                UiEvent::Fatal(message) => panic!("fatal: {message}"),
+                _ => {}
+            }
+        }
         assert!(
             notices
                 .iter()
                 .any(|text| text.contains("cancelling that turn")),
             "the reclaim must be narrated: {notices:?}"
         );
-        wait_for_prompt_count(&rig.prompts, 2).await;
+        assert!(
+            saw_permission_clear,
+            "pending permission prompts must be cleared alongside the cancel"
+        );
+        wait_for_prompt_count(&rig.prompts, 3).await;
+        // Order matters: the cancel must reach the agent BEFORE the owned
+        // resend, or it would kill the resent turn instead of the detached
+        // one. The mock records both in one wire-ordered log.
         assert_eq!(
             rig.prompts.lock().expect("prompt log").as_slice(),
-            ["start work", "steer me"]
+            ["start work", "«session/cancel»", "steer me"]
         );
-        assert_eq!(
-            rig.cancels.load(Ordering::SeqCst),
-            1,
-            "the detached turn must be cancelled before the owned resend"
-        );
+        assert_eq!(rig.cancels.load(Ordering::SeqCst), 1);
 
         rig.shutdown().await;
     }
@@ -11322,6 +11371,7 @@ mod tests {
                 flush_pending_steers(
                     &conn,
                     &SessionId::new("test-session"),
+                    &RuntimeSessionState::new(),
                     steers,
                     &ui_tx,
                     &mut deferred,
