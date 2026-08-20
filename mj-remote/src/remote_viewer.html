@@ -3165,6 +3165,15 @@
           padding-right: calc(12px + var(--theme-toggle-reserve) + env(safe-area-inset-right));
         }
 
+        /* Keep the session title readable: without a real minimum the
+           heading's min-width: 0 lets every action button stay on the first
+           row while the title collapses to a sliver. Reserving over half the
+           row forces the actions to wrap onto their own line instead. */
+        .chat-heading {
+          flex: 1 1 auto;
+          min-width: 55%;
+        }
+
         .mobile-chat-actions {
           display: flex;
           align-items: center;
