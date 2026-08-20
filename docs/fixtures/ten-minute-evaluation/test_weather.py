@@ -11,7 +11,7 @@ class WeatherStatusTest(unittest.TestCase):
         self.assertEqual(status(12), "cold")
 
     def test_fahrenheit_conversion(self):
-        self.assertTrue(fahrenheit(0))
+        self.assertEqual(fahrenheit(0), 32)
 
 
 if __name__ == "__main__":

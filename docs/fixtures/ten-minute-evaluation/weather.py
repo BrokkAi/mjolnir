@@ -5,4 +5,4 @@ def status(temp_c):
 
 
 def fahrenheit(temp_c):
-    return temp_c * 9 / 5 + 31
+    return temp_c * 9 / 5 + 32
