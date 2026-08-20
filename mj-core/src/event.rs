@@ -123,6 +123,10 @@ pub enum UiEvent {
         session_load_supported: bool,
         side_session_supported: bool,
         side_session_unsupported_reason: Option<String>,
+        /// The agent accepts `_session/steering` requests, so a prompt
+        /// submitted mid-turn can be injected into the running turn instead
+        /// of queueing behind it.
+        steering_supported: bool,
     },
     /// Event emitted by the isolated side runtime.
     Side(Box<UiEvent>),
@@ -408,6 +412,18 @@ pub struct SideSessionSource {
 pub enum UiCommand {
     /// Send a user prompt for the current session.
     SendPrompt {
+        text: String,
+        images: Vec<PromptImage>,
+        resources: Vec<PromptResource>,
+    },
+    /// Send a user prompt that may be injected into a turn that is already
+    /// running. When a turn is in flight and the agent advertises the
+    /// `_session/steering` extension, the runtime steers the message into
+    /// that turn; in every other situation it behaves exactly like
+    /// [`UiCommand::SendPrompt`]. Only user-originated prompts should use
+    /// this: orchestrator-injected prompts (subagent reports, review
+    /// follow-ups) rely on turn-boundary delivery.
+    SteerPrompt {
         text: String,
         images: Vec<PromptImage>,
         resources: Vec<PromptResource>,

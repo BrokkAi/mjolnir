@@ -30,6 +30,9 @@ pub struct SessionState {
     pub session_fork_supported: bool,
     pub side_session_supported: bool,
     pub side_session_unsupported_reason: Option<String>,
+    /// The agent accepts `_session/steering`: a prompt submitted while a
+    /// turn is streaming is injected into that turn instead of queueing.
+    pub steering_supported: bool,
     pub is_side: bool,
     pub side_start_requested: bool,
     pub side_initial_question: Option<String>,
@@ -67,6 +70,7 @@ impl SessionState {
             session_fork_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
+            steering_supported: false,
             is_side: false,
             side_start_requested: false,
             side_initial_question: None,

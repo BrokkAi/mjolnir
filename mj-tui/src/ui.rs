@@ -5606,6 +5606,18 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.scroll_input_to_bottom();
 
     if state.is_busy() {
+        if state.can_steer() {
+            // The agent supports mid-turn steering: inject the message into
+            // the running turn instead of queueing it behind the turn.
+            state.record_steered_prompt(display_text, resources.clone());
+            let _ = cmd_tx.send(UiCommand::SteerPrompt {
+                text,
+                images,
+                resources,
+            });
+            state.status_line = Some(StatusMessage::info("steering into the current turn"));
+            return;
+        }
         // The previous turn is still running. Stash this submission and
         // keep it out of the transcript until it is actually sent.
         let preview = queued_prompt_preview(&display_text);
@@ -5616,7 +5628,14 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             display_text,
         });
         let queued = state.queued_prompt_count();
-        state.status_line = Some(StatusMessage::info(format!("queued {queued}: {preview}")));
+        let steering_note = if state.is_streaming() && !state.steering_supported {
+            " (agent cannot steer mid-turn)"
+        } else {
+            ""
+        };
+        state.status_line = Some(StatusMessage::info(format!(
+            "queued {queued}{steering_note}: {preview}"
+        )));
         return;
     }
 
@@ -21067,6 +21086,7 @@ mod tests {
             session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
+            steering_supported: false,
         });
         assert!(sink.pending_lines(&state, 80).is_empty());
         assert!(sink.pending_lines(&state, 80).is_empty());
@@ -28642,6 +28662,7 @@ mod tests {
             session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
+            steering_supported: false,
         });
         finalize_startup_prompt(&mut state);
         assert_eq!(state.input, "describe this", "Connected is not ready");
@@ -29318,6 +29339,101 @@ mod tests {
     }
 
     #[test]
+    fn enter_during_streaming_steers_when_the_agent_supports_it() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        assert!(state.is_streaming());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "try the other approach");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        match cmd_rx.try_recv().expect("steer must be sent immediately") {
+            UiCommand::SteerPrompt {
+                text,
+                images,
+                resources,
+            } => {
+                assert_eq!(text, "try the other approach");
+                assert!(images.is_empty());
+                assert!(resources.is_empty());
+            }
+            other => panic!("expected SteerPrompt, got {other:?}"),
+        }
+        assert_eq!(
+            state.queued_prompt_count(),
+            0,
+            "steered prompts must not queue"
+        );
+        assert!(
+            state.transcript.iter().any(
+                |entry| matches!(entry, Entry::UserPrompt(text) if text == "try the other approach")
+            ),
+            "the steered message joins the transcript immediately"
+        );
+        assert_eq!(
+            state.connection_state(),
+            ConnectionState::Streaming,
+            "steering must not restart turn bookkeeping"
+        );
+        assert!(state.input.is_empty(), "input cleared after steering");
+    }
+
+    #[test]
+    fn steering_is_skipped_while_the_turn_is_cancelling() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        state.set_connection_state(ConnectionState::Cancelling);
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "next");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "a turn being cancelled has nothing left to steer; queue instead"
+        );
+        assert_eq!(state.queued_prompt_count(), 1);
+    }
+
+    #[test]
+    fn queueing_mentions_when_the_agent_cannot_steer() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "next one");
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        let status = state
+            .status_line
+            .as_ref()
+            .expect("queued status line")
+            .text
+            .clone();
+        assert_eq!(status, "queued 1 (agent cannot steer mid-turn): next one");
+    }
+
+    #[test]
+    fn connected_event_sets_steering_support() {
+        let mut state = ready_state_with_session();
+        state.apply_event(UiEvent::Connected {
+            agent_name: None,
+            agent_version: None,
+            prompt_images_supported: false,
+            session_fork_supported: false,
+            session_load_supported: false,
+            side_session_supported: false,
+            side_session_unsupported_reason: None,
+            steering_supported: true,
+        });
+        assert!(state.steering_supported);
+        assert!(!state.can_steer(), "no turn is streaming yet");
+    }
+
+    #[test]
     fn queued_prompts_render_above_input_and_stay_out_of_transcript() {
         // Queued prompts must show as persistent chips above the input box
         // while they wait, and must NOT be recorded into the transcript;
@@ -29634,7 +29750,9 @@ mod tests {
             .clone()
             .expect("queue status set after submit");
         assert!(
-            queued_status.text.starts_with("queued 1: "),
+            queued_status
+                .text
+                .starts_with("queued 1 (agent cannot steer mid-turn): "),
             "expected queue status, got {:?}",
             queued_status.text
         );

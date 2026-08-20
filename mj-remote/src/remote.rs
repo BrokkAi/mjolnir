@@ -10987,6 +10987,7 @@ mod tests {
             session_load_supported: true,
             side_session_supported: true,
             side_session_unsupported_reason: None,
+            steering_supported: false,
         });
         state.observe_event(&UiEvent::SessionStarted {
             session_id: "main-session".to_string(),
@@ -13865,6 +13866,7 @@ mod tests {
             session_load_supported: false,
             side_session_supported: true,
             side_session_unsupported_reason: None,
+            steering_supported: false,
         });
         assert!(!state.side_session_supported);
         assert!(
@@ -14884,6 +14886,7 @@ mod tests {
             session_load_supported: true,
             side_session_supported: false,
             side_session_unsupported_reason: None,
+            steering_supported: false,
         });
         state.observe_event(&UiEvent::SessionStarted {
             session_id: "sess-1".to_string(),
@@ -14934,6 +14937,7 @@ mod tests {
             session_load_supported: false,
             side_session_supported: false,
             side_session_unsupported_reason: None,
+            steering_supported: false,
         });
         state.observe_event(&UiEvent::SessionStarted {
             session_id: "sess-1".to_string(),
