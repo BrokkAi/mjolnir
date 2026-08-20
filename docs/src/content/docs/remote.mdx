@@ -4,11 +4,9 @@ description: One command publishes the coding session on your machine to a brows
 ---
 
 import { Image } from 'astro:assets';
-import shotPermissionDiff from '../../assets/remote/permission-diff-desktop.png';
 import shotLogin from '../../assets/remote/login.png';
 import shotNewSession from '../../assets/remote/new-session-worktree.png';
 import shotFolderSearch from '../../assets/remote/folder-search.png';
-import shotMobilePermission from '../../assets/remote/mobile-permission.png';
 import shotMobileSessions from '../../assets/remote/mobile-sessions.png';
 import shotSubagentApproval from '../../assets/remote/subagent-approval.png';
 import shotSubagentsReview from '../../assets/remote/subagents-review.png';
@@ -32,10 +30,10 @@ pass. The repository, the agent processes, and the transcripts stay on the host.
 The browser is a control surface for that session, not a copy of your code.
 
 <figure class="shot">
-  <a class="shot__zoom" href={shotPermissionDiff.src} aria-label="Open the full-size screenshot: the full session view">
-    <Image src={shotPermissionDiff} alt="Mjolnir Web on a desktop browser: session list on the left, two file diffs in the transcript, and a permission card offering Allow once, Allow for session, and Reject." />
+  <a class="shot__zoom" href={shotHistory.src} aria-label="Open the full-size screenshot: the full session view">
+    <Image src={shotHistory} alt="Mjolnir Web on a desktop browser: active and archived sessions in the sidebar, a completed agent turn with file links, per-seat token usage, and its review result." />
   </a>
-  <figcaption>A real session mid-turn — the diffs the agent wants to apply, the approval it is waiting on, and the per-seat token totals above them.</figcaption>
+  <figcaption>A real completed session — the agent result, its review pass, per-seat token totals, and active and archived work in the sidebar.</figcaption>
 </figure>
 
 ## What you can do from a browser
@@ -88,20 +86,12 @@ and send the next prompt. Add it to the home screen and it opens standalone,
 like any other app. A phone reaches the server once it is off loopback — see
 [Reach it from another device](#reach-it-from-another-device).
 
-<div class="shot-row">
-  <figure class="shot shot--phone">
-    <a class="shot__zoom" href={shotMobilePermission.src} aria-label="Open the full-size screenshot: the permission prompt on a phone">
-      <Image src={shotMobilePermission} alt="Mjolnir Web on a phone: a diff of weather.py above a PERMISSION NEEDED card with Allow once, Allow for session, and Reject." />
-    </a>
-    <figcaption>The permission prompt on a phone, with the diff that produced it directly above and the model, effort, and token line in the header.</figcaption>
-  </figure>
-  <figure class="shot shot--phone">
-    <a class="shot__zoom" href={shotMobileSessions.src} aria-label="Open the full-size screenshot: the session list on a phone">
-      <Image src={shotMobileSessions} alt="Mjolnir Web on a phone showing the session list: two weather-cli sessions with their worktree names, models, message counts, and relative times, above a History row." />
-    </a>
-    <figcaption>The session list on the same phone — every session on the host, each tagged with its worktree and model.</figcaption>
-  </figure>
-</div>
+<figure class="shot shot--phone">
+  <a class="shot__zoom" href={shotMobileSessions.src} aria-label="Open the full-size screenshot: the session list on a phone">
+    <Image src={shotMobileSessions} alt="Mjolnir Web on a phone showing the session list: two weather-cli sessions with their worktree names, models, message counts, and relative times, above a History row." />
+  </a>
+  <figcaption>The session list on a phone — every session on the host, each tagged with its worktree and model.</figcaption>
+</figure>
 
 ## Start new work from anywhere
 
@@ -208,13 +198,6 @@ The browser can archive a server-owned session to move it out of the active list
 and load or unarchive it later. A live TUI session cannot be archived; exit it in
 the terminal first. Archiving changes where the session is listed, not its
 retained transcript data.
-
-<figure class="shot">
-  <a class="shot__zoom" href={shotHistory.src} aria-label="Open the full-size screenshot: the session history and archive">
-    <Image src={shotHistory} alt="The Mjolnir Web sidebar with history expanded: active sessions above, and an archived session below a HISTORY header marked 1 archived." />
-  </a>
-  <figcaption>Archived sessions move under <strong>History</strong> and load back on demand.</figcaption>
-</figure>
 
 ## Configuration from the browser
 
