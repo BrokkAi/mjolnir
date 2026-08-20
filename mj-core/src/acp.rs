@@ -6155,10 +6155,10 @@ async fn flush_pending_steers(
     }
     match disposition {
         SteerFallbackDisposition::Resend => {
+            deferred_prompts.extend(fallbacks);
             if let Some(parts) = undelivered_in_flight {
                 deferred_prompts.push_back(parts);
             }
-            deferred_prompts.extend(fallbacks);
             deferred_prompts.extend(queued_steers);
         }
         SteerFallbackDisposition::Drop => {
@@ -11225,6 +11225,38 @@ mod tests {
         assert_eq!(rig.steers.lock().expect("steer log").len(), 1);
 
         rig.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn steer_fallbacks_preserve_submission_order_when_the_turn_ends() {
+        let pending = PendingSteer {
+            response: Box::pin(async { Ok(serde_json::json!({ "outcome": "promptRequired" })) }),
+            text: "second".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        };
+        let queued = VecDeque::from([("third".to_string(), Vec::new(), Vec::new())]);
+        let fallbacks = VecDeque::from([("first".to_string(), Vec::new(), Vec::new())]);
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let mut deferred = VecDeque::new();
+
+        flush_pending_steers(
+            Some(pending),
+            queued,
+            fallbacks,
+            &ui_tx,
+            &mut deferred,
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            deferred
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
     }
 
     #[tokio::test]
