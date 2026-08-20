@@ -94,7 +94,7 @@ const SUBAGENT_DEBRIEF_TIMEOUT: Duration = Duration::from_secs(180);
 const SUBAGENT_DEBRIEF_PROMPT: &str =
     "Your task turn is complete. Before your report is delivered to the primary
 agent that will integrate your work, answer this exit interview. Be terse
-and specific. Do not use any tools. Use exactly these five headings, each
+and specific. Do not use any tools. Use exactly these six headings, each
 followed by 1-4 short lines:
 VERIFIED: each build/test command you ran that supports your result, with
 its selection scope (targeted test names vs full package or suite).
@@ -103,6 +103,9 @@ run (packages, suites, integrations). Say \"none\" only if you ran the full
 suite of every package you changed.
 COMMITMENTS: interpretation or API decisions you made that constrain other
 work (signatures, behaviors, formats), each with the file where it lives.
+DISCOVERIES: durable, non-obvious project facts you verified that future
+sessions would otherwise rediscover (architecture constraints, build
+requirements, conventions, root causes). \"none\" if none.
 ANOMALIES: anything that behaved unexpectedly - lost or overwritten edits,
 files changed by others, flaky tests, environment problems. \"none\" if none.
 NEXT: what you would do next with more time, in priority order.";
