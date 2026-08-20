@@ -6025,79 +6025,111 @@ fn start_steer(
     }
 }
 
-/// Fold a finished steering request into the turn: confirm delivery, or
-/// requeue the message as an ordinary prompt when the agent did not inject it.
+/// What happens to a steered message the agent did not deliver. Resending is
+/// the normal path (the message becomes the next ordinary prompt); after a
+/// failed turn it is dropped instead, mirroring the TUI's failure-path queue
+/// drop — auto-resubmitting into a degraded runtime would hide the failure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SteerFallbackDisposition {
+    Resend,
+    Drop,
+}
+
+/// Fold a finished steering request into the turn: confirm delivery, or hand
+/// the undelivered payload back to the caller, narrating the chosen fallback.
 fn apply_steer_outcome(
     steer: PendingSteer,
     outcome: Result<serde_json::Value, agent_client_protocol::Error>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
-    deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
-) {
+    disposition: SteerFallbackDisposition,
+) -> Option<(String, Vec<PromptImage>, Vec<PromptResource>)> {
     let PendingSteer {
         text,
         images,
         resources,
         ..
     } = steer;
+    let fallback_tail = match disposition {
+        SteerFallbackDisposition::Resend => "the message will be sent as the next prompt",
+        SteerFallbackDisposition::Drop => {
+            "the message was dropped because the turn failed; resubmit it if still wanted"
+        }
+    };
     match outcome {
         Ok(value) => match value.get("outcome").and_then(serde_json::Value::as_str) {
             Some("injected") => {
                 let _ = ui_tx.send(UiEvent::Info(
                     "message steered into the running turn".to_string(),
                 ));
+                None
             }
             // The turn settled first and the agent already started a new
             // turn with the message (codex-acp's idle-race answer). Nothing
-            // to requeue: requeueing would deliver the message twice.
+            // to requeue — that would deliver the message twice — but the
+            // detached turn has no prompt request on this side, so its
+            // output streams in while the UI looks idle; say so.
             Some("startedNewTurn") => {
-                let _ = ui_tx.send(UiEvent::Info(
-                    "the turn had already ended; the agent started a new turn with the message"
+                let _ = ui_tx.send(UiEvent::Warning(
+                    "the turn had already ended; the agent started a new turn with the message — \
+                     its output will stream in until that turn finishes"
                         .to_string(),
                 ));
+                None
             }
             Some("promptRequired") => {
-                deferred_prompts.push_back((text, images, resources));
-                let _ = ui_tx.send(UiEvent::Info(
-                    "the turn ended before the message could be steered; it will be sent as the \
-                     next prompt"
-                        .to_string(),
-                ));
+                let _ = ui_tx.send(UiEvent::Info(format!(
+                    "the turn ended before the message could be steered; {fallback_tail}"
+                )));
+                Some((text, images, resources))
             }
             // `failed` (codex-acp) and anything unrecognized: the agent did
-            // not confirm delivery, so requeue — a visible duplicate beats a
-            // silently dropped instruction.
+            // not confirm delivery — a visible duplicate beats a silently
+            // dropped instruction.
             other => {
-                deferred_prompts.push_back((text, images, resources));
                 let _ = ui_tx.send(UiEvent::Warning(format!(
-                    "steering was not applied (outcome {}); the message will be sent as the next \
-                     prompt",
+                    "steering was not applied (outcome {}); {fallback_tail}",
                     other.unwrap_or("missing"),
                 )));
+                Some((text, images, resources))
             }
         },
         Err(error) => {
-            deferred_prompts.push_back((text, images, resources));
             let _ = ui_tx.send(UiEvent::Warning(format!(
-                "steering failed: {error}; the message will be sent as the next prompt"
+                "steering failed: {error}; {fallback_tail}"
             )));
+            Some((text, images, resources))
         }
     }
 }
 
 /// Settle steering state when the prompt turn resolves. An in-flight steer is
 /// briefly awaited — the turn just settled, so the agent answers promptly with
-/// either the injection confirmation or the miss — and steers that never
-/// started are requeued as ordinary prompts.
+/// either the injection confirmation or the miss. On a normal or cancelled
+/// turn, undelivered and never-sent steers become ordinary prompts (matching
+/// queued-prompt drain semantics); on a failed turn they are dropped with a
+/// warning, mirroring the TUI's failure-path queue drop.
 async fn flush_pending_steers(
     steer_in_flight: Option<PendingSteer>,
     queued_steers: VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
+    fallbacks: VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
+    turn_failed: bool,
 ) {
+    let disposition = if turn_failed {
+        SteerFallbackDisposition::Drop
+    } else {
+        SteerFallbackDisposition::Resend
+    };
+    // The in-flight steer narrates its own fallback; buffered and never-sent
+    // steers are aggregated below so each message is announced exactly once.
+    let mut undelivered_in_flight = None;
     if let Some(mut steer) = steer_in_flight {
         match tokio::time::timeout(std::time::Duration::from_secs(2), steer.response.as_mut()).await
         {
-            Ok(outcome) => apply_steer_outcome(steer, outcome, ui_tx, deferred_prompts),
+            Ok(outcome) => {
+                undelivered_in_flight = apply_steer_outcome(steer, outcome, ui_tx, disposition);
+            }
             Err(_elapsed) => {
                 let PendingSteer {
                     text,
@@ -6105,17 +6137,40 @@ async fn flush_pending_steers(
                     resources,
                     ..
                 } = steer;
-                deferred_prompts.push_back((text, images, resources));
-                let _ = ui_tx.send(UiEvent::Warning(
-                    "steering did not answer before the turn ended; the message will be sent as \
-                     the next prompt"
-                        .to_string(),
-                ));
+                let tail = match disposition {
+                    SteerFallbackDisposition::Resend => {
+                        "the message will be sent as the next prompt"
+                    }
+                    SteerFallbackDisposition::Drop => {
+                        "the message was dropped because the turn failed; resubmit it if still \
+                         wanted"
+                    }
+                };
+                let _ = ui_tx.send(UiEvent::Warning(format!(
+                    "steering did not answer before the turn ended; {tail}"
+                )));
+                undelivered_in_flight = Some((text, images, resources));
             }
         }
     }
-    for parts in queued_steers {
-        deferred_prompts.push_back(parts);
+    match disposition {
+        SteerFallbackDisposition::Resend => {
+            if let Some(parts) = undelivered_in_flight {
+                deferred_prompts.push_back(parts);
+            }
+            deferred_prompts.extend(fallbacks);
+            deferred_prompts.extend(queued_steers);
+        }
+        SteerFallbackDisposition::Drop => {
+            // `undelivered_in_flight` was already narrated above.
+            let dropped = fallbacks.len() + queued_steers.len();
+            if dropped > 0 {
+                let _ = ui_tx.send(UiEvent::Warning(format!(
+                    "{dropped} steered message(s) dropped after the turn failed; resubmit them \
+                     if still wanted"
+                )));
+            }
+        }
     }
 }
 
@@ -6146,9 +6201,15 @@ async fn drive_prompt_turn(
     let mut steer_in_flight: Option<PendingSteer> = None;
     let mut queued_steers: VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)> =
         VecDeque::new();
+    // Steered messages the agent reported as undelivered while the turn was
+    // still running. Whether they are resent or dropped depends on how the
+    // turn ends, so they wait here rather than in `deferred_prompts`.
+    let mut steer_fallbacks: VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)> =
+        VecDeque::new();
     loop {
         tokio::select! {
             prompt_result = &mut prompt => {
+                let turn_failed = prompt_result.is_err();
                 match prompt_result {
                     Ok(resp) => {
                         turn_diff_tracker
@@ -6176,8 +6237,10 @@ async fn drive_prompt_turn(
                 flush_pending_steers(
                     steer_in_flight.take(),
                     std::mem::take(&mut queued_steers),
+                    std::mem::take(&mut steer_fallbacks),
                     ui_tx,
                     deferred_prompts,
+                    turn_failed,
                 )
                 .await;
                 return Ok(true);
@@ -6193,7 +6256,16 @@ async fn drive_prompt_turn(
                 let steer = steer_in_flight
                     .take()
                     .expect("branch runs only while a steer is in flight");
-                apply_steer_outcome(steer, steer_outcome, ui_tx, deferred_prompts);
+                // The promised resend only happens if the turn ends without
+                // failing; `flush_pending_steers` decides at turn end.
+                if let Some(parts) = apply_steer_outcome(
+                    steer,
+                    steer_outcome,
+                    ui_tx,
+                    SteerFallbackDisposition::Resend,
+                ) {
+                    steer_fallbacks.push_back(parts);
+                }
                 if let Some((text, images, resources)) = queued_steers.pop_front() {
                     steer_in_flight = Some(start_steer(
                         conn,
@@ -9272,12 +9344,14 @@ mod tests {
     /// Mock agent for `_session/steering`. When `advertise` is set the
     /// initialize response carries `_meta.steering.supported`. The first
     /// prompt stays in flight until a steering request arrives (or the
-    /// fallback delay passes); later prompts resolve immediately. Steering
-    /// requests are logged and answered with `steer_outcome`.
+    /// fallback delay passes) and then completes — or errors, when
+    /// `fail_first_prompt` is set; later prompts resolve immediately.
+    /// Steering requests are logged and answered with `steer_outcome`.
     async fn run_mock_agent_with_steering(
         stream: tokio::io::DuplexStream,
         advertise: bool,
         steer_outcome: &'static str,
+        fail_first_prompt: bool,
         prompts: Arc<std::sync::Mutex<Vec<String>>>,
         steers: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     ) {
@@ -9341,7 +9415,13 @@ mod tests {
                             let _ =
                                 tokio::time::timeout(Duration::from_secs(2), release.notified())
                                     .await;
-                            let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+                            let _ = if fail_first_prompt {
+                                responder.respond_with_result(Err(
+                                    agent_client_protocol::Error::internal_error(),
+                                ))
+                            } else {
+                                responder.respond(PromptResponse::new(StopReason::EndTurn))
+                            };
                         });
                         Ok(())
                     } else {
@@ -10975,6 +11055,14 @@ mod tests {
     /// confirm the advertised capability on `Connected`, and start one turn
     /// that stays in flight until the mock's steer/fallback releases it.
     async fn steering_rig(advertise: bool, steer_outcome: &'static str) -> SteeringRig {
+        steering_rig_with(advertise, steer_outcome, false).await
+    }
+
+    async fn steering_rig_with(
+        advertise: bool,
+        steer_outcome: &'static str,
+        fail_first_prompt: bool,
+    ) -> SteeringRig {
         let temp = tempfile::tempdir().expect("tempdir");
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
@@ -10986,6 +11074,7 @@ mod tests {
             agent_side,
             advertise,
             steer_outcome,
+            fail_first_prompt,
             Arc::clone(&prompts),
             Arc::clone(&steers),
         ));
@@ -11132,6 +11221,39 @@ mod tests {
         assert_eq!(
             rig.prompts.lock().expect("prompt log").as_slice(),
             ["start work", "steer me"]
+        );
+        assert_eq!(rig.steers.lock().expect("steer log").len(), 1);
+
+        rig.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn steer_fallback_is_dropped_when_the_turn_fails() {
+        // The TUI drops queued prompts on PromptFailed so a degraded runtime
+        // is not auto-resubmitted into before the user sees the failure. An
+        // undelivered steer must follow the same policy: dropped with a
+        // warning, never replayed as the next prompt.
+        let mut rig = steering_rig_with(true, "promptRequired", true).await;
+
+        let mut saw_failed = false;
+        let mut drop_notice = None;
+        while !saw_failed || drop_notice.is_none() {
+            let ev = tokio::time::timeout(EVENT_DEADLINE, rig.ui_rx.recv())
+                .await
+                .expect("timed out waiting for the failure and drop notice")
+                .expect("ui event channel closed");
+            match ev {
+                UiEvent::PromptFailed { .. } => saw_failed = true,
+                UiEvent::Warning(text) if text.contains("dropped") => drop_notice = Some(text),
+                _ => {}
+            }
+        }
+
+        // Nothing may be resent into the failed runtime.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            rig.prompts.lock().expect("prompt log").as_slice(),
+            ["start work"]
         );
         assert_eq!(rig.steers.lock().expect("steer log").len(), 1);
 
