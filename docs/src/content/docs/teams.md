@@ -41,6 +41,15 @@ start the offered session to use the new team immediately.
 A single-provider team still gets discrete review — the reviewer is an
 independent session with its own context, just not an independent provider.
 
+## The default team
+
+A machine signed in to both providers, with neither ACP server switched off,
+starts on **Claude coder + Codex reviewer** — the mixed team gives adversarial
+review out of the box. Setup opens on that selection, and runs that never see
+setup (headless `mj --print`, `mj server`) use it too. Sign in to only one
+provider and Mjolnir still asks which team to run; pick a team yourself and it
+keeps that choice instead of applying the default.
+
 ## What a team does not change
 
 Mjolnir's terminal, permissions, worktrees, session storage, remote control,

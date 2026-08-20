@@ -153,9 +153,11 @@ Open a repository and run:
 mj
 ```
 
-First launch discovers available provider credentials and asks which team to
-use. Press **Ctrl+Tab** to switch teams later, or open the **Team** tab in
-`/mjconfig`. Team, model, and adapter changes apply to a new session.
+First launch discovers available provider credentials and opens setup on the
+team it picked: **Claude coder + Codex reviewer** when both providers are
+signed in and enabled, otherwise a team you choose. Press **Ctrl+Tab** to
+switch teams later, or open the **Team** tab in `/mjconfig`. Team, model, and
+adapter changes apply to a new session.
 
 ## Try it
 

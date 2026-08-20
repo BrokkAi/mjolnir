@@ -49,6 +49,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let config_path = config::default_config_path();
     let mut app_config = config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
+    app_config.apply_default_team();
     app_config.apply_model_overrides(&cfg.role_overrides);
     // A headless run is one long turn, so hold the sleep assertion for the
     // whole run; the guard drops on every return path.

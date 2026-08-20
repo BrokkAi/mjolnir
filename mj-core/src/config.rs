@@ -512,6 +512,36 @@ fn has_valid_team_with_external(config: &Config, external_id: Option<&str>) -> b
     external_id.is_some() || TeamPreset::from_config(config).is_some()
 }
 
+/// The team a machine falls back to when the user has never chosen one:
+/// Claude codes, Codex reviews.
+pub const DEFAULT_TEAM: TeamPreset = TeamPreset::ClaudeWithCodexReviewer;
+
+/// [`DEFAULT_TEAM`] when both of its providers are signed in and neither ACP
+/// server is switched off. `None` leaves the choice to the user: a machine
+/// with a single provider has no pairing to default to, and an embedding
+/// platform owns its own implicit team.
+pub fn default_team(config: &Config) -> Option<TeamPreset> {
+    default_team_with(
+        config,
+        &crate::roster::signed_in_sources(),
+        crate::roster::external_adapter().is_some(),
+    )
+}
+
+fn default_team_with(config: &Config, signed_in: &[String], external: bool) -> Option<TeamPreset> {
+    if external {
+        return None;
+    }
+    let (coder, reviewer) = DEFAULT_TEAM.sources();
+    [coder, reviewer]
+        .into_iter()
+        .all(|source| {
+            signed_in.iter().any(|id| id == source)
+                && config.acp.policy(source) != AcpServerPolicy::Disabled
+        })
+        .then_some(DEFAULT_TEAM)
+}
+
 /// How much machinery one discrete review is allowed to spend.
 ///
 /// `Quick` runs a single general reviewer and then validates its findings,
@@ -1180,6 +1210,35 @@ impl Config {
         );
 
         Ok(())
+    }
+
+    /// Adopt [`default_team`] when this config expresses no routing
+    /// preference at all. A config that names a team or pins any seat's ACP
+    /// source keeps what it has, so neither an explicit choice nor custom
+    /// routing this build cannot map to a team is replaced behind the user's
+    /// back. Model choices are untouched; only the team and its routes are
+    /// filled in. Returns whether a team was adopted.
+    pub fn apply_default_team(&mut self) -> bool {
+        self.apply_default_team_with(
+            &crate::roster::signed_in_sources(),
+            crate::roster::external_adapter().is_some(),
+        )
+    }
+
+    fn apply_default_team_with(&mut self, signed_in: &[String], external: bool) -> bool {
+        if self.team.is_some()
+            || self.agent.acp_source.is_some()
+            || self.review.acp_source.is_some()
+            || self.subagents.acp_source.is_some()
+        {
+            return false;
+        }
+        let Some(team) = default_team_with(self, signed_in, external) else {
+            return false;
+        };
+        self.team = Some(team.id().to_string());
+        team.apply_runtime_routes(self);
+        true
     }
 
     /// Bind every seat to the embedding platform's registered adapter.
@@ -1891,6 +1950,80 @@ kimi = "disabled"
         assert_eq!(config.review.model, "review-model");
         assert_eq!(config.subagents.model, "worker-model");
         assert!(config.agent.discrete_review);
+    }
+
+    fn both_providers() -> Vec<String> {
+        vec!["claude-acp".to_string(), "codex-acp".to_string()]
+    }
+
+    #[test]
+    fn both_signed_in_providers_default_to_the_claude_coder_codex_reviewer_team() {
+        let config = Config::default();
+
+        assert_eq!(
+            default_team_with(&config, &both_providers(), false),
+            Some(TeamPreset::ClaudeWithCodexReviewer)
+        );
+    }
+
+    #[test]
+    fn a_single_signed_in_provider_has_no_default_team() {
+        let config = Config::default();
+
+        for signed_in in [
+            vec![],
+            vec!["claude-acp".to_string()],
+            vec!["codex-acp".to_string()],
+        ] {
+            assert_eq!(default_team_with(&config, &signed_in, false), None);
+        }
+    }
+
+    #[test]
+    fn a_disabled_server_or_a_platform_adapter_has_no_default_team() {
+        let mut config = Config::default();
+        config.set_acp_server_policy("codex-acp", AcpServerPolicy::Disabled);
+        assert_eq!(default_team_with(&config, &both_providers(), false), None);
+
+        // The embedding platform routes every seat through its own adapter.
+        let config = Config::default();
+        assert_eq!(default_team_with(&config, &both_providers(), true), None);
+    }
+
+    #[test]
+    fn the_default_team_routes_every_seat_without_touching_model_choices() {
+        let mut config = Config::default();
+        config.agent.model = "primary-model".to_string();
+        config.agent.discrete_review = false;
+
+        assert!(config.apply_default_team_with(&both_providers(), false));
+
+        assert_eq!(config.team.as_deref(), Some("claude_codex"));
+        assert_eq!(config.agent.acp_source.as_deref(), Some("claude-acp"));
+        assert_eq!(config.review.acp_source.as_deref(), Some("codex-acp"));
+        assert_eq!(config.subagents.acp_source.as_deref(), Some("codex-acp"));
+        assert_eq!(config.agent.model, "primary-model");
+        // A default fills in what the user left unset; it overrides nothing.
+        assert!(!config.agent.discrete_review);
+        assert_eq!(config.acp.policy("claude-acp"), AcpServerPolicy::Auto);
+    }
+
+    #[test]
+    fn the_default_team_never_replaces_a_chosen_team_or_custom_routing() {
+        let mut chosen = Config {
+            team: Some("codex".to_string()),
+            ..Config::default()
+        };
+        assert!(!chosen.apply_default_team_with(&both_providers(), false));
+        assert_eq!(chosen.team.as_deref(), Some("codex"));
+
+        // Custom routing this build cannot map to a team still owes the user
+        // a choice in setup rather than a silent rewrite.
+        let mut custom = Config::default();
+        custom.agent.acp_source = Some("custom-agent".to_string());
+        assert!(!custom.apply_default_team_with(&both_providers(), false));
+        assert_eq!(custom.team, None);
+        assert_eq!(custom.agent.acp_source.as_deref(), Some("custom-agent"));
     }
 
     #[test]
