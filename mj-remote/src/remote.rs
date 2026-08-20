@@ -2952,13 +2952,7 @@ impl RemoteSessionTracker {
         actor: Option<&str>,
     ) -> PermissionPrompt {
         let request_id = prompt.tool_call.tool_call_id.to_string();
-        let title = prompt
-            .tool_call
-            .fields
-            .title
-            .clone()
-            .map(|title| title.replace("\\n", "\n"))
-            .unwrap_or_else(|| request_id.clone());
+        let title = mj_core::session_state::permission_prompt_title(&prompt.tool_call);
         let record = PendingPermissionRecord {
             request_id: request_id.clone(),
             title: actor.map_or(title.clone(), |actor| format!("{actor} · {title}")),
@@ -14673,6 +14667,57 @@ mod tests {
             .snapshot()
             .expect("snapshot");
         assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    /// codex-acp asks for command approval with no `title`: the payload is an
+    /// opaque exec id plus `rawInput.command`. The viewer renders
+    /// `PendingPermissionRecord::title` verbatim, so publishing the id there
+    /// leaves a remote approver looking at `exec-<uuid>` with no way to tell
+    /// what they are allowing.
+    #[tokio::test]
+    async fn published_permission_shows_the_command_a_codex_exec_asks_to_run() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let prompt = PermissionPrompt {
+            tool_call: ToolCallUpdate::new(
+                "exec-a18aaa9c-a65e-4a8f-8a96-e9d93a21ab91".to_string(),
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Execute)
+                    .raw_input(serde_json::json!({
+                        "command": "rm -rf target",
+                        "cwd": "/repo",
+                    })),
+            ),
+            options: vec![
+                PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+            ],
+            responder,
+        };
+
+        let _event = tracker.intercept_event(UiEvent::PermissionRequest(prompt));
+
+        let snapshot = tracker
+            .state
+            .lock()
+            .expect("state")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        let pending = &snapshot.pending_permissions[0];
+        assert_eq!(pending.title, "rm -rf target");
+        // The id still identifies the prompt a decision answers; it just is
+        // not what the approver reads.
+        assert_eq!(
+            pending.request_id,
+            "exec-a18aaa9c-a65e-4a8f-8a96-e9d93a21ab91"
+        );
     }
 
     #[tokio::test]

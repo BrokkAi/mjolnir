@@ -13412,14 +13412,7 @@ fn permission_option_lines(
 }
 
 fn permission_detail_text(pending: &PendingPermission) -> String {
-    pending
-        .prompt
-        .tool_call
-        .fields
-        .title
-        .clone()
-        .map(|title| title.replace("\\n", "\n"))
-        .unwrap_or_else(|| pending.prompt.tool_call.tool_call_id.to_string())
+    crate::session_state::permission_prompt_title(&pending.prompt.tool_call)
 }
 
 fn permission_view_lines(
@@ -25306,6 +25299,62 @@ mod tests {
         assert!(
             !lines.iter().any(|l| l.contains("\\n")),
             "literal backslash-n escape must not appear; lines:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    /// codex-acp command approvals arrive with no `title` — just an opaque
+    /// exec id and `rawInput.command` — so the modal must read the command out
+    /// of the payload rather than printing the id at the user.
+    #[test]
+    fn permission_modal_shows_the_command_when_the_payload_carries_no_title() {
+        let (responder, _rx) = tokio::sync::oneshot::channel();
+        let pending = PendingPermission {
+            prompt: crate::event::PermissionPrompt {
+                tool_call: ToolCallUpdate::new(
+                    "exec-a18aaa9c-a65e-4a8f-8a96-e9d93a21ab91",
+                    ToolCallUpdateFields::new()
+                        .kind(agent_client_protocol::schema::v1::ToolKind::Execute)
+                        .raw_input(serde_json::json!({
+                            "command": "rm -rf target",
+                            "cwd": "/repo",
+                        })),
+                ),
+                options: vec![PermissionOption::new(
+                    "option-0",
+                    "Allow once".to_string(),
+                    PermissionOptionKind::AllowOnce,
+                )],
+                responder,
+            },
+            selected: 0,
+            scroll_offset: None,
+            subagent_id: None,
+        };
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                draw_permission_modal(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    1,
+                    TerminalThemeKind::default().palette(),
+                )
+            })
+            .expect("draw");
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains("rm -rf target")),
+            "the command must be on screen; lines:\n{}",
+            lines.join("\n")
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("exec-a18aaa9c")),
+            "the raw exec id must not stand in for the command; lines:\n{}",
             lines.join("\n")
         );
     }

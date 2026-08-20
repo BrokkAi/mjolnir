@@ -9,7 +9,7 @@ use agent_client_protocol::schema::v1::{AvailableCommand, SessionConfigOption};
 
 use crate::app::{ConnectionState, Entry, TerminalRegistration, ToolCallView};
 
-pub use mj_core::session_state::remote_elicitation_outcome;
+pub use mj_core::session_state::{permission_prompt_title, remote_elicitation_outcome};
 
 use crate::event::{SessionConfigTarget, TerminalOutputSnapshot};
 
