@@ -53,10 +53,12 @@ cached launches. Ctrl-R dictation downloads roughly 0.7 GB on first use.
 
 ## Remote exposure
 
-`mj server` is loopback-only by default. `--hostname` and `--tailscale` change
-the network boundary. Remote state can include transcripts, queued prompts,
-permission decisions, authentication tokens/cookies, certificates, and local
-session metadata. Read [Remote control](/remote/) before leaving loopback.
+`mj server` is loopback-only unless `--hostname` is set or it finds Tailscale,
+either of which changes the network boundary. `--no-tailscale-detect` keeps it
+loopback-only on a tailnet machine. Remote state can include transcripts,
+queued prompts, permission decisions, authentication tokens/cookies,
+certificates, and local session metadata. Read [Mjolnir Web](/remote/) before
+leaving loopback.
 
 ## Private-repository checklist
 

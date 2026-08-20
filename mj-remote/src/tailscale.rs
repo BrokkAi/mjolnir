@@ -1,4 +1,4 @@
-//! Tailscale integration for `mj server --tailscale`.
+//! Tailscale integration for `mj server`.
 //!
 //! Discovers the local tailscale CLI, reads the node's HTTPS certificate
 //! domain from `tailscale status --json`, and mints a publicly trusted
@@ -26,12 +26,8 @@ pub struct Tailscale {
 impl Tailscale {
     /// Locate the tailscale CLI and confirm the node can mint certificates.
     pub fn discover() -> Result<Self> {
-        let binary = find_binary().ok_or_else(|| {
-            anyhow!(
-                "tailscale CLI not found in PATH; install tailscale \
-                 (https://tailscale.com/download) or start `mj server` without --tailscale"
-            )
-        })?;
+        let binary = find_binary()
+            .ok_or_else(|| anyhow!("tailscale CLI not found in PATH or the macOS app bundle"))?;
         Self::discover_with_binary(binary)
     }
 

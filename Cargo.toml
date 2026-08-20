@@ -22,7 +22,7 @@ default-members = [".", "mj-core", "mj-agents", "mj-tui", "mj-remote"]
 # Single source of truth for the release version; workspace crates inherit it, so
 # they cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
-version = "1.11.2"
+version = "1.11.3"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-only"
@@ -35,12 +35,12 @@ categories = ["development-tools", "command-line-utilities"]
 # published path dependencies to carry a registry version, but release bumps
 # should still change that version in one manifest rather than in every crate.
 [workspace.dependencies]
-mj-core = { package = "brokk-mj-core", path = "mj-core", version = "1.11.2" }
-mj-agents = { package = "brokk-mj-agents", path = "mj-agents", version = "1.11.2" }
-mj-anvil = { package = "brokk-mj-anvil", path = "mj-anvil", version = "1.11.2" }
-mj-tui = { package = "brokk-mj-tui", path = "mj-tui", version = "1.11.2" }
-mj-remote = { package = "brokk-mj-remote", path = "mj-remote", version = "1.11.2" }
-mj-desktop = { package = "brokk-mj-desktop", path = "mj-desktop", version = "1.11.2" }
+mj-core = { package = "brokk-mj-core", path = "mj-core", version = "1.11.3" }
+mj-agents = { package = "brokk-mj-agents", path = "mj-agents", version = "1.11.3" }
+mj-anvil = { package = "brokk-mj-anvil", path = "mj-anvil", version = "1.11.3" }
+mj-tui = { package = "brokk-mj-tui", path = "mj-tui", version = "1.11.3" }
+mj-remote = { package = "brokk-mj-remote", path = "mj-remote", version = "1.11.3" }
+mj-desktop = { package = "brokk-mj-desktop", path = "mj-desktop", version = "1.11.3" }
 
 [[bin]]
 name = "mj"
@@ -86,8 +86,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # servers exposed to ACP adapters through the stdio bridge. MIT-licensed.
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-# Parses the tailscale-issued certificate/key PEMs for the SNI resolver in
-# `mj server --tailscale`. Already in the tree via reqwest's rustls-tls.
+# Parses the tailscale-issued certificate/key PEMs for the SNI resolver
+# `mj server` installs when it detects a tailnet node. Already in the tree via
+# reqwest's rustls-tls.
 rustls-pemfile = "2"
 # JSON Schema derivation for MCP tool argument structs (used by rmcp's `#[tool]`
 # macro). Already in the tree via agent-client-protocol; pinned to the same 1.x.

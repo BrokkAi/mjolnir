@@ -140,7 +140,7 @@ fn ragnarok_fighter_name(
 #[derive(Debug)]
 pub struct ServerOptions {
     pub hostname: Option<String>,
-    pub tailscale: bool,
+    pub tailscale_detect: bool,
     pub port: u16,
     pub history_days: u32,
     pub session_ttl_days: u32,
@@ -170,7 +170,7 @@ pub async fn run_server(options: ServerOptions) -> anyhow::Result<()> {
         config: cfg,
         roster: resolved,
         hostname: options.hostname,
-        tailscale: options.tailscale,
+        tailscale_detect: options.tailscale_detect,
         port: options.port,
         history_days: options.history_days,
         session_ttl_days: options.session_ttl_days,
