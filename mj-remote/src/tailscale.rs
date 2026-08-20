@@ -1,4 +1,4 @@
-//! Tailscale integration for `mj server --tailscale`.
+//! Tailscale integration for `mj server`.
 //!
 //! Discovers the local tailscale CLI, reads the node's HTTPS certificate
 //! domain from `tailscale status --json`, and mints a publicly trusted
@@ -6,6 +6,10 @@
 //! ACME DNS-01 challenge on its own `ts.net` zone, so this works even
 //! though the machine is unreachable from the public internet — and the
 //! resulting certificate produces no browser warning on any device.
+//!
+//! `mj server` runs this detection on every start, so the distinction
+//! between "no tailscale here" and "tailscale here, but broken" matters:
+//! see [`Tailscale::discover`].
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -25,14 +29,22 @@ pub struct Tailscale {
 
 impl Tailscale {
     /// Locate the tailscale CLI and confirm the node can mint certificates.
-    pub fn discover() -> Result<Self> {
-        let binary = find_binary().ok_or_else(|| {
-            anyhow!(
-                "tailscale CLI not found in PATH; install tailscale \
-                 (https://tailscale.com/download) or start `mj server` without --tailscale"
-            )
-        })?;
-        Self::discover_with_binary(binary)
+    ///
+    /// `Ok(None)` means this machine has no tailscale CLI at all — the
+    /// ordinary case on a machine that does not use tailscale, and nothing
+    /// to report. An `Err` means tailscale *is* installed but cannot issue a
+    /// certificate (daemon stopped, HTTPS Certificates not enabled on the
+    /// tailnet), which is worth surfacing because the user clearly intended
+    /// to have a working tailnet node.
+    pub fn discover() -> Result<Option<Self>> {
+        Self::discover_optional(find_binary())
+    }
+
+    fn discover_optional(binary: Option<PathBuf>) -> Result<Option<Self>> {
+        match binary {
+            Some(binary) => Self::discover_with_binary(binary).map(Some),
+            None => Ok(None),
+        }
     }
 
     fn discover_with_binary(binary: PathBuf) -> Result<Self> {
@@ -282,6 +294,29 @@ exit 9
             .expect("discover");
         assert_eq!(tailscale.binary, binary);
         assert_eq!(tailscale.cert_domain, "node.tail1234.ts.net");
+    }
+
+    #[test]
+    fn discover_optional_reports_a_missing_cli_as_absence_not_failure() {
+        assert!(
+            Tailscale::discover_optional(None)
+                .expect("missing CLI is not an error")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_optional_surfaces_a_broken_installed_cli_as_an_error() {
+        let (_dir, binary) = fake_tailscale(
+            r#"#!/bin/sh
+printf '%s' '{"BackendState":"Stopped"}'
+"#,
+        );
+
+        let error = retry_text_file_busy(|| Tailscale::discover_optional(Some(binary.clone())))
+            .expect_err("installed but stopped");
+        assert!(error.to_string().contains("tailscale up"), "{error}");
     }
 
     #[cfg(unix)]

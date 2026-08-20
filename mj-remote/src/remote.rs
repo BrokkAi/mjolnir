@@ -3845,7 +3845,14 @@ pub struct RuntimeServerOptions {
     pub config: config::Config,
     pub roster: roster::Roster,
     pub hostname: Option<String>,
-    pub tailscale: bool,
+    /// Probe this machine for a certificate-capable tailscale node at
+    /// startup and, when one is found, serve its `ts.net` certificate.
+    /// Cleared by `--no-tailscale-detect`; ignored when `hostname` is set.
+    pub tailscale_detect: bool,
+    /// True when the deprecated, no-op `--tailscale` flag was passed. Carried
+    /// this far so the notice prints after the screen is cleared, where the
+    /// user will actually see it.
+    pub deprecated_tailscale_flag: bool,
     pub history_days: u32,
     pub session_ttl_days: u32,
     pub logout_all: bool,
@@ -3862,7 +3869,8 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         config: cfg,
         roster: resolved,
         hostname,
-        tailscale,
+        tailscale_detect,
+        deprecated_tailscale_flag,
         history_days,
         session_ttl_days,
         logout_all,
@@ -3882,12 +3890,16 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     // when this guard drops on any return path below.
     let _keep_awake = mj_core::keep_awake::KeepAwake::hold(cfg.keep_awake);
 
+    if deprecated_tailscale_flag {
+        println!(
+            "note: --tailscale is deprecated and does nothing; tailscale is detected \
+             automatically. Pass --no-tailscale-detect to opt out."
+        );
+    }
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
-    let tailscale_tls = if tailscale {
-        Some(prepare_tailscale_tls(&remote_control_dir())?)
-    } else {
-        None
-    };
+    let tailscale_tls = should_detect_tailscale(tailscale_detect, requested_hostname.as_deref())
+        .then(|| detect_tailscale_tls(&remote_control_dir()))
+        .flatten();
     let listen = match &tailscale_tls {
         Some(ts) => tailscale_listen_config(&ts.tailscale.cert_domain),
         None => server_listen_config(requested_hostname.as_deref())?,
@@ -3962,7 +3974,7 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     );
     if let Some(ts) = &tailscale_tls {
         println!(
-            "tls: trusted tailscale certificate for {} (auto-renews daily)",
+            "tls: detected tailscale; serving a trusted certificate for {} (auto-renews daily)",
             ts.tailscale.cert_domain
         );
     }
@@ -3970,7 +3982,7 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         println!("{}", crate::render_qr(&viewer_url)?);
     } else {
         println!(
-            "QR code hidden because localhost is only reachable from this machine; use --hostname or --tailscale for a device-login QR."
+            "QR code hidden because localhost is only reachable from this machine; connect this machine to a tailnet or pass --hostname for a device-login QR."
         );
     }
     println!("viewer code: {viewer_code}");
@@ -4366,10 +4378,42 @@ struct TailscaleTls {
     key_path: PathBuf,
 }
 
-fn prepare_tailscale_tls(root: &Path) -> Result<TailscaleTls> {
+/// Whether to probe this machine for a tailscale node. An explicit
+/// `--hostname` names the host the login QR must point at, so detection stays
+/// out of its way; `--no-tailscale-detect` turns detection off outright.
+fn should_detect_tailscale(detect: bool, requested_hostname: Option<&str>) -> bool {
+    detect && requested_hostname.is_none()
+}
+
+/// Serve this machine's tailscale certificate when it has a usable tailnet
+/// node, otherwise `None`.
+///
+/// Detection never aborts startup — a server that would have come up on
+/// localhost before must still come up now. A machine with no tailscale CLI
+/// is silent; a machine that has tailscale but cannot mint a certificate gets
+/// a warning, because there the user meant to have a working node and would
+/// otherwise be left wondering where the ts.net URL went.
+fn detect_tailscale_tls(root: &Path) -> Option<TailscaleTls> {
+    let tailscale = match crate::Tailscale::discover() {
+        Ok(Some(tailscale)) => tailscale,
+        Ok(None) => return None,
+        Err(error) => {
+            println!("note: tailscale detected but unusable ({error:#}); serving localhost only");
+            return None;
+        }
+    };
+    match prepare_tailscale_tls(root, tailscale) {
+        Ok(tls) => Some(tls),
+        Err(error) => {
+            println!("note: tailscale certificate unavailable ({error:#}); serving localhost only");
+            None
+        }
+    }
+}
+
+fn prepare_tailscale_tls(root: &Path, tailscale: crate::Tailscale) -> Result<TailscaleTls> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("create remote-control dir {}", root.display()))?;
-    let tailscale = crate::Tailscale::discover()?;
     let cert_path = root.join("tailscale-cert.pem");
     let key_path = root.join("tailscale-key.pem");
     println!(
@@ -16323,6 +16367,24 @@ mod tests {
             std::fs::read_to_string(dir.path().join("cert-hostname")).expect("read hostname"),
             "localhost"
         );
+    }
+
+    #[test]
+    fn detects_tailscale_by_default_when_no_hostname_was_requested() {
+        assert!(should_detect_tailscale(true, None));
+    }
+
+    #[test]
+    fn no_tailscale_detect_suppresses_detection() {
+        assert!(!should_detect_tailscale(false, None));
+    }
+
+    /// An explicit --hostname names the host the login QR must point at, so
+    /// detection must not quietly replace it with the ts.net name.
+    #[test]
+    fn an_explicit_hostname_suppresses_detection() {
+        assert!(!should_detect_tailscale(true, Some("example.com")));
+        assert!(!should_detect_tailscale(false, Some("example.com")));
     }
 
     #[test]
