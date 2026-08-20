@@ -4,12 +4,18 @@ description: One command publishes the coding session on your machine to a brows
 ---
 
 import { Image } from 'astro:assets';
-import shotSession from '../../assets/remote/session-transcript-desktop.png';
-import shotLogin from '../../assets/remote/login.png';
-import shotMobilePermission from '../../assets/remote/mobile-permission.png';
-import shotMobileSession from '../../assets/remote/mobile-session.png';
-import shotNewSession from '../../assets/remote/new-session-worktree.png';
 import shotPermissionDiff from '../../assets/remote/permission-diff-desktop.png';
+import shotLogin from '../../assets/remote/login.png';
+import shotNewSession from '../../assets/remote/new-session-worktree.png';
+import shotFolderSearch from '../../assets/remote/folder-search.png';
+import shotMobilePermission from '../../assets/remote/mobile-permission.png';
+import shotMobileSessions from '../../assets/remote/mobile-sessions.png';
+import shotSubagentApproval from '../../assets/remote/subagent-approval.png';
+import shotSubagentsReview from '../../assets/remote/subagents-review.png';
+import shotCommandPalette from '../../assets/remote/command-palette.png';
+import shotSessionConfig from '../../assets/remote/session-config.png';
+import shotStatusLine from '../../assets/remote/status-line.png';
+import shotHistory from '../../assets/remote/history-archive.png';
 
 One command turns the coding session on your machine into a browser you can
 drive from the next room — or, over Tailscale, from anywhere:
@@ -26,10 +32,10 @@ pass. The repository, the agent processes, and the transcripts stay on the host.
 The browser is a control surface for that session, not a copy of your code.
 
 <figure class="shot">
-  <a class="shot__zoom" href={shotSession.src} aria-label="Open the full-size screenshot of the full session view">
-    <Image src={shotSession} alt="Mjolnir Web on a desktop browser: session list on the left, a streaming transcript with a full file diff, terminal output, review row, and a message composer." />
+  <a class="shot__zoom" href={shotPermissionDiff.src} aria-label="Open the full-size screenshot: the full session view">
+    <Image src={shotPermissionDiff} alt="Mjolnir Web on a desktop browser: session list on the left, two file diffs in the transcript, and a permission card offering Allow once, Allow for session, and Reject." />
   </a>
-  <figcaption>A live session in the browser — diff, terminal output, per-seat token usage, and the review pass that already challenged the turn.</figcaption>
+  <figcaption>A real session mid-turn — the diffs the agent wants to apply, the approval it is waiting on, and the per-seat token totals above them.</figcaption>
 </figure>
 
 ## What you can do from a browser
@@ -84,16 +90,16 @@ like any other app. A phone reaches the server once it is off loopback — see
 
 <div class="shot-row">
   <figure class="shot shot--phone">
-    <a class="shot__zoom" href={shotMobilePermission.src} aria-label="Open the full-size screenshot of the permission prompt on a phone">
-      <Image src={shotMobilePermission} alt="Mjolnir Web on a phone showing a code diff above a PERMISSION NEEDED card for editing fizzbuzz.py, with Deny, Allow once, and Always allow buttons." />
+    <a class="shot__zoom" href={shotMobilePermission.src} aria-label="Open the full-size screenshot: the permission prompt on a phone">
+      <Image src={shotMobilePermission} alt="Mjolnir Web on a phone: a diff of weather.py above a PERMISSION NEEDED card with Allow once, Allow for session, and Reject." />
     </a>
-    <figcaption>A permission prompt on a phone, with the diff above it and the model, effort, and per-seat token line in the header.</figcaption>
+    <figcaption>The permission prompt on a phone, with the diff that produced it directly above and the model, effort, and token line in the header.</figcaption>
   </figure>
   <figure class="shot shot--phone">
-    <a class="shot__zoom" href={shotMobileSession.src} aria-label="Open the full-size screenshot of the running session on a phone">
-      <Image src={shotMobileSession} alt="Mjolnir Web on a phone showing a streaming agent turn, a subagent row for reviewer #2, and two review rows below the composer." />
+    <a class="shot__zoom" href={shotMobileSessions.src} aria-label="Open the full-size screenshot: the session list on a phone">
+      <Image src={shotMobileSessions} alt="Mjolnir Web on a phone showing the session list: two weather-cli sessions with their worktree names, models, message counts, and relative times, above a History row." />
     </a>
-    <figcaption>The same session working: a streaming turn, a running subagent, and both review passes tracked under the composer.</figcaption>
+    <figcaption>The session list on the same phone — every session on the host, each tagged with its worktree and model.</figcaption>
   </figure>
 </div>
 
@@ -103,10 +109,10 @@ The new-session dialog is one screen: current folder, a folder search, a **New
 worktree** checkbox, and **Start session**.
 
 <figure class="shot">
-  <a class="shot__zoom" href={shotNewSession.src} aria-label="Open the full-size screenshot of the new-session dialog">
-    <Image src={shotNewSession} alt="The NEW SESSION dialog: current folder, a project chip, a folder search box, a checked New worktree option, and a Start session button." />
+  <a class="shot__zoom" href={shotNewSession.src} aria-label="Open the full-size screenshot: the new-session dialog">
+    <Image src={shotNewSession} alt="The NEW SESSION dialog: current folder /Users/Shared/mj-demo, a recent-folders row, a folder search box, a checked New worktree option, a Start session button, and the three project folders below." />
   </a>
-  <figcaption>Pick a folder, tick <strong>New worktree</strong>, start. The session runs on the host, in a linked worktree, exactly as <code>mj --worktree</code> would.</figcaption>
+  <figcaption>Pick a folder, tick <strong>New worktree</strong>, start. Recent working directories sit above the folder list so yesterday’s project is one tap away.</figcaption>
 </figure>
 
 The folder picker browses the workspace roots configured on the server. It also
@@ -117,16 +123,23 @@ changing the server's workspace configuration does not expose old paths. Broad
 searches are capped; refine the query when the picker reports that only the
 first matches are shown.
 
+<figure class="shot">
+  <a class="shot__zoom" href={shotFolderSearch.src} aria-label="Open the full-size screenshot: the folder search">
+    <Image src={shotFolderSearch} alt="The new-session folder search showing one matching folder, /Users/Shared/mj-demo/invoice-api/src/handlers, with the match count below it." />
+  </a>
+  <figcaption>Search reaches nested folders across every configured root, and says how many matches it is showing.</figcaption>
+</figure>
+
 ## Permissions with the change in view
 
 Every permission request the session raises reaches the browser with the diff or
 command that prompted it, so an approval from a phone is still an informed one.
 
 <figure class="shot">
-  <a class="shot__zoom" href={shotPermissionDiff.src} aria-label="Open the full-size screenshot of the permission prompt with its diff">
-    <Image src={shotPermissionDiff} alt="Mjolnir Web on a desktop browser: a full diff of fizzbuzz.py above a PERMISSION NEEDED card for writing the file, with Deny, Allow once, and Always allow buttons." />
+  <a class="shot__zoom" href={shotSubagentApproval.src} aria-label="Open the full-size screenshot: the MCP subagent approval">
+    <Image src={shotSubagentApproval} alt="Mjolnir Web showing an INPUT NEEDED card asking whether the mj-subagents MCP server may run the create_subagent tool, with Allow once, Allow for this session, Allow and don’t ask again, Cancel, and Decline." />
   </a>
-  <figcaption>A write request, the complete diff it would apply, and the three answers — from the browser, on the session running on your machine.</figcaption>
+  <figcaption>An MCP approval for Mjolnir’s own subagent tool, with the four approval scopes the agent offers.</figcaption>
 </figure>
 
 Requests raised by a subagent carry its id, so a remote user answers the right
@@ -141,6 +154,13 @@ running rows first in spawn order, each showing its id, label, latest activity,
 and elapsed time, and finished rows marked `✔`, `✘`, or `⊘`. This is more
 granular than the terminal's aggregate workflow progress rows.
 
+<figure class="shot">
+  <a class="shot__zoom" href={shotSubagentsReview.src} aria-label="Open the full-size screenshot: subagent work under review">
+    <Image src={shotSubagentsReview} alt="Mjolnir Web transcript showing a SUBAGENT-1 entry, a REVIEW entry raising a P1 finding that README.md documents a helper weather.py does not define, and a review supervisor starting a validator pass." />
+  </a>
+  <figcaption>Delegated work and the review that challenges it, in one browser transcript: subagent output, a P1 finding against it, and the supervisor opening a validator pass.</figcaption>
+</figure>
+
 ## Side conversations
 
 When the connected agent supports ephemeral side sessions, the web command
@@ -150,6 +170,17 @@ the `Side` actor so they cannot be mistaken for main-session history. Use the
 **Exit side** action (or send `exit`) to delete the temporary session and return
 the composer to the main conversation.
 
+Typing `/` opens the palette of commands the connected agent advertises, so the
+list reflects that agent's capabilities rather than a fixed menu — `/side` only
+appears on an agent that supports side sessions.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: the command palette">
+    <Image src={shotCommandPalette} alt="The Mjolnir Web composer with a slash typed, showing a command palette listing /new, /clear, /compact, /export, /mjconfig, and /review with their descriptions." />
+  </a>
+  <figcaption>The command palette over a finished turn — the commands this agent advertises, not a fixed list.</figcaption>
+</figure>
+
 ## Status line
 
 Under the chat header the browser mirrors the terminal status line: primary
@@ -158,6 +189,13 @@ model and its ACP adapter, reasoning effort, per-seat token totals
 provider subscription quota windows (Codex/Claude), and a link to the current
 branch's open pull request. The pull-request badge comes from a `git`/`gh` probe
 on the session host and refreshes about twice a minute.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotStatusLine.src} aria-label="Open the full-size screenshot: the status line">
+    <Image src={shotStatusLine} alt="The Mjolnir Web status line: gpt-5-6-sol via codex-acp, effort default, primary 17.7k, review 18k, context 7 percent, and a Codex usage line showing remaining weekly quota and reset time." />
+  </a>
+  <figcaption>The status strip under the chat header: model and adapter, effort, per-seat totals, context occupancy, and the provider quota window.</figcaption>
+</figure>
 
 Cost is deliberately not shown here. Only some ACP adapters report one, and seats
 bind adapters independently, so a single session-wide figure would silently cover
@@ -170,6 +208,27 @@ The browser can archive a server-owned session to move it out of the active list
 and load or unarchive it later. A live TUI session cannot be archived; exit it in
 the terminal first. Archiving changes where the session is listed, not its
 retained transcript data.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotHistory.src} aria-label="Open the full-size screenshot: the session history and archive">
+    <Image src={shotHistory} alt="The Mjolnir Web sidebar with history expanded: active sessions above, and an archived session below a HISTORY header marked 1 archived." />
+  </a>
+  <figcaption>Archived sessions move under <strong>History</strong> and load back on demand.</figcaption>
+</figure>
+
+## Configuration from the browser
+
+`/mjconfig` opens the same configuration editor the terminal uses: team, agent,
+reviewer, subagent, and ACP-server settings, plus the session options the
+connected adapter exposes. Changes apply to sessions started afterwards, not to
+the turn already running.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotSessionConfig.src} aria-label="Open the full-size screenshot: the configuration editor">
+    <Image src={shotSessionConfig} alt="The Mjolnir Web configuration editor showing Team, Agent, Reviewer, Subagents, ACP servers, and Appearance sections, with Codex session options for mode, collaboration mode, reasoning effort, and fast mode." />
+  </a>
+  <figcaption>The configuration editor in the browser, with the connected adapter’s own session options underneath Mjolnir’s.</figcaption>
+</figure>
 
 ## Ragnarok, read-only
 
