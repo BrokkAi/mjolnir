@@ -2392,10 +2392,16 @@ impl AppState {
         if crate::roster::external_adapter().is_some() {
             return;
         }
+        // Reflect the team this run is actually on, including a default the
+        // config file has not been asked to persist yet.
         let active = self
             .config_path
             .as_deref()
             .and_then(|path| crate::config::Config::load(path).ok())
+            .map(|mut config| {
+                config.apply_default_team();
+                config
+            })
             .as_ref()
             .and_then(crate::config::TeamPreset::from_config);
         let selected = active
@@ -2496,6 +2502,7 @@ impl AppState {
             .as_deref()
             .and_then(|path| crate::config::Config::load(path).ok())
             .unwrap_or_default();
+        config.apply_default_team();
         config.theme = self.theme_kind;
         config.spinner = self.spinner_style;
         config.thought_output = self.thought_output;
@@ -9072,10 +9079,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut config = crate::roster::config_with_a_visible_builtin();
+        // A saved team is what routes a seat: `acp_source` is runtime-only, and
+        // a config with no team would pick up the default team instead.
+        crate::config::TeamPreset::Codex.apply(&mut config);
         let mut inventory = crate::roster::discover_inventory(&config);
         let server = inventory.servers.first_mut().expect("visible ACP server");
         let source_id = server.id.clone();
-        config.agent.acp_source = Some(source_id.clone());
         config.save(&path).expect("save config");
 
         let mut state = AppState::new();

@@ -153,8 +153,9 @@ pub struct ServerOptions {
 
 pub async fn run_server(options: ServerOptions) -> anyhow::Result<()> {
     let config_path = crate::config::default_config_path();
-    let cfg = crate::config::Config::load(&config_path)
+    let mut cfg = crate::config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
+    cfg.apply_default_team();
     let resolved = crate::roster::resolve(&cfg, &options.cwd).await?;
     let session_manager =
         std::sync::Arc::new(crate::remote_host::RootServerSessionManager::new_roster(

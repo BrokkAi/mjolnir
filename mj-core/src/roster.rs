@@ -287,6 +287,18 @@ pub fn native_source_id(model: &str) -> Option<String> {
     Some(launch_for(adapter_kind(model)?).source_id)
 }
 
+/// The built-in ACP servers this machine has usable credentials for. Decides
+/// which team a config with no team of its own adopts.
+pub(crate) fn signed_in_sources() -> Vec<String> {
+    [
+        (AdapterKind::Claude, claude_detection()),
+        (AdapterKind::Codex, codex_detection()),
+    ]
+    .into_iter()
+    .filter_map(|(kind, evidence)| evidence.map(|_| launch_for(kind).source_id))
+    .collect()
+}
+
 /// A config that explicitly enables one built-in server for tests that need a
 /// selected route regardless of the host's credentials.
 #[doc(hidden)]
@@ -831,6 +843,9 @@ pub async fn resolve(config: &Config, cwd: &Path) -> Result<Roster> {
 /// successful adapter probe proves they are no longer offered. Callers that
 /// own the config file should save `config` when notices are returned.
 pub async fn resolve_recovering(config: &mut Config, cwd: &Path) -> Result<(Roster, Vec<String>)> {
+    // Callers that never run setup — headless runs, remote hosts — still get
+    // the default team rather than falling back to bare model ranking.
+    config.apply_default_team();
     let leaderboard = deepswe::load(
         &deepswe::default_cache_path(),
         deepswe::CACHE_TTL,
