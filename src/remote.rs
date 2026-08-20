@@ -141,6 +141,7 @@ fn ragnarok_fighter_name(
 pub struct ServerOptions {
     pub hostname: Option<String>,
     pub tailscale: bool,
+    pub port: u16,
     pub history_days: u32,
     pub session_ttl_days: u32,
     pub logout_all: bool,
@@ -170,6 +171,7 @@ pub async fn run_server(options: ServerOptions) -> anyhow::Result<()> {
         roster: resolved,
         hostname: options.hostname,
         tailscale: options.tailscale,
+        port: options.port,
         history_days: options.history_days,
         session_ttl_days: options.session_ttl_days,
         logout_all: options.logout_all,

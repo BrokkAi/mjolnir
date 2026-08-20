@@ -61,10 +61,12 @@ use mj_core::event::{
 use mj_core::roster;
 use mj_core::session_state::{StatusKind, status_transcript_text};
 
-const REMOTE_CONTROL_LOCAL_ADDR: &str = "127.0.0.1:11921";
-const REMOTE_CONTROL_LOCAL_ADDR_V6: &str = "[::1]:11921";
-const REMOTE_CONTROL_PUBLIC_ADDR: &str = "0.0.0.0:11921";
-const REMOTE_CONTROL_UPSERT_URL: &str = "https://localhost:11921/api/sessions";
+const REMOTE_CONTROL_LOCAL_HOST: &str = "127.0.0.1";
+const REMOTE_CONTROL_LOCAL_HOST_V6: &str = "[::1]";
+const REMOTE_CONTROL_PUBLIC_HOST: &str = "0.0.0.0";
+/// Port `mj server` listens on unless `--port` overrides it. Local `mj`
+/// processes fall back to it when the running server left no `port` file.
+pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 11921;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const REMOTE_INITIAL_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
@@ -1387,6 +1389,9 @@ struct ClaimConfigChangeRequest {
 struct RemoteConnection {
     client: reqwest::Client,
     token: Arc<String>,
+    /// Origin of the local server (`https://localhost:<port>`), read from the
+    /// port the running server published rather than assumed.
+    base_url: Arc<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1504,6 +1509,9 @@ struct ServerPaths {
     key_path: PathBuf,
     token_path: PathBuf,
     cookie_key_path: PathBuf,
+    /// Holds the port the running server listens on, so local `mj` sessions
+    /// reach it even when `--port` moved it off the default.
+    port_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1513,6 +1521,9 @@ struct ServerListenConfig {
     /// host with IPv6 disabled still starts on IPv4 alone.
     bind_addrs: Vec<String>,
     viewer_host: String,
+    /// Port every bind address listens on, and the port the viewer URL (and
+    /// the login QR code) points at.
+    port: u16,
 }
 
 #[derive(Clone)]
@@ -3808,7 +3819,19 @@ impl RemoteSessionTracker {
 fn build_connection(dir: &Path) -> Option<RemoteConnection> {
     let token = read_token(&dir.join("token")).map(Arc::new)?;
     let client = build_client(&dir.join("cert.pem"))?;
-    Some(RemoteConnection { client, token })
+    let base_url = Arc::new(local_server_base_url(read_server_port(&dir.join("port"))));
+    Some(RemoteConnection {
+        client,
+        token,
+        base_url,
+    })
+}
+
+/// The loopback origin local `mj` sessions post to. Always `localhost` (never
+/// the `--hostname` name) so requests keep validating against the pinned
+/// self-signed certificate.
+fn local_server_base_url(port: u16) -> String {
+    format!("https://localhost:{port}")
 }
 
 fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
@@ -3846,6 +3869,7 @@ pub struct RuntimeServerOptions {
     pub roster: roster::Roster,
     pub hostname: Option<String>,
     pub tailscale: bool,
+    pub port: u16,
     pub history_days: u32,
     pub session_ttl_days: u32,
     pub logout_all: bool,
@@ -3863,6 +3887,7 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         roster: resolved,
         hostname,
         tailscale,
+        port,
         history_days,
         session_ttl_days,
         logout_all,
@@ -3889,8 +3914,8 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         None
     };
     let listen = match &tailscale_tls {
-        Some(ts) => tailscale_listen_config(&ts.tailscale.cert_domain),
-        None => server_listen_config(requested_hostname.as_deref())?,
+        Some(ts) => tailscale_listen_config(&ts.tailscale.cert_domain, port),
+        None => server_listen_config(requested_hostname.as_deref(), port)?,
     };
     let paths = ensure_server_paths(requested_hostname.as_deref())?;
     init_db(&paths.db_path)?;
@@ -3910,7 +3935,7 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     ));
     let session_ttl = session_ttl_from_days(session_ttl_days);
     let viewer_code = generate_viewer_code()?;
-    let viewer_url = remote_qr_login_url(&listen.viewer_host, &token);
+    let viewer_url = remote_qr_login_url(&listen.viewer_host, listen.port, &token);
 
     let app = build_router(RouterConfig {
         db_path: paths.db_path.clone(),
@@ -3952,13 +3977,19 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         }
     }
 
+    // Local `mj` sessions report to whatever port this server listens on, so
+    // publish it next to the certificate and token they already read. Only
+    // after the bind succeeds: a start that loses the port to another process
+    // must not redirect sessions away from the server that already owns it.
+    publish_server_port(&paths.port_path, listen.port)?;
+
     let history_ttl =
         (history_days > 0).then(|| Duration::from_secs(u64::from(history_days) * 24 * 60 * 60));
     spawn_queue_pruner(paths.db_path.clone(), history_ttl);
 
     println!(
-        "Remote control listening on https://{}:11921",
-        listen.viewer_host
+        "Remote control listening on https://{}:{}",
+        listen.viewer_host, listen.port
     );
     if let Some(ts) = &tailscale_tls {
         println!(
@@ -4336,12 +4367,12 @@ fn normalize_requested_hostname(hostname: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn remote_qr_login_url(host: &str, token: &str) -> String {
+fn remote_qr_login_url(host: &str, port: u16, token: &str) -> String {
     let encoded = url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
     // Target `/auth/login` (not `/?token=`) so the server validates the token,
     // sets the session cookie, and redirects to a clean `/`. This keeps the
     // long-lived token out of the browser history and out of later requests.
-    format!("https://{host}:11921/auth/login?token={encoded}")
+    format!("https://{host}:{port}/auth/login?token={encoded}")
 }
 
 fn should_render_login_qr(host: &str) -> bool {
@@ -4396,18 +4427,19 @@ fn mint_tailscale_cert(
 
 /// In tailscale mode the server must accept connections from tailnet peers
 /// (the phone) *and* local `mj` processes reporting sessions to
-/// `https://localhost:11921`, so it binds all interfaces exactly like
+/// `https://localhost:<port>`, so it binds all interfaces exactly like
 /// `--hostname` mode. Access is still gated by the bearer token/viewer code.
-fn tailscale_listen_config(cert_domain: &str) -> ServerListenConfig {
+fn tailscale_listen_config(cert_domain: &str, port: u16) -> ServerListenConfig {
     ServerListenConfig {
-        bind_addrs: vec![REMOTE_CONTROL_PUBLIC_ADDR.to_string()],
+        bind_addrs: vec![format!("{REMOTE_CONTROL_PUBLIC_HOST}:{port}")],
         viewer_host: cert_domain.to_string(),
+        port,
     }
 }
 
 /// Serves the tailscale (Let's Encrypt) certificate to clients whose SNI is
 /// the ts.net name, and the self-signed certificate to everyone else — so
-/// local `mj` processes hitting `https://localhost:11921` keep validating
+/// local `mj` processes hitting `https://localhost:<port>` keep validating
 /// against the pinned `cert.pem` unchanged.
 #[derive(Debug)]
 struct SniCertResolver {
@@ -6937,11 +6969,12 @@ fn remote_control_dir() -> PathBuf {
         .join("remote-control")
 }
 
-fn server_listen_config(hostname: Option<&str>) -> Result<ServerListenConfig> {
+fn server_listen_config(hostname: Option<&str>, port: u16) -> Result<ServerListenConfig> {
     match normalize_requested_hostname(hostname).as_deref() {
         Some(hostname) => Ok(ServerListenConfig {
-            bind_addrs: vec![REMOTE_CONTROL_PUBLIC_ADDR.to_string()],
+            bind_addrs: vec![format!("{REMOTE_CONTROL_PUBLIC_HOST}:{port}")],
             viewer_host: hostname.to_string(),
+            port,
         }),
         None => Ok(ServerListenConfig {
             // Many Linux systems resolve "localhost" to the IPv6 loopback
@@ -6950,10 +6983,11 @@ fn server_listen_config(hostname: Option<&str>) -> Result<ServerListenConfig> {
             // hop that some browsers handle inconsistently between page
             // navigation and same-origin fetch(), so bind both.
             bind_addrs: vec![
-                REMOTE_CONTROL_LOCAL_ADDR.to_string(),
-                REMOTE_CONTROL_LOCAL_ADDR_V6.to_string(),
+                format!("{REMOTE_CONTROL_LOCAL_HOST}:{port}"),
+                format!("{REMOTE_CONTROL_LOCAL_HOST_V6}:{port}"),
             ],
             viewer_host: "localhost".to_string(),
+            port,
         }),
     }
 }
@@ -7000,7 +7034,24 @@ fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerP
         key_path,
         token_path: root.join("token"),
         cookie_key_path: root.join("cookie-key"),
+        port_path: root.join("port"),
     })
+}
+
+/// Record the listening port for local `mj` processes. Rewritten on every
+/// start so a port left over from an earlier `--port` run cannot outlive it.
+fn publish_server_port(port_path: &Path, port: u16) -> Result<()> {
+    std::fs::write(port_path, port.to_string())
+        .with_context(|| format!("write {}", port_path.display()))
+}
+
+/// Port a local `mj` session should report to, falling back to the default
+/// when no server has published one (or the file is unreadable/garbage).
+fn read_server_port(port_path: &Path) -> u16 {
+    read_trimmed_file(port_path)
+        .and_then(|contents| contents.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(DEFAULT_REMOTE_CONTROL_PORT)
 }
 
 /// Load the shared bearer token, generating and persisting one on first run.
@@ -7105,10 +7156,10 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 //
 // The desktop app reuses the whole remote-control server (router, API, viewer
 // assets, session manager, cookie signing) but swaps the perimeter: an
-// OS-assigned loopback port instead of 11921, per-launch in-memory secrets
-// instead of persisted token/cookie-key files, and TLS material plus session
-// history kept in a dedicated per-user directory so a concurrent `mj server`
-// never contends with it.
+// OS-assigned loopback port instead of the `mj server` port, per-launch
+// in-memory secrets instead of persisted token/cookie-key files, and TLS
+// material plus session history kept in a dedicated per-user directory so a
+// concurrent `mj server` never contends with it.
 
 /// Server-side expiry baked into the desktop bootstrap cookie. Generous on
 /// purpose: the cookie only lives in the webview's in-memory store and the
@@ -7406,7 +7457,7 @@ impl DesktopAuth {
 }
 
 /// Bind the desktop listener on an OS-assigned IPv4 loopback port, so it never
-/// collides with `mj server` on 11921 or with another running `mj app`.
+/// collides with `mj server`'s port or with another running `mj app`.
 fn bind_desktop_listener() -> Result<(TcpListener, SocketAddr)> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("bind desktop app listener")?;
     listener
@@ -8767,7 +8818,7 @@ async fn flush_final_remote_requests<T, F, Fut>(
 async fn send_snapshot(connection: RemoteConnection, snapshot: SessionRecord) -> Result<()> {
     let request = connection
         .client
-        .post(REMOTE_CONTROL_UPSERT_URL)
+        .post(format!("{}/api/sessions", connection.base_url))
         .bearer_auth(connection.token.as_str())
         .json(&snapshot);
     request
@@ -8789,7 +8840,8 @@ async fn send_finish(
     connection
         .client
         .post(format!(
-            "{REMOTE_CONTROL_UPSERT_URL}/{encoded_session_id}/finish"
+            "{}/api/sessions/{encoded_session_id}/finish",
+            connection.base_url
         ))
         .bearer_auth(connection.token.as_str())
         .json(&request)
@@ -8807,7 +8859,7 @@ async fn claim_remote_prompt(
 ) -> Result<Option<QueuedPrompt>> {
     let request = connection
         .client
-        .post("https://localhost:11921/api/queued-prompts/claim")
+        .post(format!("{}/api/queued-prompts/claim", connection.base_url))
         .bearer_auth(connection.token.as_str())
         .json(&ClaimQueuedPromptRequest {
             session_id: session_id.to_string(),
@@ -8831,7 +8883,7 @@ async fn claim_remote_prompt_cancel(
 ) -> Result<Option<PromptCancelRequestRecord>> {
     let request = connection
         .client
-        .post("https://localhost:11921/api/prompt-cancels/claim")
+        .post(format!("{}/api/prompt-cancels/claim", connection.base_url))
         .bearer_auth(connection.token.as_str())
         .json(&ClaimPromptCancelRequest {
             session_id: session_id.to_string(),
@@ -8855,7 +8907,10 @@ async fn claim_remote_permission_decision(
 ) -> Result<Option<PermissionDecisionRecord>> {
     let request = connection
         .client
-        .post("https://localhost:11921/api/permission-decisions/claim")
+        .post(format!(
+            "{}/api/permission-decisions/claim",
+            connection.base_url
+        ))
         .bearer_auth(connection.token.as_str())
         .json(&ClaimPermissionDecisionRequest {
             session_id: session_id.to_string(),
@@ -8878,7 +8933,7 @@ async fn claim_remote_config_change(
 ) -> Result<Option<ConfigChangeRecord>> {
     let request = connection
         .client
-        .post("https://localhost:11921/api/config-changes/claim")
+        .post(format!("{}/api/config-changes/claim", connection.base_url))
         .bearer_auth(connection.token.as_str())
         .json(&ClaimConfigChangeRequest {
             session_id: session_id.to_string(),
@@ -15992,13 +16047,11 @@ mod tests {
     #[test]
     fn server_listen_config_defaults_to_localhost() {
         assert_eq!(
-            server_listen_config(None).expect("config"),
+            server_listen_config(None, DEFAULT_REMOTE_CONTROL_PORT).expect("config"),
             ServerListenConfig {
-                bind_addrs: vec![
-                    REMOTE_CONTROL_LOCAL_ADDR.to_string(),
-                    REMOTE_CONTROL_LOCAL_ADDR_V6.to_string(),
-                ],
+                bind_addrs: vec!["127.0.0.1:11921".to_string(), "[::1]:11921".to_string()],
                 viewer_host: "localhost".to_string(),
+                port: DEFAULT_REMOTE_CONTROL_PORT,
             }
         );
     }
@@ -16006,10 +16059,11 @@ mod tests {
     #[test]
     fn server_listen_config_uses_public_hostname() {
         assert_eq!(
-            server_listen_config(Some("example.com")).expect("config"),
+            server_listen_config(Some("example.com"), DEFAULT_REMOTE_CONTROL_PORT).expect("config"),
             ServerListenConfig {
-                bind_addrs: vec![REMOTE_CONTROL_PUBLIC_ADDR.to_string()],
+                bind_addrs: vec!["0.0.0.0:11921".to_string()],
                 viewer_host: "example.com".to_string(),
+                port: DEFAULT_REMOTE_CONTROL_PORT,
             }
         );
     }
@@ -16017,8 +16071,28 @@ mod tests {
     #[test]
     fn server_listen_config_treats_blank_hostname_as_localhost() {
         assert_eq!(
-            server_listen_config(Some("   ")).expect("config"),
-            server_listen_config(None).expect("config")
+            server_listen_config(Some("   "), DEFAULT_REMOTE_CONTROL_PORT).expect("config"),
+            server_listen_config(None, DEFAULT_REMOTE_CONTROL_PORT).expect("config")
+        );
+    }
+
+    #[test]
+    fn server_listen_config_binds_every_address_on_the_requested_port() {
+        assert_eq!(
+            server_listen_config(None, 9443).expect("config"),
+            ServerListenConfig {
+                bind_addrs: vec!["127.0.0.1:9443".to_string(), "[::1]:9443".to_string()],
+                viewer_host: "localhost".to_string(),
+                port: 9443,
+            }
+        );
+        assert_eq!(
+            server_listen_config(Some("example.com"), 9443).expect("config"),
+            ServerListenConfig {
+                bind_addrs: vec!["0.0.0.0:9443".to_string()],
+                viewer_host: "example.com".to_string(),
+                port: 9443,
+            }
         );
     }
 
@@ -16284,12 +16358,16 @@ mod tests {
     #[test]
     fn remote_qr_login_url_encodes_query_token() {
         assert_eq!(
-            remote_qr_login_url("localhost", "abc123"),
+            remote_qr_login_url("localhost", DEFAULT_REMOTE_CONTROL_PORT, "abc123"),
             "https://localhost:11921/auth/login?token=abc123"
         );
         assert_eq!(
-            remote_qr_login_url("example.com", "a+b/c=="),
+            remote_qr_login_url("example.com", DEFAULT_REMOTE_CONTROL_PORT, "a+b/c=="),
             "https://example.com:11921/auth/login?token=a%2Bb%2Fc%3D%3D"
+        );
+        assert_eq!(
+            remote_qr_login_url("example.com", 9443, "abc123"),
+            "https://example.com:9443/auth/login?token=abc123"
         );
     }
 
@@ -16326,12 +16404,56 @@ mod tests {
     }
 
     #[test]
+    fn published_server_port_round_trips_for_local_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = ensure_server_paths_in(dir.path(), None).expect("paths");
+        assert!(paths.port_path.ends_with("port"));
+
+        // No server has run yet, so local sessions assume the default port.
+        assert_eq!(read_server_port(&paths.port_path), 11921);
+
+        publish_server_port(&paths.port_path, 9443).expect("publish port");
+        assert_eq!(read_server_port(&paths.port_path), 9443);
+        assert_eq!(
+            local_server_base_url(read_server_port(&paths.port_path)),
+            "https://localhost:9443"
+        );
+
+        // A later default-port run overwrites the earlier `--port` choice.
+        publish_server_port(&paths.port_path, 11921).expect("publish port");
+        assert_eq!(read_server_port(&paths.port_path), 11921);
+    }
+
+    #[test]
+    fn unusable_port_files_fall_back_to_the_default_port() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let port_path = dir.path().join("port");
+        for contents in ["", "  ", "not-a-port", "0", "70000", "-1"] {
+            std::fs::write(&port_path, contents).expect("write port");
+            assert_eq!(
+                read_server_port(&port_path),
+                11921,
+                "port file {contents:?} should fall back to the default"
+            );
+        }
+    }
+
+    #[test]
     fn tailscale_listen_config_binds_all_interfaces_with_ts_domain() {
         assert_eq!(
-            tailscale_listen_config("mybox.tail1234.ts.net"),
+            tailscale_listen_config("mybox.tail1234.ts.net", DEFAULT_REMOTE_CONTROL_PORT),
             ServerListenConfig {
-                bind_addrs: vec![REMOTE_CONTROL_PUBLIC_ADDR.to_string()],
+                bind_addrs: vec!["0.0.0.0:11921".to_string()],
                 viewer_host: "mybox.tail1234.ts.net".to_string(),
+                port: DEFAULT_REMOTE_CONTROL_PORT,
+            }
+        );
+        assert_eq!(
+            tailscale_listen_config("mybox.tail1234.ts.net", 9443),
+            ServerListenConfig {
+                bind_addrs: vec!["0.0.0.0:9443".to_string()],
+                viewer_host: "mybox.tail1234.ts.net".to_string(),
+                port: 9443,
             }
         );
     }

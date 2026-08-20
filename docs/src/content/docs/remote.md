@@ -18,6 +18,18 @@ The default listens on loopback HTTPS (`127.0.0.1` and `::1`) on port 11921
 with a locally generated certificate. It is reachable only from the same
 machine and does not print a device-login QR code.
 
+## Choosing a port
+
+```bash
+mj server --port 9443
+```
+
+`--port` moves every listener, the printed viewer URL, and the login QR code to
+that port; it applies to `--hostname` and `--tailscale` mode as well. The
+running server records its port next to its certificate and token, so `mj`
+sessions on the same machine report to it without needing the flag themselves.
+Sessions started while no server is running fall back to 11921.
+
 The viewer uses a bearer login token or short viewer code, then stores a signed
 session cookie. Treat QR codes, login URLs, tokens, cookies, certificate keys,
 and downloaded transcripts as secrets.
@@ -125,7 +137,8 @@ Mjolnir's platform state/config directories.
 
 ## Before leaving loopback
 
-1. Decide who can reach port 11921 and enforce that with host or tailnet policy.
+1. Decide who can reach the server's port (11921 unless `--port` changed it) and
+   enforce that with host or tailnet policy.
 2. Protect the login token, cookie key, certificates, and transcript storage.
 3. Set finite history and session lifetimes.
 4. Confirm remote users understand the active workspace and permission mode.
