@@ -81,7 +81,7 @@ for an end-to-end exercise in a disposable repository.
   change-producing turn.
 - Run `mj --print` for scripts and machine-readable output.
 
-Continue with [Remote control](/remote/), [Voice dictation](/voice/), or
+Continue with [Mjolnir Web](/remote/), [Voice dictation](/voice/), or
 [Delegation and adversarial review](/delegation-review/).
 
 ## Pair Codex with Claude
