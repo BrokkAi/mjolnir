@@ -160,11 +160,10 @@ working directory. See [Data and trust boundaries](/data-boundaries/).
 Headless runs can override models without changing the saved file:
 
 ```bash
-mj --print \
-  --model provider/model-id \
+mj --model provider/model-id \
   --review-model provider/review-model-id \
   --subagent-model disabled \
-  "summarize this repository"
+  --print "summarize this repository"
 ```
 
 Overrides require explicit model IDs; `auto` is not accepted. Each accepts an

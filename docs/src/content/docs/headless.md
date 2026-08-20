@@ -21,9 +21,8 @@ mode applies to subagent permission requests as well as the primary's.
 
 ```bash
 mj --cwd /tmp/eval \
-  --print \
   --permission-mode manual \
-  "inspect the project without changing it"
+  --print "inspect the project without changing it"
 ```
 
 ## Output formats
@@ -68,7 +67,7 @@ last turn's answer, so it reflects the reports the primary received rather than
 the turn that merely launched the work.
 
 ```bash
-mj --print --output-format stream-json "summarize this repository" \
+mj --output-format stream-json --print "summarize this repository" \
   | jq -c 'select(.type == "result" or .type == "subagent")'
 ```
 

@@ -1,0 +1,302 @@
+---
+title: Evaluate Mjolnir in ten minutes
+description: Watch an isolated worktree session delegate a change, an independent review catch planted defects the test suite cannot see, and the same session move between terminal and browser.
+---
+
+import { Image } from 'astro:assets';
+import shotDelegating from '../../assets/evaluate/worktree-delegating.png';
+import shotSubagentDetail from '../../assets/evaluate/subagent-detail.png';
+import shotReportReview from '../../assets/evaluate/report-and-review.png';
+import shotDiscreteVerdict from '../../assets/evaluate/discrete-verdict.png';
+import shotReviewPicker from '../../assets/evaluate/review-picker.png';
+import shotPlantedVerdict from '../../assets/evaluate/planted-verdict.png';
+import shotServerTailscale from '../../assets/evaluate/server-tailscale.png';
+import shotWebSession from '../../assets/evaluate/web-session.png';
+import shotConfigTeam from '../../assets/evaluate/mjconfig-team.png';
+import shotConfigAppearance from '../../assets/evaluate/mjconfig-appearance.png';
+
+> Fixture, CLI surface, and screenshots produced against Mjolnir 1.11.3 on
+> 2026-08-20. Live provider output is model- and availability-dependent and is
+> not run in docs CI.
+
+This evaluation uses the coding team you select — Codex, Claude, or a mixed
+team — against a checked-in Python fixture in a disposable Git repository.
+The fixture ships with **two planted defects its own test suite cannot see**,
+so the point of the exercise is not "the agent edits a file": it is watching
+Mjolnir keep the work isolated in a linked worktree, delegate a bounded change
+to a background subagent, challenge the result with an independent review that
+reads code rather than test output, and hand the same session between your
+terminal and a browser.
+
+It does not prove large-repository performance, consistent quality across
+models, predictable provider cost, safe unattended shell execution, or
+remote-server security.
+
+## Before you start
+
+You need:
+
+- Mjolnir installed and `mj --version` working.
+- Python 3 for the fixture tests.
+- Git.
+- An authenticated, launchable Codex or Claude route. Provider use may cost
+  money.
+
+Run `mj` once and choose a team on onboarding's **Team** tab (or later on the
+same tab of `/mjconfig`): **Codex**, **Claude**, or a mixed team such as
+**Claude coder + Codex reviewer**. A team pins the primary seat to its coder
+and the review and subagent seats to its reviewer while keeping their models on
+Auto. The mixed teams are the interesting ones here: the provider that wrote
+the change is never the provider that reviews it.
+
+## Prepare the disposable fixture
+
+From a Mjolnir checkout:
+
+```bash
+EVAL_DIR="$(mktemp -d)/mjolnir-eval"
+cp -R docs/fixtures/ten-minute-evaluation "$EVAL_DIR"
+cd "$EVAL_DIR"
+git init
+git add .
+git -c user.name="Mjolnir Eval" \
+    -c user.email="mjolnir-eval@example.invalid" \
+    commit -m "Add weather status and Fahrenheit helpers"
+python3 -m unittest -v
+```
+
+If you are reading the published docs, clone the repository first:
+
+```bash
+git clone https://github.com/BrokkAi/mjolnir.git
+cd mjolnir
+```
+
+The baseline has three passing tests — and two planted defects the suite
+cannot detect:
+
+- `fahrenheit()` adds **31** instead of 32, so every conversion is one degree
+  off.
+- `test_fahrenheit_conversion` only asserts `assertTrue(...)`, so it passes no
+  matter what `fahrenheit()` returns.
+
+The green suite is the trap. Keep the secret: do not mention the defects in
+your prompts. Journey 2 exists to watch a reviewer find them anyway.
+
+## Journey 1: an isolated worktree and a delegated change
+
+Start Mjolnir in a linked Git worktree:
+
+```bash
+mj --worktree
+```
+
+On first use it offers to add `.mjolnir/worktrees/` to `.gitignore`; accept.
+The status line shows the generated worktree name (for example
+`.mjolnir/worktrees/bright-oak/`). Everything the session changes lands in
+that worktree — your checkout stays untouched.
+
+Send this prompt:
+
+```text
+Use the create_subagent tool from the mj-subagents MCP server to delegate
+this bounded change to a background subagent, then end your turn without
+waiting for it: update weather.py so status(0) returns "freezing", negative
+values return "below freezing", values below 20 return "cold", and all other
+values return "warm". The subagent should add focused tests for the new
+statuses, run python3 -m unittest -v, and report the result. Do not change
+anything else yourself.
+```
+
+Naming the `create_subagent` tool matters: coding agents ship their own
+in-process helpers, and a bare "launch a subagent" can route to those instead
+of Mjolnir's delegated subagent seat.
+
+Expected observations:
+
+1. The primary agent launches the subagent and ends its turn instead of
+   waiting — the prompt is immediately yours again.
+2. A stable `Subagents` workflow row appears with elapsed time and
+   running/done counts. The subagent runs on the subagent seat's provider —
+   on a mixed team, the coder's counterpart rather than the coder.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotDelegating.src} aria-label="Open the full-size screenshot: the delegation turn">
+    <Image src={shotDelegating} alt="Mjolnir TUI: the primary agent reports it launched the weather-status-update subagent and ended its turn; a live Subagents workflow row shows one subagent running; the status line shows the .mjolnir/worktrees/bright-oak/ path." />
+  </a>
+  <figcaption>The primary delegates and ends its turn. The <strong>Subagents</strong> row tracks the background work; the status line shows the session is confined to the <code>bright-oak</code> worktree.</figcaption>
+</figure>
+
+3. `/subagents` opens the retained nested-agent transcripts: the live
+   implementation subagent, and any review agents from earlier turns, each
+   with its adapter and model.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotSubagentDetail.src} aria-label="Open the full-size screenshot: the /subagents detail view">
+    <Image src={shotSubagentDetail} alt="The /subagents overlay: a list of retained nested agents with the implementation subagent running on codex-acp, and its live transcript showing the new status() implementation and the tests it added." />
+  </a>
+  <figcaption><code>/subagents</code> shows every nested agent the session has run — here the implementation subagent, live, on the other provider's model — with its full transcript.</figcaption>
+</figure>
+
+4. Any permission request the subagent raises is fully readable before you
+   decide and is labelled with the subagent's id.
+5. When the subagent finishes, its report is injected as a new user turn and
+   the primary responds to it — verify the claims, then summarize.
+6. Because that turn changed the workspace, a discrete review starts
+   automatically: an independent reviewer session (a Norse-named specialist
+   such as `vor`, on the reviewer seat's provider) challenges the diff, a
+   validator checks each finding, and the verdict is rendered before the turn
+   is released.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotReportReview.src} aria-label="Open the full-size screenshot: the subagent report and the review that follows">
+    <Image src={shotReportReview} alt="The subagent's pushed-back report summarized by the primary, a completed Subagents workflow row, and a live Review workflow row in its specialist-review phase." />
+  </a>
+  <figcaption>The pushed-back report becomes a user turn; the <strong>Subagents</strong> row completes and a <strong>Review</strong> row takes over as the independent reviewer starts.</figcaption>
+</figure>
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotDiscreteVerdict.src} aria-label="Open the full-size screenshot: the discrete review verdict">
+    <Image src={shotDiscreteVerdict} alt="A review verdict block: one validated P3 issue about generated __pycache__ bytecode included in the cumulative patch, with the completed Review workflow row offering F9 details." />
+  </a>
+  <figcaption>Advisory findings, validated before display. Even on a toy change the reviewer has an opinion — here a <code>P3</code> about test-run bytecode landing in the workspace. <strong>F9</strong> opens the session-wide issue ledger.</figcaption>
+</figure>
+
+7. Prove the isolation from another terminal, in the fixture directory:
+
+```bash
+git status --short && git worktree list
+```
+
+The main checkout reports no modified files; the change exists only in the
+linked worktree.
+
+The exact wording and tool sequence differ by model. If the primary ignores
+the explicit delegation or the change is wrong, record the selected models and
+adapter in your evaluation notes; that is a failed outcome, not a docs
+failure.
+
+## Journey 2: the review catches what the tests cannot
+
+Now for the planted defects. Run:
+
+```text
+/review
+```
+
+(Manual review is available once the session has at least one completed turn
+and the primary is idle.) A target picker opens:
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotReviewPicker.src} aria-label="Open the full-size screenshot: the /review target picker">
+    <Image src={shotReviewPicker} alt="The /review target picker with three options: most recent changes, all uncommitted changes, and HEAD — changes introduced by the current commit." />
+  </a>
+  <figcaption><code>/review</code> is not tied to what the agent just did: it can judge the retained turn, everything uncommitted, or the current commit.</figcaption>
+</figure>
+
+Choose **HEAD — changes introduced by the current commit**. That is the
+fixture commit — the one with the planted defects that `python3 -m unittest`
+happily reports green.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotPlantedVerdict.src} aria-label="Open the full-size screenshot: the review finding the planted defects">
+    <Image src={shotPlantedVerdict} alt="The review verdict on HEAD: findings identifying the off-by-one Fahrenheit conversion adding 31 instead of 32 and the vacuous assertTrue test that cannot fail." />
+  </a>
+  <figcaption>The payoff: a green test suite, and a review that reads the code anyway — the off-by-one conversion and the assertion that can never fail.</figcaption>
+</figure>
+
+Review is findings-only: nothing in the workspace is modified. The findings
+land in the same F9 ledger as discrete-review results. This journey is also
+the fallback story for teams that turn automatic review off — review on
+demand, against any target, whenever you want a second opinion.
+
+## Journey 3: leave the desk, keep the session
+
+Mjolnir Web publishes the same sessions to a browser. In a second terminal:
+
+```bash
+mj server
+```
+
+When the machine is on a tailnet with MagicDNS and HTTPS certificates
+enabled, the server detects it, serves a trusted certificate for the
+machine's `ts.net` name, and prints a QR code plus a six-digit viewer code —
+scan it from your phone anywhere on the tailnet. Without tailscale (or with
+`--no-tailscale-detect`) it binds `https://localhost:11921` with a
+self-signed certificate and explains why the QR is hidden. `--port` changes
+the port; local `mj` sessions follow it automatically.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotServerTailscale.src} aria-label="Open the full-size screenshot: mj server startup with tailscale detected">
+    <Image src={shotServerTailscale} alt="mj server startup output: a trusted certificate obtained for the machine's ts.net name, a login QR code, and a six-digit viewer code. QR, hostname, and code are redacted in this screenshot." />
+  </a>
+  <figcaption><code>mj server</code> with tailscale detected: trusted TLS for the machine's <code>ts.net</code> name and a QR sign-in for your phone. (Hostname, QR, and viewer code redacted here.)</figcaption>
+</figure>
+
+Sign in with the viewer code. The running TUI session from the journeys above
+is already in the session list — same transcript, same review results, same
+permission prompts. Ask for the fix from the browser:
+
+```text
+Fix the two defects the review found: fahrenheit() must add 32, and
+test_fahrenheit_conversion must assert the exact converted value. Run
+python3 -m unittest -v.
+```
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotWebSession.src} aria-label="Open the full-size screenshot: the same session in Mjolnir Web">
+    <Image src={shotWebSession} alt="Mjolnir Web showing the same session: the transcript with the review verdict, and the fix turn requested from the browser composer." />
+  </a>
+  <figcaption>The browser is the same session, not a copy — the review verdict from the terminal is right there, and the fix turn starts from the web composer.</figcaption>
+</figure>
+
+Back at the terminal, exit with **Ctrl-D** on an empty prompt. Mjolnir asks
+whether to keep or remove the worktree, then prints the way back:
+
+```text
+To resume: mj resume <session-id> --worktree <name>
+```
+
+Run the printed command. The session returns through its saved ACP adapter and
+model provenance — including the turn you ran from the browser. That is the
+whole loop: start at the desk, continue from a phone, come back to the
+terminal.
+
+## Configuration and appearance
+
+`/mjconfig` opens the same editor onboarding uses, live in the session:
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotConfigTeam.src} aria-label="Open the full-size screenshot: the /mjconfig Team tab">
+    <Image src={shotConfigTeam} alt="The /mjconfig editor on its Team tab: Team, Agent, Reviewer, Subagents, ACP Servers, and Appearance tabs, with the four team configurations listed and Claude coder + Codex reviewer selected." />
+  </a>
+  <figcaption>The <strong>Team</strong> tab pins who codes and who reviews; the other tabs override each seat, manage ACP servers, and tune the interface.</figcaption>
+</figure>
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotConfigAppearance.src} aria-label="Open the full-size screenshot: the /mjconfig Appearance tab">
+    <Image src={shotConfigAppearance} alt="The /mjconfig Appearance tab: theme, spinner, thought output, feature tips, keep awake, and the inline-versus-fullscreen interface choice, with live preview." />
+  </a>
+  <figcaption>Appearance changes preview immediately: theme, spinner, thought verbosity, and the inline vs. fullscreen interface for the next session.</figcaption>
+</figure>
+
+## Voice
+
+On supported desktop platforms, **Ctrl-R** starts locally transcribed
+dictation straight into the prompt — no audio leaves the machine. Try it on
+any of the journey prompts above; see [Voice dictation](/voice/) for platform
+support and model download details.
+
+## Interpret the result
+
+A successful run proves the selected team can, on one small repository: keep
+agent changes out of your checkout, delegate and supervise background work,
+catch defects that a green test suite hides, and move one session between
+terminal and browser. Record model IDs, elapsed time, token/cost telemetry,
+whether the delegation occurred, what the HEAD review caught, and any manual
+intervention. Then repeat with another team from `/mjconfig` — the mixed
+teams are the quickest way to watch one provider's reviewer challenge the
+other provider's change.
+
+Before broader use, read [Permissions and workspace scope](/permissions/) and
+[Data and trust boundaries](/data-boundaries/).

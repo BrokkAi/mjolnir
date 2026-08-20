@@ -1,6 +1,6 @@
 import unittest
 
-from weather import status
+from weather import fahrenheit, status
 
 
 class WeatherStatusTest(unittest.TestCase):
@@ -9,6 +9,9 @@ class WeatherStatusTest(unittest.TestCase):
 
     def test_cold_temperature(self):
         self.assertEqual(status(12), "cold")
+
+    def test_fahrenheit_conversion(self):
+        self.assertTrue(fahrenheit(0))
 
 
 if __name__ == "__main__":
