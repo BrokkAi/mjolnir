@@ -375,9 +375,8 @@ struct ServerArgs {
     /// Public hostname to embed in the login QR code and TLS certificate.
     #[arg(long)]
     hostname: Option<String>,
-    /// Deprecated no-op: tailscale is now detected automatically. Kept so
-    /// existing invocations keep working; pass --no-tailscale-detect to opt
-    /// out of detection.
+    /// Deprecated no-op: tailscale is detected automatically. Accepted so
+    /// existing invocations keep working.
     #[arg(long, hide = true)]
     tailscale: bool,
     /// Skip tailscale detection and bind loopback only, as if this machine
@@ -671,7 +670,6 @@ async fn main() -> Result<()> {
                 remote::run_server(remote::ServerOptions {
                     hostname: args.hostname,
                     tailscale_detect: !args.no_tailscale_detect,
-                    deprecated_tailscale_flag: args.tailscale,
                     history_days: args.history_days,
                     session_ttl_days: args.session_ttl_days,
                     logout_all: args.logout_all,

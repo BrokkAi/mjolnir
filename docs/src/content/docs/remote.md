@@ -90,26 +90,19 @@ pull request remain local TUI actions.
 mj server
 ```
 
-`mj server` detects Tailscale on its own. When the machine has a running
-tailnet node with MagicDNS and HTTPS Certificates enabled, Mjolnir binds to
+`mj server` uses Tailscale when it finds it. On a machine with a running
+tailnet node and MagicDNS plus HTTPS Certificates enabled, Mjolnir binds to
 network interfaces, asks `tailscale cert` for the machine's `ts.net`
-certificate, and renews it. Tailnet reachability and ACLs are part of the
-security boundary.
-
-Detection never blocks startup: a machine without Tailscale — or with
-Tailscale installed but unable to issue a certificate — prints a note and
-serves on localhost as before.
+certificate, and renews it. Otherwise it serves on localhost as before.
+Tailnet reachability and ACLs are part of the security boundary.
 
 ```bash
 mj server --no-tailscale-detect
 ```
 
-`--no-tailscale-detect` skips the probe and keeps the server loopback-only
-even on a tailnet machine. Passing `--hostname` also skips it, because that
-hostname is the one the login QR code must point at.
-
-The old `--tailscale` flag is deprecated. It still parses so existing
-invocations keep working, but it does nothing.
+`--no-tailscale-detect` keeps the server loopback-only on a tailnet machine.
+`--hostname` also skips detection, since that hostname is the one the login QR
+code must point at. The old `--tailscale` flag is a deprecated no-op.
 
 ## Public hostname
 

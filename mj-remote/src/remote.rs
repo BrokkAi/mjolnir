@@ -3849,10 +3849,6 @@ pub struct RuntimeServerOptions {
     /// startup and, when one is found, serve its `ts.net` certificate.
     /// Cleared by `--no-tailscale-detect`; ignored when `hostname` is set.
     pub tailscale_detect: bool,
-    /// True when the deprecated, no-op `--tailscale` flag was passed. Carried
-    /// this far so the notice prints after the screen is cleared, where the
-    /// user will actually see it.
-    pub deprecated_tailscale_flag: bool,
     pub history_days: u32,
     pub session_ttl_days: u32,
     pub logout_all: bool,
@@ -3870,7 +3866,6 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         roster: resolved,
         hostname,
         tailscale_detect,
-        deprecated_tailscale_flag,
         history_days,
         session_ttl_days,
         logout_all,
@@ -3890,12 +3885,6 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     // when this guard drops on any return path below.
     let _keep_awake = mj_core::keep_awake::KeepAwake::hold(cfg.keep_awake);
 
-    if deprecated_tailscale_flag {
-        println!(
-            "note: --tailscale is deprecated and does nothing; tailscale is detected \
-             automatically. Pass --no-tailscale-detect to opt out."
-        );
-    }
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
     let tailscale_tls = should_detect_tailscale(tailscale_detect, requested_hostname.as_deref())
         .then(|| detect_tailscale_tls(&remote_control_dir()))
@@ -4386,26 +4375,15 @@ fn should_detect_tailscale(detect: bool, requested_hostname: Option<&str>) -> bo
 }
 
 /// Serve this machine's tailscale certificate when it has a usable tailnet
-/// node, otherwise `None`.
-///
-/// Detection never aborts startup — a server that would have come up on
-/// localhost before must still come up now. A machine with no tailscale CLI
-/// is silent; a machine that has tailscale but cannot mint a certificate gets
-/// a warning, because there the user meant to have a working node and would
-/// otherwise be left wondering where the ts.net URL went.
+/// node. Anything short of that — no tailscale, daemon down, HTTPS
+/// Certificates off, `tailscale cert` failing — falls back to the loopback
+/// default instead of failing the server start.
 fn detect_tailscale_tls(root: &Path) -> Option<TailscaleTls> {
-    let tailscale = match crate::Tailscale::discover() {
-        Ok(Some(tailscale)) => tailscale,
-        Ok(None) => return None,
-        Err(error) => {
-            println!("note: tailscale detected but unusable ({error:#}); serving localhost only");
-            return None;
-        }
-    };
-    match prepare_tailscale_tls(root, tailscale) {
+    match crate::Tailscale::discover().and_then(|tailscale| prepare_tailscale_tls(root, tailscale))
+    {
         Ok(tls) => Some(tls),
         Err(error) => {
-            println!("note: tailscale certificate unavailable ({error:#}); serving localhost only");
+            debug!("no tailscale certificate for this server: {error:#}");
             None
         }
     }

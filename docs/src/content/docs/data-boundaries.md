@@ -53,9 +53,9 @@ cached launches. Ctrl-R dictation downloads roughly 0.7 GB on first use.
 
 ## Remote exposure
 
-`mj server` is loopback-only unless it can reach the network another way.
-`--hostname`, and automatic Tailscale detection, change the network boundary;
-`--no-tailscale-detect` keeps the server loopback-only on a tailnet machine. Remote state can include transcripts, queued prompts,
+`mj server` is loopback-only unless `--hostname` is set or it finds Tailscale,
+either of which changes the network boundary. `--no-tailscale-detect` keeps it
+loopback-only on a tailnet machine. Remote state can include transcripts, queued prompts,
 permission decisions, authentication tokens/cookies, certificates, and local
 session metadata. Read [Remote control](/remote/) before leaving loopback.
 
