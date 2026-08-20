@@ -841,6 +841,18 @@ fn spawn_subagent_runtime(
             )
         })
         .unwrap_or_default();
+    // Shared project knowledge flows into every worker lane; only primary
+    // sessions get the memory_save/memory_forget tools.
+    let memory = role_config
+        .as_ref()
+        .and_then(|role| mj_core::roster::AdapterKind::from_source_id(&role.adapter_source_id))
+        .and_then(|kind| {
+            let memory_config =
+                mj_core::config::Config::load(&mj_core::config::default_config_path())
+                    .map(|config| config.memory)
+                    .unwrap_or_default();
+            mj_core::memory::SessionMemory::inject_only(&memory_config, &context.cwd, Some(kind))
+        });
     let runtime_config = AcpRuntimeConfig {
         command: config.command.clone(),
         args: config.args.clone(),
@@ -858,7 +870,7 @@ fn spawn_subagent_runtime(
         saved_session_config,
         role_config,
         subagents: None,
-        memory: None,
+        memory,
         side_prompt_policy: false,
         termination: Some(cancel.clone()),
     };

@@ -2877,6 +2877,7 @@ async fn drive_session(
                             entries,
                             last_memory_entries.as_deref(),
                             &memory.project,
+                            memory.tools,
                         )
                     })
                 });

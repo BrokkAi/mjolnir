@@ -158,6 +158,8 @@ pub fn isolated_runtime_config(
         saved_session_config: std::collections::HashMap::new(),
         role_config: None,
         subagents: None,
+        // Side conversations fork the primary session, so the primary's
+        // injected memory already sits in the forked history.
         memory: None,
         side_prompt_policy: true,
         termination: None,

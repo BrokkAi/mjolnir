@@ -1885,6 +1885,18 @@ fn runtime_config(
     resume_session: Option<String>,
     termination: Option<CancellationToken>,
 ) -> acp::AcpRuntimeConfig {
+    // Combatants share the project knowledge every other lane sees, but
+    // injection-only: the save tools stay with primary sessions.
+    let memory = role_config
+        .as_ref()
+        .and_then(|role| mj_core::roster::AdapterKind::from_source_id(&role.adapter_source_id))
+        .and_then(|kind| {
+            let memory_config =
+                mj_core::config::Config::load(&mj_core::config::default_config_path())
+                    .map(|config| config.memory)
+                    .unwrap_or_default();
+            mj_core::memory::SessionMemory::inject_only(&memory_config, cwd, Some(kind))
+        });
     acp::AcpRuntimeConfig {
         command: launch.program.clone(),
         args: launch.args.clone(),
@@ -1902,7 +1914,7 @@ fn runtime_config(
         saved_session_config,
         role_config,
         subagents: None,
-        memory: None,
+        memory,
         side_prompt_policy: false,
         termination,
     }
