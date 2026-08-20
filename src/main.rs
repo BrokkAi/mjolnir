@@ -375,12 +375,16 @@ struct ServerArgs {
     /// Public hostname to embed in the login QR code and TLS certificate.
     #[arg(long)]
     hostname: Option<String>,
-    /// Serve a trusted HTTPS certificate for this machine's tailscale
-    /// (ts.net) name, minted via `tailscale cert`, so tailnet devices get no
-    /// browser certificate warning. Requires tailscale to be running with
-    /// MagicDNS and HTTPS Certificates enabled on the tailnet.
-    #[arg(long, conflicts_with = "hostname")]
+    /// Deprecated no-op: tailscale is detected automatically. Accepted so
+    /// existing invocations keep working.
+    #[arg(long, hide = true)]
     tailscale: bool,
+    /// Skip tailscale detection and bind loopback only, as if this machine
+    /// were not on a tailnet. Without it, `mj server` serves a trusted
+    /// certificate for this machine's ts.net name whenever tailscale is
+    /// running with MagicDNS and HTTPS Certificates enabled.
+    #[arg(long)]
+    no_tailscale_detect: bool,
     /// Days of disconnected-session history to keep. Sessions (and their
     /// queued prompts) whose last update is older are deleted by the
     /// periodic sweeper. Pass 0 to keep history forever.
@@ -665,7 +669,7 @@ async fn main() -> Result<()> {
                     validate_workspace_roots(&cwd, &top_level_additional_directories)?;
                 remote::run_server(remote::ServerOptions {
                     hostname: args.hostname,
-                    tailscale: args.tailscale,
+                    tailscale_detect: !args.no_tailscale_detect,
                     history_days: args.history_days,
                     session_ttl_days: args.session_ttl_days,
                     logout_all: args.logout_all,
@@ -4309,6 +4313,7 @@ mod tests {
             Some(Commands::Server(args)) => {
                 assert!(args.hostname.is_none());
                 assert!(!args.tailscale);
+                assert!(!args.no_tailscale_detect, "detection is on by default");
                 assert_eq!(args.session_ttl_days, 30);
                 assert!(!args.logout_all);
             }
@@ -4349,23 +4354,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_server_subcommand_with_tailscale() {
+    fn parse_server_still_accepts_the_deprecated_tailscale_flag() {
         let cli = try_parse_hermetic(&["mj", "server", "--tailscale"]).expect("parse");
         match cli.command {
             Some(Commands::Server(args)) => {
                 assert!(args.tailscale);
+                assert!(
+                    !args.no_tailscale_detect,
+                    "the deprecated flag must not disable detection"
+                );
                 assert!(args.hostname.is_none());
             }
             _ => panic!("expected Server subcommand"),
         }
     }
 
+    /// The flag is a no-op now, so pairing it with --hostname is no longer a
+    /// conflict: the hostname simply wins, as it would without the flag.
     #[test]
-    fn parse_server_rejects_tailscale_with_hostname() {
-        let error =
-            try_parse_hermetic(&["mj", "server", "--tailscale", "--hostname", "example.com"])
-                .expect_err("conflicting flags");
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    fn parse_server_accepts_the_deprecated_tailscale_flag_with_hostname() {
+        let cli = try_parse_hermetic(&["mj", "server", "--tailscale", "--hostname", "example.com"])
+            .expect("parse");
+        match cli.command {
+            Some(Commands::Server(args)) => {
+                assert!(args.tailscale);
+                assert_eq!(args.hostname.as_deref(), Some("example.com"));
+            }
+            _ => panic!("expected Server subcommand"),
+        }
+    }
+
+    #[test]
+    fn parse_server_subcommand_with_no_tailscale_detect() {
+        let cli = try_parse_hermetic(&["mj", "server", "--no-tailscale-detect"]).expect("parse");
+        match cli.command {
+            Some(Commands::Server(args)) => {
+                assert!(args.no_tailscale_detect);
+                assert!(!args.tailscale);
+            }
+            _ => panic!("expected Server subcommand"),
+        }
     }
 
     #[test]

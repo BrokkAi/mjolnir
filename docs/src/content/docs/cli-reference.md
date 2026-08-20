@@ -35,11 +35,11 @@ mj memory list
 mj memory add [--global] "one short fact"
 mj memory forget m7
 mj memory clear --yes
-mj server [--hostname HOST | --tailscale]
+mj server [--hostname HOST] [--no-tailscale-detect]
 ```
 
-See [Sessions, worktrees, and resume](/sessions-worktrees/) and [Remote
-control](/remote/) for behavioral boundaries.
+See [Sessions, worktrees, and resume](/sessions-worktrees/) and [Mjolnir
+Web](/remote/) for behavioral boundaries.
 
 ## Useful slash commands
 

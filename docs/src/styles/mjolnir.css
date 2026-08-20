@@ -302,3 +302,18 @@ html[data-has-hero] .sl-markdown-content > .home-section:first-child { margin-to
   .command-strip small { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .capability-grid a { transition: none; } }
+
+/* Documentation screenshots. Figures sit outside the prose measure so a
+   full-width UI capture stays legible; captions keep the mono label voice. */
+.sl-markdown-content .shot { margin: var(--space-8) 0; }
+.shot__zoom { display: block; text-decoration: none; }
+.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--mj-line-strong); background: var(--mj-surface-raised); }
+.shot__zoom:hover img, .shot__zoom:focus-visible img { border-color: var(--mj-violet); }
+.shot__zoom:focus-visible { outline: 2px solid var(--mj-violet); outline-offset: 3px; }
+.shot figcaption { margin-top: var(--space-3); color: var(--mj-muted); font-family: var(--mj-font-mono); font-size: var(--text-sm); line-height: var(--leading-body); }
+.shot figcaption code { color: var(--mj-gold); font-size: inherit; }
+.shot figcaption strong { color: var(--mj-copy); font-weight: var(--weight-bold); }
+.shot-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); align-items: start; }
+.sl-markdown-content .shot-row .shot { margin-block: var(--space-8) 0; }
+.shot--phone img { max-width: 20rem; margin-inline: auto; }
+@media (width < 50rem) { .shot-row { grid-template-columns: 1fr; } }

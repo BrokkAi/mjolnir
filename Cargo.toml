@@ -86,8 +86,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # servers exposed to ACP adapters through the stdio bridge. MIT-licensed.
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-# Parses the tailscale-issued certificate/key PEMs for the SNI resolver in
-# `mj server --tailscale`. Already in the tree via reqwest's rustls-tls.
+# Parses the tailscale-issued certificate/key PEMs for the SNI resolver
+# `mj server` installs when it detects a tailnet node. Already in the tree via
+# reqwest's rustls-tls.
 rustls-pemfile = "2"
 # JSON Schema derivation for MCP tool argument structs (used by rmcp's `#[tool]`
 # macro). Already in the tree via agent-client-protocol; pinned to the same 1.x.
