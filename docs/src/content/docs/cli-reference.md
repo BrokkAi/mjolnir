@@ -38,8 +38,8 @@ mj memory clear --yes
 mj server [--hostname HOST | --tailscale]
 ```
 
-See [Sessions, worktrees, and resume](/sessions-worktrees/) and [Remote
-control](/remote/) for behavioral boundaries.
+See [Sessions, worktrees, and resume](/sessions-worktrees/) and [Mjolnir
+Web](/remote/) for behavioral boundaries.
 
 ## Useful slash commands
 

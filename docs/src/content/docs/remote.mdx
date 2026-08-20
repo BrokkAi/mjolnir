@@ -1,0 +1,234 @@
+---
+title: Mjolnir Web
+description: One command publishes the coding session on your machine to a browser — read the diff, answer permission prompts, and start worktree sessions from your phone while the repository stays on the host.
+---
+
+import { Image } from 'astro:assets';
+import shotSession from '../../assets/remote/session-transcript-desktop.png';
+import shotLogin from '../../assets/remote/login.png';
+import shotMobilePermission from '../../assets/remote/mobile-permission.png';
+import shotMobileSession from '../../assets/remote/mobile-session.png';
+import shotNewSession from '../../assets/remote/new-session-worktree.png';
+import shotPermissionDiff from '../../assets/remote/permission-diff-desktop.png';
+
+One command turns the coding session on your machine into a browser you can
+drive from the next room — or, over Tailscale, from anywhere:
+
+```bash
+mj server
+```
+
+Mjolnir Web is the same session, not a summary of it. It runs with the resolved
+team, models, permissions, and subagent configuration the terminal client uses,
+and it renders what the TUI renders: streaming turns, file diffs, terminal
+output, permission prompts, per-seat token usage, and the independent review
+pass. The repository, the agent processes, and the transcripts stay on the host.
+The browser is a control surface for that session, not a copy of your code.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotSession.src} aria-label="Open the full-size screenshot of the full session view">
+    <Image src={shotSession} alt="Mjolnir Web on a desktop browser: session list on the left, a streaming transcript with a full file diff, terminal output, review row, and a message composer." />
+  </a>
+  <figcaption>A live session in the browser — diff, terminal output, per-seat token usage, and the review pass that already challenged the turn.</figcaption>
+</figure>
+
+## What you can do from a browser
+
+- **Answer permission prompts** with the diff or command in front of you — deny,
+  allow once, or always allow.
+- **Read the work as it happens**: streaming assistant turns, tool calls, file
+  diffs, and terminal output.
+- **Start new work**, including in a fresh Git worktree, without touching the
+  terminal.
+- **Pick up sessions from either side.** Sessions started in the terminal appear
+  in the browser; sessions started in the browser record their adapter and model
+  so `mj resume` reopens them on the host.
+- **Queue a prompt while the agent is busy** — it runs when the turn frees up.
+- **Attach an image** to a prompt, and run the agent's own slash commands: typing
+  `/` opens a palette of the commands the connected agent advertises.
+- **Install it as an app.** Mjolnir Web ships a web app manifest and service
+  worker, so a phone can add it to the home screen and open it standalone.
+
+## Start the server
+
+```bash
+mj server
+```
+
+The default listens on loopback HTTPS (`127.0.0.1` and `::1`) on port 11921 with
+a locally generated certificate. It is reachable only from the same machine, so
+it prints no device-login QR code — use `--tailscale` or `--hostname` for that.
+On start, `mj server` prints the URL to open, the six-digit viewer code, and the
+viewer session lifetime.
+
+Sign in with that viewer code or a bearer login token; the browser then stores a
+signed session cookie. Treat QR codes, login URLs, tokens, cookies, certificate
+keys, and downloaded transcripts as secrets.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotLogin.src} aria-label="Open the full-size screenshot of the sign-in screen">
+    <Image src={shotLogin} alt="The Mjolnir Web sign-in screen: a panel labelled REMOTE CONSOLE asking for the six-digit viewer code printed by mj server." />
+  </a>
+  <figcaption>Sign-in takes the six-digit code <code>mj server</code> prints, or the login URL behind the QR code when the server is reachable off the host.</figcaption>
+</figure>
+
+## From your phone
+
+The phone layout is the whole session, not a cut-down status page. Approve a
+write against the diff that produced it, watch the reviewer and subagents work,
+and send the next prompt. Add it to the home screen and it opens standalone,
+like any other app. A phone reaches the server once it is off loopback — see
+[Reach it from another device](#reach-it-from-another-device).
+
+<div class="shot-row">
+  <figure class="shot shot--phone">
+    <a class="shot__zoom" href={shotMobilePermission.src} aria-label="Open the full-size screenshot of the permission prompt on a phone">
+      <Image src={shotMobilePermission} alt="Mjolnir Web on a phone showing a code diff above a PERMISSION NEEDED card for editing fizzbuzz.py, with Deny, Allow once, and Always allow buttons." />
+    </a>
+    <figcaption>A permission prompt on a phone, with the diff above it and the model, effort, and per-seat token line in the header.</figcaption>
+  </figure>
+  <figure class="shot shot--phone">
+    <a class="shot__zoom" href={shotMobileSession.src} aria-label="Open the full-size screenshot of the running session on a phone">
+      <Image src={shotMobileSession} alt="Mjolnir Web on a phone showing a streaming agent turn, a subagent row for reviewer #2, and two review rows below the composer." />
+    </a>
+    <figcaption>The same session working: a streaming turn, a running subagent, and both review passes tracked under the composer.</figcaption>
+  </figure>
+</div>
+
+## Start new work from anywhere
+
+The new-session dialog is one screen: current folder, a folder search, a **New
+worktree** checkbox, and **Start session**.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotNewSession.src} aria-label="Open the full-size screenshot of the new-session dialog">
+    <Image src={shotNewSession} alt="The NEW SESSION dialog: current folder, a project chip, a folder search box, a checked New worktree option, and a Start session button." />
+  </a>
+  <figcaption>Pick a folder, tick <strong>New worktree</strong>, start. The session runs on the host, in a linked worktree, exactly as <code>mj --worktree</code> would.</figcaption>
+</figure>
+
+The folder picker browses the workspace roots configured on the server. It also
+shows up to six working directories from the most recently used retained
+sessions and can search for nested folders across those roots. Recent and search
+results are canonicalized against the current roots before they are shown, so
+changing the server's workspace configuration does not expose old paths. Broad
+searches are capped; refine the query when the picker reports that only the
+first matches are shown.
+
+## Permissions with the change in view
+
+Every permission request the session raises reaches the browser with the diff or
+command that prompted it, so an approval from a phone is still an informed one.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotPermissionDiff.src} aria-label="Open the full-size screenshot of the permission prompt with its diff">
+    <Image src={shotPermissionDiff} alt="Mjolnir Web on a desktop browser: a full diff of fizzbuzz.py above a PERMISSION NEEDED card for writing the file, with Deny, Allow once, and Always allow buttons." />
+  </a>
+  <figcaption>A write request, the complete diff it would apply, and the three answers — from the browser, on the session running on your machine.</figcaption>
+</figure>
+
+Requests raised by a subagent carry its id, so a remote user answers the right
+nested request while several run at once. MCP approvals for
+`mcp__mj_subagents__create_subagent` and `mcp__mj_subagents__subagent_cancel`
+are recognized as Mjolnir's own tools rather than third-party ones.
+
+## Subagents in the browser
+
+Mjolnir Web keeps an actor-level subagent list: one row per background subagent,
+running rows first in spawn order, each showing its id, label, latest activity,
+and elapsed time, and finished rows marked `✔`, `✘`, or `⊘`. This is more
+granular than the terminal's aggregate workflow progress rows.
+
+## Side conversations
+
+When the connected agent supports ephemeral side sessions, the web command
+palette exposes `/side` with an optional question. The same transcript stays open
+in a visible side mode, but side prompts, replies, and tools are labelled with
+the `Side` actor so they cannot be mistaken for main-session history. Use the
+**Exit side** action (or send `exit`) to delete the temporary session and return
+the composer to the main conversation.
+
+## Status line
+
+Under the chat header the browser mirrors the terminal status line: primary
+model and its ACP adapter, reasoning effort, per-seat token totals
+(primary/review/subagents), context occupancy when the agent reports it,
+provider subscription quota windows (Codex/Claude), and a link to the current
+branch's open pull request. The pull-request badge comes from a `git`/`gh` probe
+on the session host and refreshes about twice a minute.
+
+Cost is deliberately not shown here. Only some ACP adapters report one, and seats
+bind adapters independently, so a single session-wide figure would silently cover
+just the seats that happen to report. `/agents` in the terminal breaks cost down
+per seat and per model, where the unpriced seats are visible.
+
+## Archiving sessions
+
+The browser can archive a server-owned session to move it out of the active list
+and load or unarchive it later. A live TUI session cannot be archived; exit it in
+the terminal first. Archiving changes where the session is listed, not its
+retained transcript data.
+
+## Ragnarok, read-only
+
+`/ragnarok <task>` is Mjolnir's model-vs-model arena: several champion models
+implement the same task in parallel worktrees, each adversarially reviews a
+rival's implementation, and a router agent judges the results and crowns a
+winner. While a local `/ragnarok` arena is active, the browser shows its task and
+phase, each fighter's model source, status, and vigor, plus the final verdict and
+adoption guidance when available. This view is read-only: summoning the arena,
+approving `UNLEASH`, choosing between finalists, and publishing a draft pull
+request remain local TUI actions.
+
+## Reach it from another device
+
+### Tailscale
+
+```bash
+mj server --tailscale
+```
+
+This requires Tailscale, MagicDNS, and HTTPS Certificates enabled on the tailnet.
+Mjolnir binds to network interfaces, asks `tailscale cert` for the machine's
+`ts.net` certificate, and renews it. Tailnet reachability and ACLs are part of
+the security boundary.
+
+### Public hostname
+
+```bash
+mj server --hostname mj.example.com
+```
+
+This binds to network interfaces and generates a self-signed certificate for the
+supplied hostname. It does not provision DNS, a trusted public certificate, a
+reverse proxy, firewall rules, or internet authentication. Do not expose this
+mode directly to an untrusted network without designing those layers.
+
+## Retention and sign-out
+
+```bash
+mj server \
+  --history-days 7 \
+  --session-ttl-days 2
+```
+
+- `--history-days 0` keeps disconnected session history indefinitely.
+- `--session-ttl-days 0` makes viewer sessions ephemeral.
+- `--logout-all` rotates the cookie signing key and signs every viewer out. The
+  underlying QR/bearer login token remains available for reauthentication.
+
+Remote state includes local SQLite session/transcript data, queued prompts,
+permission decisions, authentication material, and certificates under Mjolnir's
+platform state/config directories.
+
+## Before leaving loopback
+
+1. Decide who can reach port 11921 and enforce that with host or tailnet policy.
+2. Protect the login token, cookie key, certificates, and transcript storage.
+3. Set finite history and session lifetimes.
+4. Confirm remote users understand the active workspace and permission mode.
+5. Test `--logout-all` and recovery before relying on remote access.
+6. Keep the host patched; the server can drive provider agents and answer nested permissions.
+
+See [Data and trust boundaries](/data-boundaries/) and [Storage and network
+activity](/storage-network/) for the complete surface.

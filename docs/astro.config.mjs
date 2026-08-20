@@ -87,7 +87,7 @@ export default defineConfig({
         {
           label: 'Workflows',
           items: [
-            { label: 'Remote control', slug: 'remote' },
+            { label: 'Mjolnir Web (remote control)', slug: 'remote' },
             { label: 'Voice dictation', slug: 'voice' },
             { label: 'Subagents', slug: 'subagents' },
             { label: 'Delegation and adversarial review', slug: 'delegation-review' },
