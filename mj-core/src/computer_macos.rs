@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use block2::RcBlock;
 use image::{GenericImageView as _, ImageFormat};
+use objc2::{ClassType as _, sel};
 use objc2_core_foundation::{CGPoint as ObjcCGPoint, CGRect as ObjcCGRect, CGSize as ObjcCGSize};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::NSError;
@@ -31,6 +32,7 @@ use crate::computer::{
 
 type CGDirectDisplayID = u32;
 type CGError = i32;
+type CGDisplayModeRef = *const c_void;
 type CGImageRef = *const c_void;
 type CFDataRef = *const c_void;
 type CFMutableDataRef = *mut c_void;
@@ -69,8 +71,9 @@ unsafe extern "C" {
         display_count: *mut u32,
     ) -> CGError;
     fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
-    fn CGDisplayPixelsWide(display: CGDirectDisplayID) -> usize;
-    fn CGDisplayPixelsHigh(display: CGDirectDisplayID) -> usize;
+    fn CGDisplayCopyDisplayMode(display: CGDirectDisplayID) -> CGDisplayModeRef;
+    fn CGDisplayModeGetPixelWidth(mode: CGDisplayModeRef) -> usize;
+    fn CGDisplayModeGetPixelHeight(mode: CGDisplayModeRef) -> usize;
     fn CGPreflightScreenCaptureAccess() -> bool;
 }
 
@@ -150,11 +153,13 @@ impl MacosComputerBackend {
 
         let png = screen_capture_kit_png(display_rect(&info), cancellation)?;
         check_cancelled(cancellation)?;
-        let full = image::load_from_memory_with_format(&png, ImageFormat::Png)
-            .map_err(|error| ComputerError::Backend(format!("decode CoreGraphics PNG: {error}")))?;
+        let full =
+            image::load_from_memory_with_format(&png, ImageFormat::Png).map_err(|error| {
+                ComputerError::Backend(format!("decode ScreenCaptureKit PNG: {error}"))
+            })?;
         if full.dimensions() != (info.pixel_size.width, info.pixel_size.height) {
             return Err(ComputerError::Backend(format!(
-                "CoreGraphics returned {}x{} pixels for display declared as {}x{}",
+                "ScreenCaptureKit returned {}x{} pixels for display declared as {}x{}",
                 full.width(),
                 full.height(),
                 info.pixel_size.width,
@@ -325,16 +330,15 @@ fn display_info(display: CGDirectDisplayID) -> Result<DisplayInfo, ComputerError
     }
     // SAFETY: `display` is an active id returned by CoreGraphics.
     let bounds = unsafe { CGDisplayBounds(display) };
-    // SAFETY: `display` is an active id returned by CoreGraphics.
-    let width = unsafe { CGDisplayPixelsWide(display) };
-    // SAFETY: `display` is an active id returned by CoreGraphics.
-    let height = unsafe { CGDisplayPixelsHigh(display) };
-    let pixel_size = PixelSize {
-        width: u32::try_from(width)
-            .map_err(|_| ComputerError::Backend("display width exceeds u32".to_string()))?,
-        height: u32::try_from(height)
-            .map_err(|_| ComputerError::Backend("display height exceeds u32".to_string()))?,
-    };
+    let pixel_size = display_mode_pixel_size(display)?;
+    display_info_from_geometry(display, bounds, pixel_size)
+}
+
+fn display_info_from_geometry(
+    display: CGDirectDisplayID,
+    bounds: CGRect,
+    pixel_size: PixelSize,
+) -> Result<DisplayInfo, ComputerError> {
     if bounds.size.width <= 0.0
         || bounds.size.height <= 0.0
         || !bounds.size.width.is_finite()
@@ -357,6 +361,28 @@ fn display_info(display: CGDirectDisplayID) -> Result<DisplayInfo, ComputerError
         scale_x,
         scale_y,
         point_size: (bounds.size.width, bounds.size.height),
+    })
+}
+
+fn display_mode_pixel_size(display: CGDirectDisplayID) -> Result<PixelSize, ComputerError> {
+    // SAFETY: `display` is an active id and CoreGraphics returns a retained
+    // display-mode object owned by this wrapper.
+    let mode = unsafe { CGDisplayCopyDisplayMode(display) };
+    if mode.is_null() {
+        return Err(ComputerError::Backend(
+            "CoreGraphics did not return a display mode".to_string(),
+        ));
+    }
+    let mode = CoreFoundationObject(mode);
+    // SAFETY: `mode` is the valid retained display-mode object above.
+    let width = unsafe { CGDisplayModeGetPixelWidth(mode.0) };
+    // SAFETY: `mode` is the valid retained display-mode object above.
+    let height = unsafe { CGDisplayModeGetPixelHeight(mode.0) };
+    Ok(PixelSize {
+        width: u32::try_from(width)
+            .map_err(|_| ComputerError::Backend("display width exceeds u32".to_string()))?,
+        height: u32::try_from(height)
+            .map_err(|_| ComputerError::Backend("display height exceeds u32".to_string()))?,
     })
 }
 
@@ -449,6 +475,11 @@ fn screen_capture_kit_png(
     rect: ObjcCGRect,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, ComputerError> {
+    if !SCScreenshotManager::class().responds_to(sel!(captureImageInRect:completionHandler:)) {
+        return Err(ComputerError::Backend(
+            "ScreenCaptureKit display capture requires macOS 15.2 or newer".to_string(),
+        ));
+    }
     let (tx, rx) = mpsc::sync_channel(1);
     let callback = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
         let result = if image.is_null() {
@@ -651,12 +682,24 @@ mod tests {
     }
 
     #[test]
-    fn main_display_geometry_is_available_without_screen_recording_permission() {
-        let info = display_info(main_display_id()).expect("read main display geometry");
-        assert!(info.pixel_size.width > 0);
-        assert!(info.pixel_size.height > 0);
-        assert!(info.scale_x.is_finite() && info.scale_x > 0.0);
-        assert!(info.scale_y.is_finite() && info.scale_y > 0.0);
+    fn main_display_uses_display_mode_pixel_dimensions_without_screen_recording_permission() {
+        let display = main_display_id();
+        let mode_pixels = display_mode_pixel_size(display).expect("read main display mode");
+        // SAFETY: the main display ID is valid for CoreGraphics geometry
+        // queries; unlike display capture, this does not require TCC consent.
+        let bounds = unsafe { CGDisplayBounds(display) };
+        let info = display_info_from_geometry(display, bounds, mode_pixels)
+            .expect("construct main display geometry");
+
+        assert_eq!(info.pixel_size, mode_pixels);
+        assert_eq!(
+            info.scale_x,
+            f64::from(mode_pixels.width) / info.point_size.0
+        );
+        assert_eq!(
+            info.scale_y,
+            f64::from(mode_pixels.height) / info.point_size.1
+        );
     }
 
     #[tokio::test]

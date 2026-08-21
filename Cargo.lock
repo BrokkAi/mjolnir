@@ -545,6 +545,7 @@ dependencies = [
  "iana-time-zone",
  "image",
  "libc",
+ "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
