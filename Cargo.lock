@@ -542,6 +542,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "iana-time-zone",
+ "image",
  "libc",
  "reqwest",
  "rmcp",

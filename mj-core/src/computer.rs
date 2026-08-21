@@ -463,6 +463,9 @@ pub enum BackendAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionState {
     Granted,
+    /// The OS did not grant the permission; CoreGraphics cannot distinguish a
+    /// first-run prompt from a prior denial without showing a system prompt.
+    NotGranted,
     Denied,
     NotDetermined,
     Unsupported,
@@ -519,6 +522,7 @@ pub enum ComputerError {
     InvalidDisplayScale,
     InvalidObservationExpiry,
     InvalidSourceRegion,
+    DisplayNotFound,
     ObservationExpired,
     DisplayChanged,
     ObservationNotFound,
@@ -544,6 +548,7 @@ impl fmt::Display for ComputerError {
             Self::InvalidDisplayScale => f.write_str("computer display scale is invalid"),
             Self::InvalidObservationExpiry => f.write_str("computer observation expiry is invalid"),
             Self::InvalidSourceRegion => f.write_str("computer source region is invalid"),
+            Self::DisplayNotFound => f.write_str("computer display was not found"),
             Self::ObservationExpired => f.write_str("computer observation has expired"),
             Self::DisplayChanged => f.write_str("computer display changed since observation"),
             Self::ObservationNotFound => f.write_str("computer observation was not found"),

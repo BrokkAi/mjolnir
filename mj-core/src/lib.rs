@@ -8,6 +8,8 @@ pub mod claude_token;
 pub mod claude_usage;
 pub mod codex_usage;
 pub mod computer;
+#[cfg(target_os = "macos")]
+pub mod computer_macos;
 pub mod config;
 pub mod deepswe;
 pub mod event;
