@@ -16,6 +16,10 @@ import shotServerTailscale from '../../assets/evaluate/server-tailscale.png';
 import shotWebSession from '../../assets/evaluate/web-session.png';
 import shotConfigTeam from '../../assets/evaluate/mjconfig-team.png';
 import shotConfigAppearance from '../../assets/evaluate/mjconfig-appearance.png';
+import shotOnboardingServers from '../../assets/evaluate/onboarding-acp-servers.png';
+import shotSigninOpenAi from '../../assets/evaluate/signin-openai.png';
+import shotSigninAnthropic from '../../assets/evaluate/signin-anthropic.png';
+import shotOnboardingTeam from '../../assets/evaluate/onboarding-team.png';
 
 > Fixture, CLI surface, and screenshots produced against Mjolnir 1.11.3 on
 > 2026-08-20. Live provider output is model- and availability-dependent and is
@@ -55,8 +59,16 @@ mj --version
 
 ### 2. Sign in to Codex, Claude, or both
 
-Run `mj` in any repository. First launch opens onboarding; its **ACP
-Servers** tab signs you in without leaving the terminal:
+Run `mj` in any repository. First launch opens onboarding; with no
+credentials yet it lands on the **ACP Servers** tab, which signs you in
+without leaving the terminal:
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotOnboardingServers.src} aria-label="Open the full-size screenshot: onboarding's ACP Servers tab on a fresh install">
+    <Image src={shotOnboardingServers} alt="First-launch onboarding titled Set up Mjolnir Teams, open on the ACP Servers tab: an Accounts list with OpenAI / ChatGPT and Anthropic / Claude sign-in rows, and Supported servers showing Codex and Claude Code as not ready because no credentials were found." />
+  </a>
+  <figcaption>A fresh install: both accounts offered for sign-in, both ACP servers <strong>not ready</strong> until credentials exist. Enter on an account starts its sign-in.</figcaption>
+</figure>
 
 - **Anthropic / Claude** — choose **Claude subscription** (Pro, Max, Team, or
   Enterprise) or **Anthropic Console** (API usage billing). Mjolnir launches
@@ -64,6 +76,21 @@ Servers** tab signs you in without leaving the terminal:
   onboarding after sign-in.
 - **OpenAI / ChatGPT** — choose **Browser** (`codex login`) or **Device
   code** (`codex login --device-auth`).
+
+<div class="shot-row">
+  <figure class="shot">
+    <a class="shot__zoom" href={shotSigninAnthropic.src} aria-label="Open the full-size screenshot: the Anthropic / Claude sign-in menu">
+      <Image src={shotSigninAnthropic} alt="The Anthropic / Claude sign-in menu with two choices: Claude subscription (Claude Pro, Max, Team, or Enterprise) and Anthropic Console (API usage billing)." />
+    </a>
+    <figcaption>Anthropic / Claude: subscription or Console billing.</figcaption>
+  </figure>
+  <figure class="shot">
+    <a class="shot__zoom" href={shotSigninOpenAi.src} aria-label="Open the full-size screenshot: the OpenAI / ChatGPT sign-in menu">
+      <Image src={shotSigninOpenAi} alt="The OpenAI / ChatGPT sign-in menu with two choices: Browser (codex login) and Device code (codex login --device-auth)." />
+    </a>
+    <figcaption>OpenAI / ChatGPT: browser or device-code login.</figcaption>
+  </figure>
+</div>
 
 You do not need global `@anthropic-ai/claude-code` or `@openai/codex`
 installations: each ACP route ships a compatible CLI, and Mjolnir detects the
@@ -85,6 +112,13 @@ configurations: **Codex**, **Claude**, **Codex coder + Claude reviewer**, and
 **Claude coder + Codex reviewer**. A team pins the primary seat to its coder
 and the review and subagent seats to its reviewer while keeping all three
 models on Auto.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotOnboardingTeam.src} aria-label="Open the full-size screenshot: onboarding's Team tab">
+    <Image src={shotOnboardingTeam} alt="Onboarding's Team tab listing the four available configurations — Codex, Claude, Codex coder + Claude reviewer, and Claude coder + Codex reviewer — each with a one-line description of who handles primary, subagents, and review." />
+  </a>
+  <figcaption>The <strong>Team</strong> tab: one choice sets the coder, the reviewer, and the subagent seat together.</figcaption>
+</figure>
 
 With both providers signed in, Mjolnir defaults to **Claude coder + Codex
 reviewer** so review lands on the model that did not write the code. With one
