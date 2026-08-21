@@ -471,6 +471,7 @@ fn start_server_agent_session(
                 .with_active_implementation_workers(active_implementation_workers.clone())
                 .with_max_parallel(app_config.subagents.max_parallel)
                 .with_debrief(app_config.subagents.debrief)
+                .with_permission_mode(app_config.subagents.permission)
                 .with_reports(subagent_reports.clone())
                 .with_run_registry(subagent_runs.clone())
                 .with_prewarm(subagent::RunContext {
@@ -553,6 +554,7 @@ fn start_server_agent_session(
                         agent_stderr: None,
                         snapshot_exclusions: snapshot_exclusions.clone(),
                         fs_max_text_bytes,
+                        permission: app_config.review.permission,
                         id_allocator: subagent_ids.clone(),
                     })
                 }),

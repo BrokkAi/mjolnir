@@ -313,15 +313,25 @@ impl MemoryConfig {
     }
 }
 
-/// Permission preset applied to an ACP runtime. Never persisted: interactive
-/// and remote sessions inherit the ACP harness policy, and headless sessions
-/// pass `--permission-mode` through directly.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Provider-native permission preset for a delegated or review session.
+///
+/// Headless runs also pass `--permission-mode` through directly, overriding
+/// these saved seat defaults for that invocation.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum PermissionPreset {
     Manual,
     #[default]
     Auto,
     Yolo,
+}
+
+impl PermissionPreset {
+    pub const ALL: [Self; 3] = [Self::Manual, Self::Auto, Self::Yolo];
+
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,6 +716,10 @@ pub struct ReviewConfig {
     /// `--review-model MODEL+high` override replaces it only for that run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Provider-native permission preset for review sessions. `auto` lets the
+    /// provider decide routine actions and surface risky ones.
+    #[serde(default, skip_serializing_if = "PermissionPreset::is_default")]
+    pub permission: PermissionPreset,
     /// Adapter-owned session defaults selected for future review sessions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
@@ -718,6 +732,7 @@ impl Default for ReviewConfig {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
+            permission: PermissionPreset::default(),
             session_defaults: BTreeMap::new(),
         }
     }
@@ -748,6 +763,10 @@ pub struct SubagentsConfig {
     /// `--subagent-model MODEL+high` override replaces it only for that run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Provider-native permission preset for delegated sessions. `auto` lets
+    /// the provider decide routine actions and surface risky ones.
+    #[serde(default, skip_serializing_if = "PermissionPreset::is_default")]
+    pub permission: PermissionPreset,
     /// Adapter-owned session defaults selected for future delegated sessions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
@@ -773,6 +792,7 @@ impl Default for SubagentsConfig {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
+            permission: PermissionPreset::default(),
             session_defaults: BTreeMap::new(),
             max_parallel: default_max_parallel(),
             auto_failover: true,
@@ -1435,6 +1455,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.loki.reasoning_effort,
+            permission: PermissionPreset::default(),
             session_defaults: BTreeMap::new(),
         },
         subagents: SubagentsConfig {
@@ -1442,6 +1463,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: old.eitri.reasoning_effort,
+            permission: PermissionPreset::default(),
             session_defaults: BTreeMap::new(),
             max_parallel: old.eitri.max_parallel_explores,
             auto_failover: old.council.auto_failover,
@@ -2394,6 +2416,36 @@ origin = "custom"
         assert!(!loaded.agent.discrete_review);
         assert_eq!(loaded.agent.review_tier, ReviewTier::Extended);
         assert!(!loaded.subagents.auto_failover);
+    }
+
+    #[test]
+    fn review_and_subagent_permissions_default_and_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        Config::default().save(&path).expect("save defaults");
+        let default_body = std::fs::read_to_string(&path).expect("read defaults");
+        assert!(!default_body.contains("permission"), "{default_body}");
+        let defaults = Config::load(&path).expect("load defaults");
+        assert_eq!(defaults.review.permission, PermissionPreset::Auto);
+        assert_eq!(defaults.subagents.permission, PermissionPreset::Auto);
+
+        let mut configured = Config::default();
+        configured.review.permission = PermissionPreset::Manual;
+        configured.subagents.permission = PermissionPreset::Yolo;
+        configured.save(&path).expect("save configured permissions");
+        let configured_body = std::fs::read_to_string(&path).expect("read configured");
+        assert!(
+            configured_body.contains("permission = \"manual\""),
+            "{configured_body}"
+        );
+        assert!(
+            configured_body.contains("permission = \"yolo\""),
+            "{configured_body}"
+        );
+        let loaded = Config::load(&path).expect("load configured permissions");
+        assert_eq!(loaded.review.permission, PermissionPreset::Manual);
+        assert_eq!(loaded.subagents.permission, PermissionPreset::Yolo);
     }
 
     #[test]

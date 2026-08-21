@@ -56,8 +56,11 @@ pub struct AdapterLaunch {
 pub fn configure_permissions(
     kind: AdapterKind,
     mode: PermissionPreset,
-    _env: &mut HashMap<String, String>,
+    env: &mut HashMap<String, String>,
 ) -> Option<RuntimePermissionConfig> {
+    if kind == AdapterKind::Codex {
+        configure_codex_approvals_reviewer(mode, env);
+    }
     let (config_id, value, manual_fallback) = match (kind, mode) {
         (AdapterKind::Codex, PermissionPreset::Manual) => ("mode", "read-only", None),
         (AdapterKind::Codex, PermissionPreset::Auto) => ("mode", "agent", Some("read-only")),
@@ -75,6 +78,40 @@ pub fn configure_permissions(
         manual_fallback: manual_fallback.map(str::to_string),
         mode,
     })
+}
+
+const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
+
+/// `codex-acp` passes this object to Codex's `thread/start` config. Codex
+/// keeps approval routing separate from its ACP `mode` option: `auto_review`
+/// is the native setting behind the CLI's “Approve for me” choice.
+fn configure_codex_approvals_reviewer(mode: PermissionPreset, env: &mut HashMap<String, String>) {
+    let mut config = match env.get(CODEX_CONFIG_ENV) {
+        Some(value) => {
+            match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(value) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(
+                        "not replacing invalid CODEX_CONFIG while applying Codex permissions: {error}"
+                    );
+                    return;
+                }
+            }
+        }
+        None => serde_json::Map::new(),
+    };
+    let reviewer = match mode {
+        PermissionPreset::Auto => "auto_review",
+        PermissionPreset::Manual | PermissionPreset::Yolo => "user",
+    };
+    config.insert(
+        "approvals_reviewer".to_string(),
+        serde_json::Value::String(reviewer.to_string()),
+    );
+    env.insert(
+        CODEX_CONFIG_ENV.to_string(),
+        serde_json::Value::Object(config).to_string(),
+    );
 }
 
 #[derive(Debug, Clone)]

@@ -38,9 +38,11 @@ discrete_review = true
 
 [review]
 model = "auto"
+permission = "auto"
 
 [subagents]
 model = "auto"
+permission = "auto"
 max_parallel = 6
 auto_failover = true
 
@@ -51,6 +53,12 @@ codex-acp = "enabled"
 
 `team` records the selected Team preset; the coder and reviewer ACP routes are
 derived from it on every launch and are never persisted themselves.
+
+The Reviewer and Subagents tabs each have a **Permissions** control. Its
+default, `auto`, delegates routine approval decisions to the selected provider:
+for Codex this is its native **Approve for me** setting, not a Mjolnir
+auto-answer rule. `manual` and `yolo` select the provider's restrictive and
+full-access presets.
 
 `[agent]` is the primary agent: the session that owns every user turn. It cannot
 be disabled. `[review]` configures the discrete-review model; review
@@ -71,10 +79,12 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `review.model` | Review supervisor model, or `auto` |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
+| `review.permission` | Provider-native permissions for review sessions: `manual`, `auto` (default), or `yolo` |
 | `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
+| `subagents.permission` | Provider-native permissions for delegated sessions: `manual`, `auto` (default), or `yolo` |
 | `subagents.session_defaults` | Per-ACP saved session-option defaults for newly created subagents |
 | `subagents.max_parallel` | Concurrent subagents, default 6, maximum 16 |
 | `subagents.auto_failover` | Move the default pool to the next roster route when the current ACP source's quota runs low; the model may stay the same |

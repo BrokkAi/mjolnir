@@ -128,6 +128,7 @@ pub struct Config {
     /// Id source installed on the controller when the MCP server starts, so
     /// discrete-review lanes can draw from the same sequence.
     pub id_allocator: SubagentIdAllocator,
+    permission_mode: Option<mj_core::config::PermissionPreset>,
     headless_permission_mode: Option<mj_core::config::PermissionPreset>,
     role_pool: Option<crate::quota::RolePool>,
     reports: Option<SubagentReportBus>,
@@ -207,6 +208,7 @@ impl Config {
             max_parallel: DEFAULT_MAX_PARALLEL,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
+            permission_mode: None,
             headless_permission_mode: None,
             role_pool,
             reports: None,
@@ -248,6 +250,14 @@ impl Config {
         mode: mj_core::config::PermissionPreset,
     ) -> Self {
         self.headless_permission_mode = Some(mode);
+        self
+    }
+
+    /// Apply the saved provider-native permission policy to interactive
+    /// subagent or review lanes. The headless command-line policy wins when
+    /// both are present.
+    pub fn with_permission_mode(mut self, mode: mj_core::config::PermissionPreset) -> Self {
+        self.permission_mode = Some(mode);
         self
     }
 
@@ -347,7 +357,9 @@ impl Config {
             .map(|role| {
                 format!(
                     "{}\0{}\0{:?}",
-                    role.adapter_source_id, role.model_id, self.headless_permission_mode
+                    role.adapter_source_id,
+                    role.model_id,
+                    self.headless_permission_mode.or(self.permission_mode)
                 )
             })
             .unwrap_or_else(|| self.display_label.clone())
@@ -814,7 +826,7 @@ fn spawn_subagent_runtime(
     let cancel = termination.unwrap_or_default();
     let mut env = config.env.clone();
     let mut role_config = config.role_config.clone();
-    if let Some(mode) = config.headless_permission_mode
+    if let Some(mode) = config.headless_permission_mode.or(config.permission_mode)
         && let Some(role) = role_config.as_mut()
         && let Some(kind) = mj_core::roster::AdapterKind::from_source_id(&role.adapter_source_id)
     {
@@ -3477,6 +3489,7 @@ mod tests {
             max_parallel: 2,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
+            permission_mode: None,
             headless_permission_mode: None,
             role_pool: None,
             reports: None,

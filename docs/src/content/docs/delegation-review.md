@@ -70,10 +70,12 @@ chooses the **review tier** — how much machinery one review may spend. The
 tier is read when a review dispatches, so a change applies to the next
 reviewed turn.
 
-The Reviewer tab also exposes the selected provider's session options. Select
-its native **Mode** (for example, `Auto`) to let Claude Code or Codex apply its
-own policy to provider-owned tools. Mjolnir-hosted ACP filesystem and terminal
-capabilities remain read-only for review sessions.
+The Reviewer tab has an independent **Permissions** setting. Its default,
+`Auto`, starts Codex with its native **Approve for me** policy and Claude Code
+with its native Auto policy; Mjolnir does not auto-answer approval requests.
+The selected provider's session options, including **Mode**, remain separately
+available. Mjolnir-hosted ACP filesystem and terminal capabilities stay
+read-only for review sessions.
 
 ### Quick tier (default)
 

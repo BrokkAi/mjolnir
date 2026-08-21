@@ -1610,6 +1610,7 @@ async fn run_app(
             session_boundary,
             roster.clone(),
             cfg.agent.clone(),
+            cfg.review.clone(),
             cfg.subagents.clone(),
             termination.clone(),
         )
@@ -2078,6 +2079,7 @@ async fn run_session(
     mut session_boundary: Option<String>,
     roster: roster::Roster,
     agent_config: config::AgentConfig,
+    review_config: config::ReviewConfig,
     subagents_config: config::SubagentsConfig,
     termination: CancellationToken,
 ) -> Result<RunSessionResult> {
@@ -2320,6 +2322,7 @@ async fn run_session(
                     .with_active_implementation_workers(active_implementation_workers.clone())
                     .with_max_parallel(subagents_config.max_parallel)
                     .with_debrief(subagents_config.debrief)
+                    .with_permission_mode(subagents_config.permission)
                     .with_reports(subagent_reports.clone())
                     .with_run_registry(subagent_runs.clone())
                     .with_prewarm(subagent::RunContext {
@@ -2418,6 +2421,7 @@ async fn run_session(
                         agent_stderr: runtime_options.agent_stderr.clone(),
                         snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
                         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+                        permission: review_config.permission,
                         id_allocator: subagent_ids.clone(),
                     })
                 },

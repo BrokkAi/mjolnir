@@ -55,6 +55,7 @@ use crate::{
 use mj_core::{
     acp::{PreparedAgentCommand, RuntimeAccessMode},
     agent_usage::Seat,
+    config::PermissionPreset,
     event::{InternalMessage, InternalMessageKind, SubagentOutcome, UiEvent},
     roster::ResolvedAgent,
 };
@@ -259,6 +260,8 @@ pub struct FanoutConfig {
     pub agent_stderr: Option<PathBuf>,
     pub snapshot_exclusions: Vec<PathBuf>,
     pub fs_max_text_bytes: u64,
+    /// Provider-native policy applied to reviewer and supervisor sessions.
+    pub permission: PermissionPreset,
     /// Shared with the subagent pool so a lane's status row cannot land on the
     /// same id as a running subagent's. Lanes are *not* pool members: they keep
     /// their own [`MAX_PARALLEL_LANES`] semaphore and never occupy a slot.
@@ -758,6 +761,7 @@ fn configure_review_pool(
         })
         .with_mcp_servers(Vec::new())
         .with_usage_seat(Seat::Review)
+        .with_permission_mode(fanout.permission)
         .with_retain_after_completion(retain)
         .with_debrief(false)
 }
@@ -2728,6 +2732,7 @@ mod tests {
             agent_stderr: None,
             snapshot_exclusions: Vec::new(),
             fs_max_text_bytes: 1_000_000,
+            permission: PermissionPreset::Auto,
             id_allocator: SubagentIdAllocator::default(),
         }
     }

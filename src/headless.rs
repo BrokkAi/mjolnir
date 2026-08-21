@@ -236,6 +236,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         agent_stderr: cfg.agent_stderr.clone(),
                         snapshot_exclusions: cfg.snapshot_exclusions.clone(),
                         fs_max_text_bytes: cfg.fs_max_text_bytes,
+                        permission: cfg.permission_mode.into(),
                         id_allocator: subagent_ids.clone(),
                     })
                 }),
