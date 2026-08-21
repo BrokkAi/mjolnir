@@ -8734,12 +8734,38 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
         if !title.is_empty() {
-            // The title owns every cell after the version label.
-            let separator_width = 3;
+            // Label the title as session context. The header can sit directly
+            // below live review findings, where unlabelled prose reads like a
+            // continuation of the final issue. On narrow terminals preserve
+            // usable title space before adding chrome.
+            let full_session_prefix = "   │ Session: ";
+            let compact_session_prefix = "   │ ";
+            let title_separator = "   ";
+            const MIN_READABLE_TITLE_WIDTH: usize = 12;
             let used: usize = spans.iter().map(|span| span.content.width()).sum();
-            let max_width = width.saturating_sub(used).saturating_sub(separator_width);
+            let available = width.saturating_sub(used);
+            let session_prefix =
+                if available >= full_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
+                    full_session_prefix
+                } else if available >= compact_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
+                    compact_session_prefix
+                } else {
+                    title_separator
+                };
+            let max_width = width
+                .saturating_sub(used)
+                .saturating_sub(session_prefix.width());
             if max_width > 0 {
-                spans.push(Span::raw("   "));
+                if session_prefix == title_separator {
+                    spans.push(Span::raw(session_prefix));
+                } else {
+                    spans.push(Span::styled(
+                        session_prefix,
+                        Style::default()
+                            .ink(state.theme.muted)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
                 spans.push(Span::styled(
                     compact_middle_display(title, max_width),
                     Style::default()
@@ -16397,6 +16423,55 @@ mod tests {
     }
 
     #[test]
+    fn session_header_is_explicit_below_a_live_review_board() {
+        let mut state = AppState::new();
+        state.session_title = Some("Correct review permissions".to_string());
+        let workflow_id = WorkflowId::review(4);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec!["review setting is ignored".to_string()],
+            },
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut TranscriptScrollState::default(),
+                    UiMode::FullscreenTui,
+                )
+            })
+            .expect("draw");
+        let lines = buffer_lines(terminal.backend().buffer());
+        let issue_row = lines
+            .iter()
+            .rposition(|line| line.contains("#1 review setting is ignored"))
+            .expect("live review issue row");
+        let header_row = lines
+            .iter()
+            .position(|line| line.contains("│ Session: Correct review permissions"))
+            .expect("labelled session header");
+
+        assert_eq!(
+            header_row,
+            issue_row + 1,
+            "the directly adjacent session line must name itself:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
     fn stream_reveal_hides_partial_source_and_paces_complete_lines() {
         let mut state = AppState::new();
         state.set_connection_state(ConnectionState::Streaming);
@@ -17249,7 +17324,7 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_only_version_and_session_title() {
+    fn header_labels_the_session_title() {
         let mut state = AppState::new();
         state.agent_label = "uvx".to_string();
         state.project_label = "~/code/mjolnir/.mjolnir/worktrees/bold-willow".to_string();
@@ -17274,8 +17349,56 @@ mod tests {
         assert!(!rendered.contains("session"), "rendered:\n{rendered}");
         assert!(!rendered.contains("48c95a78"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("Review payment flow"),
+            rendered.contains("│ Session: Review payment flow"),
             "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn header_preserves_title_space_on_narrow_terminals() {
+        let mut state = AppState::new();
+        state.session_title = Some("narrow title".to_string());
+        let version_width = mjolnir_version_label().width();
+        let narrow_width = (version_width + 4) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(narrow_width, 1)).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!("{}   n", mjolnir_version_label())),
+            "narrow headers must retain title text instead of spending it on session chrome:\n{rendered}"
+        );
+
+        let compact_width = (version_width + "   │ ".width() + "narrow title".width()) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(compact_width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!("{}   │ narrow title", mjolnir_version_label())),
+            "mid-width headers must keep a session divider and a readable title:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Session:"),
+            "the full label belongs to wider headers:\n{rendered}"
+        );
+
+        let full_width = (version_width + "   │ Session: ".width() + "narrow title".width()) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(full_width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!(
+                "{}   │ Session: narrow title",
+                mjolnir_version_label()
+            )),
+            "standard-width headers must identify the session:\n{rendered}"
         );
     }
 
