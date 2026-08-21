@@ -5997,6 +5997,22 @@ async fn drive_prompt_turn(
         tokio::select! {
             prompt_result = &mut prompt => {
                 let turn_failed = prompt_result.is_err();
+                // Resolve steering before announcing the turn's end: the
+                // orchestrator snapshots the user-message history into the
+                // discrete-review job while handling `PromptDone`, so a steer
+                // whose delivery confirmation arrived after that emission
+                // would be invisible to review. The flush bounds its wait, so
+                // an unresponsive agent cannot hold the completion back.
+                flush_pending_steers(
+                    conn,
+                    session_id,
+                    session_state,
+                    std::mem::take(&mut steers),
+                    ui_tx,
+                    deferred_prompts,
+                    turn_failed,
+                )
+                .await;
                 match prompt_result {
                     Ok(resp) => {
                         turn_diff_tracker
@@ -6021,16 +6037,6 @@ async fn drive_prompt_turn(
                         let _ = ui_tx.send(UiEvent::PromptFailed { message });
                     }
                 }
-                flush_pending_steers(
-                    conn,
-                    session_id,
-                    session_state,
-                    std::mem::take(&mut steers),
-                    ui_tx,
-                    deferred_prompts,
-                    turn_failed,
-                )
-                .await;
                 return Ok(true);
             }
             steer_outcome = async {
@@ -9060,25 +9066,43 @@ mod tests {
             .await;
     }
 
-    /// Mock agent for `_session/steering`. When `advertise` is set the
-    /// initialize response carries `_meta.steering.supported`. The first
+    /// How [`run_mock_agent_with_steering`] behaves. When `advertise` is set
+    /// the initialize response carries `_meta.steering.supported`. The first
     /// prompt stays in flight until a steering request arrives (or the
     /// fallback delay passes) and then completes — or errors, when
     /// `fail_first_prompt` is set; later prompts resolve immediately.
-    /// Steering requests are logged and answered with `steer_outcome`.
-    async fn run_mock_agent_with_steering(
-        stream: tokio::io::DuplexStream,
+    /// Steering requests are logged and answered with `steer_outcome`,
+    /// deferred past the first prompt's response when
+    /// `answer_steer_after_prompt` is set.
+    #[derive(Clone, Copy)]
+    struct SteeringMockBehavior {
         advertise: bool,
         steer_outcome: &'static str,
         fail_first_prompt: bool,
+        answer_steer_after_prompt: bool,
+    }
+
+    async fn run_mock_agent_with_steering(
+        stream: tokio::io::DuplexStream,
+        behavior: SteeringMockBehavior,
         prompts: Arc<std::sync::Mutex<Vec<String>>>,
         steers: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
         cancels: Arc<AtomicU64>,
     ) {
+        let SteeringMockBehavior {
+            advertise,
+            steer_outcome,
+            fail_first_prompt,
+            answer_steer_after_prompt,
+        } = behavior;
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
         let release = Arc::new(tokio::sync::Notify::new());
         let prompt_release = Arc::clone(&release);
+        // Notified once the first prompt's response has been sent, so the
+        // steering answer can be deliberately held until the turn resolved.
+        let prompt_responded = Arc::new(tokio::sync::Notify::new());
+        let prompt_responded_signal = Arc::clone(&prompt_responded);
         let cancel_prompts = Arc::clone(&prompts);
         let _ = AgentRole
             .builder()
@@ -9132,6 +9156,7 @@ mod tests {
                     ));
                     if first {
                         let release = Arc::clone(&prompt_release);
+                        let responded = Arc::clone(&prompt_responded_signal);
                         tokio::spawn(async move {
                             let _ =
                                 tokio::time::timeout(Duration::from_secs(2), release.notified())
@@ -9143,6 +9168,7 @@ mod tests {
                             } else {
                                 responder.respond(PromptResponse::new(StopReason::EndTurn))
                             };
+                            responded.notify_one();
                         });
                         Ok(())
                     } else {
@@ -9156,7 +9182,22 @@ mod tests {
                     assert_eq!(req.method, SESSION_STEERING_METHOD);
                     steers.lock().expect("steer log").push(req.params.clone());
                     release.notify_one();
-                    responder.respond(serde_json::json!({ "outcome": steer_outcome }))
+                    if answer_steer_after_prompt {
+                        // Hold the steering answer until the prompt response
+                        // went out, so the runtime resolves the turn while
+                        // this steer's confirmation is still in flight.
+                        let responded = Arc::clone(&prompt_responded);
+                        tokio::spawn(async move {
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(2), responded.notified())
+                                    .await;
+                            let _ =
+                                responder.respond(serde_json::json!({ "outcome": steer_outcome }));
+                        });
+                        Ok(())
+                    } else {
+                        responder.respond(serde_json::json!({ "outcome": steer_outcome }))
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -10791,14 +10832,16 @@ mod tests {
     /// confirm the advertised capability on `Connected`, and start one turn
     /// that stays in flight until the mock's steer/fallback releases it.
     async fn steering_rig(advertise: bool, steer_outcome: &'static str) -> SteeringRig {
-        steering_rig_with(advertise, steer_outcome, false).await
+        steering_rig_with(SteeringMockBehavior {
+            advertise,
+            steer_outcome,
+            fail_first_prompt: false,
+            answer_steer_after_prompt: false,
+        })
+        .await
     }
 
-    async fn steering_rig_with(
-        advertise: bool,
-        steer_outcome: &'static str,
-        fail_first_prompt: bool,
-    ) -> SteeringRig {
+    async fn steering_rig_with(behavior: SteeringMockBehavior) -> SteeringRig {
         let temp = tempfile::tempdir().expect("tempdir");
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
@@ -10809,9 +10852,7 @@ mod tests {
         let cancels = Arc::new(AtomicU64::new(0));
         let agent_task = tokio::spawn(run_mock_agent_with_steering(
             agent_side,
-            advertise,
-            steer_outcome,
-            fail_first_prompt,
+            behavior,
             Arc::clone(&prompts),
             Arc::clone(&steers),
             Arc::clone(&cancels),
@@ -10847,7 +10888,7 @@ mod tests {
         }
         assert_eq!(
             advertised,
-            Some(advertise),
+            Some(behavior.advertise),
             "Connected must mirror the agent's steering advertisement"
         );
 
@@ -10957,6 +10998,59 @@ mod tests {
             ["start work"]
         );
         assert_eq!(rig.cancels.load(Ordering::SeqCst), 0);
+
+        rig.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn steer_confirmed_at_turn_end_is_recorded_before_prompt_done() {
+        // The agent holds the steering answer until after the prompt
+        // response, so the turn resolves while the steer's confirmation is
+        // still in flight. The runtime must still deliver
+        // `SteeredPromptDelivered` ahead of `PromptDone`: the orchestrator
+        // snapshots the user-message history for discrete review when it
+        // processes the completion, and a steer recorded after that snapshot
+        // would leave review auditing a superseded request.
+        let mut rig = steering_rig_with(SteeringMockBehavior {
+            advertise: true,
+            steer_outcome: "injected",
+            fail_first_prompt: false,
+            answer_steer_after_prompt: true,
+        })
+        .await;
+
+        let mut delivered_at = None;
+        let mut prompt_done_at = None;
+        let mut position = 0_usize;
+        while prompt_done_at.is_none() {
+            let ev = tokio::time::timeout(EVENT_DEADLINE, rig.ui_rx.recv())
+                .await
+                .expect("timed out waiting for PromptDone")
+                .expect("ui event channel closed");
+            match ev {
+                UiEvent::SteeredPromptDelivered { text } => {
+                    assert_eq!(text, "steer me");
+                    delivered_at = Some(position);
+                }
+                UiEvent::PromptDone { .. } => prompt_done_at = Some(position),
+                UiEvent::PromptFailed { message } => panic!("prompt failed: {message}"),
+                UiEvent::Fatal(message) => panic!("fatal: {message}"),
+                _ => {}
+            }
+            position += 1;
+        }
+        assert!(
+            delivered_at.expect("the steer delivery must be announced")
+                < prompt_done_at.expect("the turn must complete"),
+            "the delivered steer must precede PromptDone"
+        );
+
+        // Delivery confirmed: the message joined the turn and is not resent.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            rig.prompts.lock().expect("prompt log").as_slice(),
+            ["start work"]
+        );
 
         rig.shutdown().await;
     }
@@ -11103,7 +11197,13 @@ mod tests {
         // is not auto-resubmitted into before the user sees the failure. An
         // undelivered steer must follow the same policy: dropped with a
         // warning, never replayed as the next prompt.
-        let mut rig = steering_rig_with(true, "promptRequired", true).await;
+        let mut rig = steering_rig_with(SteeringMockBehavior {
+            advertise: true,
+            steer_outcome: "promptRequired",
+            fail_first_prompt: true,
+            answer_steer_after_prompt: false,
+        })
+        .await;
 
         let mut saw_failed = false;
         let mut drop_notice = None;
