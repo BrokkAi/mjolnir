@@ -1,5 +1,5 @@
 //! Agentic discrete review over the changes a single user turn just authored.
-//! A first-class read-only supervisor may launch useful Norse reviewers
+//! A first-class supervisor may launch useful Norse reviewers
 //! asynchronously, then receives their reports in follow-up turns before
 //! returning one verdict.
 //!
@@ -8,8 +8,9 @@
 //! * Every dispatch produces **exactly one** [`ReviewOutcome`]. Model turns
 //!   have no wall-clock deadline; explicit user/session cancellation reaps
 //!   every owned agent before the review returns.
-//! * Reviewer sessions are fresh, read-only, visible through the ordinary
-//!   subagent UI, and never modify the workspace.
+//! * Reviewer sessions are fresh and visible through the ordinary subagent UI.
+//!   Mjolnir-hosted ACP filesystem and terminal capabilities are read-only;
+//!   provider-owned tools use the configured native permission mode.
 //! * Reviewer reports are untrusted evidence delivered asynchronously. The
 //!   supervisor must vet them and cannot issue a final verdict while selected
 //!   reviewers remain outstanding.
@@ -54,6 +55,7 @@ use crate::{
 use mj_core::{
     acp::{PreparedAgentCommand, RuntimeAccessMode},
     agent_usage::Seat,
+    config::PermissionPreset,
     event::{InternalMessage, InternalMessageKind, SubagentOutcome, UiEvent},
     roster::ResolvedAgent,
 };
@@ -258,6 +260,8 @@ pub struct FanoutConfig {
     pub agent_stderr: Option<PathBuf>,
     pub snapshot_exclusions: Vec<PathBuf>,
     pub fs_max_text_bytes: u64,
+    /// Provider-native policy applied to reviewer and supervisor sessions.
+    pub permission: PermissionPreset,
     /// Shared with the subagent pool so a lane's status row cannot land on the
     /// same id as a running subagent's. Lanes are *not* pool members: they keep
     /// their own [`MAX_PARALLEL_LANES`] semaphore and never occupy a slot.
@@ -735,10 +739,6 @@ fn review_run_context(config: &FanoutConfig) -> RunContext {
     }
 }
 
-fn requires_native_review_policy(source_id: &str) -> bool {
-    mj_core::roster::AdapterKind::from_source_id(source_id).is_some()
-}
-
 fn configure_review_pool(
     mut config: SubagentConfig,
     fanout: &FanoutConfig,
@@ -748,10 +748,6 @@ fn configure_review_pool(
 ) -> SubagentConfig {
     if let Some(role) = config.role_config.as_mut() {
         role.session_tag = fanout.session_tag.clone();
-        // Built-in adapters have provider-specific review hardening. An
-        // embedding platform's external adapter uses the ordinary discrete
-        // review runtime and permission flow.
-        role.require_native_read_only = requires_native_review_policy(&role.adapter_source_id);
     }
     config
         .with_reports(reports)
@@ -765,6 +761,7 @@ fn configure_review_pool(
         })
         .with_mcp_servers(Vec::new())
         .with_usage_seat(Seat::Review)
+        .with_permission_mode(fanout.permission)
         .with_retain_after_completion(retain)
         .with_debrief(false)
 }
@@ -1193,10 +1190,6 @@ async fn run_async(
                             synthesis,
                             evidence: evidence(),
                         },
-                        ReviewVerdict::Advisory { synthesis, .. } => ReviewVerdict::Advisory {
-                            synthesis,
-                            evidence: evidence(),
-                        },
                         verdict => verdict,
                     }
                 },
@@ -1530,10 +1523,6 @@ where
             synthesis,
             evidence,
         },
-        ReviewVerdict::Advisory { synthesis, .. } => ReviewVerdict::Advisory {
-            synthesis,
-            evidence,
-        },
         verdict => verdict,
     }
 }
@@ -1589,7 +1578,7 @@ fn lane_report_is_clean(text: &str) -> bool {
             .trim()
             .eq_ignore_ascii_case(LANE_CLEAN_SENTINEL)
     });
-    ends_clean && synthesis_severity(&lines) == SynthesisSeverity::None
+    ends_clean && !has_priority_marker(&lines)
 }
 
 fn quick_review_prompt(job: &ReviewJob, shared_context: &str, repository_root: &Path) -> String {
@@ -2428,9 +2417,11 @@ fn emit_internal(
 
 /// Classify the supervisor's reply. Some models explain their clean verdict
 /// before emitting the required sentinel, so accept a final sentinel line as
-/// clean unless the reply also contains a canonical priority marker. Keep the
-/// failure direction conservative: malformed or contradictory output remains
-/// findings rather than dropping a possible problem.
+/// clean unless the reply also contains a canonical priority marker. A
+/// priority marker records a review issue and must therefore produce a
+/// corrective verdict, regardless of whether it is P0 or P3. Keep the failure
+/// direction conservative: malformed or contradictory output remains findings
+/// rather than dropping a possible problem.
 pub fn synthesis_verdict(text: &str) -> ReviewVerdict {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -2443,49 +2434,29 @@ pub fn synthesis_verdict(text: &str) -> ReviewVerdict {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    let severity = synthesis_severity(&lines);
+    let has_priority_marker = has_priority_marker(&lines);
     let ends_with_clean_sentinel = lines.last().is_some_and(|line| {
         line.trim_matches('*')
             .trim()
             .eq_ignore_ascii_case(CLEAN_SENTINEL)
     });
-    if ends_with_clean_sentinel && severity == SynthesisSeverity::None {
+    if ends_with_clean_sentinel && !has_priority_marker {
         return ReviewVerdict::Clean;
     }
     let synthesis = bound_tail(trimmed, SYNTHESIS_LIMIT, "synthesis");
-    match severity {
-        SynthesisSeverity::Substantive | SynthesisSeverity::None => ReviewVerdict::Findings {
-            synthesis,
-            evidence: ReviewPassEvidence::default(),
-        },
-        SynthesisSeverity::Advisory => ReviewVerdict::Advisory {
-            synthesis,
-            evidence: ReviewPassEvidence::default(),
-        },
+    ReviewVerdict::Findings {
+        synthesis,
+        evidence: ReviewPassEvidence::default(),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SynthesisSeverity {
-    None,
-    Advisory,
-    Substantive,
-}
-
-fn synthesis_severity(lines: &[&str]) -> SynthesisSeverity {
-    let mut has_advisory = false;
-    for line in lines {
+fn has_priority_marker(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
         let lower = line.to_ascii_lowercase();
-        if ["[p0]", "[p1]"].iter().any(|marker| lower.contains(marker)) {
-            return SynthesisSeverity::Substantive;
-        }
-        has_advisory |= ["[p2]", "[p3]"].iter().any(|marker| lower.contains(marker));
-    }
-    if has_advisory {
-        SynthesisSeverity::Advisory
-    } else {
-        SynthesisSeverity::None
-    }
+        ["[p0]", "[p1]", "[p2]", "[p3]"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+    })
 }
 
 /// Shared evidence every lane sees. Built once per dispatch: six copies of an
@@ -2735,6 +2706,7 @@ mod tests {
             agent_stderr: None,
             snapshot_exclusions: Vec::new(),
             fs_max_text_bytes: 1_000_000,
+            permission: PermissionPreset::Auto,
             id_allocator: SubagentIdAllocator::default(),
         }
     }
@@ -4506,7 +4478,7 @@ mod tests {
         .await;
         assert_eq!(verdict, ReviewVerdict::Clean);
 
-        // A validator that downgrades a P0 to advisory costs no correction round.
+        // A validator that returns any priority-marked issue requires a correction.
         let verdict = quick_verdict(
             &job,
             &events,
@@ -4516,8 +4488,8 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(verdict, ReviewVerdict::Advisory { .. }),
-            "advisory-only output must not re-arm the review, got {verdict:?}"
+            matches!(verdict, ReviewVerdict::Findings { .. }),
+            "a P3 finding must enter the correction path, got {verdict:?}"
         );
 
         // A validator that never reports is a coverage failure, never a clean turn.
@@ -4632,11 +4604,11 @@ mod tests {
             synthesis_verdict(
                 "Review summary:\n- [P2] src/a.rs:2 -- still broken\n\nNo material findings."
             ),
-            ReviewVerdict::Advisory { .. }
+            ReviewVerdict::Findings { .. }
         ));
         assert!(matches!(
             synthesis_verdict("[P3] src/a.rs:1 -- optional cleanup"),
-            ReviewVerdict::Advisory { .. }
+            ReviewVerdict::Findings { .. }
         ));
         assert!(matches!(
             synthesis_verdict("[P2] src/a.rs:1 -- minor\n[P1] src/b.rs:2 -- broken"),
@@ -4711,13 +4683,6 @@ mod tests {
         assert_eq!(context.snapshot_exclusions, vec![PathBuf::from("target")]);
         assert_eq!(context.fs_max_text_bytes, 4096);
         assert_eq!(context.access_mode, RuntimeAccessMode::ReadOnly);
-    }
-
-    #[test]
-    fn external_review_routes_use_the_normal_discrete_review_runtime() {
-        assert!(requires_native_review_policy("codex-acp"));
-        assert!(requires_native_review_policy("claude-acp"));
-        assert!(!requires_native_review_policy("sidecar"));
     }
 
     #[test]

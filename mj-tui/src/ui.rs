@@ -3030,6 +3030,7 @@ fn handle_crossterm(
     if key.modifiers == KeyModifiers::CONTROL
         && matches!(key.code, KeyCode::Char('c'))
         && state.is_side
+        && !state.is_streaming()
         && state.input.is_empty()
         && attachment_count(state) == 0
     {
@@ -3574,6 +3575,32 @@ fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
     if state.connection_state() != ConnectionState::Streaming {
         return;
     }
+
+    // Enter always queues behind an active turn. Ctrl-C is the explicit
+    // gesture to apply the oldest queued correction now when the runtime can
+    // steer it into that turn.
+    if state.can_steer()
+        && let Some(queued) = state.take_queued_prompt()
+    {
+        let preview = queued_prompt_preview(&queued.display_text);
+        state.record_steered_prompt(queued.display_text, queued.resources.clone());
+        let _ = cmd_tx.send(UiCommand::SteerPrompt {
+            text: queued.text,
+            images: queued.images,
+            resources: queued.resources,
+        });
+        let remaining = state.queued_prompt_count();
+        let suffix = if remaining == 0 {
+            String::new()
+        } else {
+            format!(" ({remaining} still queued)")
+        };
+        state.status_line = Some(StatusMessage::info(format!(
+            "steering queued prompt into the current turn{suffix}: {preview}"
+        )));
+        return;
+    }
+
     let _ = cmd_tx.send(UiCommand::CancelPrompt);
     state.mark_cancelling();
     let queued = state.queued_prompt_count();
@@ -5582,18 +5609,6 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.scroll_input_to_bottom();
 
     if state.is_busy() {
-        if state.can_steer() {
-            // The agent supports mid-turn steering: inject the message into
-            // the running turn instead of queueing it behind the turn.
-            state.record_steered_prompt(display_text, resources.clone());
-            let _ = cmd_tx.send(UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            });
-            state.status_line = Some(StatusMessage::info("steering into the current turn"));
-            return;
-        }
         // The previous turn is still running. Stash this submission and
         // keep it out of the transcript until it is actually sent.
         let preview = queued_prompt_preview(&display_text);
@@ -5604,14 +5619,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             display_text,
         });
         let queued = state.queued_prompt_count();
-        let steering_note = if state.is_streaming() && !state.steering_supported {
-            " (agent cannot steer mid-turn)"
-        } else {
-            ""
-        };
-        state.status_line = Some(StatusMessage::info(format!(
-            "queued {queued}{steering_note}: {preview}"
-        )));
+        state.status_line = Some(StatusMessage::info(format!("queued {queued}: {preview}")));
         return;
     }
 
@@ -5647,16 +5655,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
     match subcommand {
         "" => {
             let memory_config = memory_config_from_disk(state);
-            let mut listing = crate::memory::render_list(&store, &project, &memory_config);
-            if !state.agent_source_id.is_empty()
-                && crate::roster::AdapterKind::from_source_id(&state.agent_source_id)
-                    != Some(crate::roster::AdapterKind::Codex)
-            {
-                listing.push_str(
-                    "\nNote: memories apply only to Codex primary sessions; the current \
-                     primary agent will not receive them.",
-                );
-            }
+            let listing = crate::memory::render_list(&store, &project, &memory_config);
             state.push_system_message(listing);
         }
         "add" => {
@@ -5678,7 +5677,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 Ok(entry) => state.record_status_message(
                     StatusKind::Info,
                     format!(
-                        "saved memory m{} ({}); shared before the next Claude or Codex turn",
+                        "saved memory m{} ({}); synchronized into Claude and Codex native memory when their next sessions start",
                         entry.id,
                         if global { "global" } else { "this project" }
                     ),
@@ -7779,7 +7778,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         .split(area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" review issues — session ledger ")
+        .title(" review issues — full evidence ")
         .style(Style::default().ink(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
@@ -7809,15 +7808,19 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
             .add_modifier(Modifier::BOLD),
     )];
     for (count, label, ink) in [
-        (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.open, "● {} awaiting correction", theme.warning),
+        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.fixed, "✔ {} verified fixed", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
-        head.push(Span::styled("   ", Style::default()));
-        head.push(Span::styled(
-            label.replacen("{}", &count.to_string(), 1),
-            Style::default().ink(ink).add_modifier(Modifier::BOLD),
-        ));
+        if count > 0 {
+            head.push(Span::styled("   ", Style::default()));
+            head.push(Span::styled(
+                label.replacen("{}", &count.to_string(), 1),
+                Style::default().ink(ink).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     let mut lines = vec![Line::from(head)];
     if issues.is_empty() {
@@ -7845,10 +7848,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
                         .add_modifier(Modifier::BOLD),
                 )));
             }
-            lines.push(review_ledger_line(
-                &crate::app::review_issue_row(issue),
-                theme,
-            ));
+            lines.extend(review_issue_detail_lines(issue, theme));
         }
     }
     let total = Paragraph::new(lines.clone())
@@ -7864,10 +7864,111 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         inner,
     );
     f.render_widget(
-        Paragraph::new("F9/Esc close · Up/Down PgUp/PgDn Home/End scroll")
+        Paragraph::new(
+            "F9/Esc close · full finding, correction report, exact diff, and verification state · Up/Down PgUp/PgDn Home/End scroll",
+        )
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
+}
+
+/// Complete evidence for one review issue. The compact board and transcript
+/// deliberately show only the first line; F9 is the durable place where a
+/// user can inspect the reviewer's complete finding, the primary's correction
+/// report, the captured correction diff, and whether a later review verified
+/// that correction.
+fn review_issue_detail_lines(
+    issue: &crate::workflow::ReviewIssue,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    use crate::workflow::ReviewIssueStatus;
+
+    let (status, ink, explanation) = match issue.status {
+        ReviewIssueStatus::Validated => (
+            "validated — awaiting correction",
+            theme.warning,
+            "The review supervisor confirmed this finding. No correction has completed for it.",
+        ),
+        ReviewIssueStatus::Corrected => (
+            "corrected — verification pending",
+            theme.warning,
+            "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean, so this is not presented as fixed.",
+        ),
+        ReviewIssueStatus::Fixed => (
+            "fixed — independently verified",
+            theme.success,
+            "A later verification review returned clean after the correction.",
+        ),
+        ReviewIssueStatus::Uncorrected => (
+            "unresolved",
+            theme.warning,
+            "The primary correction turn completed without changing the workspace. This validated finding is not fixed.",
+        ),
+        ReviewIssueStatus::Invalidated => (
+            "invalidated",
+            theme.error,
+            "The review workflow explicitly invalidated this finding; the recorded reason is below.",
+        ),
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" #{} · {status}", issue.id),
+        Style::default().ink(ink).add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::from(Span::styled(
+        " Finding — validated review evidence",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(issue.summary.lines().map(|line| {
+        Line::from(Span::styled(
+            format!("   {line}"),
+            Style::default().ink(theme.text),
+        ))
+    }));
+    lines.push(Line::from(Span::styled(
+        " Status",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   {explanation}"),
+        Style::default().ink(theme.text),
+    )));
+    if let Some(reason) = issue.resolution_reason.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Recorded outcome",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(reason.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    if let Some(details) = issue.resolution_details.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Correction evidence",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(details.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    lines.push(Line::from(Span::styled(
+        " ───────────────────────────────────────",
+        Style::default().ink(theme.muted),
+    )));
+    lines
 }
 
 fn nested_actor_backend(actor: &SubagentStatus) -> String {
@@ -12373,15 +12474,18 @@ fn review_board_row_count(state: &AppState) -> u16 {
     (1 + visible + overflow).min(usize::from(u16::MAX)) as u16
 }
 
-/// Order the board so what needs the user's eyes comes first: still-open
-/// findings, then invalidations (loud, never buried), then the fixed tail.
+/// Order the board so what needs the user's eyes comes first: findings still
+/// awaiting correction, then corrections still awaiting verification, then
+/// unresolved/invalidated records, and finally independently verified fixes.
 fn review_board_rank(status: crate::workflow::ReviewIssueStatus) -> u8 {
     use crate::workflow::ReviewIssueStatus;
 
     match status {
         ReviewIssueStatus::Validated => 0,
-        ReviewIssueStatus::Invalidated => 1,
-        ReviewIssueStatus::Fixed => 2,
+        ReviewIssueStatus::Corrected => 1,
+        ReviewIssueStatus::Uncorrected => 2,
+        ReviewIssueStatus::Invalidated => 3,
+        ReviewIssueStatus::Fixed => 4,
     }
 }
 
@@ -12411,7 +12515,9 @@ fn draw_review_board(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     )];
     for (count, label, ink) in [
         (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.fixed, "✔ {} verified", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
         if count > 0 {
@@ -12672,9 +12778,11 @@ fn workflow_progress_line(
         let tally = workflow.issue_tally();
         let mut parts = vec![format!("issues {} found", tally.found)];
         for (count, label) in [
-            (tally.fixed, "fixed"),
+            (tally.fixed, "verified fixed"),
+            (tally.corrected, "corrected; unverified"),
+            (tally.uncorrected, "unresolved"),
             (tally.invalidated, "invalidated"),
-            (tally.open, "unresolved"),
+            (tally.open, "awaiting correction"),
         ] {
             if count > 0 {
                 parts.push(format!("{count} {label}"));
@@ -16182,6 +16290,7 @@ mod tests {
                 pass: 0,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
+                details: None,
             },
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
@@ -16205,6 +16314,62 @@ mod tests {
             "a finished review leaves the board to the verdict banner"
         );
         assert_eq!(inline_chat_layout(&state, area)[3].height, 0);
+    }
+
+    #[test]
+    fn review_issue_viewer_shows_full_finding_fix_evidence_and_verification_state() {
+        use crate::workflow::ReviewIssueStatus;
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(7);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![
+                    "[P1] src/cache.rs:12 -- stale cache entry leaks across sessions\n  The caller reuses this entry after logout."
+                        .to_string(),
+                ],
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some("the correction changed the workspace; verification is pending".to_string()),
+                details: Some(
+                    "Primary correction report:\ncleared the session cache on logout\n\nExact correction diff:\n+cache.clear();"
+                        .to_string(),
+                ),
+            },
+        );
+        state.open_review_issue_viewer();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_issue_viewer(frame, frame.area(), &mut state))
+            .expect("draw issue viewer");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("full evidence"), "{rendered}");
+        assert!(rendered.contains("caller reuses this entry"), "{rendered}");
+        assert!(
+            rendered.contains("corrected — verification pending"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("cleared the session cache on logout"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("+cache.clear();"), "{rendered}");
     }
 
     #[test]
@@ -19516,7 +19681,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_memory_notes_when_the_primary_is_not_codex() {
+    fn slash_memory_is_available_to_claude_and_codex_primaries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = AppState::new();
         state.memory_store_path = dir.path().join("memories.json");
@@ -19527,7 +19692,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("apply only to Codex primary sessions")
+            Some(Entry::System(text)) if text.contains("Memories")
         ));
 
         state.agent_source_id = "codex-acp".to_string();
@@ -19535,7 +19700,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if !text.contains("apply only to Codex primary sessions")
+            Some(Entry::System(text)) if text.contains("Memories")
         ));
     }
 
@@ -19648,6 +19813,7 @@ mod tests {
         let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
         editor.tab = crate::settings::SettingsTab::Reviewer;
         editor.selected = 0;
+        state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Char(' '));
         state.mjconfig_menu_key(KeyCode::Down);
@@ -28505,10 +28671,17 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_with_empty_side_composer_returns_even_while_streaming() {
+    fn ctrl_c_with_empty_side_composer_steers_queued_prompt_while_streaming() {
         let mut state = ready_state_with_session();
         state.is_side = true;
+        state.steering_supported = true;
         state.record_user_prompt("long answer".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "focus on the error".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "focus on the error".to_string(),
+        });
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -28517,11 +28690,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
 
-        assert!(state.side_exit_requested);
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "cleanup is owned by the UI loop"
-        );
+        assert!(!state.side_exit_requested);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SteerPrompt { text, .. }) if text == "focus on the error"
+        ));
         assert!(state.exit_reason.is_none());
     }
 
@@ -28628,7 +28801,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_streaming_steers_when_the_agent_supports_it() {
+    fn enter_during_streaming_queues_when_the_agent_supports_steering() {
         let mut state = ready_state_with_session();
         state.steering_supported = true;
         state.record_user_prompt("first".to_string());
@@ -28638,35 +28811,27 @@ mod tests {
         type_string(&mut state, &cmd_tx, "try the other approach");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        match cmd_rx.try_recv().expect("steer must be sent immediately") {
-            UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            } => {
-                assert_eq!(text, "try the other approach");
-                assert!(images.is_empty());
-                assert!(resources.is_empty());
-            }
-            other => panic!("expected SteerPrompt, got {other:?}"),
-        }
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "Enter must queue even when steering is available"
+        );
         assert_eq!(
             state.queued_prompt_count(),
-            0,
-            "steered prompts must not queue"
+            1,
+            "the correction waits for Ctrl-C to steer it"
         );
         assert!(
-            state.transcript.iter().any(
+            !state.transcript.iter().any(
                 |entry| matches!(entry, Entry::UserPrompt(text) if text == "try the other approach")
             ),
-            "the steered message joins the transcript immediately"
+            "queued text stays out of the transcript"
         );
         assert_eq!(
             state.connection_state(),
             ConnectionState::Streaming,
-            "steering must not restart turn bookkeeping"
+            "queueing must not restart turn bookkeeping"
         );
-        assert!(state.input.is_empty(), "input cleared after steering");
+        assert!(state.input.is_empty(), "input cleared after queueing");
     }
 
     #[test]
@@ -28688,7 +28853,7 @@ mod tests {
     }
 
     #[test]
-    fn queueing_mentions_when_the_agent_cannot_steer() {
+    fn queueing_reports_fifo_without_a_capability_warning() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
@@ -28702,7 +28867,7 @@ mod tests {
             .expect("queued status line")
             .text
             .clone();
-        assert_eq!(status, "queued 1 (agent cannot steer mid-turn): next one");
+        assert_eq!(status, "queued 1: next one");
     }
 
     #[test]
@@ -29039,9 +29204,7 @@ mod tests {
             .clone()
             .expect("queue status set after submit");
         assert!(
-            queued_status
-                .text
-                .starts_with("queued 1 (agent cannot steer mid-turn): "),
+            queued_status.text.starts_with("queued 1: "),
             "expected queue status, got {:?}",
             queued_status.text
         );
@@ -29105,7 +29268,57 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_during_streaming_preserves_queued_prompt() {
+    fn ctrl_c_steers_oldest_queued_prompt_when_supported() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "redirect here".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "redirect here".to_string(),
+        });
+        state.push_queued_prompt(QueuedPrompt {
+            text: "then do this".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "then do this".to_string(),
+        });
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(
+            state.queued_prompt_count(),
+            1,
+            "only the oldest prompt steers"
+        );
+        assert_eq!(
+            state.queued_prompts().next().expect("queued prompt").text,
+            "then do this"
+        );
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        match cmd_rx.try_recv().expect("steer dispatched") {
+            UiCommand::SteerPrompt { text, images, .. } => {
+                assert_eq!(text, "redirect here");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, Entry::UserPrompt(text) if text == "redirect here"))
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancels_and_preserves_queue_when_steering_is_unsupported() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
         state.push_queued_prompt(QueuedPrompt {
@@ -29123,15 +29336,8 @@ mod tests {
         );
 
         assert_eq!(state.queued_prompt_count(), 1, "queue preserved by Ctrl-C");
-        assert_eq!(
-            state.queued_prompts().next().expect("queued prompt").text,
-            "keep me"
-        );
         assert_eq!(state.connection_state(), ConnectionState::Cancelling);
-        match cmd_rx.try_recv().expect("cancel dispatched") {
-            UiCommand::CancelPrompt => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelPrompt)));
     }
 
     #[test]

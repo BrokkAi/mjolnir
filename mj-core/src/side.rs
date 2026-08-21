@@ -49,9 +49,8 @@ pub async fn start(
     let fork_source = source.has_history;
     let resume_session = fork_source.then_some(source.session_id);
 
-    // A forked side session inherits the primary's injected memory through
-    // its history; one started before the primary's first prompt has no
-    // history to fork, so it gets the worker-lane injection instead.
+    // A forked side session already has the provider's native context. A
+    // fresh side session synchronizes native memory before it starts.
     let memory = if fork_source {
         None
     } else {
@@ -245,7 +244,6 @@ mod tests {
             project: PathBuf::from("/workspace"),
             inject: true,
             tools: false,
-            import_claude_auto: false,
         };
         let cfg = isolated_runtime_config(
             &agent,

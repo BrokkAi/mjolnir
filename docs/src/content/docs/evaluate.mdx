@@ -306,19 +306,22 @@ correction rounds when a finding sticks:
 
 <figure class="shot">
   <a class="shot__zoom" href={shotExtendedVerdict.src} aria-label="Open the full-size screenshot: the extended review verdict">
-    <Image src={shotExtendedVerdict} alt="The extended review outcome: the primary explains that a specialist's P1 claim was rejected after verification against git evidence, the correction pass changed nothing, and the completed Review row reads issues 1 found, 1 invalidated." />
+    <Image src={shotExtendedVerdict} alt="The extended review outcome, including the primary's review decision and the completed Review workflow state." />
   </a>
-  <figcaption>The part worth paying for: a specialist raised a plausible <code>P1</code>, the validator refuted it against <code>git diff</code> evidence, and the correction pass explicitly changed nothing — <strong>issues 1 found · 1 invalidated</strong>.</figcaption>
+  <figcaption>The part worth paying for: the supervisor and specialists leave a visible, evidence-backed decision for every finding instead of silently discarding it.</figcaption>
 </figure>
 
-Findings are session-state, not scrollback. **F9** opens the ledger, which
-tracks every issue across turns as open, fixed, or invalidated:
+Findings are session-state, not scrollback. **F9** opens the evidence ledger:
+it keeps the complete reviewer finding, the primary correction report, the
+captured correction diff, and whether a later review independently verified
+the correction. A workspace change alone is shown as **corrected — verification
+pending**, never as fixed.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotReviewLedger.src} aria-label="Open the full-size screenshot: the F9 review issue ledger">
-    <Image src={shotReviewLedger} alt="The session review ledger: 2 found, 1 open, 0 fixed, 1 invalidated — the open P2 about the weak describe test and the invalidated P1 with the note that the correction turn changed nothing." />
+    <Image src={shotReviewLedger} alt="The session review ledger, which records each reviewer finding and its correction or verification state." />
   </a>
-  <figcaption>The session ledger keeps score: the honest <code>P2</code> stays open until a turn fixes it, and the refuted <code>P1</code> is recorded as invalidated rather than silently dropped.</figcaption>
+  <figcaption>The ledger makes the evidence inspectable: an open <code>P2</code> stays open until a correction is independently verified, and every correction that has not passed that verification remains plainly marked.</figcaption>
 </figure>
 
 One scope note to calibrate expectations: discrete review judges **the turn's

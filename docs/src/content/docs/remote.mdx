@@ -1,6 +1,6 @@
 ---
 title: Mjolnir Web
-description: One command publishes the coding session on your machine to a browser — read the diff, answer permission prompts, and start worktree sessions from your phone while the repository stays on the host.
+description: One command publishes the coding session on your machine to a browser — read the diff, steer a running turn, answer permission prompts, and start worktree sessions from your phone while the repository stays on the host.
 ---
 
 import { Image } from 'astro:assets';
@@ -47,7 +47,10 @@ The browser is a control surface for that session, not a copy of your code.
 - **Pick up sessions from either side.** Sessions started in the terminal appear
   in the browser; sessions started in the browser record their adapter and model
   so `mj resume` reopens them on the host.
-- **Queue a prompt while the agent is busy** — it runs when the turn frees up.
+- **Steer the running turn** — send a correction while the agent is working
+  to place it in the same FIFO queue the terminal uses, then select **Stop**
+  to inject the oldest queued correction into that turn when steering is
+  supported.
 - **Attach an image** to a prompt, and run the agent's own slash commands: typing
   `/` opens a palette of the commands the connected agent advertises.
 - **Install it as an app.** Mjolnir Web ships a web app manifest and service
