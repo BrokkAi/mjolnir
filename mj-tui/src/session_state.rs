@@ -51,6 +51,12 @@ pub struct SessionState {
     pub(crate) terminal_registry: Vec<TerminalRegistration>,
     /// Cache key bumped whenever transcript rendering inputs change.
     pub(crate) transcript_revision: u64,
+    /// Cache key bumped only when the rendered form of *settled* transcript
+    /// entries can change (theme, detail toggles, thought output, or a
+    /// mutation reaching an entry the renderer may already have frozen).
+    /// Streaming appends and reveal pacing do not bump it, so the renderer
+    /// can keep a settled-prefix cache across transcript revisions.
+    pub(crate) settled_render_epoch: u64,
     /// Time when the current lifecycle state began.
     pub(crate) connection_state_started_at: Instant,
 }
@@ -84,6 +90,7 @@ impl SessionState {
             terminal_outputs: HashMap::new(),
             terminal_registry: Vec::new(),
             transcript_revision: 0,
+            settled_render_epoch: 0,
             connection_state_started_at: now,
         }
     }

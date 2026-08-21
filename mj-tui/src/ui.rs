@@ -535,6 +535,29 @@ struct TranscriptScrollState {
     /// expanded, so it cannot share `cache` with the collapsed chat pane even
     /// though both are keyed the same way.
     viewer_cache: Option<TranscriptCache>,
+    /// Rendered lines for the settled transcript prefix, kept across
+    /// transcript revisions. While a turn streams, every reveal tick bumps
+    /// the revision; without this cache each bump re-rendered and re-measured
+    /// the whole session, which made long fullscreen sessions crawl on the
+    /// single UI thread. Only the entries past `settled_entry_boundary` are
+    /// rebuilt per revision.
+    prefix: Option<SettledPrefixCache>,
+}
+
+/// Immutable rendered prefix of the transcript. Valid while the settled
+/// render epoch and width both match; extended (never edited) as more
+/// entries settle.
+#[derive(Debug)]
+struct SettledPrefixCache {
+    epoch: u64,
+    width: u16,
+    /// Transcript entries `0..entries` are rendered into `lines`.
+    entries: usize,
+    lines: Vec<Line<'static>>,
+    /// Absolute wrapped row offset of each line (first line starts at 0).
+    row_starts: Vec<usize>,
+    /// Total wrapped rows of the prefix.
+    rows: usize,
 }
 
 #[derive(Debug)]
@@ -542,13 +565,18 @@ struct TranscriptCache {
     revision: u64,
     width: u16,
     search_query: Option<String>,
+    /// Rendered lines for entries past the settled prefix (the whole
+    /// transcript when `prefix_rows == 0`).
     lines: Vec<Line<'static>>,
     line_count: usize,
     entry_row_starts: Vec<Option<usize>>,
-    /// Wrapped row offset of each entry in `lines`. Lets a frame slice out
-    /// just the visible window instead of handing the whole transcript to
-    /// `Paragraph`, whose wrapping cost is O(total lines) per render.
+    /// Wrapped row offset of each entry in `lines`, absolute (offset by
+    /// `prefix_rows`). Lets a frame slice out just the visible window
+    /// instead of handing the whole transcript to `Paragraph`, whose
+    /// wrapping cost is O(total lines) per render.
     row_starts: Vec<usize>,
+    /// Wrapped rows contributed by the settled prefix cache ahead of `lines`.
+    prefix_rows: usize,
 }
 
 #[derive(Debug, Default)]
@@ -949,6 +977,11 @@ struct TranscriptTurn {
     prompt_index: usize,
     end: usize,
     is_compactable: bool,
+    /// Every entry in the turn is stable. Distinct from `is_compactable`,
+    /// which also requires a completed local lifecycle: the settled-prefix
+    /// boundary needs to know whether the turn's *render* can still change,
+    /// which it can while any entry is unstable.
+    entries_stable: bool,
     elapsed: Option<Duration>,
     tool_summary: Option<TurnToolSummary>,
     final_response_index: Option<usize>,
@@ -997,6 +1030,7 @@ fn transcript_turns(state: &AppState) -> Vec<TranscriptTurn> {
                 prompt_index,
                 end,
                 is_compactable,
+                entries_stable,
                 elapsed: state.prompt_turn_elapsed(prompt_index),
                 tool_summary,
                 final_response_index,
@@ -1057,6 +1091,17 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
     if idx < state.committed_transcript_entries() {
         return true;
     }
+    transcript_entry_settles_naturally(state, idx, entry)
+}
+
+/// Stability on the entry's own terms, ignoring the committed-by-fiat
+/// shortcut above. The settled-prefix boundary must use this: an entry
+/// force-committed by the inline overflow valve counts as stable for
+/// scrollback purposes while its backing state (a still-running terminal,
+/// an open message) can still change how it renders — freezing that render
+/// would keep e.g. a `running · /terminals to view` reference line on
+/// screen after the terminal exits.
+fn transcript_entry_settles_naturally(state: &AppState, idx: usize, entry: &Entry) -> bool {
     match entry {
         Entry::UserPrompt(_)
         | Entry::System(_)
@@ -1082,22 +1127,10 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         // A tool call with no backing view renders nothing that could change,
         // so it must not hold the boundary (`is_none_or`, not `is_some_and`:
         // a missing record can never settle any other way).
-        Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
-            state.tool_calls.get(id).is_none_or(|view| {
-                matches!(
-                    view.status,
-                    ToolCallStatus::Completed | ToolCallStatus::Failed
-                ) && view.body.iter().all(|output| {
-                    !matches!(
-                        output,
-                        ToolCallOutput::Terminal {
-                            exit_status: None,
-                            ..
-                        }
-                    )
-                })
-            })
-        }
+        Entry::ToolCall(id) | Entry::SubagentToolCall(id) => state
+            .tool_calls
+            .get(id)
+            .is_none_or(crate::app::ToolCallView::render_settled),
     }
 }
 
@@ -9182,13 +9215,14 @@ fn draw_transcript(
                 && c.search_query == search_query
     );
     if !cache_hit {
-        transcript_scroll.cache = Some(build_transcript_cache(
+        let cache = build_chat_transcript_cache(
             state,
             inner.width,
             revision,
             search_query.clone(),
-            false,
-        ));
+            &mut transcript_scroll.prefix,
+        );
+        transcript_scroll.cache = Some(cache);
     }
     let total = transcript_scroll
         .cache
@@ -9235,7 +9269,7 @@ fn draw_transcript(
         .as_ref()
         .expect("cache populated above");
     let (window, inner_scroll) =
-        wrapped_visible_window(&cache.lines, &cache.row_starts, top, inner.height);
+        stitched_visible_window(transcript_scroll.prefix.as_ref(), cache, top, inner.height);
     let paragraph = Paragraph::new(window)
         .wrap(Wrap { trim: false })
         .scroll((inner_scroll, 0));
@@ -9277,7 +9311,176 @@ fn build_transcript_cache(
         line_count,
         entry_row_starts,
         row_starts,
+        prefix_rows: 0,
     }
+}
+
+/// Number of leading transcript entries whose rendered lines can no longer
+/// change, making them safe to freeze in [`SettledPrefixCache`]. The rules
+/// mirror `AppState`'s mutation surface:
+/// - the trailing entry can always grow (`append_or_start` extends the last
+///   entry in place for streamed message and replayed user-prompt chunks)
+/// - the newest Plan / SubagentPlan entries are replaced in place by later
+///   plan updates even though the stability predicate classes them stable
+/// - entries at or past the lowest reveal prefix render a growing text slice
+/// - a turn whose compact context is not final re-renders as a whole when
+///   `transcript_turns` reclassifies it: any turn with unstable entries, and
+///   the in-flight last turn that has not become compactable yet
+/// - every frozen entry must settle naturally: the committed-by-fiat
+///   shortcut is ignored, because a force-committed entry's render still
+///   changes (a running terminal's reference line resolves when it exits)
+fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
+    let len = state.transcript.len();
+    if len == 0 {
+        return 0;
+    }
+    let mut boundary = len - 1;
+    for (index, entry) in state.transcript.iter().enumerate().rev() {
+        if matches!(entry, Entry::Plan(_)) {
+            boundary = boundary.min(index);
+            break;
+        }
+    }
+    for (index, entry) in state.transcript.iter().enumerate().rev() {
+        if matches!(entry, Entry::SubagentPlan(_)) {
+            boundary = boundary.min(index);
+            break;
+        }
+    }
+    if let Some(index) = state.min_stream_visible_entry() {
+        boundary = boundary.min(index);
+    }
+    for (position, turn) in turns.iter().enumerate() {
+        if turn.prompt_index >= boundary {
+            break;
+        }
+        let last_turn = position + 1 == turns.len();
+        if !turn.entries_stable || (last_turn && !turn.is_compactable) {
+            boundary = turn.prompt_index;
+            break;
+        }
+    }
+    state.transcript[..boundary]
+        .iter()
+        .enumerate()
+        .find(|&(index, entry)| !transcript_entry_settles_naturally(state, index, entry))
+        .map_or(boundary, |(index, _)| index)
+}
+
+/// Build the chat pane's transcript cache, reusing and extending the settled
+/// prefix so a rebuild only renders the entries that can still change. The
+/// search path renders the full transcript (matches need every entry) and
+/// leaves the prefix untouched for when the search clears.
+fn build_chat_transcript_cache(
+    state: &AppState,
+    width: u16,
+    revision: u64,
+    search_query: Option<String>,
+    prefix: &mut Option<SettledPrefixCache>,
+) -> TranscriptCache {
+    if search_query.is_some() {
+        return build_transcript_cache(state, width, revision, search_query, false);
+    }
+    let turns = transcript_turns(state);
+    let boundary = settled_entry_boundary(state, &turns);
+    let epoch = state.settled_render_epoch();
+    if prefix
+        .as_ref()
+        .is_some_and(|p| p.epoch != epoch || p.width != width || p.entries > boundary)
+    {
+        *prefix = None;
+    }
+    let rendered_entries = prefix.as_ref().map_or(0, |p| p.entries);
+    if rendered_entries < boundary {
+        let new_lines = render_transcript_entry_range_with_turns(
+            state,
+            width,
+            rendered_entries..boundary,
+            transcript_collapse_limit(state),
+            state.theme,
+            true,
+            &turns,
+        );
+        let p = prefix.get_or_insert_with(|| SettledPrefixCache {
+            epoch,
+            width,
+            entries: 0,
+            lines: Vec::new(),
+            row_starts: Vec::new(),
+            rows: 0,
+        });
+        for line in new_lines {
+            p.row_starts.push(p.rows);
+            p.rows += wrapped_line_height(&line, width);
+            p.lines.push(line);
+        }
+        p.entries = boundary;
+    }
+    let prefix_rows = prefix.as_ref().map_or(0, |p| p.rows);
+    let lines = render_transcript_entry_range_with_turns(
+        state,
+        width,
+        boundary..state.transcript.len(),
+        transcript_collapse_limit(state),
+        state.theme,
+        true,
+        &turns,
+    );
+    let (mut row_starts, tail_rows) = wrapped_row_starts(&lines, width);
+    for start in &mut row_starts {
+        *start += prefix_rows;
+    }
+    TranscriptCache {
+        revision,
+        width,
+        search_query: None,
+        lines,
+        line_count: prefix_rows + tail_rows,
+        entry_row_starts: Vec::new(),
+        row_starts,
+        prefix_rows,
+    }
+}
+
+/// Lines covering wrapped rows `top .. top + height` across the settled
+/// prefix and the cache's tail, plus the scroll offset inside the first
+/// returned line. Splitting at the seam keeps the frame O(visible rows).
+fn stitched_visible_window(
+    prefix: Option<&SettledPrefixCache>,
+    cache: &TranscriptCache,
+    top: usize,
+    height: u16,
+) -> (Vec<Line<'static>>, u16) {
+    let Some(prefix) = prefix.filter(|_| cache.prefix_rows > 0) else {
+        return wrapped_visible_window(&cache.lines, &cache.row_starts, top, height);
+    };
+    if top >= cache.prefix_rows {
+        return tail_visible_window(cache, top, height);
+    }
+    let (mut window, inner_scroll) =
+        wrapped_visible_window(&prefix.lines, &prefix.row_starts, top, height);
+    let end_row = top.saturating_add(usize::from(height));
+    if end_row > cache.prefix_rows {
+        let remaining = (end_row - cache.prefix_rows).min(usize::from(height)) as u16;
+        let (tail, _) = tail_visible_window(cache, cache.prefix_rows, remaining);
+        window.extend(tail);
+    }
+    (window, inner_scroll)
+}
+
+/// Window over the cache's tail lines, whose `row_starts` are absolute
+/// (offset by `prefix_rows`); `top` is absolute as well.
+fn tail_visible_window(
+    cache: &TranscriptCache,
+    top: usize,
+    height: u16,
+) -> (Vec<Line<'static>>, u16) {
+    wrapped_visible_window(
+        &cache.lines,
+        &cache.row_starts,
+        top.max(cache.prefix_rows),
+        height,
+    )
 }
 
 /// Block title for the transcript pane. Adds a scroll indicator when
@@ -24026,6 +24229,283 @@ mod tests {
             scroll.viewer_cache.as_ref().expect("cache").line_count > cached_rows,
             "a revision bump must rebuild the cached render"
         );
+    }
+
+    /// Turns completed through the real prompt lifecycle, so every entry is
+    /// stable and every turn is compactable — the settled-prefix happy path.
+    fn settled_turns_state(turns: usize) -> AppState {
+        let mut state = AppState::new();
+        for index in 0..turns {
+            state.record_user_prompt(format!("prompt {index}"));
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                text_chunk(&format!(
+                    "answer {index}: {}",
+                    "prose that wraps across several rendered rows ".repeat(4)
+                )),
+            )));
+            state.apply_event(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn settled_boundary_excludes_live_turns_reveals_plans_and_the_tail() {
+        let mut state = settled_turns_state(3);
+        let turns = transcript_turns(&state);
+        // Only the trailing entry stays live once every turn has settled.
+        assert_eq!(
+            settled_entry_boundary(&state, &turns),
+            state.transcript.len() - 1
+        );
+
+        // An in-flight turn keeps every entry from its prompt onward live.
+        state.record_user_prompt("active".to_string());
+        let active_prompt = state.transcript.len() - 1;
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("streaming answer"),
+        )));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), active_prompt);
+
+        // An entry paced by the reveal controller renders a growing slice.
+        assert!(state.set_stream_visible_bytes(1, 4));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), 1);
+        assert!(state.clear_stream_visible_bytes(1));
+
+        // The newest Plan entry is replaced in place by later plan updates,
+        // so it must stay live even with settled turns behind and after it.
+        let mut state = settled_turns_state(1);
+        let plan_index = state.transcript.len();
+        state.transcript.push(Entry::Plan(Vec::new()));
+        state.record_user_prompt("after the plan".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("done"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), plan_index);
+    }
+
+    #[test]
+    fn chat_cache_with_settled_prefix_matches_the_full_render() {
+        let mut state = settled_turns_state(4);
+        state.record_user_prompt("active".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("streaming thought that is still growing"),
+        )));
+
+        let (width, height) = (40u16, 10u16);
+        let mut prefix = None;
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        assert!(
+            cache.prefix_rows > 0,
+            "settled turns must land in the prefix"
+        );
+        let full = render_transcript_lines(&state, width);
+        let (full_starts, full_total) = wrapped_row_starts(&full, width);
+        assert_eq!(cache.line_count, full_total);
+
+        let render = |lines: Vec<Line<'static>>, scroll: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((scroll, 0)),
+                        frame.area(),
+                    )
+                })
+                .expect("draw");
+            buffer_lines(terminal.backend().buffer())
+        };
+
+        let seam = cache.prefix_rows;
+        for top in [
+            0usize,
+            1,
+            seam.saturating_sub(1),
+            seam,
+            seam + 1,
+            full_total.saturating_sub(usize::from(height)),
+            full_total + 3,
+        ] {
+            let (window, inner_scroll) =
+                stitched_visible_window(prefix.as_ref(), &cache, top, height);
+            let (full_window, full_scroll) =
+                wrapped_visible_window(&full, &full_starts, top, height);
+            assert_eq!(
+                render(window, inner_scroll),
+                render(full_window, full_scroll),
+                "stitched window differs from the full render at row {top}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_cache_reuses_the_settled_prefix_across_stream_revisions() {
+        let mut state = settled_turns_state(4);
+        state.record_user_prompt("active".to_string());
+
+        let width = 40u16;
+        let mut prefix = None;
+        build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let frozen = prefix.as_ref().expect("prefix populated").entries;
+        assert!(frozen > 0);
+
+        // Tamper with a cached line: streaming revisions must reuse the
+        // frozen render verbatim, so the marker survives the rebuild.
+        prefix.as_mut().expect("prefix").lines[0] = Line::from("TAMPERED-PREFIX-MARKER");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("more streamed prose"),
+        )));
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let (window, _) = stitched_visible_window(prefix.as_ref(), &cache, 0, 4);
+        assert_eq!(line_text(&window[0]), "TAMPERED-PREFIX-MARKER");
+        assert_eq!(prefix.as_ref().expect("prefix").entries, frozen);
+
+        // A settled-render epoch bump (Ctrl-T changes every collapse budget)
+        // must drop the frozen prefix and rebuild it from live state.
+        state.toggle_expand_transcript_details();
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let (window, _) = stitched_visible_window(prefix.as_ref(), &cache, 0, 4);
+        assert_ne!(line_text(&window[0]), "TAMPERED-PREFIX-MARKER");
+    }
+
+    #[test]
+    fn fullscreen_transcript_draw_extends_the_prefix_like_a_fresh_render() {
+        let mut state = settled_turns_state(3);
+        state.record_user_prompt("active".to_string());
+        let mut scroll = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert!(
+            scroll.prefix.as_ref().is_some_and(|p| p.entries > 0),
+            "fullscreen draw must populate the settled prefix"
+        );
+
+        // Stream more prose and complete the turn: the incremental rebuild
+        // must render exactly what a from-scratch render of the same state
+        // produces.
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("streamed body of the active turn"),
+        )));
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+
+        let mut fresh_scroll = TranscriptScrollState::default();
+        let mut fresh_terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+        fresh_terminal
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(
+            buffer_lines(terminal.backend().buffer()),
+            buffer_lines(fresh_terminal.backend().buffer()),
+        );
+    }
+
+    #[test]
+    fn settled_boundary_ignores_force_committed_running_tools() {
+        let mut state = settled_turns_state(1);
+        insert_running_terminal_tool_call(&mut state, "stuck-build", "cargo build --watch");
+        let tool_index = state.transcript.len() - 1;
+        state.record_user_prompt("carry on".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("done"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        // The inline overflow valve committed the running tool to scrollback:
+        // stable by fiat, but its render still resolves once the terminal
+        // exits, so the settled prefix must not freeze it.
+        assert!(state.force_commit_transcript_entries(tool_index + 1));
+        assert!(transcript_entry_is_stable(
+            &state,
+            tool_index,
+            &state.transcript[tool_index]
+        ));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), tool_index);
+    }
+
+    #[test]
+    fn late_update_to_a_settled_tool_bumps_the_settled_render_epoch() {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+
+        let mut state = settled_turns_state(1);
+        state.record_user_prompt("run the tool".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("tool-1", "run a check"),
+        )));
+        let mut fail = ToolCallUpdateFields::default();
+        fail.status = Some(ToolCallStatus::Failed);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", fail),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let epoch = state.settled_render_epoch();
+
+        // A no-op update leaves the settled render, and so the epoch, alone.
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", ToolCallUpdateFields::default()),
+        )));
+        assert_eq!(state.settled_render_epoch(), epoch);
+
+        // A late update that rewrites the failed tool changes a render the
+        // settled prefix may have frozen.
+        let mut retitle = ToolCallUpdateFields::default();
+        retitle.title = Some("rewritten after failure".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", retitle),
+        )));
+        assert_ne!(state.settled_render_epoch(), epoch);
     }
 
     #[test]

@@ -885,7 +885,7 @@ pub struct ConfigValueChoice {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolCallView {
     pub title: String,
     pub kind: ToolKind,
@@ -1019,6 +1019,25 @@ impl ToolCallView {
                     .push(ToolCallOutput::Note("unsupported tool content".to_string())),
             }
         }
+    }
+
+    /// True when this view's rendered form can no longer change: the call
+    /// reached a terminal status and every embedded terminal has exited.
+    /// This is the render-side stability contract — scrollback commits and
+    /// the settled-prefix cache both freeze entries on it.
+    pub(crate) fn render_settled(&self) -> bool {
+        matches!(
+            self.status,
+            ToolCallStatus::Completed | ToolCallStatus::Failed
+        ) && self.body.iter().all(|output| {
+            !matches!(
+                output,
+                ToolCallOutput::Terminal {
+                    exit_status: None,
+                    ..
+                }
+            )
+        })
     }
 
     fn apply_terminal_output(&mut self, snapshot: &TerminalOutputSnapshot) -> bool {
@@ -2396,6 +2415,7 @@ impl AppState {
     pub fn set_theme(&mut self, theme_kind: TerminalThemeKind) {
         if self.theme_kind != theme_kind {
             self.bump_transcript_revision();
+            self.bump_settled_render_epoch();
         }
         self.theme_kind = theme_kind;
         self.theme = theme_kind.palette();
@@ -2408,6 +2428,7 @@ impl AppState {
     pub fn set_thought_output(&mut self, thought_output: crate::config::ThoughtOutput) {
         if self.thought_output != thought_output {
             self.bump_transcript_revision();
+            self.bump_settled_render_epoch();
         }
         self.thought_output = thought_output;
     }
@@ -2745,6 +2766,25 @@ impl AppState {
         self.transcript_revision
     }
 
+    pub(crate) fn settled_render_epoch(&self) -> u64 {
+        self.settled_render_epoch
+    }
+
+    /// Invalidate renders of entries the renderer may have frozen. Every
+    /// bump site must also bump the transcript revision (they all reach a
+    /// visible render change), but not vice versa: streaming appends and
+    /// reveal pacing leave settled renders intact.
+    fn bump_settled_render_epoch(&mut self) {
+        self.settled_render_epoch = self.settled_render_epoch.wrapping_add(1);
+    }
+
+    /// Lowest transcript entry currently limited to a reveal prefix. Entries
+    /// at or above this index render a growing slice of their text and must
+    /// not be frozen.
+    pub(crate) fn min_stream_visible_entry(&self) -> Option<usize> {
+        self.stream_visible_bytes.keys().min().copied()
+    }
+
     /// Limit an active transcript entry to a source prefix for live rendering.
     /// This is deliberately transient: exports, history, and replay continue
     /// to read the complete entry.
@@ -2834,13 +2874,23 @@ impl AppState {
         let snapshots: Vec<TerminalOutputSnapshot> =
             self.terminal_outputs.values().cloned().collect();
         let mut changed = false;
+        let mut settled_changed = false;
         for snapshot in &snapshots {
             for view in self.tool_calls.values_mut() {
-                changed |= view.apply_terminal_output(snapshot);
+                // A snapshot that still mutates a settled view (a late or
+                // diverging report after the terminal exited) invalidates
+                // renders the settled-prefix cache may have frozen.
+                let was_settled = view.render_settled();
+                let view_changed = view.apply_terminal_output(snapshot);
+                changed |= view_changed;
+                settled_changed |= view_changed && was_settled;
             }
         }
         if changed {
             self.bump_transcript_revision();
+        }
+        if settled_changed {
+            self.bump_settled_render_epoch();
         }
     }
 
@@ -2851,6 +2901,7 @@ impl AppState {
         self.expand_transcript_details = !self.expand_transcript_details;
         self.tool_detail_overrides.clear();
         self.bump_transcript_revision();
+        self.bump_settled_render_epoch();
     }
 
     /// Toggle one tool's details relative to the current renderer default.
@@ -2874,6 +2925,7 @@ impl AppState {
             self.tool_detail_overrides.insert(id.to_string(), expanded);
         }
         self.bump_transcript_revision();
+        self.bump_settled_render_epoch();
         true
     }
 
@@ -4396,6 +4448,7 @@ impl AppState {
                     self.close_nested_agent_viewer();
                     self.nested_agent_selected = None;
                     self.subagents.clear();
+                    let tool_calls_before = self.tool_calls.len();
                     self.tool_calls
                         .retain(|id, _| !id.starts_with(SUBAGENT_ID_PREFIX));
                     self.terminal_outputs
@@ -4404,9 +4457,15 @@ impl AppState {
                     self.subagent_label = None;
                     self.active_subagents = 0;
                     self.workflow_clocks.clear();
-                    if !self.tool_detail_overrides.is_empty() {
+                    // Dropping a tool view changes how its (possibly settled)
+                    // transcript entry renders, as does clearing the per-tool
+                    // detail overrides.
+                    if self.tool_calls.len() != tool_calls_before
+                        || !self.tool_detail_overrides.is_empty()
+                    {
                         self.tool_detail_overrides.clear();
                         self.bump_transcript_revision();
+                        self.bump_settled_render_epoch();
                     }
                 }
                 self.session_id = Some(session_id);
@@ -5389,6 +5448,13 @@ impl AppState {
                 let key = format!("{prefix}{}", tool_call.tool_call_id);
                 let mut view = ToolCallView::from_tool_call(&tool_call);
                 view.namespace_terminal_ids(prefix);
+                if self
+                    .tool_calls
+                    .get(&key)
+                    .is_some_and(ToolCallView::render_settled)
+                {
+                    self.bump_settled_render_epoch();
+                }
                 self.tool_calls.insert(key.clone(), view);
                 self.ensure_subagent_state(subagent_id)
                     .transcript
@@ -5399,8 +5465,13 @@ impl AppState {
                 self.finalize_subagent_message(subagent_id);
                 let key = format!("{prefix}{}", update.tool_call_id);
                 if let Some(view) = self.tool_calls.get_mut(&key) {
+                    let settled_before = view.render_settled().then(|| view.clone());
                     view.apply_update(&update);
                     view.namespace_terminal_ids(prefix);
+                    let settled_changed = settled_before.is_some_and(|before| before != *view);
+                    if settled_changed {
+                        self.bump_settled_render_epoch();
+                    }
                 } else {
                     let mut view = ToolCallView {
                         title: update
@@ -5591,6 +5662,15 @@ impl AppState {
                 self.finalize_message(EntryKind::Agent);
                 let id = tc.tool_call_id.to_string();
                 let suppressed = is_subagent_transport_call(&tc);
+                // A duplicate id replacing a settled view changes a render
+                // the settled-prefix cache may have frozen.
+                if self
+                    .tool_calls
+                    .get(&id)
+                    .is_some_and(ToolCallView::render_settled)
+                {
+                    self.bump_settled_render_epoch();
+                }
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
                 self.register_terminals_for_tool_call(&id);
@@ -5615,7 +5695,15 @@ impl AppState {
                     }
                 }
                 if let Some(view) = self.tool_calls.get_mut(&id) {
+                    // A late update that still changes a settled view (a
+                    // trailing report after failure or completion) mutates a
+                    // render the settled-prefix cache may have frozen.
+                    let settled_before = view.render_settled().then(|| view.clone());
                     view.apply_update(&u);
+                    let settled_changed = settled_before.is_some_and(|before| before != *view);
+                    if settled_changed {
+                        self.bump_settled_render_epoch();
+                    }
                 } else {
                     // Update before create; synthesize a placeholder.
                     let mut view = ToolCallView {
