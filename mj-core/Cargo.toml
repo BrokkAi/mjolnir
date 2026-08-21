@@ -45,7 +45,12 @@ unicode-width = "0.2.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSError", "NSString"] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCScreenshotManager", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

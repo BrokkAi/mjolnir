@@ -137,7 +137,8 @@ pub struct CurrentDisplay {
     pub display_id: DisplayId,
     pub origin: DesktopPoint,
     pub pixel_size: PixelSize,
-    pub scale: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
 }
 
 /// Geometry reported with every observation.
@@ -149,8 +150,10 @@ pub struct ObservationMetadata {
     pub display_origin: DesktopPoint,
     /// Full physical-pixel dimensions of the display at capture time.
     pub display_pixel_size: PixelSize,
-    /// Physical pixels per desktop point (2.0 on a typical Retina display).
-    pub display_scale: f64,
+    /// Physical pixels per desktop point on each axis. The values can differ
+    /// slightly in a scaled display mode because its point dimensions round.
+    pub display_scale_x: f64,
+    pub display_scale_y: f64,
     /// Physical-pixel crop taken from the display before any downscaling.
     pub source_region: SourceRegion,
     /// Dimensions of the image supplied to the agent after downscaling.
@@ -164,7 +167,11 @@ pub struct ObservationMetadata {
 
 impl ObservationMetadata {
     pub fn validate(&self, limits: ImageLimits) -> Result<(), ComputerError> {
-        if !self.display_scale.is_finite() || self.display_scale <= 0.0 {
+        if !self.display_scale_x.is_finite()
+            || !self.display_scale_y.is_finite()
+            || self.display_scale_x <= 0.0
+            || self.display_scale_y <= 0.0
+        {
             return Err(ComputerError::InvalidDisplayScale);
         }
         if self.expires_at_unix_ms <= self.created_at_unix_ms {
@@ -211,8 +218,8 @@ impl ObservationMetadata {
             + point.y * f64::from(self.source_region.height)
                 / f64::from(self.returned_image_size.height);
         Ok((
-            self.display_origin.x as f64 + source_x / self.display_scale,
-            self.display_origin.y as f64 + source_y / self.display_scale,
+            self.display_origin.x as f64 + source_x / self.display_scale_x,
+            self.display_origin.y as f64 + source_y / self.display_scale_y,
         ))
     }
 
@@ -231,7 +238,8 @@ impl ObservationMetadata {
         if current_display.display_id != self.display_id
             || current_display.origin != self.display_origin
             || current_display.pixel_size != self.display_pixel_size
-            || current_display.scale.to_bits() != self.display_scale.to_bits()
+            || current_display.scale_x.to_bits() != self.display_scale_x.to_bits()
+            || current_display.scale_y.to_bits() != self.display_scale_y.to_bits()
         {
             return Err(ComputerError::DisplayChanged);
         }
@@ -583,7 +591,8 @@ mod tests {
                 width: 3_840,
                 height: 2_160,
             },
-            display_scale: 2.0,
+            display_scale_x: 2.0,
+            display_scale_y: 2.0,
             source_region: SourceRegion {
                 x: 640,
                 y: 360,
@@ -637,7 +646,8 @@ mod tests {
             display_id: metadata.display_id.clone(),
             origin: metadata.display_origin,
             pixel_size: metadata.display_pixel_size,
-            scale: metadata.display_scale,
+            scale_x: metadata.display_scale_x,
+            scale_y: metadata.display_scale_y,
         };
         assert_eq!(
             metadata.resolve_target(ImagePoint { x: 0.0, y: 0.0 }, 200, &current),

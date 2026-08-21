@@ -1,18 +1,25 @@
 //! macOS observation backend for the computer-interaction contract.
 //!
-//! CoreGraphics provides display geometry and the current display image;
-//! ImageIO encodes that image as PNG. This module intentionally does not
+//! CoreGraphics provides display geometry; ScreenCaptureKit supplies display
+//! images and ImageIO encodes them as PNG. This module intentionally does not
 //! request Screen Recording access, inject input, start an MCP listener, or
 //! make policy decisions.
 
 use std::{
     ffi::{c_char, c_void},
     io::Cursor,
+    sync::mpsc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use block2::RcBlock;
 use image::{GenericImageView as _, ImageFormat};
+use objc2_core_foundation::{CGPoint as ObjcCGPoint, CGRect as ObjcCGRect, CGSize as ObjcCGSize};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::NSError;
+use objc2_screen_capture_kit::SCScreenshotManager;
 use tokio_util::sync::CancellationToken;
 
 use crate::computer::{
@@ -64,7 +71,6 @@ unsafe extern "C" {
     fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
     fn CGDisplayPixelsWide(display: CGDirectDisplayID) -> usize;
     fn CGDisplayPixelsHigh(display: CGDirectDisplayID) -> usize;
-    fn CGDisplayCreateImage(display: CGDirectDisplayID) -> CGImageRef;
     fn CGPreflightScreenCaptureAccess() -> bool;
 }
 
@@ -142,9 +148,7 @@ impl MacosComputerBackend {
         let info = display_info(display)?;
         check_cancelled(cancellation)?;
 
-        let image = CoreGraphicsImage::capture(display)?;
-        check_cancelled(cancellation)?;
-        let png = image.png_bytes()?;
+        let png = screen_capture_kit_png(display_rect(&info), cancellation)?;
         check_cancelled(cancellation)?;
         let full = image::load_from_memory_with_format(&png, ImageFormat::Png)
             .map_err(|error| ComputerError::Backend(format!("decode CoreGraphics PNG: {error}")))?;
@@ -167,7 +171,7 @@ impl MacosComputerBackend {
         );
         let max_width = request.max_image_width.unwrap_or(self.limits.max_width);
         let max_height = request.max_image_height.unwrap_or(self.limits.max_height);
-        let returned = cropped.thumbnail(max_width, max_height);
+        let returned = downscale_to_limits(cropped, max_width, max_height);
         let returned_size = PixelSize {
             width: returned.width(),
             height: returned.height(),
@@ -186,7 +190,8 @@ impl MacosComputerBackend {
                 display_id: info.display_id,
                 display_origin: info.origin,
                 display_pixel_size: info.pixel_size,
-                display_scale: info.scale,
+                display_scale_x: info.scale_x,
+                display_scale_y: info.scale_y,
                 source_region,
                 returned_image_size: returned_size,
                 mime_type: "image/png".to_string(),
@@ -256,7 +261,8 @@ struct DisplayInfo {
     display_id: DisplayId,
     origin: DesktopPoint,
     pixel_size: PixelSize,
-    scale: f64,
+    scale_x: f64,
+    scale_y: f64,
     point_size: (f64, f64),
 }
 
@@ -266,7 +272,8 @@ impl DisplayInfo {
             display_id: self.display_id.clone(),
             origin: self.origin,
             pixel_size: self.pixel_size,
-            scale: self.scale,
+            scale_x: self.scale_x,
+            scale_y: self.scale_y,
         }
     }
 }
@@ -337,7 +344,7 @@ fn display_info(display: CGDirectDisplayID) -> Result<DisplayInfo, ComputerError
     }
     let scale_x = f64::from(pixel_size.width) / bounds.size.width;
     let scale_y = f64::from(pixel_size.height) / bounds.size.height;
-    if !scale_x.is_finite() || !scale_y.is_finite() || (scale_x - scale_y).abs() > f64::EPSILON {
+    if !scale_x.is_finite() || !scale_y.is_finite() || scale_x <= 0.0 || scale_y <= 0.0 {
         return Err(ComputerError::InvalidDisplayScale);
     }
     Ok(DisplayInfo {
@@ -347,7 +354,8 @@ fn display_info(display: CGDirectDisplayID) -> Result<DisplayInfo, ComputerError
             y: bounds.origin.y.round() as i64,
         },
         pixel_size,
-        scale: scale_x,
+        scale_x,
+        scale_y,
         point_size: (bounds.size.width, bounds.size.height),
     })
 }
@@ -371,10 +379,10 @@ fn source_region(
     if left < 0.0 || top < 0.0 || right > display.point_size.0 || bottom > display.point_size.1 {
         return Err(ComputerError::InvalidCaptureRegion);
     }
-    let x = (left * display.scale).round();
-    let y = (top * display.scale).round();
-    let right = (right * display.scale).round();
-    let bottom = (bottom * display.scale).round();
+    let x = (left * display.scale_x).round();
+    let y = (top * display.scale_y).round();
+    let right = (right * display.scale_x).round();
+    let bottom = (bottom * display.scale_y).round();
     let region = SourceRegion {
         x: x as u32,
         y: y as u32,
@@ -395,6 +403,14 @@ fn source_region(
         return Err(ComputerError::InvalidCaptureRegion);
     }
     Ok(region)
+}
+
+fn downscale_to_limits(
+    image: image::DynamicImage,
+    max_width: u32,
+    max_height: u32,
+) -> image::DynamicImage {
+    image.thumbnail(max_width.min(image.width()), max_height.min(image.height()))
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<(), ComputerError> {
@@ -419,53 +435,76 @@ fn unix_millis() -> Result<u64, ComputerError> {
         .map(|duration| duration.as_millis() as u64)
 }
 
-struct CoreGraphicsImage(CGImageRef);
+fn display_rect(display: &DisplayInfo) -> ObjcCGRect {
+    ObjcCGRect::new(
+        ObjcCGPoint::new(display.origin.x as f64, display.origin.y as f64),
+        ObjcCGSize::new(display.point_size.0, display.point_size.1),
+    )
+}
 
-impl CoreGraphicsImage {
-    fn capture(display: CGDirectDisplayID) -> Result<Self, ComputerError> {
-        // SAFETY: `display` is active and CoreGraphics returns a retained image
-        // reference owned by this wrapper.
-        let image = unsafe { CGDisplayCreateImage(display) };
-        if image.is_null() {
-            return Err(ComputerError::Backend(
-                "CoreGraphics did not return a display image".to_string(),
-            ));
-        }
-        Ok(Self(image))
+/// Captures one display-space rectangle with the supported ScreenCaptureKit
+/// API. The callback encodes while its borrowed `CGImage` is alive, so no
+/// CoreFoundation object escapes the callback without a retain.
+fn screen_capture_kit_png(
+    rect: ObjcCGRect,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, ComputerError> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let callback = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        let result = if image.is_null() {
+            let reason = if error.is_null() {
+                "ScreenCaptureKit returned neither image nor error"
+            } else {
+                "ScreenCaptureKit did not capture the requested display"
+            };
+            Err(ComputerError::Backend(reason.to_string()))
+        } else {
+            png_bytes_from_image(image.cast())
+        };
+        let _ = tx.send(result);
+    });
+    // SAFETY: `rect` is a valid display-space rectangle and `callback` remains
+    // retained until the capture has completed or this function returns.
+    unsafe {
+        SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&callback));
     }
-
-    fn png_bytes(&self) -> Result<Vec<u8>, ComputerError> {
-        let data = CoreFoundationData::new_mutable()?;
-        let png_type = CoreFoundationString::new("public.png")?;
-        // SAFETY: the CF data and PNG type remain valid for the destination's
-        // lifetime; ImageIO retains neither after finalize/release.
-        let destination =
-            unsafe { CGImageDestinationCreateWithData(data.0, png_type.0, 1, std::ptr::null()) };
-        if destination.is_null() {
-            return Err(ComputerError::Backend(
-                "create PNG image destination failed".to_string(),
-            ));
+    loop {
+        check_cancelled(cancellation)?;
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(ComputerError::Backend(
+                    "ScreenCaptureKit completion handler disconnected".to_string(),
+                ));
+            }
         }
-        let destination = CoreFoundationObject(destination.cast());
-        // SAFETY: destination and image are valid retained CoreFoundation
-        // objects; no properties are supplied.
-        unsafe { CGImageDestinationAddImage(destination.0.cast_mut(), self.0, std::ptr::null()) };
-        // SAFETY: destination is valid until the RAII wrapper drops it.
-        if !unsafe { CGImageDestinationFinalize(destination.0.cast_mut()) } {
-            return Err(ComputerError::Backend(
-                "encode CoreGraphics PNG failed".to_string(),
-            ));
-        }
-        data.bytes()
     }
 }
 
-impl Drop for CoreGraphicsImage {
-    fn drop(&mut self) {
-        // SAFETY: CGDisplayCreateImage returned this retained CoreFoundation
-        // object and this wrapper is its sole owner.
-        unsafe { CFRelease(self.0) };
+fn png_bytes_from_image(image: CGImageRef) -> Result<Vec<u8>, ComputerError> {
+    let data = CoreFoundationData::new_mutable()?;
+    let png_type = CoreFoundationString::new("public.png")?;
+    // SAFETY: the CF data, PNG type, and callback-owned image remain valid
+    // until ImageIO finishes encoding below.
+    let destination =
+        unsafe { CGImageDestinationCreateWithData(data.0, png_type.0, 1, std::ptr::null()) };
+    if destination.is_null() {
+        return Err(ComputerError::Backend(
+            "create PNG image destination failed".to_string(),
+        ));
     }
+    let destination = CoreFoundationObject(destination.cast());
+    // SAFETY: destination and image are valid CoreFoundation objects; no
+    // properties are supplied.
+    unsafe { CGImageDestinationAddImage(destination.0.cast_mut(), image, std::ptr::null()) };
+    // SAFETY: destination is valid until the RAII wrapper drops it.
+    if !unsafe { CGImageDestinationFinalize(destination.0.cast_mut()) } {
+        return Err(ComputerError::Backend(
+            "encode ScreenCaptureKit PNG failed".to_string(),
+        ));
+    }
+    data.bytes()
 }
 
 struct CoreFoundationObject(*const c_void);
@@ -560,7 +599,8 @@ mod tests {
                 width: 3_840,
                 height: 2_160,
             },
-            scale: 2.0,
+            scale_x: 2.0,
+            scale_y: 2.0,
             point_size: (1_920.0, 1_080.0),
         }
     }
@@ -601,6 +641,22 @@ mod tests {
             ),
             Err(ComputerError::InvalidCaptureRegion)
         );
+    }
+
+    #[test]
+    fn image_limits_never_upscale_a_small_capture() {
+        let image = image::DynamicImage::new_rgba8(800, 600);
+        let returned = downscale_to_limits(image, 2_048, 2_048);
+        assert_eq!(returned.dimensions(), (800, 600));
+    }
+
+    #[test]
+    fn main_display_geometry_is_available_without_screen_recording_permission() {
+        let info = display_info(main_display_id()).expect("read main display geometry");
+        assert!(info.pixel_size.width > 0);
+        assert!(info.pixel_size.height > 0);
+        assert!(info.scale_x.is_finite() && info.scale_x > 0.0);
+        assert!(info.scale_y.is_finite() && info.scale_y > 0.0);
     }
 
     #[tokio::test]
@@ -660,8 +716,12 @@ mod tests {
         assert_eq!(current.pixel_size, observation.metadata.display_pixel_size);
         assert_eq!(current.origin, observation.metadata.display_origin);
         assert_eq!(
-            current.scale.to_bits(),
-            observation.metadata.display_scale.to_bits()
+            current.scale_x.to_bits(),
+            observation.metadata.display_scale_x.to_bits()
+        );
+        assert_eq!(
+            current.scale_y.to_bits(),
+            observation.metadata.display_scale_y.to_bits()
         );
     }
 }
