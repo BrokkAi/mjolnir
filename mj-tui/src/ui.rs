@@ -9324,8 +9324,10 @@ fn build_transcript_cache(
 ///   plan updates even though the stability predicate classes them stable
 /// - entries at or past the lowest reveal prefix render a growing text slice
 /// - a turn whose compact context is not final re-renders as a whole when
-///   `transcript_turns` reclassifies it: any turn with unstable entries, and
-///   the in-flight last turn that has not become compactable yet
+///   `transcript_turns` reclassifies it: any turn with unstable entries, any
+///   turn whose local lifecycle has not completed (a mid-turn steer splits
+///   the running turn into a non-last one), and the in-flight last turn that
+///   has not become compactable yet
 /// - every frozen entry must settle naturally: the committed-by-fiat
 ///   shortcut is ignored, because a force-committed entry's render still
 ///   changes (a running terminal's reference line resolves when it exits)
@@ -9355,7 +9357,12 @@ fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
             break;
         }
         let last_turn = position + 1 == turns.len();
-        if !turn.entries_stable || (last_turn && !turn.is_compactable) {
+        // A mid-turn steer pushes a later `UserPrompt` without a lifecycle,
+        // so the running turn is no longer the last one; it still completes
+        // (and compacts, and gains its elapsed label) on `PromptDone`.
+        let lifecycle_open = state.has_prompt_turn(turn.prompt_index)
+            && !state.prompt_turn_completed(turn.prompt_index);
+        if !turn.entries_stable || lifecycle_open || (last_turn && !turn.is_compactable) {
             boundary = turn.prompt_index;
             break;
         }
@@ -24442,6 +24449,52 @@ mod tests {
         assert_eq!(
             buffer_lines(terminal.backend().buffer()),
             buffer_lines(fresh_terminal.backend().buffer()),
+        );
+    }
+
+    #[test]
+    fn settled_boundary_holds_a_running_turn_split_by_a_mid_turn_steer() {
+        let mut state = settled_turns_state(1);
+        state.record_user_prompt("ready the v1 release".to_string());
+        let running_prompt = state.transcript.len() - 1;
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("working on v1"),
+        )));
+        // A steer lands as a later `UserPrompt` without its own lifecycle, so
+        // the running turn is no longer the last turn. Its entries are all
+        // stable (the steer closed the open message) but `PromptDone` still
+        // has to complete it, which compacts its render and adds its elapsed
+        // time to the turn header.
+        state.record_steered_prompt("sorry, make it v2".to_string(), Vec::new());
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), running_prompt);
+
+        let (width, height) = (60u16, 16u16);
+        let mut scroll = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("switching to v2"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+
+        let mut fresh_scroll = TranscriptScrollState::default();
+        let mut fresh_terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        fresh_terminal
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(
+            buffer_lines(terminal.backend().buffer()),
+            buffer_lines(fresh_terminal.backend().buffer()),
+            "the completed turn must re-render compacted, not stay frozen in its streaming form"
         );
     }
 
