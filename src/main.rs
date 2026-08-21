@@ -1541,10 +1541,7 @@ async fn run_app(
             &config_path,
             &cwd,
             termination.clone(),
-            team_selection_required.then_some(
-                "Your previous configuration does not map to a supported Team. Choose one of the four Teams to continue."
-                    .to_string(),
-            ),
+            team_recovery_notice(config_exists, team_selection_required),
         )
         .await?
         else {
@@ -1681,6 +1678,18 @@ async fn run_app(
             }
         }
     }
+}
+
+/// The notice shown when a *saved* configuration no longer maps to one of the
+/// four Teams. A fresh install has no previous configuration: it gets
+/// onboarding's own "choose a Team" prompt instead, and must not be told its
+/// (nonexistent) configuration failed to map — that also keeps it on the fresh
+/// flow rather than the recovery flow the notice selects.
+fn team_recovery_notice(config_exists: bool, team_selection_required: bool) -> Option<String> {
+    (config_exists && team_selection_required).then(|| {
+        "Your previous configuration does not map to a supported Team. Choose one of the four Teams to continue."
+            .to_string()
+    })
 }
 
 fn onboarding_kind(
@@ -3543,6 +3552,19 @@ mod tests {
             selected.env.get("TOKEN").map(String::as_str),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn fresh_install_is_not_told_its_previous_configuration_failed_to_map() {
+        // No saved config: onboarding's own "choose a Team" prompt applies, and
+        // the recovery notice (which also selects the recovery flow) stays off.
+        assert_eq!(team_recovery_notice(false, true), None);
+        assert_eq!(team_recovery_notice(false, false), None);
+        // A saved config that maps to a Team needs no notice either.
+        assert_eq!(team_recovery_notice(true, false), None);
+        // Only a saved config that no longer maps gets the recovery wording.
+        let notice = team_recovery_notice(true, true).expect("recovery notice");
+        assert!(notice.starts_with("Your previous configuration does not map"));
     }
 
     #[test]
