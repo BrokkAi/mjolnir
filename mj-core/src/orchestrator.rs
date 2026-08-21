@@ -78,6 +78,13 @@ impl UserMessageHistory {
     /// adapters do not reliably echo it as a `UserMessageChunk`, so this is
     /// the only path that keeps mid-turn corrections visible to review.
     fn record_steer(&mut self, text: String) {
+        // An adapter may echo the steer as a `UserMessageChunk` before the
+        // steering request's `injected` outcome arrives. That echo must not be
+        // flushed as a separate, unflagged copy ahead of the record that
+        // carries the mid-turn identity.
+        if self.pending_replay.trim() == text.trim() {
+            self.pending_replay.clear();
+        }
         self.finish_pending();
         self.push_deduplicated(text, true);
     }
@@ -95,10 +102,15 @@ impl UserMessageHistory {
     }
 
     fn push_deduplicated(&mut self, text: String, steered: bool) {
+        if text.trim().is_empty() {
+            return;
+        }
         // Text-only comparison: an adapter that echoes a recorded steer back
-        // as a `UserMessageChunk` must not append a second, unflagged copy.
-        if !text.trim().is_empty() && self.messages.last().map(|last| &last.text) != Some(&text) {
-            self.messages.push(UserMessage { text, steered });
+        // as a `UserMessageChunk` must not append a second, unflagged copy,
+        // and an echo that landed first must not strip the steer's identity.
+        match self.messages.last_mut() {
+            Some(last) if last.text == text => last.steered |= steered,
+            _ => self.messages.push(UserMessage { text, steered }),
         }
     }
 }
@@ -2790,6 +2802,43 @@ mod tests {
             "sorry, make it v2",
         )));
         history.observe(&SessionUpdate::AgentMessageChunk(text_chunk("done")));
+        assert_eq!(
+            history.snapshot(),
+            vec![
+                UserMessage::prompt("ready the v1 release"),
+                UserMessage::steer("sorry, make it v2")
+            ]
+        );
+    }
+
+    #[test]
+    fn user_message_history_keeps_the_steer_flag_when_the_echo_lands_first() {
+        let mut history = UserMessageHistory::default();
+        history.record_prompt("ready the v1 release".to_string());
+        // The adapter echoes the steered text before the steering request's
+        // `injected` outcome is confirmed; the record must not end up as an
+        // unflagged echo followed by a dropped duplicate.
+        history.observe(&SessionUpdate::UserMessageChunk(text_chunk(
+            "sorry, make it v2",
+        )));
+        history.record_steer("sorry, make it v2".to_string());
+        history.observe(&SessionUpdate::AgentMessageChunk(text_chunk("done")));
+        assert_eq!(
+            history.snapshot(),
+            vec![
+                UserMessage::prompt("ready the v1 release"),
+                UserMessage::steer("sorry, make it v2")
+            ]
+        );
+
+        // An echo already flushed by an agent chunk is upgraded in place.
+        let mut history = UserMessageHistory::default();
+        history.record_prompt("ready the v1 release".to_string());
+        history.observe(&SessionUpdate::UserMessageChunk(text_chunk(
+            "sorry, make it v2",
+        )));
+        history.observe(&SessionUpdate::AgentThoughtChunk(text_chunk("hm")));
+        history.record_steer("sorry, make it v2".to_string());
         assert_eq!(
             history.snapshot(),
             vec![
