@@ -735,10 +735,6 @@ fn review_run_context(config: &FanoutConfig) -> RunContext {
     }
 }
 
-fn requires_native_review_policy(source_id: &str) -> bool {
-    mj_core::roster::AdapterKind::from_source_id(source_id).is_some()
-}
-
 fn configure_review_pool(
     mut config: SubagentConfig,
     fanout: &FanoutConfig,
@@ -748,10 +744,6 @@ fn configure_review_pool(
 ) -> SubagentConfig {
     if let Some(role) = config.role_config.as_mut() {
         role.session_tag = fanout.session_tag.clone();
-        // Built-in adapters have provider-specific review hardening. An
-        // embedding platform's external adapter uses the ordinary discrete
-        // review runtime and permission flow.
-        role.require_native_read_only = requires_native_review_policy(&role.adapter_source_id);
     }
     config
         .with_reports(reports)
@@ -4711,13 +4703,6 @@ mod tests {
         assert_eq!(context.snapshot_exclusions, vec![PathBuf::from("target")]);
         assert_eq!(context.fs_max_text_bytes, 4096);
         assert_eq!(context.access_mode, RuntimeAccessMode::ReadOnly);
-    }
-
-    #[test]
-    fn external_review_routes_use_the_normal_discrete_review_runtime() {
-        assert!(requires_native_review_policy("codex-acp"));
-        assert!(requires_native_review_policy("claude-acp"));
-        assert!(!requires_native_review_policy("sidecar"));
     }
 
     #[test]

@@ -134,9 +134,6 @@ pub struct RuntimeRoleConfig {
     pub model_id: String,
     pub model_value: String,
     pub adapter_source_id: String,
-    /// Require an adapter-native read-only policy before the first prompt.
-    /// Discrete-review seats set this in addition to the client-side ACP gate.
-    pub require_native_read_only: bool,
     /// Provider-native permission preset applied after model selection.
     pub permission: Option<crate::config::RuntimePermissionConfig>,
     /// Correlates primary and subagent records in one interactive session.
@@ -145,74 +142,6 @@ pub struct RuntimeRoleConfig {
     /// applied to this seat's ACP session after the model is set. `None`
     /// leaves the adapter's own default effort untouched.
     pub reasoning_effort: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeReadOnlyPolicy {
-    Codex,
-    Claude,
-}
-
-const CLAUDE_READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
-
-const CLAUDE_MUTATING_TOOLS: &[&str] = &[
-    "Agent",
-    "Bash",
-    "Edit",
-    "Write",
-    "NotebookEdit",
-    "TaskStop",
-    "TodoWrite",
-    "SendFeedback",
-    "ClaudeDesign",
-    "Projects",
-    "TaskCreate",
-    "TaskUpdate",
-    "REPL",
-    "Workflow",
-    "CronCreate",
-    "CronDelete",
-    "ScheduleWakeup",
-    "RemoteTrigger",
-    "ShowOnboardingRolePicker",
-    "ProposeSkills",
-    "Artifact",
-    "PushNotification",
-    "EnterWorktree",
-    "ExitWorktree",
-];
-
-fn native_read_only_policy(
-    role: Option<&RuntimeRoleConfig>,
-) -> Result<Option<NativeReadOnlyPolicy>> {
-    let Some(role) = role.filter(|role| role.require_native_read_only) else {
-        return Ok(None);
-    };
-    let policy = match role.adapter_source_id.as_str() {
-        "codex-acp" => NativeReadOnlyPolicy::Codex,
-        "claude-acp" => NativeReadOnlyPolicy::Claude,
-        _ => {
-            anyhow::bail!(
-                "native read-only enforcement is unavailable for adapter '{}'; review lane disabled",
-                role.adapter_source_id
-            )
-        }
-    };
-    Ok(Some(policy))
-}
-
-fn claude_read_only_meta() -> serde_json::Map<String, serde_json::Value> {
-    serde_json::json!({
-        "claudeCode": {
-            "options": {
-                "tools": CLAUDE_READ_ONLY_TOOLS,
-                "disallowedTools": CLAUDE_MUTATING_TOOLS,
-            }
-        }
-    })
-    .as_object()
-    .expect("Claude read-only metadata is an object")
-    .clone()
 }
 
 const MAX_LOGGED_UPDATE_BYTES: usize = 4096;
@@ -1037,16 +966,10 @@ fn new_session_request(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
 ) -> NewSessionRequest {
-    let request = NewSessionRequest::new(cwd)
+    NewSessionRequest::new(cwd)
         .additional_directories(additional_directories.to_vec())
-        .mcp_servers(mcp_servers.to_vec());
-    if native_read_only == Some(NativeReadOnlyPolicy::Claude) {
-        request.meta(claude_read_only_meta())
-    } else {
-        request
-    }
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 async fn create_new_session(
@@ -1054,17 +977,9 @@ async fn create_new_session(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<NewSessionResponse, LaunchError> {
-    let request = || {
-        new_session_request(
-            cwd.clone(),
-            additional_directories,
-            mcp_servers,
-            native_read_only,
-        )
-    };
+    let request = || new_session_request(cwd.clone(), additional_directories, mcp_servers);
     match conn.send_request(request()).block_task().await {
         Ok(response) => Ok(response),
         Err(source) => match auth_required_detail(&source) {
@@ -1085,7 +1000,6 @@ async fn create_initial_session_with_retry(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
     auth_methods: &[AuthMethod],
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
 ) -> std::result::Result<NewSessionResponse, LaunchError> {
@@ -1094,7 +1008,6 @@ async fn create_initial_session_with_retry(
         cwd.clone(),
         additional_directories,
         mcp_servers,
-        native_read_only,
         auth_methods,
     )
     .await;
@@ -1105,15 +1018,7 @@ async fn create_initial_session_with_retry(
     let _ = ui_tx.send(UiEvent::Warning(format!(
         "session/new failed; retrying once on the existing agent connection: {first_error}"
     )));
-    create_new_session(
-        conn,
-        cwd,
-        additional_directories,
-        mcp_servers,
-        native_read_only,
-        auth_methods,
-    )
-    .await
+    create_new_session(conn, cwd, additional_directories, mcp_servers, auth_methods).await
 }
 
 fn resume_session_request(
@@ -1283,11 +1188,6 @@ pub async fn run(
     ui_rx: mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<()> {
     let fatal_emitted = Arc::new(AtomicBool::new(false));
-    if let Err(error) = native_read_only_policy(cfg.role_config.as_ref()) {
-        let text = error.to_string();
-        emit_fatal(&ui_tx, &fatal_emitted, text.clone());
-        return Err(anyhow::anyhow!(text));
-    }
     if let Some(role) = cfg.role_config.as_ref()
         && let Some(session_tag) = role.session_tag.as_deref()
     {
@@ -2500,19 +2400,6 @@ async fn drive_session(
     manual_compact_suppression: Arc<AtomicBool>,
     stderr_tail: Option<AgentStderrTail>,
 ) -> Result<()> {
-    let native_read_only = match native_read_only_policy(role_config.as_ref()) {
-        Ok(policy) => policy,
-        Err(error) => {
-            let text = emit_fatal_with_stderr(
-                ui_tx,
-                &fatal_emitted,
-                error.to_string(),
-                stderr_tail.as_ref(),
-            )
-            .await;
-            return Err(anyhow::anyhow!(text));
-        }
-    };
     // Advertise the client capabilities backed by handlers registered in
     // `drive_client` above.
     let mut client_meta = serde_json::Map::new();
@@ -2698,7 +2585,6 @@ async fn drive_session(
             cwd.clone(),
             &additional_directories,
             &mcp_servers,
-            native_read_only,
             &init_resp.auth_methods,
             ui_tx,
         )
@@ -2733,16 +2619,11 @@ async fn drive_session(
         options: session_config_options,
         targets: session_config_targets,
     };
-    let mut hidden_config_ids = role_config
+    let hidden_config_ids = role_config
         .as_ref()
         .and_then(|role| role.permission.as_ref())
         .map(|permission| vec![permission.config_id.clone()])
         .unwrap_or_default();
-    if let Some(config_id) = native_read_only.and_then(native_read_only_config_id)
-        && !hidden_config_ids.contains(&config_id.to_string())
-    {
-        hidden_config_ids.push(config_id.to_string());
-    }
     if let Some(role) = role_config.as_ref() {
         match apply_runtime_role_config(&conn, &session_id, &mut session_config, role).await {
             Ok(warnings) => {
@@ -2784,19 +2665,6 @@ async fn drive_session(
             ui_tx,
         )
         .await;
-    }
-    if let Some(policy) = native_read_only
-        && let Err(error) =
-            enforce_native_read_only(&conn, &session_id, &mut session_config, policy, resumed).await
-    {
-        let text = emit_fatal_with_stderr(
-            ui_tx,
-            &fatal_emitted,
-            format!("native read-only policy failed: {error}; review lane disabled"),
-            stderr_tail.as_ref(),
-        )
-        .await;
-        return Err(anyhow::anyhow!(text));
     }
     let _ = ui_tx.send(UiEvent::SessionStarted {
         session_id: session_id.to_string(),
@@ -2981,7 +2849,6 @@ async fn drive_session(
                     cwd.clone(),
                     &additional_directories,
                     &mcp_servers,
-                    native_read_only,
                     &init_resp.auth_methods,
                     role_config.as_ref(),
                     &saved_session_config,
@@ -3195,7 +3062,6 @@ async fn start_fresh_session(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
     auth_methods: &[AuthMethod],
     role_config: Option<&RuntimeRoleConfig>,
     saved_session_config: &HashMap<String, String>,
@@ -3210,7 +3076,6 @@ async fn start_fresh_session(
         cwd.clone(),
         additional_directories,
         mcp_servers,
-        native_read_only,
         auth_methods,
     )
     .await
@@ -3243,11 +3108,6 @@ async fn start_fresh_session(
                 ui_tx,
             )
             .await;
-        }
-        if let Some(policy) = native_read_only {
-            enforce_native_read_only(conn, &new_session_id, &mut new_config, policy, false)
-                .await
-                .map_err(|error| format!("native read-only policy failed: {error}"))?;
         }
         Ok::<(), String>(())
     }
@@ -5308,90 +5168,6 @@ pub fn session_config_option_contains_value(
             .any(|choice| choice.value == *value),
         _ => false,
     }
-}
-
-fn native_read_only_config_id(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
-    match policy {
-        NativeReadOnlyPolicy::Codex => Some("mode"),
-        NativeReadOnlyPolicy::Claude => None,
-    }
-}
-
-fn native_read_only_config_value(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
-    match policy {
-        NativeReadOnlyPolicy::Codex => Some("read-only"),
-        NativeReadOnlyPolicy::Claude => None,
-    }
-}
-
-async fn enforce_native_read_only(
-    conn: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    session_config: &mut SessionConfigCache,
-    policy: NativeReadOnlyPolicy,
-    resumed: bool,
-) -> Result<()> {
-    if policy == NativeReadOnlyPolicy::Claude {
-        if resumed {
-            anyhow::bail!(
-                "Claude read-only tool restrictions cannot be confirmed for a resumed session"
-            );
-        }
-        // A successful fresh session/new confirms that claude-agent-acp accepted
-        // the options carrying the explicit built-in allowlist and denylist.
-        return Ok(());
-    }
-
-    let config_id = native_read_only_config_id(policy).expect("config-backed policy");
-    let desired = SessionConfigValueId::from(
-        native_read_only_config_value(policy).expect("config-backed policy"),
-    );
-    let option_index = session_config
-        .targets
-        .iter()
-        .position(|target| {
-            matches!(target, SessionConfigTarget::ConfigOption { config_id: candidate } if candidate.to_string() == config_id)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "ACP adapter did not advertise required read-only configuration '{config_id}'"
-            )
-        })?;
-    if !session_config_option_contains_value(&session_config.options[option_index], &desired) {
-        anyhow::bail!(
-            "ACP adapter did not advertise required read-only value '{}' for '{config_id}'",
-            desired
-        );
-    }
-    if config_option_current_value(&session_config.options[option_index]) != Some(&desired) {
-        let target = session_config.targets[option_index].clone();
-        match send_config_update(conn, session_id, target.clone(), desired.clone()).await? {
-            Some(options) => {
-                session_config.targets = config_option_targets(&options);
-                session_config.options = options;
-            }
-            None => set_current_config_value(
-                &mut session_config.options,
-                &session_config.targets,
-                &target,
-                &desired,
-            ),
-        }
-    }
-    let confirmed = session_config
-        .targets
-        .iter()
-        .position(|target| {
-            matches!(target, SessionConfigTarget::ConfigOption { config_id: candidate } if candidate.to_string() == config_id)
-        })
-        .and_then(|index| config_option_current_value(&session_config.options[index]));
-    if confirmed != Some(&desired) {
-        anyhow::bail!(
-            "ACP adapter did not confirm required read-only value '{}' for '{config_id}'",
-            desired
-        );
-    }
-    Ok(())
 }
 
 fn select_runtime_permission_value(
@@ -8324,7 +8100,6 @@ mod tests {
             model_id: "claude-sonnet-5".to_string(),
             model_value: "claude-sonnet-5".to_string(),
             adapter_source_id: "claude-acp".to_string(),
-            require_native_read_only: false,
             permission: None,
             session_tag: None,
             reasoning_effort: None,
@@ -8349,7 +8124,6 @@ mod tests {
             model_id: "gpt-5-6-sol".to_string(),
             model_value: "gpt-5-6-sol".to_string(),
             adapter_source_id: "codex-acp".to_string(),
-            require_native_read_only: false,
             permission: None,
             session_tag: None,
             reasoning_effort: None,
@@ -8358,62 +8132,6 @@ mod tests {
             select_role_model(&codex_model, &codex_role).map(|value| value.to_string()),
             Some("gpt-5.6-sol".to_string())
         );
-    }
-
-    #[test]
-    fn claude_native_read_only_policy_limits_builtin_tools_at_session_creation() {
-        let request = new_session_request(
-            PathBuf::from("/workspace"),
-            &[],
-            &[],
-            Some(NativeReadOnlyPolicy::Claude),
-        );
-        let options = request
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("claudeCode"))
-            .and_then(|claude| claude.get("options"))
-            .expect("Claude read-only options");
-
-        assert_eq!(options["tools"], serde_json::json!(CLAUDE_READ_ONLY_TOOLS));
-        assert_eq!(
-            options["disallowedTools"],
-            serde_json::json!(CLAUDE_MUTATING_TOOLS)
-        );
-        assert!(
-            options["tools"]
-                .as_array()
-                .expect("tool allowlist")
-                .iter()
-                .any(|tool| tool == "Read")
-        );
-        for denied in ["Bash", "Edit", "Write", "NotebookEdit", "Agent"] {
-            assert!(
-                options["disallowedTools"]
-                    .as_array()
-                    .expect("tool denylist")
-                    .iter()
-                    .any(|tool| tool == denied),
-                "missing mutating tool {denied}"
-            );
-        }
-    }
-
-    #[test]
-    fn required_native_read_only_policy_rejects_unknown_adapters() {
-        let role = RuntimeRoleConfig {
-            label: "reviewer".to_string(),
-            model_id: "custom-model".to_string(),
-            model_value: "custom-model".to_string(),
-            adapter_source_id: "custom:unsafe".to_string(),
-            require_native_read_only: true,
-            permission: None,
-            session_tag: None,
-            reasoning_effort: None,
-        };
-
-        let error = native_read_only_policy(Some(&role)).expect_err("unsupported adapter");
-        assert!(error.to_string().contains("review lane disabled"));
     }
 
     #[test]
@@ -8798,11 +8516,7 @@ mod tests {
             .await;
     }
 
-    fn native_read_only_config_options(
-        config_id: &str,
-        current_value: &str,
-        read_only_value: &str,
-    ) -> Vec<SessionConfigOption> {
+    fn reviewer_mode_config_options(current_value: &str) -> Vec<SessionConfigOption> {
         vec![
             SessionConfigOption::select(
                 "model",
@@ -8812,30 +8526,26 @@ mod tests {
             )
             .category(SessionConfigOptionCategory::Model),
             SessionConfigOption::select(
-                config_id.to_string(),
+                "mode",
                 "Permission mode",
                 current_value.to_string(),
                 vec![
                     SessionConfigSelectOption::new("default", "Default"),
-                    SessionConfigSelectOption::new(read_only_value.to_string(), "Read-only"),
+                    SessionConfigSelectOption::new("agent", "Auto"),
                 ],
             )
             .category(SessionConfigOptionCategory::Mode),
         ]
     }
 
-    async fn run_mock_agent_confirming_native_read_only(
+    async fn run_mock_agent_confirming_saved_reviewer_mode(
         stream: tokio::io::DuplexStream,
-        config_id: &'static str,
-        read_only_value: &'static str,
         startup_stage: Arc<AtomicUsize>,
     ) {
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
-        let initial_options =
-            native_read_only_config_options(config_id, "default", read_only_value);
-        let confirmed_options =
-            native_read_only_config_options(config_id, read_only_value, read_only_value);
+        let initial_options = reviewer_mode_config_options("default");
+        let confirmed_options = reviewer_mode_config_options("agent");
         let config_stage = startup_stage.clone();
         let prompt_stage = startup_stage.clone();
         let _ = AgentRole
@@ -8859,11 +8569,8 @@ mod tests {
             )
             .on_receive_request(
                 async move |req: SetSessionConfigOptionRequest, responder, _cx| {
-                    assert_eq!(req.config_id.to_string(), config_id);
-                    assert_eq!(
-                        req.value,
-                        SessionConfigOptionValue::value_id(read_only_value)
-                    );
+                    assert_eq!(req.config_id.to_string(), "mode");
+                    assert_eq!(req.value, SessionConfigOptionValue::value_id("agent"));
                     assert_eq!(config_stage.swap(1, Ordering::SeqCst), 0);
                     responder.respond(SetSessionConfigOptionResponse::new(
                         confirmed_options.clone(),
@@ -8919,19 +8626,13 @@ mod tests {
         }
     }
 
-    async fn assert_native_read_only_is_confirmed_before_prompt(
-        adapter_source_id: &'static str,
-        config_id: &'static str,
-        read_only_value: &'static str,
-    ) {
+    async fn assert_saved_reviewer_mode_is_confirmed_before_prompt() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
         let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
         let startup_stage = Arc::new(AtomicUsize::new(0));
-        let mut agent_task = tokio::spawn(run_mock_agent_confirming_native_read_only(
+        let mut agent_task = tokio::spawn(run_mock_agent_confirming_saved_reviewer_mode(
             agent_side,
-            config_id,
-            read_only_value,
             startup_stage.clone(),
         ));
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
@@ -8948,15 +8649,14 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::ReadOnly,
-            Some(adapter_source_id.to_string()),
+            Some("codex-acp".to_string()),
             None,
-            HashMap::new(),
+            HashMap::from([("config:mode".to_string(), "agent".to_string())]),
             Some(RuntimeRoleConfig {
                 label: "reviewer".to_string(),
                 model_id: "model-a".to_string(),
                 model_value: "model-a".to_string(),
-                adapter_source_id: adapter_source_id.to_string(),
-                require_native_read_only: true,
+                adapter_source_id: "codex-acp".to_string(),
                 permission: None,
                 session_tag: None,
                 reasoning_effort: None,
@@ -8999,8 +8699,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn codex_native_read_only_is_confirmed_before_review_prompt() {
-        assert_native_read_only_is_confirmed_before_prompt("codex-acp", "mode", "read-only").await;
+    async fn saved_reviewer_mode_is_confirmed_before_review_prompt() {
+        assert_saved_reviewer_mode_is_confirmed_before_prompt().await;
     }
 
     async fn run_mock_agent_with_additional_directories(
@@ -10726,7 +10426,6 @@ mod tests {
             model_id: "model-a".to_string(),
             model_value: "model-a".to_string(),
             adapter_source_id: "brokk-acp-rust".to_string(),
-            require_native_read_only: false,
             permission: Some(crate::config::RuntimePermissionConfig {
                 config_id: "permission_mode".to_string(),
                 value: "bypassPermissions".to_string(),
@@ -12597,7 +12296,6 @@ mod tests {
                 model_id: "model-a".to_string(),
                 model_value: "model-a".to_string(),
                 adapter_source_id: "codex-acp".to_string(),
-                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort: None,
@@ -12843,51 +12541,6 @@ mod tests {
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_rejects_unsupported_native_read_only_before_spawn() {
-        let cfg = AcpRuntimeConfig {
-            command: PathBuf::from("definitely-not-a-real-mjolnir-command"),
-            args: Vec::new(),
-            cwd: std::env::temp_dir(),
-            additional_directories: Vec::new(),
-            mcp_servers: Vec::new(),
-            resume_session: None,
-            session_restore_mode: SessionRestoreMode::Continue,
-            env: HashMap::new(),
-            agent_stderr: None,
-            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
-            access_mode: RuntimeAccessMode::ReadOnly,
-            agent_source_id: Some("custom:unsafe".to_string()),
-            config_path: None,
-            saved_session_config: HashMap::new(),
-            role_config: Some(RuntimeRoleConfig {
-                label: "reviewer".to_string(),
-                model_id: "custom-model".to_string(),
-                model_value: "custom-model".to_string(),
-                adapter_source_id: "custom:unsafe".to_string(),
-                require_native_read_only: true,
-                permission: None,
-                session_tag: None,
-                reasoning_effort: None,
-            }),
-            subagents: None,
-            memory: None,
-            side_prompt_policy: false,
-            termination: None,
-        };
-        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
-        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-
-        let result = run(cfg, ui_tx, cmd_rx).await.expect_err("must fail closed");
-        let event = ui_rx.recv().await.expect("fatal event");
-        let UiEvent::Fatal(message) = event else {
-            panic!("unexpected event: {event:?}");
-        };
-        assert!(message.contains("native read-only enforcement is unavailable"));
-        assert!(!message.contains("agent command not found"));
-        assert!(result.to_string().contains("review lane disabled"));
     }
 
     /// End-to-end check that a bad `--agent-stderr` path emits the right
@@ -14435,7 +14088,7 @@ mod tests {
         let session_id = SessionId::from("session-1");
 
         assert_eq!(
-            new_session_request(cwd.clone(), &additional, &servers, None).mcp_servers,
+            new_session_request(cwd.clone(), &additional, &servers).mcp_servers,
             servers
         );
         assert_eq!(
