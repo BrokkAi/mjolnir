@@ -62,11 +62,9 @@ where
         timed_out,
     } = outcomes;
     // Capability probes fan out several adapters at once on every
-    // roster resolution; gate Claude probes so they never trigger
-    // racing OAuth refreshes against seats spawning concurrently.
-    if crate::claude_token::is_claude_invocation(None, &args) {
-        crate::claude_token::ensure_fresh_before_spawn(cwd.clone(), &env).await;
-    }
+    // roster resolution; gate Claude and codex probes so they never
+    // trigger racing OAuth refreshes against seats spawning concurrently.
+    crate::token_gate::ensure_fresh_before_spawn(None, &args, cwd.clone(), &env).await;
 
     let Some(prepared) = acp::resolve_agent_command_for_probe(&program, &env).await else {
         return missing();

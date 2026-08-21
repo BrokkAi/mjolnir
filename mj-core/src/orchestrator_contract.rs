@@ -281,10 +281,6 @@ pub enum ReviewVerdict {
         synthesis: String,
         evidence: ReviewPassEvidence,
     },
-    Advisory {
-        synthesis: String,
-        evidence: ReviewPassEvidence,
-    },
     Clean,
     Failed {
         reason: String,

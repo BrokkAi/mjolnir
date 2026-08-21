@@ -38,9 +38,11 @@ discrete_review = true
 
 [review]
 model = "auto"
+permission = "auto"
 
 [subagents]
 model = "auto"
+permission = "auto"
 max_parallel = 6
 auto_failover = true
 
@@ -51,6 +53,12 @@ codex-acp = "enabled"
 
 `team` records the selected Team preset; the coder and reviewer ACP routes are
 derived from it on every launch and are never persisted themselves.
+
+The Reviewer and Subagents tabs each have a **Permissions** control. Its
+default, `auto`, delegates routine approval decisions to the selected provider:
+for Codex this is its native **Approve for me** setting, not a Mjolnir
+auto-answer rule. `manual` and `yolo` select the provider's restrictive and
+full-access presets.
 
 `[agent]` is the primary agent: the session that owns every user turn. It cannot
 be disabled. `[review]` configures the discrete-review model; review
@@ -71,11 +79,13 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `review.model` | Review supervisor model, or `auto` |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
-| `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions |
+| `review.permission` | Provider-native permissions for review sessions: `manual`, `auto` (default), or `yolo` |
+| `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions, except Mode, which `review.permission` controls |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
-| `subagents.session_defaults` | Per-ACP saved session-option defaults for newly created subagents |
+| `subagents.permission` | Provider-native permissions for delegated sessions: `manual`, `auto` (default), or `yolo` |
+| `subagents.session_defaults` | Per-ACP saved session-option defaults for newly created subagents, except Mode, which `subagents.permission` controls |
 | `subagents.max_parallel` | Concurrent subagents, default 6, maximum 16 |
 | `subagents.auto_failover` | Move the default pool to the next roster route when the current ACP source's quota runs low; the model may stay the same |
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |
@@ -178,11 +188,10 @@ build requirements, architecture constraints, debugging conclusions, and
 repository conventions.
 
 Mjolnir keeps these short, durable facts (at most 2,000 bytes each) across
-sessions in `memories.json`, next to the config. Built-in Claude and Codex
-primary sessions share this store. Before each turn, Mjolnir refreshes the
-project snapshot and injects it when it differs from the last snapshot
-delivered to that session. Concurrent sessions therefore see one another's
-discoveries on their next turn without restarting.
+sessions in `memories.json`, next to the config. It synchronizes them into
+Claude Code's native `MEMORY.md` and Codex's native `MEMORY.md` and
+`memory_summary.md` files before sessions start. Mjolnir never prepends memory
+text to a provider's user prompt.
 
 Knowledge is global or project-scoped. The authenticated `mj-memory` MCP
 server instructs both agents to save non-obvious, verified implementation
@@ -191,9 +200,8 @@ requirements, debugging conclusions, and repository conventions. It tells
 agents not to store secrets, speculation, transient task state, or facts
 trivially visible in source.
 
-For Codex primary sessions, Claude Code's native auto-memory `MEMORY.md`
-index is imported at turn boundaries; Claude sessions continue to use their
-native injection and do not receive a duplicate. Mjolnir honors
+Claude Code's native auto-memory `MEMORY.md` is imported before synchronization
+so Claude discoveries become available to Codex as well. Mjolnir honors
 `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, managed policy
 settings, user settings, and project/local `autoMemoryEnabled`. A policy- or
 user-configured `autoMemoryDirectory` is global; otherwise the standard
@@ -203,11 +211,8 @@ removed when disabled or superseded; global imports are filtered outside their
 resolved scope and removed only when their global file is confirmed absent, so
 one project cannot delete another's data. Imported entries are a projection of
 `MEMORY.md` rather than knowledge Mjolnir owns, so `/memory forget` declines
-them and names the file; remove the text there and the next refresh drops it.
-Turn refreshes inject only new or changed entries, retrying budget-omitted
-entries on later turns. Users can also manage knowledge
-with `/memory` or `mj memory`. Side conversations, subagents, and review lanes
-remain isolated.
+them and names the file; remove the text there and the next synchronization
+drops it. Users can also manage knowledge with `/memory` or `mj memory`.
 
 The feature is optional. A master switch plus two toggles control it, all on
 by default:
@@ -215,12 +220,12 @@ by default:
 ```toml
 [memory]
 enabled = true           # master switch; false disables the feature entirely
-use_memories = true      # inject stored memories into new primary sessions
+use_memories = true      # synchronize stored memories into provider-native files
 generate_memories = true # expose the memory_save / memory_forget tools
 ```
 
 Set `enabled = false` (or run `/memory off` in the TUI) to switch memory off
-entirely — no injection and no tools, regardless of the other toggles. The
+entirely — no native synchronization and no tools, regardless of the other toggles. The
 store and the management commands below keep working while disabled, and
 `/memory` and `mj memory list` call out the disabled state. Toggle the
 sub-switches with `/memory use on|off` and `/memory generate on|off`; all

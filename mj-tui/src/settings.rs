@@ -12,7 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::{
-    AcpServerPolicy, Config, InterfaceMode, ModelsConfig, TeamPreset, ThoughtOutput,
+    AcpServerPolicy, Config, InterfaceMode, ModelsConfig, PermissionPreset, TeamPreset,
+    ThoughtOutput,
 };
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
@@ -85,7 +86,9 @@ pub(crate) enum SessionDefaultsSeat {
 enum SettingsRow {
     PrimaryModel,
     ReviewModel,
+    ReviewPermissions,
     SubagentModel,
+    SubagentPermissions,
     SessionOption {
         seat: SessionDefaultsSeat,
         server_index: usize,
@@ -237,6 +240,12 @@ impl SettingsEditor {
                 SettingsRow::PrimaryModel => self.cycle_model(0, delta),
                 SettingsRow::ReviewModel => self.cycle_model(1, delta),
                 SettingsRow::SubagentModel => self.cycle_model(2, delta),
+                SettingsRow::ReviewPermissions => {
+                    cycle_permission_preset(&mut self.config.review.permission, delta)
+                }
+                SettingsRow::SubagentPermissions => {
+                    cycle_permission_preset(&mut self.config.subagents.permission, delta)
+                }
                 SettingsRow::SessionOption {
                     seat,
                     server_index,
@@ -400,7 +409,7 @@ impl SettingsEditor {
                 rows
             }
             SettingsTab::Reviewer => {
-                let mut rows = vec![SettingsRow::ReviewModel];
+                let mut rows = vec![SettingsRow::ReviewModel, SettingsRow::ReviewPermissions];
                 rows.extend(
                     self.session_option_rows(SessionDefaultsSeat::Review)
                         .into_iter()
@@ -415,7 +424,7 @@ impl SettingsEditor {
                 rows
             }
             SettingsTab::Subagents => {
-                let mut rows = vec![SettingsRow::SubagentModel];
+                let mut rows = vec![SettingsRow::SubagentModel, SettingsRow::SubagentPermissions];
                 rows.extend(
                     self.session_option_rows(SessionDefaultsSeat::Subagents)
                         .into_iter()
@@ -546,6 +555,13 @@ impl SettingsEditor {
         else {
             return Vec::new();
         };
+        let permissions_own_mode = matches!(
+            seat,
+            SessionDefaultsSeat::Review | SessionDefaultsSeat::Subagents
+        ) && matches!(
+            server.launch.kind,
+            crate::roster::AdapterKind::Codex | crate::roster::AdapterKind::Claude
+        );
         server
             .session_config
             .iter()
@@ -556,6 +572,7 @@ impl SettingsEditor {
                         option.category,
                         Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Model)
                     )
+                    && !(permissions_own_mode && option.id.to_string() == "mode")
             })
             .map(|(option_index, _)| (server_index, option_index))
             .collect()
@@ -1083,6 +1100,31 @@ fn model_lines(
     lines
 }
 
+fn permission_lines(
+    selected: bool,
+    permission: PermissionPreset,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    let detail = match permission {
+        PermissionPreset::Manual => "Provider uses its restrictive policy.",
+        PermissionPreset::Auto => "Codex: Approve for me; Claude Code: Auto.",
+        PermissionPreset::Yolo => "Provider grants full access.",
+    };
+    vec![
+        selected_line(selected, format!("Permissions < {permission} >"), theme),
+        Line::styled(format!("  {detail}"), Style::default().ink(theme.muted)),
+    ]
+}
+
+fn cycle_permission_preset(permission: &mut PermissionPreset, delta: i32) {
+    let current = PermissionPreset::ALL
+        .iter()
+        .position(|candidate| *candidate == *permission)
+        .unwrap_or(0);
+    let next = (current as i32 + delta).rem_euclid(PermissionPreset::ALL.len() as i32) as usize;
+    *permission = PermissionPreset::ALL[next];
+}
+
 fn draw_agents(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -1146,7 +1188,9 @@ fn draw_agents(
                 }
             }
             SettingsRow::ReviewModel
+            | SettingsRow::ReviewPermissions
             | SettingsRow::SubagentModel
+            | SettingsRow::SubagentPermissions
             | SettingsRow::DiscreteReview
             | SettingsRow::ReviewTier
             | SettingsRow::MaxParallelSubagents
@@ -1169,10 +1213,12 @@ fn draw_reviewer(
         .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
     let mut lines = Vec::new();
     let mut selected_line_index = 0;
+    let mut session_options_heading_drawn = false;
     for (row_index, row) in rows.into_iter().enumerate() {
-        if row_index == 1 && has_options {
+        if matches!(row, SettingsRow::SessionOption { .. }) && !session_options_heading_drawn {
             lines.push(Line::raw(""));
             lines.push(session_options_heading(editor, source.as_deref(), theme));
+            session_options_heading_drawn = true;
         }
         if has_options && matches!(row, SettingsRow::DiscreteReview) {
             lines.push(Line::raw(""));
@@ -1190,6 +1236,13 @@ fn draw_reviewer(
                     model,
                     1,
                     editor,
+                    theme,
+                ));
+            }
+            SettingsRow::ReviewPermissions => {
+                lines.extend(permission_lines(
+                    selected,
+                    editor.config.review.permission,
                     theme,
                 ));
             }
@@ -1247,6 +1300,7 @@ fn draw_reviewer(
             }
             SettingsRow::PrimaryModel
             | SettingsRow::SubagentModel
+            | SettingsRow::SubagentPermissions
             | SettingsRow::MaxParallelSubagents
             | SettingsRow::AutomaticQuotaFailover => {}
         }
@@ -1267,10 +1321,12 @@ fn draw_subagents(
         .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
     let mut lines = Vec::new();
     let mut selected_line_index = 0;
+    let mut session_options_heading_drawn = false;
     for (row_index, row) in rows.into_iter().enumerate() {
-        if row_index == 1 && has_options {
+        if matches!(row, SettingsRow::SessionOption { .. }) && !session_options_heading_drawn {
             lines.push(Line::raw(""));
             lines.push(session_options_heading(editor, source.as_deref(), theme));
+            session_options_heading_drawn = true;
         }
         if has_options && matches!(row, SettingsRow::MaxParallelSubagents) {
             lines.push(Line::raw(""));
@@ -1288,6 +1344,13 @@ fn draw_subagents(
                     model,
                     2,
                     editor,
+                    theme,
+                ));
+            }
+            SettingsRow::SubagentPermissions => {
+                lines.extend(permission_lines(
+                    selected,
+                    editor.config.subagents.permission,
                     theme,
                 ));
             }
@@ -1331,6 +1394,7 @@ fn draw_subagents(
             )),
             SettingsRow::PrimaryModel
             | SettingsRow::ReviewModel
+            | SettingsRow::ReviewPermissions
             | SettingsRow::DiscreteReview
             | SettingsRow::ReviewTier => {}
         }
@@ -2023,25 +2087,41 @@ mod tests {
         );
 
         editor.tab = SettingsTab::Reviewer;
-        for selected in 1..=5 {
+        assert_eq!(
+            editor
+                .session_option_rows(SessionDefaultsSeat::Review)
+                .len(),
+            4,
+            "review permissions owns the provider mode option"
+        );
+        for selected in 2..=5 {
             editor.selected = selected;
             assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         }
-        assert_eq!(editor.config.review.session_defaults[&server_id].len(), 5);
+        assert_eq!(editor.config.review.session_defaults[&server_id].len(), 4);
+        assert!(!editor.config.review.session_defaults[&server_id].contains_key("config:mode"));
         assert_eq!(
             editor.config.review.reasoning_effort.as_deref(),
             Some("value")
         );
 
         editor.tab = SettingsTab::Subagents;
-        for selected in 1..=5 {
+        assert_eq!(
+            editor
+                .session_option_rows(SessionDefaultsSeat::Subagents)
+                .len(),
+            4,
+            "subagent permissions owns the provider mode option"
+        );
+        for selected in 2..=5 {
             editor.selected = selected;
             assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         }
         assert_eq!(
             editor.config.subagents.session_defaults[&server_id].len(),
-            5
+            4
         );
+        assert!(!editor.config.subagents.session_defaults[&server_id].contains_key("config:mode"));
         assert_eq!(
             editor.config.subagents.reasoning_effort.as_deref(),
             Some("value")
@@ -2342,6 +2422,31 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_and_subagent_permissions_are_configured_independently() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = editor
+            .settings_rows(SettingsTab::Reviewer)
+            .iter()
+            .position(|row| *row == SettingsRow::ReviewPermissions)
+            .expect("review permissions row");
+        assert_eq!(editor.config.review.permission, PermissionPreset::Auto);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.review.permission, PermissionPreset::Manual);
+        assert_eq!(editor.config.subagents.permission, PermissionPreset::Auto);
+
+        editor.tab = SettingsTab::Subagents;
+        editor.selected = editor
+            .settings_rows(SettingsTab::Subagents)
+            .iter()
+            .position(|row| *row == SettingsRow::SubagentPermissions)
+            .expect("subagent permissions row");
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.subagents.permission, PermissionPreset::Yolo);
+        assert_eq!(editor.config.review.permission, PermissionPreset::Manual);
+    }
+
+    #[test]
     fn disabled_is_only_available_for_optional_roles() {
         let editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         assert!(
@@ -2615,7 +2720,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_panel_keeps_persistence_details_out_of_the_control_list() {
+    fn reviewer_panel_keeps_mode_under_the_permissions_control() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -2656,7 +2761,14 @@ mod tests {
             reviewer.contains("Session options ·"),
             "rendered:\n{reviewer}"
         );
-        assert!(reviewer.contains("Mode < Agent >"), "rendered:\n{reviewer}");
+        assert!(
+            reviewer.contains("Permissions < Auto >"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(
+            !reviewer.contains("Mode < Agent >"),
+            "rendered:\n{reviewer}"
+        );
         assert!(
             reviewer.contains("Reasoning effort < High >"),
             "rendered:\n{reviewer}"

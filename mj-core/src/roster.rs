@@ -1181,12 +1181,41 @@ mod tests {
 
     #[test]
     fn permission_presets_map_to_provider_controls() {
-        let mut env = HashMap::new();
+        let mut env = HashMap::from([(
+            "CODEX_CONFIG".to_string(),
+            r#"{"model":"gpt-5.6"}"#.to_string(),
+        )]);
         let codex = configure_permissions(AdapterKind::Codex, PermissionPreset::Auto, &mut env)
             .expect("Codex preset");
         assert_eq!(codex.config_id, "mode");
         assert_eq!(codex.value, "agent");
         assert_eq!(codex.manual_fallback.as_deref(), Some("read-only"));
+        let codex_config: serde_json::Value =
+            serde_json::from_str(env.get("CODEX_CONFIG").expect("Codex configuration"))
+                .expect("valid Codex configuration");
+        assert_eq!(
+            codex_config["approvals_reviewer"],
+            serde_json::Value::String("auto_review".to_string())
+        );
+        assert_eq!(codex_config["model"], "gpt-5.6");
+
+        let mut codex_manual_env = HashMap::new();
+        configure_permissions(
+            AdapterKind::Codex,
+            PermissionPreset::Manual,
+            &mut codex_manual_env,
+        )
+        .expect("Codex manual preset");
+        let codex_manual_config: serde_json::Value = serde_json::from_str(
+            codex_manual_env
+                .get("CODEX_CONFIG")
+                .expect("Codex configuration"),
+        )
+        .expect("valid Codex configuration");
+        assert_eq!(
+            codex_manual_config["approvals_reviewer"],
+            serde_json::Value::String("user".to_string())
+        );
 
         let claude = configure_permissions(AdapterKind::Claude, PermissionPreset::Manual, &mut env)
             .expect("Claude preset");
