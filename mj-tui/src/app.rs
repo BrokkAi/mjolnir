@@ -468,7 +468,7 @@ pub enum ReviewTone {
     Header,
     /// A finding still awaiting its fix.
     Open,
-    /// A finding the correction turn fixed.
+    /// A finding a verification review confirmed fixed.
     Fixed,
     /// A finding that did not survive: full error weight, never muted.
     Invalidated,
@@ -492,8 +492,28 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
         ReviewIssueStatus::Validated => {
             ReviewLedgerLine::new(vec![(format!("   ● {label}"), ReviewTone::Open)])
         }
-        ReviewIssueStatus::Fixed => {
-            ReviewLedgerLine::new(vec![(format!("   ✔ {label}"), ReviewTone::Fixed)])
+        ReviewIssueStatus::Corrected => ReviewLedgerLine::new(vec![(
+            [
+                "   ◐ ".to_string(),
+                label,
+                " · verification pending".to_string(),
+            ]
+            .concat(),
+            ReviewTone::Open,
+        )]),
+        ReviewIssueStatus::Fixed => ReviewLedgerLine::new(vec![(
+            format!("   ✔ {label} · verified"),
+            ReviewTone::Fixed,
+        )]),
+        ReviewIssueStatus::Uncorrected => {
+            let mut spans = vec![(format!("   ! {label}"), ReviewTone::Open)];
+            if let Some(reason) = issue.resolution_reason.as_deref() {
+                spans.push((
+                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    ReviewTone::Detail,
+                ));
+            }
+            ReviewLedgerLine::new(spans)
         }
         ReviewIssueStatus::Invalidated => {
             let mut spans = vec![
@@ -501,7 +521,10 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
                 (label, ReviewTone::Struck),
             ];
             if let Some(reason) = issue.resolution_reason.as_deref() {
-                spans.push((format!(" — {reason}"), ReviewTone::Detail));
+                spans.push((
+                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    ReviewTone::Detail,
+                ));
             }
             ReviewLedgerLine::new(spans)
         }
@@ -550,7 +573,9 @@ fn review_resolved_record(
     let verdict_tone = match status {
         ReviewIssueStatus::Fixed => ReviewTone::Fixed,
         ReviewIssueStatus::Invalidated => ReviewTone::Invalidated,
-        ReviewIssueStatus::Validated => ReviewTone::Open,
+        ReviewIssueStatus::Validated
+        | ReviewIssueStatus::Corrected
+        | ReviewIssueStatus::Uncorrected => ReviewTone::Open,
     };
     let mut head = vec![
         (
@@ -576,7 +601,7 @@ fn review_resolved_record(
 }
 
 /// The banner a finished review fossilizes into: final counts up front, then
-/// one row per issue that did not end up plainly fixed.
+/// one row per issue that did not end up independently verified as fixed.
 fn review_verdict_record(
     state: &crate::workflow::WorkflowState,
     outcome: crate::workflow::WorkflowOutcome,
@@ -601,9 +626,11 @@ fn review_verdict_record(
         ),
     ];
     for (count, label, tone) in [
-        (tally.fixed, "fixed", ReviewTone::Fixed),
+        (tally.fixed, "verified fixed", ReviewTone::Fixed),
+        (tally.corrected, "corrected; unverified", ReviewTone::Open),
+        (tally.uncorrected, "unresolved", ReviewTone::Open),
         (tally.invalidated, "invalidated", ReviewTone::Invalidated),
-        (tally.open, "unresolved", ReviewTone::Open),
+        (tally.open, "awaiting correction", ReviewTone::Open),
     ] {
         if count > 0 {
             counts.push((" · ".to_string(), ReviewTone::Detail));
@@ -4667,6 +4694,7 @@ impl AppState {
                 pass,
                 status,
                 reason,
+                ..
             } => {
                 let record = self
                     .workflows
@@ -8259,6 +8287,7 @@ mod tests {
                 pass: 0,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
+                details: None,
             },
         )));
         let records = ledger_texts(&state);

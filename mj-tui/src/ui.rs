@@ -7793,7 +7793,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         .split(area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" review issues — session ledger ")
+        .title(" review issues — full evidence ")
         .style(Style::default().ink(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
@@ -7823,15 +7823,19 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
             .add_modifier(Modifier::BOLD),
     )];
     for (count, label, ink) in [
-        (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.open, "● {} awaiting correction", theme.warning),
+        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.fixed, "✔ {} verified fixed", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
-        head.push(Span::styled("   ", Style::default()));
-        head.push(Span::styled(
-            label.replacen("{}", &count.to_string(), 1),
-            Style::default().ink(ink).add_modifier(Modifier::BOLD),
-        ));
+        if count > 0 {
+            head.push(Span::styled("   ", Style::default()));
+            head.push(Span::styled(
+                label.replacen("{}", &count.to_string(), 1),
+                Style::default().ink(ink).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     let mut lines = vec![Line::from(head)];
     if issues.is_empty() {
@@ -7859,10 +7863,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
                         .add_modifier(Modifier::BOLD),
                 )));
             }
-            lines.push(review_ledger_line(
-                &crate::app::review_issue_row(issue),
-                theme,
-            ));
+            lines.extend(review_issue_detail_lines(issue, theme));
         }
     }
     let total = Paragraph::new(lines.clone())
@@ -7878,10 +7879,111 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         inner,
     );
     f.render_widget(
-        Paragraph::new("F9/Esc close · Up/Down PgUp/PgDn Home/End scroll")
+        Paragraph::new(
+            "F9/Esc close · full finding, correction report, exact diff, and verification state · Up/Down PgUp/PgDn Home/End scroll",
+        )
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
+}
+
+/// Complete evidence for one review issue. The compact board and transcript
+/// deliberately show only the first line; F9 is the durable place where a
+/// user can inspect the reviewer's complete finding, the primary's correction
+/// report, the captured correction diff, and whether a later review verified
+/// that correction.
+fn review_issue_detail_lines(
+    issue: &crate::workflow::ReviewIssue,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    use crate::workflow::ReviewIssueStatus;
+
+    let (status, ink, explanation) = match issue.status {
+        ReviewIssueStatus::Validated => (
+            "validated — awaiting correction",
+            theme.warning,
+            "The review supervisor confirmed this finding. No correction has completed for it.",
+        ),
+        ReviewIssueStatus::Corrected => (
+            "corrected — verification pending",
+            theme.warning,
+            "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean, so this is not presented as fixed.",
+        ),
+        ReviewIssueStatus::Fixed => (
+            "fixed — independently verified",
+            theme.success,
+            "A later verification review returned clean after the correction.",
+        ),
+        ReviewIssueStatus::Uncorrected => (
+            "unresolved",
+            theme.warning,
+            "The primary correction turn completed without changing the workspace. This validated finding is not fixed.",
+        ),
+        ReviewIssueStatus::Invalidated => (
+            "invalidated",
+            theme.error,
+            "The review workflow explicitly invalidated this finding; the recorded reason is below.",
+        ),
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" #{} · {status}", issue.id),
+        Style::default().ink(ink).add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::from(Span::styled(
+        " Finding — validated review evidence",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(issue.summary.lines().map(|line| {
+        Line::from(Span::styled(
+            format!("   {line}"),
+            Style::default().ink(theme.text),
+        ))
+    }));
+    lines.push(Line::from(Span::styled(
+        " Status",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   {explanation}"),
+        Style::default().ink(theme.text),
+    )));
+    if let Some(reason) = issue.resolution_reason.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Recorded outcome",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(reason.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    if let Some(details) = issue.resolution_details.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Correction evidence",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(details.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    lines.push(Line::from(Span::styled(
+        " ───────────────────────────────────────",
+        Style::default().ink(theme.muted),
+    )));
+    lines
 }
 
 fn nested_actor_backend(actor: &SubagentStatus) -> String {
@@ -12397,15 +12499,18 @@ fn review_board_row_count(state: &AppState) -> u16 {
     (1 + visible + overflow).min(usize::from(u16::MAX)) as u16
 }
 
-/// Order the board so what needs the user's eyes comes first: still-open
-/// findings, then invalidations (loud, never buried), then the fixed tail.
+/// Order the board so what needs the user's eyes comes first: findings still
+/// awaiting correction, then corrections still awaiting verification, then
+/// unresolved/invalidated records, and finally independently verified fixes.
 fn review_board_rank(status: crate::workflow::ReviewIssueStatus) -> u8 {
     use crate::workflow::ReviewIssueStatus;
 
     match status {
         ReviewIssueStatus::Validated => 0,
-        ReviewIssueStatus::Invalidated => 1,
-        ReviewIssueStatus::Fixed => 2,
+        ReviewIssueStatus::Corrected => 1,
+        ReviewIssueStatus::Uncorrected => 2,
+        ReviewIssueStatus::Invalidated => 3,
+        ReviewIssueStatus::Fixed => 4,
     }
 }
 
@@ -12435,7 +12540,9 @@ fn draw_review_board(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     )];
     for (count, label, ink) in [
         (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.fixed, "✔ {} verified", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
         if count > 0 {
@@ -12696,9 +12803,11 @@ fn workflow_progress_line(
         let tally = workflow.issue_tally();
         let mut parts = vec![format!("issues {} found", tally.found)];
         for (count, label) in [
-            (tally.fixed, "fixed"),
+            (tally.fixed, "verified fixed"),
+            (tally.corrected, "corrected; unverified"),
+            (tally.uncorrected, "unresolved"),
             (tally.invalidated, "invalidated"),
-            (tally.open, "unresolved"),
+            (tally.open, "awaiting correction"),
         ] {
             if count > 0 {
                 parts.push(format!("{count} {label}"));
@@ -16206,6 +16315,7 @@ mod tests {
                 pass: 0,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
+                details: None,
             },
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
@@ -16229,6 +16339,62 @@ mod tests {
             "a finished review leaves the board to the verdict banner"
         );
         assert_eq!(inline_chat_layout(&state, area)[3].height, 0);
+    }
+
+    #[test]
+    fn review_issue_viewer_shows_full_finding_fix_evidence_and_verification_state() {
+        use crate::workflow::ReviewIssueStatus;
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(7);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![
+                    "[P1] src/cache.rs:12 -- stale cache entry leaks across sessions\n  The caller reuses this entry after logout."
+                        .to_string(),
+                ],
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some("the correction changed the workspace; verification is pending".to_string()),
+                details: Some(
+                    "Primary correction report:\ncleared the session cache on logout\n\nExact correction diff:\n+cache.clear();"
+                        .to_string(),
+                ),
+            },
+        );
+        state.open_review_issue_viewer();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_issue_viewer(frame, frame.area(), &mut state))
+            .expect("draw issue viewer");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("full evidence"), "{rendered}");
+        assert!(rendered.contains("caller reuses this entry"), "{rendered}");
+        assert!(
+            rendered.contains("corrected — verification pending"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("cleared the session cache on logout"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("+cache.clear();"), "{rendered}");
     }
 
     #[test]
