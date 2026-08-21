@@ -9,8 +9,8 @@ tabs. Team and adapter changes apply to a new session. Credentials and adapter
 capabilities are probed whenever a new session roster is resolved;
 `mj models refresh` runs that probe as a standalone diagnostic.
 
-The config schema is versioned. The current schema is `version = 4`; version 2
-and 3 files are migrated in memory on load and reach disk in the current schema
+The config schema is versioned. The current schema is `version = 5`; versions 2,
+3, and 4 files are migrated in memory on load and reach disk in the current schema
 the next time settings are saved — merely reading the file never rewrites it,
 so older and newer mj builds can share one config until someone actually saves.
 A file written by a *newer* build loads best-effort and is read-only: its
@@ -29,7 +29,7 @@ canceling fresh setup leaves onboarding incomplete.
 What the **Codex coder + Claude reviewer** team writes:
 
 ```toml
-version = 4
+version = 5
 team = "codex_claude"
 
 [agent]
@@ -89,6 +89,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `subagents.max_parallel` | Concurrent subagents, default 6, maximum 16 |
 | `subagents.auto_failover` | Move the default pool to the next roster route when the current ACP source's quota runs low; the model may stay the same |
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |
+| `voice_auto_send` | `off` (default), `two_seconds`, `four_seconds`, `six_seconds`, or `eight_seconds`; submit a recognized voice prompt after that much detected silence |
 
 Explicit model IDs can be selected in `/mjconfig`; availability is checked
 when the next session starts. A `max_parallel` above 16 is a configuration
@@ -134,7 +135,7 @@ Sources absent from a saved list are appended in discovery order.
 A `version = 2` file (`[thor]`, `[eitri]`, `[loki]`, `[council]`) is mapped onto
 the current schema every time this build loads it:
 
-| v2 | v4 |
+| v2 | v5 |
 | --- | --- |
 | `thor.model`, `thor.reasoning_effort`, `thor.discrete_review`, `thor.max_correction_rounds` | `agent.*` |
 | `eitri.model`, `eitri.reasoning_effort` | `subagents.*` |

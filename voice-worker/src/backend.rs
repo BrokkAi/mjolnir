@@ -26,6 +26,8 @@ const VAD_MODEL_URL: &str =
 const VAD_MODEL_FILE: &str = "silero_vad.onnx";
 
 pub(super) const DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a user has to begin speaking, and how long manual dictation can
+/// remain quiet before it completes normally.
 const DICTATION_SILENCE: Duration = Duration::from_secs(20);
 /// cpal delivers callbacks continuously (silence arrives as zeros), so a
 /// stream that produces no frames at all is broken, not quiet.
@@ -35,6 +37,32 @@ const SAMPLE_RATE: i32 = 16000;
 const VAD_WINDOW_SIZE: usize = 512;
 const INTERIM_DECODE_INTERVAL: Duration = Duration::from_millis(250);
 const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(80);
+
+/// Why microphone capture completed. The parent uses `Silence` only when its
+/// configured auto-send delay asked for it; an explicit stop and the hard
+/// length cap always leave the transcript in the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DictationFinish {
+    Manual,
+    Silence,
+    Timeout,
+}
+
+impl DictationFinish {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Silence => "silence",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DictationResult {
+    pub text: String,
+    pub finish: DictationFinish,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ModelPaths {
@@ -376,8 +404,9 @@ pub(super) fn run<F, G, H>(
     mut on_partial: F,
     mut on_level: G,
     mut on_status: H,
+    auto_send_silence: Option<Duration>,
     cancel_rx: mpsc::Receiver<()>,
-) -> Result<String>
+) -> Result<DictationResult>
 where
     F: FnMut(String),
     G: FnMut(f32),
@@ -399,7 +428,10 @@ where
     // Model loading takes a moment; honor a cancellation that arrived in
     // the meantime without ever opening the microphone.
     if cancel_rx.try_recv().is_ok() {
-        return Ok(String::new());
+        return Ok(DictationResult {
+            text: String::new(),
+            finish: DictationFinish::Manual,
+        });
     }
 
     let host = cpal::default_host();
@@ -428,22 +460,25 @@ where
     let mut buffer = Vec::<f32>::new();
     let mut vad_offset = 0usize;
     let mut speech_started = false;
+    let mut heard_speech = false;
 
     let mut finalized = Vec::<String>::new();
     let mut interim = String::new();
     let mut last_emitted: Option<String> = None;
-    let mut cancelled = false;
-
-    loop {
+    let finish = loop {
         if cancel_rx.try_recv().is_ok() {
-            cancelled = true;
-            break;
+            break DictationFinish::Manual;
         }
         if started_at.elapsed() >= DICTATION_TIMEOUT {
-            break;
+            break DictationFinish::Timeout;
         }
-        if last_activity_at.elapsed() >= DICTATION_SILENCE {
-            break;
+        let silence_limit = if heard_speech {
+            auto_send_silence.unwrap_or(DICTATION_SILENCE)
+        } else {
+            DICTATION_SILENCE
+        };
+        if last_activity_at.elapsed() >= silence_limit {
+            break DictationFinish::Silence;
         }
 
         match audio_rx.recv_timeout(Duration::from_millis(30)) {
@@ -478,6 +513,7 @@ where
         while vad_offset + VAD_WINDOW_SIZE <= buffer.len() {
             vad.accept_waveform(&buffer[vad_offset..vad_offset + VAD_WINDOW_SIZE]);
             if vad.detected() {
+                heard_speech = true;
                 last_activity_at = Instant::now();
                 if !speech_started {
                     speech_started = true;
@@ -518,11 +554,11 @@ where
             on_partial(transcript.clone());
             last_emitted = Some(transcript);
         }
-    }
+    };
 
     drop(stream);
 
-    if !cancelled {
+    if finish != DictationFinish::Manual {
         vad.flush();
         while !vad.is_empty() {
             if let Some(segment) = vad.front() {
@@ -537,10 +573,10 @@ where
     }
 
     let text = compose_transcript(&finalized, &interim);
-    if !cancelled && text.is_empty() {
+    if finish != DictationFinish::Manual && text.is_empty() {
         bail!("no speech was recognized");
     }
-    Ok(text)
+    Ok(DictationResult { text, finish })
 }
 
 pub(super) fn decode_segment(

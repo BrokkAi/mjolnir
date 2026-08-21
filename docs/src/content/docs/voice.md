@@ -4,8 +4,20 @@ description: Dictate prompts locally in Mjolnir and understand the supported pla
 ---
 
 Mjolnir can transcribe a spoken prompt locally and insert the result into the
-composer. Press **Ctrl-R** to start dictation and press it again to stop. Review
-or edit the transcript before sending it to the selected agent.
+composer. Press **Ctrl-R** to start dictation and press it again to stop. By
+default, review or edit the transcript before sending it to the selected agent.
+
+## Auto-send after silence
+
+Open `/mjconfig`, choose **Input**, and set **Voice auto-send** to 2, 4,
+6, or 8 seconds. After speech begins, that much voice-activity-detector
+silence finalizes recognition and submits the prompt through the normal send
+path. The setting defaults to **off**, so existing dictation remains review
+first.
+
+Speech before the delay expires keeps recording. **Ctrl-R** still stops
+dictation and leaves its live text in the composer, while **Enter** sends it
+immediately. A failed or empty recognition never sends a prompt.
 
 ## Platform support
 

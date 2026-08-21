@@ -70,7 +70,9 @@ use crate::palette::TerminalThemeKindExt;
 use crate::ragnarok;
 use crate::ragnarok_sprites::{self, SpriteKind};
 use crate::settings::{SettingsAction, draw_settings_panel};
-use crate::speech::{dictation_error_message, run_dictation, voice_input_supported};
+use crate::speech::{
+    DictationFinish, DictationResult, dictation_error_message, run_dictation, voice_input_supported,
+};
 use crate::spinner::SpinnerStyle;
 use crate::term::TrackedBackend;
 use crate::text::truncate_text_to_width;
@@ -489,7 +491,7 @@ enum DictationEvent {
     Partial(String),
     Level(f32),
     Status(String),
-    Finished(std::result::Result<String, String>),
+    Finished(std::result::Result<DictationResult, String>),
 }
 
 #[cfg(test)]
@@ -1142,6 +1144,7 @@ pub struct UiRunOptions<'a> {
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub thought_output: config::ThoughtOutput,
+    pub voice_auto_send: config::VoiceAutoSend,
     pub feature_hints_enabled: bool,
     pub keep_awake_enabled: bool,
     pub active_agent_launch: Option<ragnarok::Launch>,
@@ -1182,6 +1185,7 @@ struct UiInitialState {
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
     thought_output: config::ThoughtOutput,
+    voice_auto_send: config::VoiceAutoSend,
     feature_hints_enabled: bool,
     keep_awake_enabled: bool,
     session_boundary: Option<String>,
@@ -1264,6 +1268,7 @@ pub async fn run(
             theme_kind: options.theme_kind,
             spinner_style: options.spinner_style,
             thought_output: options.thought_output,
+            voice_auto_send: options.voice_auto_send,
             feature_hints_enabled: options.feature_hints_enabled,
             keep_awake_enabled: options.keep_awake_enabled,
             session_boundary: options.session_boundary,
@@ -1536,6 +1541,7 @@ async fn ui_loop(
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
     state.set_thought_output(initial.thought_output);
+    state.voice_auto_send = initial.voice_auto_send;
     state.feature_hints_enabled = initial.feature_hints_enabled;
     state.keep_awake.set_enabled(initial.keep_awake_enabled);
     state.config_path = initial.config_path;
@@ -1681,7 +1687,7 @@ async fn ui_loop(
                     }
                     Some(DictationEvent::Finished(result)) => {
                         dictation_cancel_tx = None;
-                        finish_dictation(&mut state, result);
+                        finish_dictation(&mut state, cmd_tx, result);
                         pending_redraw.mark_interactive();
                     }
                     None => {}
@@ -4697,6 +4703,10 @@ fn start_dictation(
     let (cancel_tx, cancel_rx) = std_mpsc::channel();
     *dictation_cancel_tx = Some(cancel_tx);
     let dictation_tx = dictation_tx.clone();
+    let auto_send_silence = state
+        .voice_auto_send
+        .silence_timeout_secs()
+        .map(Duration::from_secs);
     tokio::task::spawn_blocking(move || {
         let partial_tx = dictation_tx.clone();
         let level_tx = dictation_tx.clone();
@@ -4711,6 +4721,7 @@ fn start_dictation(
             move |message| {
                 let _ = status_tx.send(DictationEvent::Status(message));
             },
+            auto_send_silence,
             cancel_rx,
         )
         .map_err(|e| dictation_error_message(&e));
@@ -4774,22 +4785,34 @@ fn update_dictation_status(state: &mut AppState, message: String) {
     }
 }
 
-fn finish_dictation(state: &mut AppState, result: std::result::Result<String, String>) {
+fn finish_dictation(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    result: std::result::Result<DictationResult, String>,
+) {
     if !state.voice_input_active {
         return;
     }
     state.voice_input_active = false;
     state.voice_input_level = None;
     match result {
-        Ok(text) => {
+        Ok(result) => {
+            let auto_send = result.finish == DictationFinish::Silence
+                && state.voice_auto_send.silence_timeout_secs().is_some()
+                && !result.text.trim().is_empty();
             let range = state
                 .voice_input_range
                 .take()
                 .unwrap_or((state.input_cursor, state.input_cursor));
-            replace_input_range(state, range.0, range.1, &text);
+            replace_input_range(state, range.0, range.1, &result.text);
             state.scroll_input_to_bottom();
             state.update_autocomplete();
-            state.status_line = Some(StatusMessage::info("inserted voice input"));
+            if auto_send {
+                state.status_line = Some(StatusMessage::info("sending voice input..."));
+                submit_prompt(state, cmd_tx);
+            } else {
+                state.status_line = Some(StatusMessage::info("inserted voice input"));
+            }
         }
         Err(message) => {
             state.voice_input_range = None;
@@ -4802,9 +4825,15 @@ fn finish_dictation(state: &mut AppState, result: std::result::Result<String, St
 /// carries no ornament and stays a single unstyled span.
 fn dictation_prompt_title(state: &AppState) -> Line<'static> {
     if let Some(level) = state.voice_input_level {
+        let auto_send_hint = state
+            .voice_auto_send
+            .silence_timeout_secs()
+            .map(|seconds| format!(" · auto-send after {seconds}s quiet"))
+            .unwrap_or_default();
         return Line::raw(format!(
-            " 🎙 {} Ctrl-R stop ",
-            voice_level_meter(Some(level))
+            " 🎙 {}{} Ctrl-R stop ",
+            voice_level_meter(Some(level)),
+            auto_send_hint,
         ));
     }
 
@@ -5874,6 +5903,7 @@ fn persist_mjconfig_selection(
     let feature_hints_enabled = config.feature_hints;
     let keep_awake_enabled = config.keep_awake;
     let thought_output = config.thought_output;
+    let voice_auto_send = config.voice_auto_send;
     let live_session_updates = live_primary_session_config_updates(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
@@ -5891,6 +5921,7 @@ fn persist_mjconfig_selection(
                 state.feature_hints_enabled = feature_hints_enabled;
                 state.keep_awake.set_enabled(keep_awake_enabled);
                 state.set_thought_output(thought_output);
+                state.voice_auto_send = voice_auto_send;
                 if review_changed {
                     let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
                         enabled: config.agent.discrete_review,
@@ -20053,11 +20084,8 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         // Preview different values in both sections.
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
+        state.mjconfig_menu.as_mut().expect("menu").editor.tab =
+            crate::settings::SettingsTab::Appearance;
         state.mjconfig_menu_key(KeyCode::Right);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
@@ -20143,6 +20171,7 @@ mod tests {
         assert!(rendered.contains("Team"), "rendered:\n{rendered}");
         assert!(!rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Input"), "rendered:\n{rendered}");
         assert!(rendered.contains("Appearance"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("Codex coder + Claude reviewer"),
@@ -27374,7 +27403,15 @@ mod tests {
         let mut cancel_tx = Some(cancel_tx);
 
         stop_dictation(&mut state, &mut cancel_tx);
-        finish_dictation(&mut state, Ok("ignored".to_string()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "ignored".to_string(),
+                finish: DictationFinish::Manual,
+            }),
+        );
 
         assert!(!state.voice_input_active);
         assert!(state.voice_input_range.is_none());
@@ -27438,11 +27475,13 @@ mod tests {
         let mut state = AppState::new();
         state.voice_input_active = true;
         state.voice_input_level = Some(0.35);
+        state.voice_auto_send = config::VoiceAutoSend::SixSeconds;
         state.status_line = Some(StatusMessage::info("listening..."));
 
         let title = line_text(&dictation_prompt_title(&state));
 
         assert!(title.contains("[||||......]"));
+        assert!(title.contains("auto-send after 6s quiet"));
         assert!(!title.contains("listening..."));
     }
 
@@ -27490,12 +27529,48 @@ mod tests {
         state.voice_input_range = Some((state.input_cursor, state.input_cursor));
 
         update_dictation_partial(&mut state, "rough draft");
-        finish_dictation(&mut state, Ok("voice ".to_string()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "voice ".to_string(),
+                finish: DictationFinish::Manual,
+            }),
+        );
 
         assert!(!state.voice_input_active);
         assert_eq!(state.input, "before voice after");
         assert_eq!(state.input_cursor, "before voice ".chars().count());
         assert!(state.voice_input_range.is_none());
+    }
+
+    #[test]
+    fn silence_completed_dictation_auto_sends_when_enabled() {
+        let mut state = ready_state_with_session();
+        state.voice_input_active = true;
+        state.voice_input_range = Some((0, 0));
+        state.voice_auto_send = config::VoiceAutoSend::SixSeconds;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "send this prompt".to_string(),
+                finish: DictationFinish::Silence,
+            }),
+        );
+
+        assert!(!state.voice_input_active);
+        assert!(state.input.is_empty());
+        match cmd_rx.try_recv().expect("voice prompt sent") {
+            UiCommand::SendPrompt { text, images, .. } => {
+                assert_eq!(text, "send this prompt");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

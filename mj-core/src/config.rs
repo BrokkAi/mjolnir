@@ -13,7 +13,7 @@ use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
 pub const DISABLED_MODEL: &str = "disabled";
-pub const CONFIG_VERSION: u32 = 4;
+pub const CONFIG_VERSION: u32 = 5;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
 pub const ONBOARDING_CONTENT_VERSION: u32 = 4;
@@ -38,6 +38,7 @@ fn model_provider(model: &str) -> Option<&'static str> {
 /// Schema versions this build can migrate forward from.
 const V2_CONFIG_VERSION: u32 = 2;
 const V3_CONFIG_VERSION: u32 = 3;
+const V4_CONFIG_VERSION: u32 = 4;
 
 /// Saved ACP session defaults are scoped to the seat that will consume them.
 /// Live accepted values remain in the top-level `session_config` cache.
@@ -179,6 +180,70 @@ impl std::str::FromStr for InterfaceMode {
     }
 }
 
+/// Whether a completed spoken prompt is submitted after a period of silence.
+///
+/// This stays opt-in because sending a prompt is materially different from
+/// the established dictation behavior of leaving the transcript in the
+/// composer for review.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceAutoSend {
+    #[default]
+    Off,
+    TwoSeconds,
+    FourSeconds,
+    SixSeconds,
+    EightSeconds,
+}
+
+impl VoiceAutoSend {
+    pub const ALL: [Self; 5] = [
+        Self::Off,
+        Self::TwoSeconds,
+        Self::FourSeconds,
+        Self::SixSeconds,
+        Self::EightSeconds,
+    ];
+
+    /// Delay after detected speech stops before the voice worker completes a
+    /// dictation and the TUI submits it. `None` keeps manual sending.
+    pub const fn silence_timeout_secs(self) -> Option<u64> {
+        match self {
+            Self::Off => None,
+            Self::TwoSeconds => Some(2),
+            Self::FourSeconds => Some(4),
+            Self::SixSeconds => Some(6),
+            Self::EightSeconds => Some(8),
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Off => "leave dictated text in the composer for review",
+            Self::TwoSeconds => "send after 2 seconds of detected silence",
+            Self::FourSeconds => "send after 4 seconds of detected silence",
+            Self::SixSeconds => "send after 6 seconds of detected silence",
+            Self::EightSeconds => "send after 8 seconds of detected silence",
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl std::fmt::Display for VoiceAutoSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("off"),
+            Self::TwoSeconds => f.write_str("2 seconds"),
+            Self::FourSeconds => f.write_str("4 seconds"),
+            Self::SixSeconds => f.write_str("6 seconds"),
+            Self::EightSeconds => f.write_str("8 seconds"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     pub version: u32,
@@ -208,6 +273,9 @@ pub struct Config {
     /// flag forces the fullscreen TUI for a single run without changing this.
     #[serde(default, skip_serializing_if = "InterfaceMode::is_default")]
     pub interface: InterfaceMode,
+    /// Optional hands-free submit for voice dictation after detected silence.
+    #[serde(default, skip_serializing_if = "VoiceAutoSend::is_default")]
+    pub voice_auto_send: VoiceAutoSend,
     /// Persistent cross-session memory behavior.
     #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
     pub memory: MemoryConfig,
@@ -257,6 +325,7 @@ impl Default for Config {
             feature_hints: true,
             keep_awake: true,
             interface: InterfaceMode::default(),
+            voice_auto_send: VoiceAutoSend::default(),
             memory: MemoryConfig::default(),
             team: None,
             agent: AgentConfig::default(),
@@ -907,6 +976,7 @@ impl Config {
                 if version >= i64::from(CONFIG_VERSION)
                     || version == i64::from(V2_CONFIG_VERSION)
                     || version == i64::from(V3_CONFIG_VERSION)
+                    || version == i64::from(V4_CONFIG_VERSION)
         )
     }
 
@@ -1042,6 +1112,11 @@ impl Config {
             cfg.normalize()?;
             return Ok(cfg);
         }
+        if version == Some(i64::from(V4_CONFIG_VERSION)) {
+            let mut cfg = migrate_v4(&s).with_context(|| format!("migrate {}", path.display()))?;
+            cfg.normalize()?;
+            return Ok(cfg);
+        }
         if let Some(found) = version.filter(|found| *found > i64::from(CONFIG_VERSION)) {
             let found = u32::try_from(found).unwrap_or(u32::MAX);
             tracing::warn!(
@@ -1125,6 +1200,7 @@ impl Config {
             feature_hints,
             keep_awake,
             interface,
+            voice_auto_send,
             memory,
             agent,
             review,
@@ -1438,6 +1514,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         feature_hints: true,
         keep_awake: true,
         interface: InterfaceMode::default(),
+        voice_auto_send: VoiceAutoSend::default(),
         memory: MemoryConfig::default(),
         team: None,
         agent: AgentConfig {
@@ -1489,6 +1566,15 @@ fn migrate_v3(body: &str) -> Result<Config> {
     if config.agent.max_correction_rounds == Some(1) {
         config.agent.max_correction_rounds = None;
     }
+    Ok(config)
+}
+
+/// V4 predates persisted voice auto-send preferences. Its remaining shape is
+/// current, so deserialize with the new field's default and advance only the
+/// schema marker.
+fn migrate_v4(body: &str) -> Result<Config> {
+    let mut config: Config = toml::from_str(body).context("parse v4 config")?;
+    config.version = CONFIG_VERSION;
     Ok(config)
 }
 
@@ -2133,6 +2219,8 @@ kimi = "disabled"
         assert!(Config::path_has_saved_config(&path));
         std::fs::write(&path, "version = 3\n").expect("v3 config");
         assert!(Config::path_has_saved_config(&path));
+        std::fs::write(&path, "version = 4\n").expect("v4 config");
+        assert!(Config::path_has_saved_config(&path));
         Config::default().save(&path).expect("current config");
         assert!(Config::path_has_saved_config(&path));
         // A newer build's file counts too: its owner already finished setup,
@@ -2262,6 +2350,18 @@ origin = "custom"
             assert_eq!(config.version, CONFIG_VERSION);
             assert_eq!(config.agent.max_correction_rounds, expected);
         }
+    }
+
+    #[test]
+    fn v4_migration_defaults_voice_auto_send_to_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, format!("version = {V4_CONFIG_VERSION}\n")).expect("write v4 config");
+
+        let config = Config::load(&path).expect("migrate v4");
+
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(config.voice_auto_send, VoiceAutoSend::Off);
     }
 
     #[test]
@@ -2988,6 +3088,31 @@ mode = "ask"
             !body.contains("theme"),
             "default theme should not be serialized: {body:?}"
         );
+    }
+
+    #[test]
+    fn voice_auto_send_defaults_off_and_round_trips_selected_delay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read default");
+        assert!(!body.contains("voice_auto_send"));
+
+        let config = Config {
+            voice_auto_send: VoiceAutoSend::SixSeconds,
+            ..Config::default()
+        };
+        config.save(&path).expect("save selected delay");
+        let body = std::fs::read_to_string(&path).expect("read selected delay");
+        assert!(body.contains("voice_auto_send = \"six_seconds\""));
+        assert_eq!(
+            Config::load(&path)
+                .expect("load selected delay")
+                .voice_auto_send,
+            VoiceAutoSend::SixSeconds
+        );
+        assert_eq!(VoiceAutoSend::SixSeconds.silence_timeout_secs(), Some(6));
     }
 
     #[test]

@@ -1292,6 +1292,8 @@ pub struct AppState {
     pub spinner_style: SpinnerStyle,
     /// Amount of agent thought text shown in the normal transcript.
     pub thought_output: crate::config::ThoughtOutput,
+    /// Whether a silence-completed voice dictation submits its prompt.
+    pub voice_auto_send: crate::config::VoiceAutoSend,
     /// Open `/mjconfig` overlay, if any.
     pub mjconfig_menu: Option<MjConfigMenu>,
     pub acp_inventory: crate::roster::AcpInventory,
@@ -2167,6 +2169,7 @@ impl AppState {
             theme: theme_kind.palette(),
             spinner_style: SpinnerStyle::default(),
             thought_output: crate::config::ThoughtOutput::default(),
+            voice_auto_send: crate::config::VoiceAutoSend::default(),
             mjconfig_menu: None,
             acp_inventory: crate::roster::AcpInventory::default(),
             ragnarok: None,

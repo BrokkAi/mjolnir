@@ -15,8 +15,30 @@
 use anyhow::Result;
 #[cfg(target_os = "android")]
 use anyhow::bail;
+use std::time::Duration;
+
+/// Why a voice worker completed capture.
+///
+/// Older workers omit this field; serde maps that safely to `Manual`, so a
+/// mismatched sidecar can never cause an automatic send.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationFinish {
+    #[default]
+    Manual,
+    Silence,
+    Timeout,
+}
+
+/// The final transcript and the event that completed microphone capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationResult {
+    pub text: String,
+    pub finish: DictationFinish,
+}
 #[cfg(not(target_os = "android"))]
 mod worker {
+    use super::{DictationFinish, DictationResult};
     use anyhow::{Context, Result, anyhow};
     use serde::{Deserialize, Serialize};
     use std::io::{BufRead, BufReader, Read};
@@ -30,11 +52,23 @@ mod worker {
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     #[serde(tag = "event", rename_all = "snake_case")]
     pub(super) enum WorkerEvent {
-        Status { message: String },
-        Partial { text: String },
-        Level { value: f32 },
-        Result { text: String },
-        Error { message: String },
+        Status {
+            message: String,
+        },
+        Partial {
+            text: String,
+        },
+        Level {
+            value: f32,
+        },
+        Result {
+            text: String,
+            #[serde(default)]
+            finish: DictationFinish,
+        },
+        Error {
+            message: String,
+        },
     }
 
     pub(super) fn parse_event(line: &str) -> Option<WorkerEvent> {
@@ -55,18 +89,26 @@ mod worker {
         on_partial: F,
         on_level: G,
         on_status: H,
+        auto_send_silence: Option<Duration>,
         cancel_rx: mpsc::Receiver<()>,
-    ) -> Result<String>
+    ) -> Result<DictationResult>
     where
         F: FnMut(String),
         G: FnMut(f32),
         H: FnMut(String),
     {
         let exe = voice_worker_executable()?;
-        let child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(silence) = auto_send_silence {
+            command
+                .arg("--auto-send-silence-ms")
+                .arg(silence.as_millis().to_string());
+        }
+        let child = command
             .spawn()
             .with_context(|| format!("start voice worker {}", exe.display()))?;
         drive_worker(child, on_partial, on_level, on_status, cancel_rx)
@@ -106,7 +148,7 @@ mod worker {
         mut on_level: G,
         mut on_status: H,
         cancel_rx: mpsc::Receiver<()>,
-    ) -> Result<String>
+    ) -> Result<DictationResult>
     where
         F: FnMut(String),
         G: FnMut(f32),
@@ -148,7 +190,10 @@ mod worker {
                 && at.elapsed() >= CANCEL_GRACE
             {
                 let _ = child.kill();
-                break Some(Ok(last_partial.clone()));
+                break Some(Ok(DictationResult {
+                    text: last_partial.clone(),
+                    finish: DictationFinish::Manual,
+                }));
             }
             if started_at.elapsed() >= DICTATION_TIMEOUT + WORKER_GRACE {
                 let _ = child.kill();
@@ -161,7 +206,9 @@ mod worker {
                 }
                 Ok(Some(WorkerEvent::Level { value })) => on_level(value),
                 Ok(Some(WorkerEvent::Status { message })) => on_status(message),
-                Ok(Some(WorkerEvent::Result { text })) => break Some(Ok(text)),
+                Ok(Some(WorkerEvent::Result { text, finish })) => {
+                    break Some(Ok(DictationResult { text, finish }));
+                }
                 Ok(Some(WorkerEvent::Error { message })) => break Some(Err(anyhow!(message))),
                 Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => break None,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -306,14 +353,21 @@ pub fn run_dictation<F, G, H>(
     on_partial: F,
     on_level: G,
     on_status: H,
+    auto_send_silence: Option<Duration>,
     cancel_rx: std::sync::mpsc::Receiver<()>,
-) -> Result<String>
+) -> Result<DictationResult>
 where
     F: FnMut(String),
     G: FnMut(f32),
     H: FnMut(String),
 {
-    worker::run(on_partial, on_level, on_status, cancel_rx)
+    worker::run(
+        on_partial,
+        on_level,
+        on_status,
+        auto_send_silence,
+        cancel_rx,
+    )
 }
 
 #[cfg(target_os = "android")]
@@ -321,8 +375,9 @@ pub fn run_dictation<F, G, H>(
     _on_partial: F,
     _on_level: G,
     _on_status: H,
+    _auto_send_silence: Option<Duration>,
     _cancel_rx: std::sync::mpsc::Receiver<()>,
-) -> Result<String>
+) -> Result<DictationResult>
 where
     F: FnMut(String),
     G: FnMut(f32),
@@ -376,6 +431,7 @@ mod tests {
             WorkerEvent::Level { value: 0.25 },
             WorkerEvent::Result {
                 text: "hello world".to_string(),
+                finish: DictationFinish::Silence,
             },
             WorkerEvent::Error {
                 message: "microphone capture failed".to_string(),
@@ -399,6 +455,19 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     #[test]
+    fn legacy_result_event_defaults_to_manual_finish() {
+        use super::worker::{WorkerEvent, parse_event};
+        assert_eq!(
+            parse_event(r#"{"event":"result","text":"legacy"}"#),
+            Some(WorkerEvent::Result {
+                text: "legacy".to_string(),
+                finish: DictationFinish::Manual,
+            })
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
     fn crash_error_includes_stderr_line_and_recovery_hint() {
         let err = super::worker::worker_crash_error(
             None,
@@ -415,6 +484,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "android")))]
     mod fake_worker {
         use super::super::worker::drive_worker;
+        use super::super::{DictationFinish, DictationResult};
         use std::process::{Command, Stdio};
         use std::sync::mpsc;
 
@@ -432,7 +502,7 @@ mod tests {
         fn drive(
             script: &str,
             cancel_rx: mpsc::Receiver<()>,
-        ) -> (anyhow::Result<String>, Vec<String>, Vec<String>) {
+        ) -> (anyhow::Result<DictationResult>, Vec<String>, Vec<String>) {
             let mut partials = Vec::new();
             let mut statuses = Vec::new();
             let result = drive_worker(
@@ -461,7 +531,13 @@ mod tests {
                 printf '%s\n' '{"event":"result","text":"hello world"}'
             "#;
             let (result, partials, statuses) = drive(script, never_cancelled());
-            assert_eq!(result.expect("transcript"), "hello world");
+            assert_eq!(
+                result.expect("transcript"),
+                DictationResult {
+                    text: "hello world".to_string(),
+                    finish: DictationFinish::Manual,
+                }
+            );
             assert_eq!(partials, vec!["hello".to_string()]);
             assert_eq!(statuses, vec!["listening...".to_string()]);
         }
@@ -515,7 +591,13 @@ mod tests {
             let (cancel_tx, cancel_rx) = mpsc::channel();
             cancel_tx.send(()).expect("queue cancel");
             let (result, _, _) = drive(script, cancel_rx);
-            assert_eq!(result.expect("flushed transcript"), "flushed");
+            assert_eq!(
+                result.expect("flushed transcript"),
+                DictationResult {
+                    text: "flushed".to_string(),
+                    finish: DictationFinish::Manual,
+                }
+            );
         }
     }
 }

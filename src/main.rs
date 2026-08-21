@@ -2638,6 +2638,7 @@ async fn run_session(
                 theme_kind,
                 spinner_style,
                 thought_output: ui_config.thought_output,
+                voice_auto_send: ui_config.voice_auto_send,
                 feature_hints_enabled: ui_config.feature_hints,
                 keep_awake_enabled: ui_config.keep_awake,
                 active_agent_launch: Some(ragnarok::Launch {

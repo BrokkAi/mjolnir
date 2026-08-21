@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::{
     AcpServerPolicy, Config, InterfaceMode, ModelsConfig, PermissionPreset, TeamPreset,
-    ThoughtOutput,
+    ThoughtOutput, VoiceAutoSend,
 };
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
@@ -41,16 +41,18 @@ pub enum SettingsTab {
     Reviewer,
     Subagents,
     AcpServers,
+    Input,
     Appearance,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Team,
         Self::Agents,
         Self::Reviewer,
         Self::Subagents,
         Self::AcpServers,
+        Self::Input,
         Self::Appearance,
     ];
 
@@ -61,6 +63,7 @@ impl SettingsTab {
             Self::Reviewer => "Reviewer",
             Self::Subagents => "Subagents",
             Self::AcpServers => "ACP Servers",
+            Self::Input => "Input",
             Self::Appearance => "Appearance",
         }
     }
@@ -217,6 +220,7 @@ impl SettingsEditor {
                 self.settings_rows(self.tab).len()
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
+            SettingsTab::Input => 1,
             SettingsTab::Appearance => 6,
         }
     }
@@ -334,6 +338,15 @@ impl SettingsEditor {
                 let next =
                     (current as i32 + delta).rem_euclid(InterfaceMode::ALL.len() as i32) as usize;
                 self.config.interface = InterfaceMode::ALL[next];
+            }
+            SettingsTab::Input if self.selected == 0 => {
+                let current = VoiceAutoSend::ALL
+                    .iter()
+                    .position(|setting| *setting == self.config.voice_auto_send)
+                    .unwrap_or(0);
+                let next =
+                    (current as i32 + delta).rem_euclid(VoiceAutoSend::ALL.len() as i32) as usize;
+                self.config.voice_auto_send = VoiceAutoSend::ALL[next];
             }
             _ => return SettingsAction::None,
         }
@@ -866,6 +879,7 @@ pub fn draw_settings_panel(
         SettingsTab::Reviewer => draw_reviewer(frame, rows[1], editor, theme),
         SettingsTab::Subagents => draw_subagents(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
+        SettingsTab::Input => draw_input_settings(frame, rows[1], editor, theme),
         SettingsTab::Appearance => draw_appearance(frame, rows[1], editor, theme),
     }
     if let Some(notice) = &editor.notice {
@@ -1720,6 +1734,34 @@ fn draw_appearance(
     frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), area);
 }
 
+fn draw_input_settings(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &SettingsEditor,
+    theme: TerminalTheme,
+) {
+    let lines = vec![
+        Line::styled(
+            "Input settings apply when saved.",
+            Style::default().ink(theme.muted),
+        ),
+        Line::raw(""),
+        selected_line(
+            editor.selected == 0,
+            format!("Voice auto-send < {} >", editor.config.voice_auto_send),
+            theme,
+        ),
+        Line::styled(
+            format!(
+                "                {}",
+                editor.config.voice_auto_send.description()
+            ),
+            Style::default().ink(theme.muted),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
 /// What the startup probe learned, phrased for the appearance tab.
 ///
 /// Worth surfacing because it explains an otherwise mysterious difference
@@ -2374,6 +2416,10 @@ mod tests {
             editor.config.acp.policy("codex-acp"),
             AcpServerPolicy::Disabled
         );
+        editor.handle_key(KeyCode::Tab);
+        assert_eq!(editor.tab, SettingsTab::Input);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::TwoSeconds);
     }
 
     #[test]
@@ -2653,6 +2699,18 @@ mod tests {
     }
 
     #[test]
+    fn input_tab_cycles_voice_auto_send_delay() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Input;
+
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::Off);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::TwoSeconds);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::Off);
+    }
+
+    #[test]
     fn standard_tabs_render_their_controls() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
@@ -2715,6 +2773,18 @@ mod tests {
         assert!(appearance.contains("Keep awake"), "rendered:\n{appearance}");
         assert!(appearance.contains("Interface"), "rendered:\n{appearance}");
         assert!(appearance.contains("< inline >"), "rendered:\n{appearance}");
+        assert!(
+            !appearance.contains("Voice auto-send"),
+            "rendered:\n{appearance}"
+        );
+
+        editor.tab = SettingsTab::Input;
+        let input = render(&editor, 100, 30);
+        assert!(input.contains("Voice auto-send"), "rendered:\n{input}");
+        assert!(
+            input.contains("Input settings apply when saved"),
+            "rendered:\n{input}"
+        );
 
         assert!(!render(&editor, 27, 11).contains("mj config"));
     }
