@@ -22,10 +22,7 @@ use crate::usage_fact::{StoredFact, UsageFactStore};
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const RUNTIME_PREPARE_TIMEOUT: Duration = Duration::from_secs(180);
 /// The quota probe is implementation detail, not a resumable Claude session.
-const USAGE_PROBE_ARGS: &[&str] = &["-p", "/usage"];
-/// Supported by current Claude Code and harmless on older versions that do not
-/// recognize it, unlike the print-mode-only command-line flag.
-const CLAUDE_CODE_SKIP_PROMPT_HISTORY: &str = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
+const USAGE_PROBE_ARGS: &[&str] = &["-p", "--no-session-persistence", "/usage"];
 static CLAUDE_RUNTIME_READY: OnceCell<()> = OnceCell::const_new();
 
 /// Provider key of the machine-wide shared `/usage` fact.
@@ -341,9 +338,7 @@ fn usage_probe_command(
     prepared: &crate::acp::PreparedProviderCli,
     cwd: &std::path::Path,
 ) -> Command {
-    let mut command = provider_cli_command(prepared, cwd, USAGE_PROBE_ARGS);
-    command.env(CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
-    command
+    provider_cli_command(prepared, cwd, USAGE_PROBE_ARGS)
 }
 
 fn provider_cli_command(
@@ -791,7 +786,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_probe_command_disables_prompt_history() {
+    fn usage_probe_command_disables_session_persistence() {
         let prepared = crate::acp::PreparedProviderCli {
             command: "/usr/local/bin/claude".into(),
             args: vec!["--from-acp".into()],
@@ -805,15 +800,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             args,
-            ["--from-acp", "-p", "/usage"],
+            ["--from-acp", "-p", "--no-session-persistence", "/usage"],
             "the usage probe must remain a non-interactive /usage request"
         );
-        let skip_history = command
-            .get_envs()
-            .find(|(key, _)| *key == std::ffi::OsStr::new(CLAUDE_CODE_SKIP_PROMPT_HISTORY))
-            .and_then(|(_, value)| value)
-            .and_then(|value| value.to_str());
-        assert_eq!(skip_history, Some("1"));
     }
 
     fn shared_store() -> (tempfile::TempDir, UsageFactStore) {
