@@ -73,9 +73,10 @@ reviewed turn.
 The Reviewer tab has an independent **Permissions** setting. Its default,
 `Auto`, starts Codex with its native **Approve for me** policy and Claude Code
 with its native Auto policy; Mjolnir does not auto-answer approval requests.
-The selected provider's session options, including **Mode**, remain separately
-available. Mjolnir-hosted ACP filesystem and terminal capabilities stay
-read-only for review sessions.
+Other selected-provider session options remain separately available. The
+**Permissions** setting owns the provider's **Mode** option for reviewer
+sessions, so any older saved Mode value is ignored. Mjolnir-hosted ACP
+filesystem and terminal capabilities stay read-only for review sessions.
 
 ### Quick tier (default)
 

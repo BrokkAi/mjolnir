@@ -555,6 +555,13 @@ impl SettingsEditor {
         else {
             return Vec::new();
         };
+        let permissions_own_mode = matches!(
+            seat,
+            SessionDefaultsSeat::Review | SessionDefaultsSeat::Subagents
+        ) && matches!(
+            server.launch.kind,
+            crate::roster::AdapterKind::Codex | crate::roster::AdapterKind::Claude
+        );
         server
             .session_config
             .iter()
@@ -565,6 +572,7 @@ impl SettingsEditor {
                         option.category,
                         Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Model)
                     )
+                    && !(permissions_own_mode && option.id.to_string() == "mode")
             })
             .map(|(option_index, _)| (server_index, option_index))
             .collect()
@@ -2079,25 +2087,41 @@ mod tests {
         );
 
         editor.tab = SettingsTab::Reviewer;
-        for selected in 2..=6 {
+        assert_eq!(
+            editor
+                .session_option_rows(SessionDefaultsSeat::Review)
+                .len(),
+            4,
+            "review permissions owns the provider mode option"
+        );
+        for selected in 2..=5 {
             editor.selected = selected;
             assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         }
-        assert_eq!(editor.config.review.session_defaults[&server_id].len(), 5);
+        assert_eq!(editor.config.review.session_defaults[&server_id].len(), 4);
+        assert!(!editor.config.review.session_defaults[&server_id].contains_key("config:mode"));
         assert_eq!(
             editor.config.review.reasoning_effort.as_deref(),
             Some("value")
         );
 
         editor.tab = SettingsTab::Subagents;
-        for selected in 2..=6 {
+        assert_eq!(
+            editor
+                .session_option_rows(SessionDefaultsSeat::Subagents)
+                .len(),
+            4,
+            "subagent permissions owns the provider mode option"
+        );
+        for selected in 2..=5 {
             editor.selected = selected;
             assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         }
         assert_eq!(
             editor.config.subagents.session_defaults[&server_id].len(),
-            5
+            4
         );
+        assert!(!editor.config.subagents.session_defaults[&server_id].contains_key("config:mode"));
         assert_eq!(
             editor.config.subagents.reasoning_effort.as_deref(),
             Some("value")
@@ -2696,7 +2720,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_panel_keeps_persistence_details_out_of_the_control_list() {
+    fn reviewer_panel_keeps_mode_under_the_permissions_control() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -2737,7 +2761,14 @@ mod tests {
             reviewer.contains("Session options ·"),
             "rendered:\n{reviewer}"
         );
-        assert!(reviewer.contains("Mode < Agent >"), "rendered:\n{reviewer}");
+        assert!(
+            reviewer.contains("Permissions < Auto >"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(
+            !reviewer.contains("Mode < Agent >"),
+            "rendered:\n{reviewer}"
+        );
         assert!(
             reviewer.contains("Reasoning effort < High >"),
             "rendered:\n{reviewer}"

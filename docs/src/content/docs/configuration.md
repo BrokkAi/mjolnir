@@ -80,12 +80,12 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `review.acp_priority` | ACP source preference for the review supervisor model |
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `review.permission` | Provider-native permissions for review sessions: `manual`, `auto` (default), or `yolo` |
-| `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions |
+| `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions, except Mode, which `review.permission` controls |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `subagents.permission` | Provider-native permissions for delegated sessions: `manual`, `auto` (default), or `yolo` |
-| `subagents.session_defaults` | Per-ACP saved session-option defaults for newly created subagents |
+| `subagents.session_defaults` | Per-ACP saved session-option defaults for newly created subagents, except Mode, which `subagents.permission` controls |
 | `subagents.max_parallel` | Concurrent subagents, default 6, maximum 16 |
 | `subagents.auto_failover` | Move the default pool to the next roster route when the current ACP source's quota runs low; the model may stay the same |
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |

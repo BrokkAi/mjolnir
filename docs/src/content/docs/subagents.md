@@ -152,7 +152,8 @@ another launchable route as provider quota changes. The primary agent cannot
 override the model or ACP adapter on an individual `create_subagent` call.
 `subagents.permission` controls the provider-native permission policy for the
 whole pool; its default `auto` selects Codex's **Approve for me** policy or
-Claude Code's Auto policy.
+Claude Code's Auto policy. The **Permissions** setting owns the provider's
+**Mode** option, so a saved subagent Mode value is ignored.
 
 ## Workflow progress
 
