@@ -825,7 +825,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         continue;
                     }
                     let ReviewInFlight {
-                        epoch,
+                        epoch: _,
                         workflow_id,
                         review_pass: completed_pass,
                         verifies_pass,
@@ -972,11 +972,26 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             if let Some(saved_turn) = saved_turn {
                                 last_changed_turn = Some(saved_turn);
                             }
+                            let review_outcome = match coverage {
+                                WorkflowCoverage::Complete if review_findings.is_empty() => {
+                                    "Automatic review completed cleanly and found no material findings."
+                                }
+                                WorkflowCoverage::Complete => {
+                                    "Automatic review completed cleanly after the listed findings were corrected."
+                                }
+                                WorkflowCoverage::Degraded => {
+                                    "Automatic review completed with degraded coverage. State that limitation plainly; do not call the review clean."
+                                }
+                                WorkflowCoverage::Unknown => {
+                                    "Automatic review ended before coverage was established. State that limitation plainly; do not call the review clean."
+                                }
+                            };
                             let prompt = post_review_recap_prompt(
                                 &turn.lock().await.task,
                                 original_review_result.as_deref().unwrap_or(&reviewed_result),
                                 &reviewed_result,
                                 &review_findings,
+                                review_outcome,
                             );
                             emit_internal(
                                 &events_tx,
@@ -1020,20 +1035,33 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             let _ = events_tx.send(UiEvent::Warning(format!(
                                 "discrete review failed: {reason}"
                             )));
-                            let _ = events_tx.send(completion);
-                            reset_turn_state(
-                                &workflow,
-                                &mut trajectory,
-                                &mut held_completion,
-                                &mut discrete_review_started,
-                                &mut review_in_flight,
-                                &mut correction_review_base,
-                                &mut correction_rounds,
-                                &mut primary_review_prompt_active,
-                                &mut review_cancel_pending,
-                            )
-                            .await;
-                            idle_epoch = Some(epoch);
+                            review_findings.push(format!(
+                                "Automatic review failed: {reason}. The completed task result is retained, but the review did not establish a clean verdict."
+                            ));
+                            let prompt = post_review_recap_prompt(
+                                &turn.lock().await.task,
+                                original_review_result.as_deref().unwrap_or(&reviewed_result),
+                                &reviewed_result,
+                                &review_findings,
+                                "Automatic review failed. State the failure and its limitation plainly; do not claim the review passed or found no problems.",
+                            );
+                            emit_internal(
+                                &events_tx,
+                                "review",
+                                "primary",
+                                InternalMessageKind::DiscreteReview,
+                                &prompt,
+                            );
+                            let _ = config.runtime_commands.send(UiCommand::SendPrompt {
+                                text: prompt,
+                                images: Vec::new(),
+                                resources: Vec::new(),
+                            });
+                            let _ = completion;
+                            trajectory.reset_attempt();
+                            post_review_recap_active = true;
+                            primary_review_prompt_active = true;
+                            continue;
                         }
                     }
                 }
@@ -1528,6 +1556,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     original_review_result.as_deref().unwrap_or(&final_result),
                     &final_result,
                     &review_findings,
+                    "Fallback review completed with degraded coverage. State that limitation plainly; do not call the review clean.",
                 );
                 emit_internal(
                     &events_tx,
@@ -1961,14 +1990,11 @@ fn post_review_recap_prompt(
     original_result: &str,
     final_result: &str,
     findings: &[String],
+    review_outcome: &str,
 ) -> String {
-    let findings = if findings.is_empty() {
-        "No material findings survived review.".to_string()
-    } else {
-        findings.join("\n\n")
-    };
+    let findings = findings.join("\n\n");
     format!(
-        "The implementation and every discrete-review or correction pass for this user turn are now complete. Write the final user-facing recap now, after all that work. Lead with the finished outcome, then clearly cover: (1) the original work completed, (2) the review findings, explicitly saying when there were none, (3) fixes made for each valid finding or findings rejected after verification, and (4) the final validation performed and any remaining limitations. Preserve concrete file names, behavior, and test commands from the supplied answers. Do not modify files, run tools, start more work, or discuss this instruction. Do not merely say that review passed. Return only the self-contained recap.\n\n<original_task>\n{task}\n</original_task>\n\n<original_result>\n{original_result}\n</original_result>\n\n<final_reviewed_result>\n{final_result}\n</final_reviewed_result>\n\n<review_findings>\n{findings}\n</review_findings>"
+        "The implementation and every discrete-review or correction pass for this user turn are now complete. Write the final user-facing recap now, after all that work. Lead with the finished outcome, then clearly cover: (1) the original work completed, (2) the review findings, explicitly saying when there were none, (3) fixes made for each valid finding or findings rejected after verification, and (4) the final validation performed and any review limitation. Treat the runtime review outcome below as authoritative; do not call a degraded or failed review clean. Preserve concrete file names, behavior, and test commands from the supplied answers. Do not modify files, run tools, start more work, or discuss this instruction. Do not merely say that review passed. Return only the self-contained recap.\n\n<review_outcome>\n{review_outcome}\n</review_outcome>\n\n<original_task>\n{task}\n</original_task>\n\n<original_result>\n{original_result}\n</original_result>\n\n<final_reviewed_result>\n{final_result}\n</final_reviewed_result>\n\n<review_findings>\n{findings}\n</review_findings>"
     )
 }
 
@@ -2207,6 +2233,7 @@ mod tests {
             "Originally changed retry scheduling and ran cargo test retry.",
             "Fixed the swallowed error and ran cargo test plus cargo clippy.",
             &["[P1] src/upload.rs:12 -- swallowed error".to_string()],
+            "Automatic review completed cleanly after the listed finding was corrected.",
         );
 
         assert!(prompt.contains("make retries reliable"));
@@ -2214,16 +2241,38 @@ mod tests {
         assert!(prompt.contains("[P1] src/upload.rs:12 -- swallowed error"));
         assert!(prompt.contains("Fixed the swallowed error"));
         assert!(prompt.contains("cargo test plus cargo clippy"));
+        assert!(prompt.contains("completed cleanly after the listed finding"));
         assert!(!prompt.contains("No material findings survived review."));
     }
 
     #[test]
     fn post_review_recap_marks_only_an_empty_findings_set_clean() {
-        let prompt = post_review_recap_prompt("task", "original", "reviewed", &[]);
+        let prompt = post_review_recap_prompt(
+            "task",
+            "original",
+            "reviewed",
+            &[],
+            "Automatic review completed cleanly and found no material findings.",
+        );
 
-        assert!(prompt.contains("No material findings survived review."));
+        assert!(prompt.contains("found no material findings."));
         assert!(prompt.contains("<original_result>\noriginal\n</original_result>"));
         assert!(prompt.contains("<final_reviewed_result>\nreviewed\n</final_reviewed_result>"));
+    }
+
+    #[test]
+    fn post_review_recap_never_turns_degraded_coverage_into_a_clean_verdict() {
+        let prompt = post_review_recap_prompt(
+            "task",
+            "original",
+            "reviewed",
+            &[],
+            "Automatic review completed with degraded coverage. State that limitation plainly; do not call the review clean.",
+        );
+
+        assert!(prompt.contains("completed with degraded coverage"));
+        assert!(prompt.contains("do not call the review clean"));
+        assert!(!prompt.contains("No material findings survived review."));
     }
 
     #[test]
@@ -3227,6 +3276,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut surfaced_reason = false;
         let mut workflow_failed = false;
+        let mut recap_started = false;
         loop {
             let event = tokio::time::timeout_at(deadline, running.events.recv())
                 .await
@@ -3248,6 +3298,22 @@ mod tests {
             ) {
                 workflow_failed = true;
             }
+            if workflow_failed && !recap_started {
+                let prompt = next_prompt(&mut command_rx).await;
+                assert!(prompt.contains("exact review snapshot unavailable"));
+                assert!(prompt.contains("Automatic review failed."));
+                runtime_tx
+                    .send(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                        text_chunk(
+                            "The requested behavior change is complete; review coverage failed.",
+                        ),
+                    )))
+                    .expect("send snapshot failure recap");
+                runtime_tx
+                    .send(completion())
+                    .expect("complete snapshot failure recap");
+                recap_started = true;
+            }
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
@@ -3255,8 +3321,12 @@ mod tests {
         assert!(surfaced_reason);
         assert!(workflow_failed);
         assert!(
+            recap_started,
+            "snapshot failure must still re-present the task result"
+        );
+        assert!(
             command_rx.try_recv().is_err(),
-            "snapshot failure must not dispatch a fallback review"
+            "snapshot failure must dispatch exactly one final recap"
         );
         assert_eq!(2, passes.load(Ordering::SeqCst));
 
@@ -3457,7 +3527,7 @@ mod tests {
                 };
                 assert!(images.is_empty());
                 assert!(text.contains("the original work completed"));
-                assert!(text.contains("No material findings survived review."));
+                assert!(text.contains("completed cleanly and found no material findings"));
                 runtime_tx
                     .send(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
                         text_chunk("Final recap"),
@@ -3482,7 +3552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fanout_failure_is_loudly_fatal_without_fallback_review() {
+    async fn fanout_failure_recap_preserves_the_task_result_without_claiming_clean_review() {
         let temp = tempfile::tempdir().expect("tempdir");
         let snapshot = changed_workspace(temp.path()).await;
         let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
@@ -3504,6 +3574,7 @@ mod tests {
 
         let mut workflow_failed = false;
         let mut surfaced_reason = false;
+        let mut recap_started = false;
         loop {
             let event = tokio::time::timeout(Duration::from_secs(5), running.events.recv())
                 .await
@@ -3525,6 +3596,23 @@ mod tests {
             ) {
                 workflow_failed = true;
             }
+            if workflow_failed && !recap_started {
+                let prompt = next_prompt(&mut command_rx).await;
+                assert!(prompt.contains("Automatic review failed."));
+                assert!(prompt.contains("every specialist review lane failed"));
+                assert!(prompt.contains("do not claim the review passed"));
+                runtime_tx
+                    .send(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                        text_chunk(
+                            "The requested retry change is complete. Review coverage failed.",
+                        ),
+                    )))
+                    .expect("send failure recap");
+                runtime_tx
+                    .send(completion())
+                    .expect("complete failure recap");
+                recap_started = true;
+            }
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
@@ -3538,8 +3626,12 @@ mod tests {
             "the fan-out failure reason must be visible to the user"
         );
         assert!(
+            recap_started,
+            "a failed review must still re-present the task result"
+        );
+        assert!(
             command_rx.try_recv().is_err(),
-            "failed fan-out must not dispatch a fallback review prompt"
+            "failed fan-out must dispatch exactly one final recap"
         );
 
         drop(runtime_tx);
