@@ -554,13 +554,19 @@ impl TeamPreset {
     pub fn apply(self, config: &mut Config) {
         config.team = Some(self.id().to_string());
         let (coder, reviewer) = self.sources();
+        // Seat-level reasoning efforts were picked against the seat's previous
+        // adapter's advertised values ("default" exists on claude-acp but not
+        // codex-acp), so rerouting a seat resets them along with its model.
         config.agent.model = default_auto();
         config.agent.acp_source = Some(coder.to_string());
+        config.agent.reasoning_effort = None;
         config.agent.discrete_review = true;
         config.review.model = default_auto();
         config.review.acp_source = Some(reviewer.to_string());
+        config.review.reasoning_effort = None;
         config.subagents.model = default_auto();
         config.subagents.acp_source = Some(reviewer.to_string());
+        config.subagents.reasoning_effort = None;
         config.subagents.auto_failover = true;
         for source in [coder, reviewer] {
             config.set_acp_server_policy(source, AcpServerPolicy::Enabled);
@@ -3152,6 +3158,9 @@ mode = "ask"
             config.agent.model = "provider-specific-primary".to_string();
             config.review.model = "provider-specific-review".to_string();
             config.subagents.model = "provider-specific-subagent".to_string();
+            config.agent.reasoning_effort = Some("xhigh".to_string());
+            config.review.reasoning_effort = Some("default".to_string());
+            config.subagents.reasoning_effort = Some("default".to_string());
 
             preset.apply(&mut config);
 
@@ -3163,6 +3172,9 @@ mode = "ask"
             assert_eq!(config.agent.model, "auto");
             assert_eq!(config.review.model, "auto");
             assert_eq!(config.subagents.model, "auto");
+            assert_eq!(config.agent.reasoning_effort, None);
+            assert_eq!(config.review.reasoning_effort, None);
+            assert_eq!(config.subagents.reasoning_effort, None);
             assert!(config.agent.discrete_review);
             assert_eq!(config.acp.policy(coder), AcpServerPolicy::Enabled);
             assert_eq!(config.acp.policy(reviewer), AcpServerPolicy::Enabled);
