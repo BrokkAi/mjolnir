@@ -421,6 +421,24 @@ fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
         || server.policy != AcpServerPolicy::Auto
 }
 
+/// Resolution found no launchable model at all — the machine has no usable
+/// adapter, typically because nothing is installed or authenticated yet.
+/// Callers that can guide the user through setup (the remote server) detect
+/// this with `downcast_ref` and degrade instead of failing; every other
+/// resolution error stays fatal.
+#[derive(Debug, Clone)]
+pub struct NothingLaunchable {
+    pub message: String,
+}
+
+impl std::fmt::Display for NothingLaunchable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NothingLaunchable {}
+
 type ProbeResult = std::result::Result<probe::AdapterCapabilities, String>;
 static WARNED_ADAPTERS: LazyLock<std::sync::Mutex<HashSet<String>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
@@ -998,17 +1016,20 @@ fn assemble_roster(
             .next()
             .map(|reason| format!(" ({reason})"))
             .unwrap_or_default();
-        if let Some(external) = inventory
+        let message = match inventory
             .servers
             .iter()
             .find(|server| server.launch.kind == AdapterKind::External)
         {
-            bail!(
+            Some(external) => format!(
                 "no model is launchable{diagnostic}: {} did not advertise a usable model",
                 external.label
-            );
-        }
-        bail!("no model is launchable{diagnostic}: install or authenticate Codex or Claude Code");
+            ),
+            None => format!(
+                "no model is launchable{diagnostic}: install or authenticate Codex or Claude Code"
+            ),
+        };
+        return Err(NothingLaunchable { message }.into());
     }
 
     if matches!(
@@ -2220,6 +2241,37 @@ mod tests {
 
         assert_eq!(resolved.primary.reasoning_effort.as_deref(), Some("high"));
         assert!(resolved.subagent_default.is_none());
+    }
+
+    #[test]
+    fn empty_discovery_types_the_error_as_nothing_launchable() {
+        let discovery = Discovery {
+            available: Vec::new(),
+            adapter_errors: HashMap::new(),
+            session_config: HashMap::new(),
+        };
+        let availability = Availability {
+            codex_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            subscriptions: Subscriptions::default(),
+        };
+        let error = assemble_roster(
+            &Config::default(),
+            &[],
+            &availability,
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect_err("nothing launchable");
+        let nothing = error
+            .downcast_ref::<NothingLaunchable>()
+            .expect("typed as NothingLaunchable so the server can degrade to setup");
+        assert_eq!(
+            nothing.message,
+            "no model is launchable: install or authenticate Codex or Claude Code"
+        );
+        // The rendered error keeps the message the CLI has always printed.
+        assert_eq!(format!("{error:#}"), nothing.message);
     }
 
     #[test]

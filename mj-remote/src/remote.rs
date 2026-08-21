@@ -4005,10 +4005,17 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
+/// The server started without a launchable model; the payload is the roster
+/// resolution message. The server serves the viewer anyway so the user can
+/// finish setup there, and the session manager keeps re-resolving until a
+/// roster binds.
+#[derive(Debug, Clone)]
+pub struct SetupPending(pub String);
+
 /// Options for [`run_server`], mirroring the `mj server` CLI surface.
 pub struct RuntimeServerOptions {
     pub config: config::Config,
-    pub roster: roster::Roster,
+    pub roster: std::result::Result<roster::Roster, SetupPending>,
     pub hostname: Option<String>,
     /// Probe this machine for a certificate-capable tailscale node at
     /// startup and, when one is found, serve its `ts.net` certificate.
@@ -4070,12 +4077,23 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     };
     let workspace_roots =
         mj_core::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
-    let mjconfig = Arc::new(MjConfigRuntime::new(
-        config_path.clone(),
-        resolved.choices.clone(),
-        Some(models_config_from_roster(&resolved)),
-        resolved.inventory.clone(),
-    ));
+    let mjconfig = Arc::new(match &resolved {
+        Ok(resolved) => MjConfigRuntime::new(
+            config_path.clone(),
+            resolved.choices.clone(),
+            Some(models_config_from_roster(resolved)),
+            resolved.inventory.clone(),
+        ),
+        // Setup pending: no roster to seed from. Detection-only inventory
+        // keeps the ACP servers panel truthful until the first discovery
+        // pass replaces it.
+        Err(SetupPending(_)) => MjConfigRuntime::new(
+            config_path.clone(),
+            Vec::new(),
+            None,
+            roster::discover_inventory(&cfg),
+        ),
+    });
     let session_ttl = session_ttl_from_days(session_ttl_days);
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, listen.port, &token);
@@ -4155,6 +4173,10 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         println!("session lifetime: ephemeral (signs out when the browser/PWA closes)");
     } else {
         println!("session lifetime: {session_ttl_days} days");
+    }
+    if let Err(SetupPending(reason)) = &resolved {
+        println!("setup needed: {reason}");
+        println!("open the viewer above to finish setup: sign in to an agent and choose a team.");
     }
 
     serve_listeners_until_terminated(listeners, tls_config, app, termination, session_manager)
@@ -4865,6 +4887,20 @@ struct MjConfigSnapshot {
     discovery_revision: u64,
     /// One-shot message produced while applying an edit.
     notice: Option<String>,
+    /// What still blocks this server from launching sessions. `None` once a
+    /// team is configured and a launchable model exists.
+    setup: Option<MjSetupPanel>,
+}
+
+/// First-run state driving the viewer's setup prompt.
+#[derive(Debug, Serialize)]
+struct MjSetupPanel {
+    /// No team is configured and none is adoptable from local credentials.
+    team_selection_required: bool,
+    /// Discovery has not found a launchable model.
+    no_launchable_models: bool,
+    /// One-line instruction naming the next step.
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -5308,6 +5344,14 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         (None, notice) => notice,
     };
 
+    let team_selection_required = !config::has_valid_team(config);
+    let no_launchable_models = !editor.any_model_launchable();
+    let setup = (team_selection_required || no_launchable_models).then(|| MjSetupPanel {
+        team_selection_required,
+        no_launchable_models,
+        message: mjconfig_setup_message(team_selection_required, no_launchable_models),
+    });
+
     // A registered platform adapter (e.g. Anvil on Android) is the only
     // team: show it as the fixed selection instead of offering built-in
     // presets that cannot run on this build.
@@ -5370,6 +5414,22 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         probing,
         discovery_revision,
         notice,
+        setup,
+    }
+}
+
+/// The next setup step, named concretely. Sign-in is listed before install
+/// because the ACP adapters launch through npx: a machine that can run this
+/// server can download them, so missing credentials are the usual blocker.
+fn mjconfig_setup_message(team_selection_required: bool, no_launchable_models: bool) -> String {
+    match (no_launchable_models, team_selection_required) {
+        (true, true) => {
+            "Sign in to Codex or Claude Code under ACP Servers, then choose a team.".to_string()
+        }
+        (true, false) => {
+            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers.".to_string()
+        }
+        _ => "Choose a team to finish setup.".to_string(),
     }
 }
 
@@ -5567,14 +5627,15 @@ async fn mjconfig_apply(
     if let Some(warning) = config.newer_build_notice() {
         return Err((StatusCode::CONFLICT, warning));
     }
-    let discovery = state
-        .mjconfig
-        .discovery
-        .lock()
-        .expect("mjconfig discovery lock");
-    let inventory = discovery.inventory.clone();
-    let choices = discovery.choices.clone();
-    drop(discovery);
+    // Scoped so the guard is provably dead before the refresh await below.
+    let (inventory, choices) = {
+        let discovery = state
+            .mjconfig
+            .discovery
+            .lock()
+            .expect("mjconfig discovery lock");
+        (discovery.inventory.clone(), discovery.choices.clone())
+    };
     mjconfig_apply_edits(&mut config, request, &inventory)?;
     // Same guard as the TUI's save: a policy edit that strands a pinned seat
     // model flips that seat to auto, with a notice instead of a later failure.
@@ -5586,6 +5647,20 @@ async fn mjconfig_apply(
     } else {
         format!("Saved. {}", reroute_notices.join("; "))
     };
+    // Rebind the roster now instead of on the next session launch, so a
+    // first-run team save turns the server launchable while the user is
+    // still looking at the panel. A config that still cannot bind (no
+    // credentials yet) is not a save failure; the returned snapshot's setup
+    // panel carries the remaining step.
+    match state
+        .session_manager
+        .refresh_for_config(&state.mjconfig.config_path)
+        .await
+    {
+        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
+        Ok(None) => {}
+        Err(error) => warn!("saved configuration does not bind a roster yet: {error}"),
+    }
     Ok(Json(mjconfig_snapshot_response(&state, Some(notice))))
 }
 
@@ -9673,6 +9748,9 @@ mod tests {
         next_launch: AtomicU64,
         sessions: Mutex<Vec<TestAgentSession>>,
         resolve_cwd: Option<PathBuf>,
+        /// Returned (once) by the next `refresh_for_config` call, standing in
+        /// for a re-resolve that succeeded.
+        refresh_roster: Mutex<Option<roster::Roster>>,
     }
 
     #[async_trait::async_trait]
@@ -9723,7 +9801,7 @@ mod tests {
             &self,
             _config_path: &Path,
         ) -> std::result::Result<Option<roster::Roster>, String> {
-            Ok(None)
+            Ok(self.refresh_roster.lock().expect("refresh roster").take())
         }
     }
 
@@ -9871,6 +9949,14 @@ mod tests {
     }
 
     fn mjconfig_test_router(mjconfig: Arc<MjConfigRuntime>, token: &str) -> Router {
+        mjconfig_test_router_with_manager(mjconfig, token, test_session_manager())
+    }
+
+    fn mjconfig_test_router_with_manager(
+        mjconfig: Arc<MjConfigRuntime>,
+        token: &str,
+        session_manager: Arc<TestServerSessionManager>,
+    ) -> Router {
         let dir = tempfile::tempdir().expect("tempdir");
         build_router(RouterConfig {
             db_path: dir.path().join("sessions.sqlite3"),
@@ -9879,7 +9965,7 @@ mod tests {
             cookie_key: "test-cookie-key".to_string(),
             session_ttl: DEFAULT_SESSION_TTL,
             workspace_roots: test_workspace_roots(dir.path()),
-            session_manager: test_session_manager(),
+            session_manager,
             mjconfig,
         })
     }
@@ -10169,6 +10255,98 @@ mod tests {
         let snapshot = json_body(response).await;
         assert_eq!(snapshot["probing"], true);
         assert_eq!(snapshot["discovery_revision"], 3);
+    }
+
+    #[tokio::test]
+    async fn mjconfig_snapshot_reports_setup_while_nothing_is_launchable() {
+        let runtime = test_mjconfig_runtime();
+        // A saved team isolates the check from the host's credentials: only
+        // the empty model catalog keeps setup pending.
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&runtime.config_path).expect("seed config");
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        assert_eq!(snapshot["setup"]["no_launchable_models"], true);
+        assert_eq!(snapshot["setup"]["team_selection_required"], false);
+        assert_eq!(
+            snapshot["setup"]["message"],
+            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers."
+        );
+    }
+
+    /// `team_selection_required` cannot be pinned through the saved config:
+    /// runtime route hints are `#[serde(skip)]` and `normalize` clears team
+    /// ids this build cannot map, so after a load the flag is purely "does
+    /// this host have credentials to adopt a default team" — exactly the
+    /// fresh-machine state, and host-dependent in a test. The wire coverage
+    /// above exercises the setup panel; this covers the message mapping.
+    #[test]
+    fn mjconfig_setup_message_names_the_blocking_step() {
+        assert_eq!(
+            mjconfig_setup_message(true, true),
+            "Sign in to Codex or Claude Code under ACP Servers, then choose a team."
+        );
+        assert_eq!(
+            mjconfig_setup_message(false, true),
+            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers."
+        );
+        assert_eq!(
+            mjconfig_setup_message(true, false),
+            "Choose a team to finish setup."
+        );
+    }
+
+    #[tokio::test]
+    async fn mjconfig_snapshot_omits_setup_when_teamed_and_launchable() {
+        let runtime = test_mjconfig_runtime();
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&runtime.config_path).expect("seed config");
+        runtime.update_from_roster(&test_roster("test-model"));
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        let snapshot = json_body(response).await;
+        assert!(snapshot["setup"].is_null(), "{}", snapshot["setup"]);
+    }
+
+    #[tokio::test]
+    async fn mjconfig_apply_rebinds_the_roster_with_the_save() {
+        let runtime = test_mjconfig_runtime();
+        let manager = test_session_manager();
+        *manager.refresh_roster.lock().expect("refresh roster") = Some(test_roster("test-model"));
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router_with_manager(Arc::clone(&runtime), token, manager);
+
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({ "team": "codex" })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        // The re-resolve ran with the save: the returned snapshot already
+        // shows the launchable catalog, so setup is done — no restart, no
+        // extra session launch needed to bind the roster.
+        assert_eq!(snapshot["team"]["selected"], "codex");
+        assert!(snapshot["setup"].is_null(), "{}", snapshot["setup"]);
+        let discovery = runtime.discovery.lock().expect("discovery lock");
+        assert_eq!(discovery.choices.len(), 1);
     }
 
     #[tokio::test]
@@ -10801,7 +10979,7 @@ mod tests {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("mjRow(\"Thought output\")"));
         assert!(viewer.contains("mjcfg.edits.thought_output = next"));
-        assert!(viewer.contains("function refreshThoughtOutput()"));
+        assert!(viewer.contains("function refreshServerSnapshot()"));
         assert!(viewer.contains("function thoughtSummary(text)"));
         assert!(viewer.contains("function activeThoughtTail(text)"));
         assert!(viewer.contains("function nestedThoughtFinished(actor, laterEntries, session)"));
@@ -10810,6 +10988,22 @@ mod tests {
         assert!(viewer.contains("actorPrefix === \"subagent\" ? \"subagent\" : \"review\""));
         assert!(viewer.contains("entry._thoughtCompleted"));
         assert!(viewer.contains("thoughtOutput === \"default\""));
+    }
+
+    #[test]
+    fn embedded_viewer_prompts_first_run_setup() {
+        let viewer = include_str!("remote_viewer.html");
+        // Boot captures the server's setup state and opens the Team tab once.
+        assert!(viewer.contains("function maybePromptSetup()"));
+        assert!(viewer.contains("setupPromptShown = true;"));
+        assert!(viewer.contains("void openMjConfig(\"team\");"));
+        // The sidebar carries the setup card while sessions cannot launch.
+        assert!(viewer.contains("function setupRequiredCard()"));
+        assert!(viewer.contains("querySelector(\".empty, .setup-card\")"));
+        // The dialog banner falls back to the blocking step, and a save that
+        // leaves setup unfinished keeps the editor open on it.
+        assert!(viewer.contains("mjcfg.snapshot?.setup?.message"));
+        assert!(viewer.contains("if (mjcfg.snapshot?.setup) {"));
     }
 
     #[test]

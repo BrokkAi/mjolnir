@@ -1205,6 +1205,40 @@
         box-shadow: 0 0 14px rgb(235 63 51 / 0.64);
       }
 
+      /* First-run: the server needs setup before sessions can launch. Same
+         red-rail grammar as the launch card — this state needs the user. */
+      .setup-card {
+        position: relative;
+        display: grid;
+        gap: 8px;
+        justify-items: start;
+        padding: 14px 14px 16px 18px;
+        border-bottom: 1px solid var(--line-row);
+        background:
+          linear-gradient(90deg, rgb(235 63 51 / 0.14), transparent 62%),
+          var(--surface-panel);
+      }
+
+      .setup-card::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 3px;
+        background: var(--red-hot);
+        box-shadow: 0 0 14px rgb(235 63 51 / 0.64);
+      }
+
+      .setup-card-title {
+        color: var(--text-control);
+        font: 600 15px/1.25 var(--font-body);
+      }
+
+      .setup-card-detail {
+        color: var(--muted);
+        font: 400 10.5px/1.5 var(--font-mono);
+        overflow-wrap: anywhere;
+      }
+
       .launch-card-top {
         display: flex;
         align-items: center;
@@ -3792,7 +3826,18 @@
         renderChat();
       }
 
+      /* Server-reported first-run state: what still blocks session launches
+         (no team, no launchable model). Null once setup is complete. */
+      let setupState = null;
+      let setupPromptShown = false;
+
       function applyThoughtOutputSnapshot(snapshot, render = false) {
+        const nextSetup = snapshot?.setup || null;
+        const setupChanged = Boolean(setupState) !== Boolean(nextSetup);
+        setupState = nextSetup;
+        if (setupChanged) {
+          renderSessions();
+        }
         const next = snapshot?.appearance?.thought_output === "full" ? "full" : "default";
         const changed = thoughtOutput !== next;
         thoughtOutput = next;
@@ -3801,15 +3846,26 @@
         }
       }
 
-      async function refreshThoughtOutput() {
+      async function refreshServerSnapshot() {
         try {
           const response = await apiFetch("/api/mjconfig", { cache: "no-store" });
           if (response.ok) {
             applyThoughtOutputSnapshot(await response.json());
+            maybePromptSetup();
           }
         } catch {
           // Keep the compatibility default when configuration is unavailable.
         }
+      }
+
+      /* First connect to a server that cannot launch sessions yet: take the
+         user straight to the Team tab, once per page load. */
+      function maybePromptSetup() {
+        if (!setupState || setupPromptShown) {
+          return;
+        }
+        setupPromptShown = true;
+        void openMjConfig("team");
       }
 
       function openViewerSettings() {
@@ -3932,6 +3988,7 @@
             if (response.ok) {
               const previous = mjcfg.snapshot;
               mjcfg.snapshot = await response.json();
+              applyThoughtOutputSnapshot(mjcfg.snapshot, true);
               const wasRunning =
                 (previous.login && previous.login.running)
                 || previous.probing;
@@ -3997,7 +4054,8 @@
 
       function renderMjConfig() {
         renderMjTabs();
-        mjconfigNoticeEl.textContent = mjcfg.snapshot?.notice || "";
+        mjconfigNoticeEl.textContent =
+          mjcfg.snapshot?.notice || mjcfg.snapshot?.setup?.message || "";
         mjconfigBodyEl.replaceChildren();
         if (mjcfg.spinnerTimer) {
           clearInterval(mjcfg.spinnerTimer);
@@ -4499,6 +4557,15 @@
           }
           mjcfg.edits = {};
           const notice = mjcfg.snapshot?.notice;
+          if (mjcfg.snapshot?.setup) {
+            /* Setup is not finished (e.g. a team saved before any sign-in):
+               keep the editor open on the remaining step. Clear the one-shot
+               save notice so the banner shows that step instead. */
+            mjcfg.snapshot.notice = null;
+            renderMjConfig();
+            mjSetStatus(notice || "Saved");
+            return;
+          }
           closeMjConfig();
           // Surface save-time adjustments (e.g. a seat flipped to auto because
           // its model lost every enabled ACP route) where the user will see them.
@@ -5561,14 +5628,52 @@
         card.action.disabled = pendingSessionActions.has(session.session_id);
       }
 
+      /* The server is up but cannot launch sessions until setup finishes.
+         The card names the blocking step and opens the editor on the Team
+         tab; red rail because this state needs the user. */
+      function setupRequiredCard() {
+        if (!setupState) {
+          return null;
+        }
+        const card = document.createElement("div");
+        card.className = "setup-card";
+        card.setAttribute("role", "status");
+        const title = document.createElement("div");
+        title.className = "setup-card-title";
+        title.textContent = "Finish setup";
+        const detail = document.createElement("div");
+        detail.className = "setup-card-detail";
+        detail.textContent = setupState.message;
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "primary";
+        open.textContent = "Open setup";
+        open.addEventListener("click", () => {
+          void openMjConfig("team");
+        });
+        card.append(title, detail, open);
+        return card;
+      }
+
       function renderSessions() {
         const launchCardRoot = renderLaunchSessionCard();
         if (!sessions.length) {
           sessionCardById.clear();
-          sessionsEl.replaceChildren(launchCardRoot || emptyNote("No live sessions. Use New to start one."));
+          const existingSetup = sessionsEl.querySelector(".setup-card");
+          if (launchCardRoot) {
+            sessionsEl.replaceChildren(launchCardRoot);
+          } else if (setupState && existingSetup) {
+            /* Update in place: replacing the card on every poll tick would
+               drop focus from its button. */
+            existingSetup.querySelector(".setup-card-detail").textContent = setupState.message;
+          } else if (setupState) {
+            sessionsEl.replaceChildren(setupRequiredCard());
+          } else {
+            sessionsEl.replaceChildren(emptyNote("No live sessions. Use New to start one."));
+          }
           return;
         }
-        if (sessionsEl.querySelector(".empty")) {
+        if (sessionsEl.querySelector(".empty, .setup-card")) {
           sessionsEl.replaceChildren();
         }
         if (launchCardRoot && launchCardRoot.parentElement !== sessionsEl) {
@@ -8772,7 +8877,7 @@
       async function tryResumeViewerSession() {
         if (viewerToken) {
           showApp();
-          await refreshThoughtOutput();
+          await refreshServerSnapshot();
           await refreshSessions();
           applyRoute();
           return;
@@ -8795,7 +8900,7 @@
           syncPendingStopState();
           noteSessionActivity();
           showApp();
-          await refreshThoughtOutput();
+          await refreshServerSnapshot();
           const routed = routeSessionId();
           if (routed && !sessions.some((session) => session.session_id === routed)) {
             await refreshHistory(false);
@@ -9042,7 +9147,7 @@
           }
           authTokenEl.value = "";
           showApp();
-          await refreshThoughtOutput();
+          await refreshServerSnapshot();
           await refreshSessions();
           applyRoute();
         } catch (error) {

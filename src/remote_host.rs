@@ -29,9 +29,35 @@ struct ServerAgentSession {
 /// config edit) triggers a re-resolve before the next session starts.
 #[derive(Debug, Clone)]
 struct ServerSessionLaunch {
+    binding: ServerSessionBinding,
+    config_hash: Option<u64>,
+}
+
+/// Whether server-owned sessions can launch at all. A server that starts on a
+/// machine with no launchable model runs `Unbound` — serving the viewer so the
+/// user can finish setup — and upgrades to `Bound` on the first successful
+/// roster re-resolve.
+#[derive(Debug, Clone)]
+enum ServerSessionBinding {
+    Bound(Box<BoundSession>),
+    Unbound { reason: String },
+}
+
+/// The launch binding a resolved roster produced.
+#[derive(Debug, Clone)]
+struct BoundSession {
     agent: SelectedAgent,
     roster: Option<roster::Roster>,
-    config_hash: Option<u64>,
+}
+
+impl ServerSessionBinding {
+    fn bound(agent: SelectedAgent, roster: Option<roster::Roster>) -> Self {
+        Self::Bound(Box::new(BoundSession { agent, roster }))
+    }
+
+    fn is_bound(&self) -> bool {
+        matches!(self, Self::Bound(_))
+    }
 }
 
 /// How far one requested session launch has got.
@@ -171,10 +197,50 @@ impl RootServerSessionManager {
         snapshot_exclusions: Vec<PathBuf>,
         fs_max_text_bytes: u64,
     ) -> Self {
+        Self::with_binding(
+            ServerSessionBinding::bound(selected_agent_for_roster(&roster), Some(roster)),
+            config_hash,
+            resolve_cwd,
+            additional_directories,
+            snapshot_exclusions,
+            fs_max_text_bytes,
+        )
+    }
+
+    /// A manager for a server that started with no launchable model. Session
+    /// launches fail with `reason` until a re-resolve binds a roster; every
+    /// refresh attempt re-resolves regardless of the config hash, because the
+    /// missing piece (credentials, an installed agent) changes outside the
+    /// config file.
+    pub(crate) fn new_unresolved(
+        reason: String,
+        config_hash: Option<u64>,
+        resolve_cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        snapshot_exclusions: Vec<PathBuf>,
+        fs_max_text_bytes: u64,
+    ) -> Self {
+        Self::with_binding(
+            ServerSessionBinding::Unbound { reason },
+            config_hash,
+            resolve_cwd,
+            additional_directories,
+            snapshot_exclusions,
+            fs_max_text_bytes,
+        )
+    }
+
+    fn with_binding(
+        binding: ServerSessionBinding,
+        config_hash: Option<u64>,
+        resolve_cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        snapshot_exclusions: Vec<PathBuf>,
+        fs_max_text_bytes: u64,
+    ) -> Self {
         Self {
             launch: RwLock::new(ServerSessionLaunch {
-                agent: selected_agent_for_roster(&roster),
-                roster: Some(roster),
+                binding,
                 config_hash,
             }),
             roster_refresh_lock: tokio::sync::Mutex::new(()),
@@ -221,7 +287,10 @@ impl RootServerSessionManager {
         let hash = config_file_hash(config_path);
         {
             let launch = self.launch.read().expect("server launch lock");
-            if !refresh_requested && launch.config_hash == hash {
+            // An unbound server re-resolves on every refresh: what it lacks
+            // (credentials, an installed agent) appears without touching the
+            // config file, so the hash alone can never clear the state.
+            if !refresh_requested && launch.config_hash == hash && launch.binding.is_bound() {
                 return Ok(None);
             }
         }
@@ -234,8 +303,10 @@ impl RootServerSessionManager {
         match resolve(config, resolve_cwd).await {
             Ok(roster) => {
                 let mut launch = self.launch.write().expect("server launch lock");
-                launch.agent = selected_agent_for_roster(&roster);
-                launch.roster = Some(roster.clone());
+                launch.binding = ServerSessionBinding::bound(
+                    selected_agent_for_roster(&roster),
+                    Some(roster.clone()),
+                );
                 launch.config_hash = hash;
                 Ok(Some(roster))
             }
@@ -279,9 +350,16 @@ impl RootServerSessionManager {
             registry: Arc::clone(&self.launches),
             launch_id,
         };
+        let (agent, roster) = match launch.binding {
+            ServerSessionBinding::Bound(bound) => (bound.agent, bound.roster),
+            ServerSessionBinding::Unbound { reason } => {
+                reporter.failed(reason);
+                return launch_id;
+            }
+        };
         let session = start_server_agent_session(
-            launch.agent,
-            launch.roster,
+            agent,
+            roster,
             cwd,
             self.additional_directories.clone(),
             self.snapshot_exclusions.clone(),
@@ -855,5 +933,124 @@ impl remote::ServerSessionManager for RootServerSessionManager {
         config_path: &Path,
     ) -> std::result::Result<Option<roster::Roster>, String> {
         RootServerSessionManager::refresh_for_config(self, config_path).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stub_roster() -> roster::Roster {
+        let agent = roster::ResolvedAgent {
+            model: crate::deepswe::Row {
+                model: "test-model".to_string(),
+                reasoning_effort: None,
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+            },
+            model_value: "test-model".to_string(),
+            launch: roster::AdapterLaunch {
+                kind: roster::AdapterKind::Claude,
+                source_id: "claude-acp".to_string(),
+                command: PathBuf::from("false"),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+            ranked: true,
+            reasoning_effort: None,
+        };
+        roster::Roster {
+            primary: agent.clone(),
+            review_supervisor: None,
+            subagent_default: None,
+            available: vec![agent],
+            choices: Vec::new(),
+            warnings: Vec::new(),
+            inventory: roster::AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
+        }
+    }
+
+    fn unresolved_manager(reason: &str, config_path: &Path) -> RootServerSessionManager {
+        RootServerSessionManager::new_unresolved(
+            reason.to_string(),
+            config_file_hash(config_path),
+            config_path.parent().expect("parent dir").to_path_buf(),
+            Vec::new(),
+            Vec::new(),
+            0,
+        )
+    }
+
+    #[tokio::test]
+    async fn unresolved_manager_fails_launches_with_the_setup_reason() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = unresolved_manager("no model is launchable", &dir.path().join("config.toml"));
+        let launch_id = manager.start_session(dir.path().to_path_buf());
+        match manager.launch_state(launch_id) {
+            Some(ServerSessionLaunchState::Failed { error }) => {
+                assert_eq!(error, "no model is launchable");
+            }
+            other => panic!("expected a failed launch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unbound_manager_rebinds_on_refresh_despite_an_unchanged_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let manager = unresolved_manager("setup pending", &config_path);
+        // The config file has not changed since startup (both hashes are for
+        // the missing file); only the unbound state forces the re-resolve.
+        let refreshed = manager
+            .refresh_for_config_with(&config_path, |_, _| async { Ok(stub_roster()) })
+            .await;
+        assert!(matches!(refreshed, Ok(Some(_))), "{refreshed:?}");
+        let launch = manager.launch.read().expect("launch lock");
+        assert!(launch.binding.is_bound());
+    }
+
+    #[tokio::test]
+    async fn bound_manager_skips_refresh_for_an_unchanged_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let manager = RootServerSessionManager::new_roster(
+            stub_roster(),
+            config_file_hash(&config_path),
+            dir.path().to_path_buf(),
+            Vec::new(),
+            Vec::new(),
+            0,
+        );
+        let refreshed = manager
+            .refresh_for_config_with(&config_path, |_, _| async {
+                panic!("a bound manager must not re-resolve an unchanged config")
+            })
+            .await;
+        assert!(matches!(refreshed, Ok(None)), "{refreshed:?}");
+    }
+
+    #[tokio::test]
+    async fn unbound_manager_stays_unbound_when_resolution_still_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let manager = unresolved_manager("setup pending", &config_path);
+        let refreshed = manager
+            .refresh_for_config_with(&config_path, |_, _| async {
+                Err(anyhow::anyhow!("still no model"))
+            })
+            .await;
+        assert!(
+            matches!(refreshed, Err(ref error) if error == "still no model"),
+            "{refreshed:?}"
+        );
+        let launch_id = manager.start_session(dir.path().to_path_buf());
+        match manager.launch_state(launch_id) {
+            Some(ServerSessionLaunchState::Failed { error }) => {
+                assert_eq!(error, "setup pending");
+            }
+            other => panic!("expected a failed launch, got {other:?}"),
+        }
     }
 }
