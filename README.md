@@ -19,6 +19,8 @@ and remote-control surface.
   primary agent.
 - **Integrated adversarial review:** automatically challenge changed turns
   with an independent reviewer and targeted specialist checks.
+- **Mid-turn steering:** queue a correction while a supported agent is working,
+  then use Cancel to apply the oldest queued correction to the running turn.
 - **Worktree sessions:** start work in a linked Git worktree and keep agent
   changes separate from the current checkout, whichever coder you choose.
 - **Shared project knowledge:** carry verified discoveries across Claude and
@@ -186,6 +188,7 @@ mj --worktree
 - [Start with Claude](https://mjolnir.brokk.ai/claude/)
 - [10-minute evaluation](https://mjolnir.brokk.ai/evaluate/)
 - [Remote control](https://mjolnir.brokk.ai/remote/)
+- [Mid-turn steering and terminal controls](https://mjolnir.brokk.ai/cli-reference/#mid-turn-steering)
 - [Voice dictation](https://mjolnir.brokk.ai/voice/)
 - [Subagents](https://mjolnir.brokk.ai/subagents/)
 - [Shared project knowledge](https://mjolnir.brokk.ai/configuration/#shared-project-knowledge)

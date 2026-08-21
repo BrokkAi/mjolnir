@@ -63,7 +63,8 @@ installed version.
 
 ## Keyboard basics
 
-- Enter sends a prompt or accepts the selected action.
+- Enter sends a prompt or accepts the selected action. During a primary turn,
+  it queues the prompt FIFO behind that turn.
 - Up/Down navigate autocomplete and permission choices.
 - PageUp/PageDown scroll the transcript.
 - Shift+Tab (or Ctrl+Tab in terminals that can send it) switches between the
@@ -75,10 +76,24 @@ installed version.
   for editing.
 - F10 toggles help.
 - Esc dismisses autocomplete, clears input, or cancels a permission prompt.
-- Ctrl-C cancels the active turn together with every running subagent; on an
-  idle, empty prompt it quits.
+- Ctrl-C steers the oldest queued prompt into the active turn when the agent
+  supports steering; otherwise it cancels the active turn together with every
+  running subagent. On an idle, empty prompt it quits.
 - Ctrl-D quits when input is empty.
 - Ctrl-R starts or stops microphone dictation when the voice worker is available.
+
+## Mid-turn steering
+
+Use either composer to correct or redirect an agent without losing your place
+in its work. While its primary turn is streaming, press Enter (or **Send** in
+Mjolnir Web) to place the instruction in the FIFO queue. Then press Ctrl-C
+(or **Stop** in Mjolnir Web). When the agent advertises steering, Mjolnir
+removes the oldest queued instruction and injects it into the current turn;
+the message appears in the transcript immediately and the turn keeps running.
+
+Without steering support, Ctrl-C or Stop performs a normal cancellation and
+the queued instruction runs after the turn finishes. The terminal and Mjolnir
+Web use this same queue-first behavior.
 
 Long permission commands, descriptions, and options must remain reachable; a
 truncated prompt is a UI bug, not an instruction to guess.

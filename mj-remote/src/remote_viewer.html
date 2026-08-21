@@ -7853,15 +7853,19 @@
           return;
         }
 
-        // Verb = intent, status = mechanism: the button says Send while the
-        // strip and rows report what is queued. The placeholder tracks the
-        // agent state instead of explaining the queue transport.
+        // Browser and terminal submissions always share the same FIFO queue.
+        // When steering is available, Stop applies its oldest prompt to the
+        // running turn instead of cancelling it.
         setComposerPlaceholder(sideActive
           ? (session.prompt_in_flight
-            ? "Side conversation is working — your prompt runs when it's free"
+            ? (session.steering_supported
+              ? "Side conversation is working — Send queues; Stop steers the next prompt"
+              : "Side conversation is working — your prompt runs when it's free")
             : "Message the side conversation — type exit to return")
           : (session.prompt_in_flight
-            ? "Agent is working — your prompt runs when it's free"
+            ? (session.steering_supported
+              ? "Agent is working — Send queues; Stop steers the next prompt"
+              : "Agent is working — your prompt runs when it's free")
             : "Message the agent"));
         setQueueStatus(queuedPrompts.length ? `${queuedPrompts.length} queued` : "");
 
@@ -8974,7 +8978,9 @@
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
-          setQueueStatus("Stop requested.");
+          setQueueStatus(session.steering_supported && session.queued_prompt_count > 0
+            ? "Steering the next queued prompt."
+            : "Stop requested.");
           await refreshSessions();
         } catch (error) {
           stopRequestBySessionId.delete(sessionId);

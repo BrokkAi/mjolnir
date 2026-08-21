@@ -3161,10 +3161,10 @@ impl AppState {
         )
     }
 
-    /// Whether a prompt submitted right now can be steered into the running
+    /// Whether Ctrl-C can steer the oldest queued prompt into the running
     /// turn: the agent supports `_session/steering` and a turn is actively
     /// streaming. A turn being cancelled or a fork in flight has nothing left
-    /// to steer, so those states keep the queueing path.
+    /// to steer, so those states keep the normal cancellation path.
     pub fn can_steer(&self) -> bool {
         self.steering_supported && self.connection_state == ConnectionState::Streaming
     }

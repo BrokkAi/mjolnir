@@ -3041,6 +3041,7 @@ fn handle_crossterm(
     if key.modifiers == KeyModifiers::CONTROL
         && matches!(key.code, KeyCode::Char('c'))
         && state.is_side
+        && !state.is_streaming()
         && state.input.is_empty()
         && attachment_count(state) == 0
     {
@@ -3585,6 +3586,32 @@ fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
     if state.connection_state() != ConnectionState::Streaming {
         return;
     }
+
+    // Enter always queues behind an active turn. Ctrl-C is the explicit
+    // gesture to apply the oldest queued correction now when the runtime can
+    // steer it into that turn.
+    if state.can_steer()
+        && let Some(queued) = state.take_queued_prompt()
+    {
+        let preview = queued_prompt_preview(&queued.display_text);
+        state.record_steered_prompt(queued.display_text, queued.resources.clone());
+        let _ = cmd_tx.send(UiCommand::SteerPrompt {
+            text: queued.text,
+            images: queued.images,
+            resources: queued.resources,
+        });
+        let remaining = state.queued_prompt_count();
+        let suffix = if remaining == 0 {
+            String::new()
+        } else {
+            format!(" ({remaining} still queued)")
+        };
+        state.status_line = Some(StatusMessage::info(format!(
+            "steering queued prompt into the current turn{suffix}: {preview}"
+        )));
+        return;
+    }
+
     let _ = cmd_tx.send(UiCommand::CancelPrompt);
     state.mark_cancelling();
     let queued = state.queued_prompt_count();
@@ -5593,18 +5620,6 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.scroll_input_to_bottom();
 
     if state.is_busy() {
-        if state.can_steer() {
-            // The agent supports mid-turn steering: inject the message into
-            // the running turn instead of queueing it behind the turn.
-            state.record_steered_prompt(display_text, resources.clone());
-            let _ = cmd_tx.send(UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            });
-            state.status_line = Some(StatusMessage::info("steering into the current turn"));
-            return;
-        }
         // The previous turn is still running. Stash this submission and
         // keep it out of the transcript until it is actually sent.
         let preview = queued_prompt_preview(&display_text);
@@ -5615,14 +5630,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             display_text,
         });
         let queued = state.queued_prompt_count();
-        let steering_note = if state.is_streaming() && !state.steering_supported {
-            " (agent cannot steer mid-turn)"
-        } else {
-            ""
-        };
-        state.status_line = Some(StatusMessage::info(format!(
-            "queued {queued}{steering_note}: {preview}"
-        )));
+        state.status_line = Some(StatusMessage::info(format!("queued {queued}: {preview}")));
         return;
     }
 
@@ -28506,10 +28514,17 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_with_empty_side_composer_returns_even_while_streaming() {
+    fn ctrl_c_with_empty_side_composer_steers_queued_prompt_while_streaming() {
         let mut state = ready_state_with_session();
         state.is_side = true;
+        state.steering_supported = true;
         state.record_user_prompt("long answer".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "focus on the error".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "focus on the error".to_string(),
+        });
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -28518,11 +28533,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
 
-        assert!(state.side_exit_requested);
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "cleanup is owned by the UI loop"
-        );
+        assert!(!state.side_exit_requested);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SteerPrompt { text, .. }) if text == "focus on the error"
+        ));
         assert!(state.exit_reason.is_none());
     }
 
@@ -28629,7 +28644,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_streaming_steers_when_the_agent_supports_it() {
+    fn enter_during_streaming_queues_when_the_agent_supports_steering() {
         let mut state = ready_state_with_session();
         state.steering_supported = true;
         state.record_user_prompt("first".to_string());
@@ -28639,35 +28654,27 @@ mod tests {
         type_string(&mut state, &cmd_tx, "try the other approach");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        match cmd_rx.try_recv().expect("steer must be sent immediately") {
-            UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            } => {
-                assert_eq!(text, "try the other approach");
-                assert!(images.is_empty());
-                assert!(resources.is_empty());
-            }
-            other => panic!("expected SteerPrompt, got {other:?}"),
-        }
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "Enter must queue even when steering is available"
+        );
         assert_eq!(
             state.queued_prompt_count(),
-            0,
-            "steered prompts must not queue"
+            1,
+            "the correction waits for Ctrl-C to steer it"
         );
         assert!(
-            state.transcript.iter().any(
+            !state.transcript.iter().any(
                 |entry| matches!(entry, Entry::UserPrompt(text) if text == "try the other approach")
             ),
-            "the steered message joins the transcript immediately"
+            "queued text stays out of the transcript"
         );
         assert_eq!(
             state.connection_state(),
             ConnectionState::Streaming,
-            "steering must not restart turn bookkeeping"
+            "queueing must not restart turn bookkeeping"
         );
-        assert!(state.input.is_empty(), "input cleared after steering");
+        assert!(state.input.is_empty(), "input cleared after queueing");
     }
 
     #[test]
@@ -28689,7 +28696,7 @@ mod tests {
     }
 
     #[test]
-    fn queueing_mentions_when_the_agent_cannot_steer() {
+    fn queueing_reports_fifo_without_a_capability_warning() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
@@ -28703,7 +28710,7 @@ mod tests {
             .expect("queued status line")
             .text
             .clone();
-        assert_eq!(status, "queued 1 (agent cannot steer mid-turn): next one");
+        assert_eq!(status, "queued 1: next one");
     }
 
     #[test]
@@ -29040,9 +29047,7 @@ mod tests {
             .clone()
             .expect("queue status set after submit");
         assert!(
-            queued_status
-                .text
-                .starts_with("queued 1 (agent cannot steer mid-turn): "),
+            queued_status.text.starts_with("queued 1: "),
             "expected queue status, got {:?}",
             queued_status.text
         );
@@ -29106,7 +29111,57 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_during_streaming_preserves_queued_prompt() {
+    fn ctrl_c_steers_oldest_queued_prompt_when_supported() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "redirect here".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "redirect here".to_string(),
+        });
+        state.push_queued_prompt(QueuedPrompt {
+            text: "then do this".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "then do this".to_string(),
+        });
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(
+            state.queued_prompt_count(),
+            1,
+            "only the oldest prompt steers"
+        );
+        assert_eq!(
+            state.queued_prompts().next().expect("queued prompt").text,
+            "then do this"
+        );
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        match cmd_rx.try_recv().expect("steer dispatched") {
+            UiCommand::SteerPrompt { text, images, .. } => {
+                assert_eq!(text, "redirect here");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, Entry::UserPrompt(text) if text == "redirect here"))
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancels_and_preserves_queue_when_steering_is_unsupported() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
         state.push_queued_prompt(QueuedPrompt {
@@ -29124,15 +29179,8 @@ mod tests {
         );
 
         assert_eq!(state.queued_prompt_count(), 1, "queue preserved by Ctrl-C");
-        assert_eq!(
-            state.queued_prompts().next().expect("queued prompt").text,
-            "keep me"
-        );
         assert_eq!(state.connection_state(), ConnectionState::Cancelling);
-        match cmd_rx.try_recv().expect("cancel dispatched") {
-            UiCommand::CancelPrompt => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelPrompt)));
     }
 
     #[test]

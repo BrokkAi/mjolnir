@@ -212,6 +212,10 @@ pub struct SessionRecord {
     /// Whether the live ACP agent accepts image blocks in prompts.
     #[serde(default)]
     pub prompt_images_supported: bool,
+    /// Whether the live ACP agent accepts a prompt injected into a turn that
+    /// is already running.
+    #[serde(default)]
+    pub steering_supported: bool,
     /// Permission prompts currently waiting for an answer in this session.
     #[serde(default)]
     pub pending_permissions: Vec<PendingPermissionRecord>,
@@ -1479,6 +1483,7 @@ struct TrackerState {
     available_commands: Vec<CommandRecord>,
     main_available_commands: Vec<CommandRecord>,
     prompt_images_supported: bool,
+    steering_supported: bool,
     session_fork_supported: bool,
     session_load_supported: bool,
     side_session_supported: bool,
@@ -1652,6 +1657,7 @@ impl TrackerState {
             available_commands: remote_builtin_command_records(false, false),
             main_available_commands: remote_builtin_command_records(false, false),
             prompt_images_supported: false,
+            steering_supported: false,
             session_fork_supported: false,
             session_load_supported: false,
             side_session_supported: false,
@@ -1661,15 +1667,27 @@ impl TrackerState {
     }
 
     fn observe_command(&mut self, command: &UiCommand) {
-        if let UiCommand::SendPrompt { text, .. } = command {
-            self.observe_prompt_text_as(text.clone(), None, "primary");
+        match command {
+            UiCommand::SendPrompt { text, .. } => {
+                self.observe_prompt_text_as(text.clone(), None, "primary");
+            }
+            UiCommand::SteerPrompt { text, .. } => {
+                self.observe_steered_prompt_text_as(text.clone(), "primary");
+            }
+            _ => {}
         }
     }
 
     fn observe_side_command(&mut self, command: &UiCommand) {
-        if let UiCommand::SendPrompt { text, .. } = command {
-            self.side_initial_prompt_pending = false;
-            self.observe_prompt_text_as(text.clone(), None, "side");
+        match command {
+            UiCommand::SendPrompt { text, .. } => {
+                self.side_initial_prompt_pending = false;
+                self.observe_prompt_text_as(text.clone(), None, "side");
+            }
+            UiCommand::SteerPrompt { text, .. } => {
+                self.observe_steered_prompt_text_as(text.clone(), "side");
+            }
+            _ => {}
         }
     }
 
@@ -1769,12 +1787,14 @@ impl TrackerState {
             UiEvent::RemoteSideStartRequested { .. } | UiEvent::RemoteSideExitRequested => {}
             UiEvent::Connected {
                 prompt_images_supported,
+                steering_supported,
                 session_fork_supported,
                 session_load_supported,
                 side_session_supported,
                 ..
             } => {
                 self.prompt_images_supported = *prompt_images_supported;
+                self.steering_supported = *steering_supported;
                 self.session_fork_supported = *session_fork_supported;
                 self.session_load_supported = *session_load_supported;
                 self.side_session_supported =
@@ -2530,6 +2550,42 @@ impl TrackerState {
         self.touch();
     }
 
+    /// Mirror a prompt that joined an existing turn. Like the terminal, keep
+    /// the original turn's elapsed-time and cancellation ownership intact,
+    /// while closing any open agent prose before recording the user message.
+    fn observe_steered_prompt_text_as(&mut self, text: String, actor: &str) {
+        let prompt_at = now_rfc3339();
+        self.total_messages = self.total_messages.saturating_add(1);
+        self.close_agent_message(actor);
+        // The active turn can settle after the remote poller sees it but
+        // before this command reaches the runtime. ACP turns that idle race
+        // into an ordinary prompt, so the tracker must start a new visible
+        // turn in that case instead of leaving the browser falsely idle.
+        if actor == "side" {
+            if !self.side_prompt_in_flight {
+                self.side_prompt_in_flight = true;
+                self.side_prompt_turn_started_at = Some(now_rfc3339());
+            }
+        } else if !self.prompt_in_flight {
+            self.prompt_in_flight = true;
+            self.prompt_turn_started_at = Some(now_rfc3339());
+        }
+        if self
+            .last_prompt_at
+            .as_deref()
+            .is_none_or(|current| prompt_at.as_str() >= current)
+        {
+            self.last_prompt_at = Some(prompt_at.clone());
+        }
+        self.push_transcript_entry_at_with_actor(
+            "user",
+            text,
+            prompt_at,
+            (actor != "primary").then(|| actor.to_string()),
+        );
+        self.touch();
+    }
+
     fn push_tool_transcript_entry(
         &mut self,
         tool_call_id: String,
@@ -2679,6 +2735,7 @@ impl TrackerState {
                 self.side_prompt_in_flight && self.side_prompt_turn_started_at.is_some()
             },
             prompt_images_supported: self.prompt_images_supported,
+            steering_supported: self.steering_supported,
             pending_permissions: self.pending_permissions.clone(),
             session_config: self.session_config.clone(),
             native_mode: self.native_mode.clone(),
@@ -2817,6 +2874,13 @@ impl TrackerState {
                 .flatten()
         }?;
         Some((self.session_id.clone()?, started_at))
+    }
+
+    /// The browser's Stop action only becomes steering when a live turn and
+    /// steering support are both present. Normal browser submissions remain
+    /// FIFO queued until the turn completes.
+    fn can_steer_queued_prompt_on_cancel(&self) -> bool {
+        self.steering_supported && self.prompt_cancel_claim().is_some()
     }
 }
 
@@ -3463,7 +3527,34 @@ impl RemoteSessionTracker {
                     .await
                     {
                         Ok(Some(_)) => {
-                            if command_tx.send(UiCommand::CancelPrompt).is_err() {
+                            // Browser sends always remain queued while a turn
+                            // is active. Stop is the explicit request to
+                            // inject the oldest queued correction instead of
+                            // cancelling when this runtime supports steering.
+                            let steer_queued_prompt = state
+                                .lock()
+                                .map(|guard| guard.can_steer_queued_prompt_on_cancel())
+                                .unwrap_or(false);
+                            let command = if steer_queued_prompt {
+                                match claim_remote_prompt(connection.clone(), &session_id).await {
+                                    Ok(Some(prompt)) => UiCommand::SteerPrompt {
+                                        text: prompt.text,
+                                        images: prompt.images,
+                                        resources: Vec::new(),
+                                    },
+                                    Ok(None) => UiCommand::CancelPrompt,
+                                    Err(error) => {
+                                        debug!(
+                                            "remote queued-prompt claim for Stop steering failed: {error:#}"
+                                        );
+                                        tracker.reload_connection();
+                                        UiCommand::CancelPrompt
+                                    }
+                                }
+                            } else {
+                                UiCommand::CancelPrompt
+                            };
+                            if command_tx.send(command).is_err() {
                                 break;
                             }
                             continue;
@@ -3560,13 +3651,13 @@ impl RemoteSessionTracker {
                     }
                 }
 
-                let session_id = {
+                let remote_dispatch = {
                     let Ok(mut guard) = state.lock() else {
                         continue;
                     };
                     guard.reserve_remote_prompt_slot()
                 };
-                let Some(session_id) = session_id else {
+                let Some(session_id) = remote_dispatch else {
                     continue;
                 };
 
@@ -3594,7 +3685,7 @@ impl RemoteSessionTracker {
                             .unwrap_or((false, false, false, false, None));
                         let can_compact = ui_event_tx.is_some();
                         let QueuedPrompt { text, images, .. } = prompt;
-                        match remote_queued_prompt_action(
+                        let action = remote_queued_prompt_action(
                             text,
                             !images.is_empty(),
                             can_fork,
@@ -3602,7 +3693,8 @@ impl RemoteSessionTracker {
                             can_compact,
                             can_side,
                             side_active,
-                        ) {
+                        );
+                        match action {
                             RemoteQueuedPromptAction::StartSide(initial_prompt) => {
                                 if !dispatch_remote_side_start(
                                     &command_tx,
@@ -7718,6 +7810,7 @@ fn init_db(db_path: &Path) -> Result<()> {
         "prompt_images_supported",
         "integer not null default 0",
     )?;
+    ensure_sessions_column(&conn, "steering_supported", "integer not null default 0")?;
     ensure_sessions_column(&conn, "worktree", "text")?;
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
@@ -7812,6 +7905,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
     } else {
         0
     };
+    let steering_supported = if session.steering_supported { 1_i64 } else { 0 };
     // The conflict arm refuses to move `last_update` backwards. A new lease
     // may immediately take over a live row when its first snapshot is newer,
     // which is how crash-then-resume avoids waiting for the heartbeat TTL.
@@ -7834,6 +7928,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             available_commands_json,
             prompt_in_flight,
             prompt_images_supported,
+            steering_supported,
             worktree,
             subagents_json,
             status_json,
@@ -7841,7 +7936,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             ragnarok_json,
             lease_id,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -7861,6 +7956,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             available_commands_json = excluded.available_commands_json,
             prompt_in_flight = excluded.prompt_in_flight,
             prompt_images_supported = excluded.prompt_images_supported,
+            steering_supported = excluded.steering_supported,
             worktree = excluded.worktree,
             subagents_json = excluded.subagents_json,
             status_json = excluded.status_json,
@@ -7895,6 +7991,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             available_commands_json,
             prompt_in_flight,
             prompt_images_supported,
+            steering_supported,
             session.worktree,
             subagents_json,
             status_json,
@@ -8133,6 +8230,7 @@ const SESSION_RECORD_SELECT: &str = "select
         where queued_prompts.session_id = sessions.session_id
     ) as queued_prompt_count,
     prompt_images_supported,
+    steering_supported,
     worktree,
     subagents_json,
     status_json,
@@ -8285,6 +8383,7 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                     where queued_prompts.session_id = sessions.session_id
                 ) as queued_prompt_count,
                 prompt_images_supported,
+                steering_supported,
                 worktree,
                 subagents_json,
                 status_json,
@@ -8315,10 +8414,11 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let prompt_in_flight: i64 = row.get(12)?;
     let queued_prompt_count: i64 = row.get(13)?;
     let prompt_images_supported: i64 = row.get(14)?;
-    let subagents_json: String = row.get(16)?;
-    let status_json: Option<String> = row.get(17)?;
-    let workspace_diff_json: Option<String> = row.get(18)?;
-    let ragnarok_json: Option<String> = row.get(19)?;
+    let steering_supported: i64 = row.get(15)?;
+    let subagents_json: String = row.get(17)?;
+    let status_json: Option<String> = row.get(18)?;
+    let workspace_diff_json: Option<String> = row.get(19)?;
+    let ragnarok_json: Option<String> = row.get(20)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -8338,12 +8438,13 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         last_prompt_at,
         total_messages: u64::try_from(total_messages).unwrap_or(0),
         project: row.get(6)?,
-        worktree: row.get::<_, Option<String>>(15)?,
+        worktree: row.get::<_, Option<String>>(16)?,
         agent: row.get(7)?,
         transcript,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
         prompt_in_flight: prompt_in_flight != 0,
         prompt_images_supported: prompt_images_supported != 0,
+        steering_supported: steering_supported != 0,
         pending_permissions,
         session_config,
         native_mode: None,
@@ -10938,6 +11039,87 @@ mod tests {
     }
 
     #[test]
+    fn tracker_keeps_remote_prompts_queued_until_stop_steers_one() {
+        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::Connected {
+            agent_name: None,
+            agent_version: None,
+            prompt_images_supported: false,
+            session_fork_supported: false,
+            session_load_supported: false,
+            side_session_supported: false,
+            side_session_unsupported_reason: None,
+            steering_supported: true,
+        });
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "implement it".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+        let (_, started_at) = state
+            .prompt_cancel_claim()
+            .expect("the first prompt should be active");
+        state.observe_session_update(&SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::Text(TextContent::new("working")),
+        )));
+
+        assert!(state.can_steer_queued_prompt_on_cancel());
+        assert!(
+            state.reserve_remote_prompt_slot().is_none(),
+            "normal browser prompts must remain FIFO queued while a turn is active"
+        );
+        state.observe_command(&UiCommand::SteerPrompt {
+            text: "use the streaming API".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert!(snapshot.steering_supported);
+        assert!(snapshot.prompt_in_flight, "a steer must not end the turn");
+        assert_eq!(
+            state.prompt_cancel_claim(),
+            Some(("sess-1".to_string(), started_at)),
+            "a steer must keep the original turn's cancellation ownership"
+        );
+        assert_eq!(snapshot.total_messages, 3);
+        assert_eq!(
+            snapshot.transcript.last().expect("steered prompt").text,
+            "use the streaming API"
+        );
+
+        state.steering_supported = false;
+        assert!(!state.can_steer_queued_prompt_on_cancel());
+        assert!(
+            state.reserve_remote_prompt_slot().is_none(),
+            "an agent without steering support must also retain its FIFO queue"
+        );
+
+        state.observe_event(&UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        state.observe_command(&UiCommand::SteerPrompt {
+            text: "retry after the turn ended".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+        assert!(
+            state
+                .snapshot()
+                .expect("idle-race snapshot")
+                .prompt_in_flight,
+            "an idle-race steer becomes a new ordinary prompt"
+        );
+    }
+
+    #[test]
     fn tracker_records_transcript_history() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
@@ -12747,6 +12929,7 @@ mod tests {
             queued_prompt_count: 0,
             prompt_in_flight: true,
             prompt_images_supported: true,
+            steering_supported: true,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: vec![command_record(
@@ -12825,6 +13008,7 @@ mod tests {
         assert_eq!(sessions[0].total_messages, 6);
         assert!(sessions[0].prompt_in_flight);
         assert!(sessions[0].prompt_images_supported);
+        assert!(sessions[0].steering_supported);
         assert_eq!(sessions[0].start_time, "2026-06-03T10:00:00Z");
         assert_eq!(sessions[0].last_update, "2026-06-03T10:00:40Z");
         assert_eq!(
@@ -12855,6 +13039,7 @@ mod tests {
         }"#;
         let record: SessionRecord = serde_json::from_str(json).expect("deserialize");
         assert_eq!(record.worktree, None);
+        assert!(!record.steering_supported);
     }
 
     fn init_committed_git_repo(path: &Path) {
@@ -13290,6 +13475,7 @@ mod tests {
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -14262,6 +14448,7 @@ mod tests {
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -15378,6 +15565,7 @@ mod tests {
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: vec![pending.clone()],
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -16730,6 +16918,7 @@ mod tests {
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
