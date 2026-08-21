@@ -5808,6 +5808,10 @@ async fn apply_steer_outcome(
     match outcome {
         Ok(value) => match value.get("outcome").and_then(serde_json::Value::as_str) {
             Some("injected") => {
+                // Recorded only on confirmed delivery: every other outcome
+                // requeues the text as an ordinary prompt, whose dispatch
+                // already records it into the user-message history.
+                let _ = ui_tx.send(UiEvent::SteeredPromptDelivered { text });
                 let _ = ui_tx.send(UiEvent::Info(
                     "message steered into the running turn".to_string(),
                 ));
@@ -10875,7 +10879,10 @@ mod tests {
     }
 
     /// Collect UI events until `count` `PromptDone`s were seen; returns every
-    /// Info/Warning text observed along the way.
+    /// Info/Warning text observed along the way, plus a
+    /// `steered prompt delivered: <text>` marker for each
+    /// [`UiEvent::SteeredPromptDelivered`] so tests can assert the history
+    /// record fires exactly on confirmed injection.
     async fn collect_until_prompt_done(
         ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
         count: usize,
@@ -10889,6 +10896,9 @@ mod tests {
                 .expect("ui event channel closed");
             match ev {
                 UiEvent::Info(text) | UiEvent::Warning(text) => notices.push(text),
+                UiEvent::SteeredPromptDelivered { text } => {
+                    notices.push(format!("steered prompt delivered: {text}"));
+                }
                 UiEvent::PromptDone { .. } => done += 1,
                 UiEvent::PromptFailed { message } => panic!("prompt failed: {message}"),
                 UiEvent::Fatal(message) => panic!("fatal: {message}"),
@@ -10913,10 +10923,22 @@ mod tests {
                 .await
                 .expect("timed out waiting for the steering confirmation")
                 .expect("ui event channel closed");
-            if let UiEvent::Info(text) | UiEvent::Warning(text) = ev {
-                notices.push(text);
+            match ev {
+                UiEvent::Info(text) | UiEvent::Warning(text) => notices.push(text),
+                UiEvent::SteeredPromptDelivered { text } => {
+                    notices.push(format!("steered prompt delivered: {text}"));
+                }
+                _ => {}
             }
         }
+        // Confirmed delivery must record the message for the user-message
+        // history, ahead of its confirmation notice.
+        assert!(
+            notices
+                .iter()
+                .any(|text| text == "steered prompt delivered: steer me"),
+            "injection must announce the delivered text: {notices:?}"
+        );
 
         let steer = rig.steers.lock().expect("steer log")[0].clone();
         assert_eq!(steer["sessionId"], "test-session");
@@ -10957,6 +10979,12 @@ mod tests {
                 .expect("ui event channel closed");
             match ev {
                 UiEvent::Info(text) | UiEvent::Warning(text) => notices.push(text),
+                // The reclaimed message goes out as an ordinary prompt, whose
+                // dispatch records it; a delivery event here would put the
+                // message into the user-message history twice.
+                UiEvent::SteeredPromptDelivered { text } => {
+                    panic!("a reclaimed steer must not announce delivery: {text}")
+                }
                 UiEvent::PromptDone { .. } => done += 1,
                 // The detached turn may already have raised a permission
                 // request; its prompt must not stay actionable.
@@ -11002,6 +11030,14 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("the turn ended before the message could be steered")),
             "the miss must be narrated: {notices:?}"
+        );
+        // The resent prompt is recorded by ordinary dispatch; announcing
+        // delivery for the miss would double-record it in the history.
+        assert!(
+            !notices
+                .iter()
+                .any(|text| text.starts_with("steered prompt delivered:")),
+            "a missed steer must not announce delivery: {notices:?}"
         );
         wait_for_prompt_count(&rig.prompts, 2).await;
         assert_eq!(

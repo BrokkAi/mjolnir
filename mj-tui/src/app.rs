@@ -4633,6 +4633,10 @@ impl AppState {
                 self.record_status_message(StatusKind::Warning, message);
             }
             UiEvent::RemoteSideStartRequested { .. } | UiEvent::RemoteSideExitRequested => {}
+            // The transcript already shows the steered message from the
+            // user's own submission; delivery confirmation feeds the
+            // orchestrator's user-message history, not the TUI.
+            UiEvent::SteeredPromptDelivered { .. } => {}
             UiEvent::Warning(msg) => {
                 self.record_status_message(StatusKind::Warning, msg);
             }

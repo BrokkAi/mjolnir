@@ -2690,7 +2690,10 @@ async fn run(
                         | UiEvent::SessionConfigOptions { .. }
                         | UiEvent::Workflow(_)
                         | UiEvent::WorkspaceDiff(_)
-                        | UiEvent::WorkspaceHeadDiff(_) => {}
+                        | UiEvent::WorkspaceHeadDiff(_)
+                        // Steering is a primary-session feature; a subagent
+                        // lane never sends `_session/steering` requests.
+                        | UiEvent::SteeredPromptDelivered { .. } => {}
                         UiEvent::SessionUpdate(update) => {
                             tool_lifecycle.observe(&update);
                             if let SessionUpdate::UsageUpdate(value) = &update {

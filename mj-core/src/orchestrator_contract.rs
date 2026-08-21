@@ -246,13 +246,40 @@ pub struct ReviewJob {
     pub workflow: WorkflowEmitter,
     pub task: String,
     pub images: Vec<PromptImage>,
-    pub user_messages: Vec<String>,
+    pub user_messages: Vec<UserMessage>,
     pub initial_result: String,
     pub trajectory: String,
     pub diff: String,
     pub snapshot: Option<ReviewSnapshot>,
     pub focus_snapshot: Option<ReviewSnapshot>,
     pub prior_review: Option<PriorReviewContext>,
+}
+
+/// One user-authored message captured from the primary session, in
+/// chronological order. `steered` marks a message the user delivered into a
+/// running turn through `_session/steering`; review must read it as governing
+/// current-turn intent, not as an older or internal message, because it can
+/// supersede the prompt that opened the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserMessage {
+    pub text: String,
+    pub steered: bool,
+}
+
+impl UserMessage {
+    pub fn prompt(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            steered: false,
+        }
+    }
+
+    pub fn steer(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            steered: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -208,6 +208,12 @@ pub enum UiEvent {
     /// The prompt request failed before returning a stop reason. UI can
     /// re-enable the input prompt and surface the error.
     PromptFailed { message: String },
+    /// A `_session/steering` request confirmed delivery (`injected`), so this
+    /// user message became part of the running turn. Adapters do not reliably
+    /// echo steered text back as a `UserMessageChunk`, so this event is the
+    /// authoritative signal that keeps the orchestrator's user-message history
+    /// — and therefore discrete review's intent evidence — complete.
+    SteeredPromptDelivered { text: String },
     /// `session/fork` failed before switching to the forked session. UI can
     /// leave the forking state and surface the error.
     SessionForkFailed { message: String },

@@ -293,7 +293,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             UiEvent::Side(_)
             | UiEvent::SideStartFailed { .. }
             | UiEvent::RemoteSideStartRequested { .. }
-            | UiEvent::RemoteSideExitRequested => {}
+            | UiEvent::RemoteSideExitRequested
+            // Headless runs one non-interactive prompt; nothing can steer it.
+            | UiEvent::SteeredPromptDelivered { .. } => {}
             UiEvent::Connected {
                 agent_name,
                 agent_version,

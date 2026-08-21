@@ -1950,6 +1950,10 @@ impl TrackerState {
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } => {
                 self.end_prompt_turn();
             }
+            // The steered text already entered this transcript when the
+            // `SteerPrompt` command was observed; delivery confirmation only
+            // feeds the orchestrator's user-message history.
+            UiEvent::SteeredPromptDelivered { .. } => {}
             UiEvent::Fatal(message) => {
                 self.end_prompt_turn();
                 self.record_status_notice(StatusKind::Fatal, message);
@@ -2052,6 +2056,7 @@ impl TrackerState {
                 self.observe_terminal_output(&snapshot);
             }
             UiEvent::PromptDone { .. } => self.end_side_prompt_turn(),
+            UiEvent::SteeredPromptDelivered { .. } => {}
             UiEvent::PromptFailed { message } => {
                 self.end_side_prompt_turn();
                 self.push_actor_transcript_entry("system", "side", format!("Warning: {message}"));

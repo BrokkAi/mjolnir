@@ -96,6 +96,9 @@ thorough than Quick and spends far more tokens:
 1. A single self-contained user prompt goes directly to review without another
    model call. For multi-message histories, an intent analyst extracts
    the governing contract and reconciles earlier corrections or requirements.
+   Messages steered into a running turn are captured on confirmed delivery and
+   marked as mid-turn user corrections, so a steer that supersedes the turn's
+   opening prompt governs the review instead of the stale request.
 2. A first-class internal review supervisor on the configured review model receives
    Bifrost core navigation tools and an immutable change packet. It runs in a
    detached session but is not a subagent. Changes under 200 lines

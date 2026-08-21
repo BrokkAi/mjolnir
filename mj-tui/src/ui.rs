@@ -1431,6 +1431,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::AgentUsage(_)
         | UiEvent::SubagentPoolModelChanged { .. }
         | UiEvent::PromptFailed { .. }
+        | UiEvent::SteeredPromptDelivered { .. }
         | UiEvent::SessionForkFailed { .. }
         | UiEvent::RemotePermissionDecision { .. }
         | UiEvent::Warning(_)
