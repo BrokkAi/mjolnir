@@ -10,6 +10,7 @@ mod agent_usage;
 mod app;
 mod claude_token;
 mod claude_usage;
+mod codex_token;
 mod codex_usage;
 mod config;
 #[cfg(test)]
@@ -1541,10 +1542,7 @@ async fn run_app(
             &config_path,
             &cwd,
             termination.clone(),
-            team_selection_required.then_some(
-                "Your previous configuration does not map to a supported Team. Choose one of the four Teams to continue."
-                    .to_string(),
-            ),
+            team_recovery_notice(config_exists, team_selection_required),
         )
         .await?
         else {
@@ -1612,6 +1610,7 @@ async fn run_app(
             session_boundary,
             roster.clone(),
             cfg.agent.clone(),
+            cfg.review.clone(),
             cfg.subagents.clone(),
             termination.clone(),
         )
@@ -1681,6 +1680,18 @@ async fn run_app(
             }
         }
     }
+}
+
+/// The notice shown when a *saved* configuration no longer maps to one of the
+/// four Teams. A fresh install has no previous configuration: it gets
+/// onboarding's own "choose a Team" prompt instead, and must not be told its
+/// (nonexistent) configuration failed to map — that also keeps it on the fresh
+/// flow rather than the recovery flow the notice selects.
+fn team_recovery_notice(config_exists: bool, team_selection_required: bool) -> Option<String> {
+    (config_exists && team_selection_required).then(|| {
+        "Your previous configuration does not map to a supported Team. Choose one of the four Teams to continue."
+            .to_string()
+    })
 }
 
 fn onboarding_kind(
@@ -2068,6 +2079,7 @@ async fn run_session(
     mut session_boundary: Option<String>,
     roster: roster::Roster,
     agent_config: config::AgentConfig,
+    review_config: config::ReviewConfig,
     subagents_config: config::SubagentsConfig,
     termination: CancellationToken,
 ) -> Result<RunSessionResult> {
@@ -2176,10 +2188,18 @@ async fn run_session(
             // the token sits inside the refresh window.
             let mut steward_not_before = tokio::time::Instant::now();
             loop {
-                let steward_at = claude_usage_env.as_ref().map(|env| {
-                    (tokio::time::Instant::now() + claude_token::steward_delay(env))
-                        .max(steward_not_before)
-                });
+                let claude_steward_at = claude_usage_env
+                    .as_ref()
+                    .map(|env| tokio::time::Instant::now() + claude_token::steward_delay(env));
+                let codex_steward_at = codex_usage_env
+                    .as_ref()
+                    .map(|env| tokio::time::Instant::now() + codex_token::steward_delay(env));
+                let steward_at = match (claude_steward_at, codex_steward_at) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                }
+                .map(|at| at.max(steward_not_before));
                 let trigger = tokio::select! {
                     biased;
                     _ = shutdown_rx.recv() => break,
@@ -2190,15 +2210,18 @@ async fn run_session(
                         }
                         trigger
                     },
-                    // Proactive token steward: rotate the Claude OAuth
-                    // token as it enters the refresh window so running
-                    // seats and every other process on this machine never
-                    // meet an expired credential file.
+                    // Proactive token steward: rotate the Claude and codex
+                    // OAuth tokens as they enter their refresh windows so
+                    // running seats and every other process on this machine
+                    // never meet an expired credential.
                     _ = tokio::time::sleep_until(steward_at.unwrap_or_else(tokio::time::Instant::now)),
                         if steward_at.is_some() =>
                     {
                         if let Some(env) = claude_usage_env.as_ref() {
                             claude_token::ensure_fresh_before_spawn(usage_cwd.clone(), env).await;
+                        }
+                        if let Some(env) = codex_usage_env.as_ref() {
+                            codex_token::ensure_fresh_before_spawn(usage_cwd.clone(), env).await;
                         }
                         steward_not_before = tokio::time::Instant::now()
                             + std::time::Duration::from_secs(10 * 60);
@@ -2282,7 +2305,6 @@ async fn run_session(
             model_id: roster.primary.model.model.clone(),
             model_value: roster.primary.model_value.clone(),
             adapter_source_id: roster.primary.launch.source_id.clone(),
-            require_native_read_only: false,
             permission: primary_permission,
             session_tag: Some(session_tag.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),
@@ -2300,6 +2322,7 @@ async fn run_session(
                     .with_active_implementation_workers(active_implementation_workers.clone())
                     .with_max_parallel(subagents_config.max_parallel)
                     .with_debrief(subagents_config.debrief)
+                    .with_permission_mode(subagents_config.permission)
                     .with_reports(subagent_reports.clone())
                     .with_run_registry(subagent_runs.clone())
                     .with_prewarm(subagent::RunContext {
@@ -2398,6 +2421,7 @@ async fn run_session(
                         agent_stderr: runtime_options.agent_stderr.clone(),
                         snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
                         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+                        permission: review_config.permission,
                         id_allocator: subagent_ids.clone(),
                     })
                 },
@@ -3543,6 +3567,19 @@ mod tests {
             selected.env.get("TOKEN").map(String::as_str),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn fresh_install_is_not_told_its_previous_configuration_failed_to_map() {
+        // No saved config: onboarding's own "choose a Team" prompt applies, and
+        // the recovery notice (which also selects the recovery flow) stays off.
+        assert_eq!(team_recovery_notice(false, true), None);
+        assert_eq!(team_recovery_notice(false, false), None);
+        // A saved config that maps to a Team needs no notice either.
+        assert_eq!(team_recovery_notice(true, false), None);
+        // Only a saved config that no longer maps gets the recovery wording.
+        let notice = team_recovery_notice(true, true).expect("recovery notice");
+        assert!(notice.starts_with("Your previous configuration does not map"));
     }
 
     #[test]
@@ -4926,7 +4963,6 @@ mod tests {
             project: temp.path().to_path_buf(),
             inject: true,
             tools: true,
-            import_claude_auto: false,
         };
         let server = memory::ToolServer::start(&session_memory)
             .await

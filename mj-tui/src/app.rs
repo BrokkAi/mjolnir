@@ -482,7 +482,7 @@ pub enum ReviewTone {
     Header,
     /// A finding still awaiting its fix.
     Open,
-    /// A finding the correction turn fixed.
+    /// A finding a verification review confirmed fixed.
     Fixed,
     /// A finding that did not survive: full error weight, never muted.
     Invalidated,
@@ -506,8 +506,28 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
         ReviewIssueStatus::Validated => {
             ReviewLedgerLine::new(vec![(format!("   ● {label}"), ReviewTone::Open)])
         }
-        ReviewIssueStatus::Fixed => {
-            ReviewLedgerLine::new(vec![(format!("   ✔ {label}"), ReviewTone::Fixed)])
+        ReviewIssueStatus::Corrected => ReviewLedgerLine::new(vec![(
+            [
+                "   ◐ ".to_string(),
+                label,
+                " · verification pending".to_string(),
+            ]
+            .concat(),
+            ReviewTone::Open,
+        )]),
+        ReviewIssueStatus::Fixed => ReviewLedgerLine::new(vec![(
+            format!("   ✔ {label} · verified"),
+            ReviewTone::Fixed,
+        )]),
+        ReviewIssueStatus::Uncorrected => {
+            let mut spans = vec![(format!("   ! {label}"), ReviewTone::Open)];
+            if let Some(reason) = issue.resolution_reason.as_deref() {
+                spans.push((
+                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    ReviewTone::Detail,
+                ));
+            }
+            ReviewLedgerLine::new(spans)
         }
         ReviewIssueStatus::Invalidated => {
             let mut spans = vec![
@@ -515,7 +535,10 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
                 (label, ReviewTone::Struck),
             ];
             if let Some(reason) = issue.resolution_reason.as_deref() {
-                spans.push((format!(" — {reason}"), ReviewTone::Detail));
+                spans.push((
+                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    ReviewTone::Detail,
+                ));
             }
             ReviewLedgerLine::new(spans)
         }
@@ -564,7 +587,9 @@ fn review_resolved_record(
     let verdict_tone = match status {
         ReviewIssueStatus::Fixed => ReviewTone::Fixed,
         ReviewIssueStatus::Invalidated => ReviewTone::Invalidated,
-        ReviewIssueStatus::Validated => ReviewTone::Open,
+        ReviewIssueStatus::Validated
+        | ReviewIssueStatus::Corrected
+        | ReviewIssueStatus::Uncorrected => ReviewTone::Open,
     };
     let mut head = vec![
         (
@@ -590,7 +615,7 @@ fn review_resolved_record(
 }
 
 /// The banner a finished review fossilizes into: final counts up front, then
-/// one row per issue that did not end up plainly fixed.
+/// one row per issue that did not end up independently verified as fixed.
 fn review_verdict_record(
     state: &crate::workflow::WorkflowState,
     outcome: crate::workflow::WorkflowOutcome,
@@ -615,9 +640,11 @@ fn review_verdict_record(
         ),
     ];
     for (count, label, tone) in [
-        (tally.fixed, "fixed", ReviewTone::Fixed),
+        (tally.fixed, "verified fixed", ReviewTone::Fixed),
+        (tally.corrected, "corrected; unverified", ReviewTone::Open),
+        (tally.uncorrected, "unresolved", ReviewTone::Open),
         (tally.invalidated, "invalidated", ReviewTone::Invalidated),
-        (tally.open, "unresolved", ReviewTone::Open),
+        (tally.open, "awaiting correction", ReviewTone::Open),
     ] {
         if count > 0 {
             counts.push((" · ".to_string(), ReviewTone::Detail));
@@ -1488,13 +1515,13 @@ pub struct AppState {
     pub help_scroll: u16,
     /// True while mouse capture is disabled so the terminal can select text.
     pub text_selection_mode: bool,
-    /// In-progress mouse drag selection over the fullscreen transcript panel.
+    /// In-progress mouse drag selection over the fullscreen UI.
     /// Cleared (and copied to the clipboard) on mouse-up.
     pub transcript_selection: Option<TranscriptSelection>,
-    /// Screen area `(x, y, width, height)` of the transcript panel, captured
+    /// Screen area `(x, y, width, height)` of the fullscreen UI, captured
     /// each frame so mouse events can be mapped onto the visible text.
     pub transcript_panel_area: Option<(u16, u16, u16, u16)>,
-    /// Per-cell symbols of the visible transcript rows, captured at draw time
+    /// Per-cell symbols of the visible fullscreen UI, captured at draw time
     /// while a selection is active. Continuation cells of wide graphemes hold
     /// empty strings so cell columns stay aligned with screen columns.
     pub transcript_panel_grid: Vec<Vec<String>>,
@@ -3180,10 +3207,10 @@ impl AppState {
         )
     }
 
-    /// Whether a prompt submitted right now can be steered into the running
+    /// Whether Ctrl-C can steer the oldest queued prompt into the running
     /// turn: the agent supports `_session/steering` and a turn is actively
     /// streaming. A turn being cancelled or a fork in flight has nothing left
-    /// to steer, so those states keep the queueing path.
+    /// to steer, so those states keep the normal cancellation path.
     pub fn can_steer(&self) -> bool {
         self.steering_supported && self.connection_state == ConnectionState::Streaming
     }
@@ -4686,6 +4713,7 @@ impl AppState {
                 pass,
                 status,
                 reason,
+                ..
             } => {
                 let record = self
                     .workflows
@@ -8278,6 +8306,7 @@ mod tests {
                 pass: 0,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
+                details: None,
             },
         )));
         let records = ledger_texts(&state);

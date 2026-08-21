@@ -1888,6 +1888,7 @@ mod tests {
                     pass: 0,
                     status: ReviewIssueStatus::Invalidated,
                     reason: None,
+                    details: None,
                 },
                 "invalidated",
             ),

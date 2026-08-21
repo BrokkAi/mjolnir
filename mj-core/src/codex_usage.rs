@@ -223,6 +223,42 @@ pub async fn refresh(
     }
 }
 
+/// Rotate the stored ChatGPT OAuth token through codex's own refresh path.
+///
+/// `account/read` with `refreshToken: true` runs the app-server's guarded
+/// refresh: codex re-reads `auth.json` first and skips the network call
+/// when another process already rotated the token, then persists the new
+/// token set. Used by the pre-spawn freshness gate so exactly one codex
+/// process on the machine refreshes instead of every seat racing; see
+/// `codex_token`. Runtime preparation (first-run install of the bundled
+/// codex) is included in the timeout.
+pub async fn force_token_refresh(cwd: PathBuf, env: HashMap<String, String>) -> Result<(), String> {
+    let result = tokio::time::timeout(TOKEN_REFRESH_TIMEOUT, async {
+        let mut client = CodexUsageClient::spawn(cwd, env).await?;
+        let outcome = async {
+            client.initialize().await?;
+            let id = client
+                .send_request("account/read", json!({ "refreshToken": true }))
+                .await?;
+            let account = client.read_result(id).await?;
+            classify_account(&account)
+        }
+        .await;
+        client.shutdown().await;
+        outcome
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.user_reason().to_string()),
+        Err(_) => Err("token refresh request timed out".to_string()),
+    }
+}
+
+/// Covers first-run preparation of the bundled codex runtime plus the
+/// refresh round-trip itself.
+pub const TOKEN_REFRESH_TIMEOUT: Duration = Duration::from_secs(200);
+
 async fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, QueryError> {
     let (program, prefix_args, command_env) = if let Some(override_path) = env.get("CODEX_PATH") {
         (PathBuf::from(override_path), Vec::new(), env)

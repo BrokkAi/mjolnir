@@ -13,7 +13,6 @@ import shotConfigReviewer from '../../assets/evaluate/mjconfig-reviewer.png';
 import shotExtendedVerdict from '../../assets/evaluate/extended-verdict.png';
 import shotReviewLedger from '../../assets/evaluate/review-ledger.png';
 import shotServerTailscale from '../../assets/evaluate/server-tailscale.png';
-import shotWebSession from '../../assets/evaluate/web-session.png';
 import shotConfigTeam from '../../assets/evaluate/mjconfig-team.png';
 import shotConfigAppearance from '../../assets/evaluate/mjconfig-appearance.png';
 import shotOnboardingServers from '../../assets/evaluate/onboarding-acp-servers.png';
@@ -237,7 +236,7 @@ Expected observations:
   <a class="shot__zoom" href={shotDiscreteVerdict.src} aria-label="Open the full-size screenshot: the discrete review verdict">
     <Image src={shotDiscreteVerdict} alt="A review verdict block: one validated P3 issue about generated __pycache__ bytecode included in the cumulative patch, with the completed Review workflow row offering F9 details." />
   </a>
-  <figcaption>Advisory findings, validated before display. Even on a toy change the reviewer has an opinion — here a <code>P3</code> about test-run bytecode landing in the workspace. <strong>F9</strong> opens the session-wide issue ledger.</figcaption>
+  <figcaption>Priority findings are validated before display and then enter a correction round. Even on a toy change the reviewer has an opinion — here a <code>P3</code> about test-run bytecode landing in the workspace. <strong>F9</strong> opens the session-wide issue ledger.</figcaption>
 </figure>
 
 7. Prove the isolation from another terminal, in the fixture directory:
@@ -306,19 +305,22 @@ correction rounds when a finding sticks:
 
 <figure class="shot">
   <a class="shot__zoom" href={shotExtendedVerdict.src} aria-label="Open the full-size screenshot: the extended review verdict">
-    <Image src={shotExtendedVerdict} alt="The extended review outcome: the primary explains that a specialist's P1 claim was rejected after verification against git evidence, the correction pass changed nothing, and the completed Review row reads issues 1 found, 1 invalidated." />
+    <Image src={shotExtendedVerdict} alt="The extended review outcome, including the primary's review decision and the completed Review workflow state." />
   </a>
-  <figcaption>The part worth paying for: a specialist raised a plausible <code>P1</code>, the validator refuted it against <code>git diff</code> evidence, and the correction pass explicitly changed nothing — <strong>issues 1 found · 1 invalidated</strong>.</figcaption>
+  <figcaption>The part worth paying for: the supervisor and specialists leave a visible, evidence-backed decision for every finding instead of silently discarding it.</figcaption>
 </figure>
 
-Findings are session-state, not scrollback. **F9** opens the ledger, which
-tracks every issue across turns as open, fixed, or invalidated:
+Findings are session-state, not scrollback. **F9** opens the evidence ledger:
+it keeps the complete reviewer finding, the primary correction report, the
+captured correction diff, and whether a later review independently verified
+the correction. A workspace change alone is shown as **corrected — verification
+pending**, never as fixed.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotReviewLedger.src} aria-label="Open the full-size screenshot: the F9 review issue ledger">
-    <Image src={shotReviewLedger} alt="The session review ledger: 2 found, 1 open, 0 fixed, 1 invalidated — the open P2 about the weak describe test and the invalidated P1 with the note that the correction turn changed nothing." />
+    <Image src={shotReviewLedger} alt="The session review ledger, which records each reviewer finding and its correction or verification state." />
   </a>
-  <figcaption>The session ledger keeps score: the honest <code>P2</code> stays open until a turn fixes it, and the refuted <code>P1</code> is recorded as invalidated rather than silently dropped.</figcaption>
+  <figcaption>The ledger makes the evidence inspectable: a <code>P2</code> sends the primary through a correction attempt, a changed correction remains pending until an independent review clears it, and a no-change correction remains explicitly unresolved.</figcaption>
 </figure>
 
 One scope note to calibrate expectations: discrete review judges **the turn's
@@ -351,20 +353,16 @@ the port; local `mj` sessions follow it automatically.
 
 Sign in with the viewer code. The running TUI session from the journeys above
 is already in the session list — same transcript, same review results, same
-permission prompts. Remember the `P2` the ledger still holds open? Close it
-from the browser:
+permission prompts. The `P2` has already gone through its automatic correction
+attempt. Inspect its recorded evidence from the browser:
 
 ```text
-Address the open P2 from the review ledger: make the describe test assert
-the exact output, then run python3 -m unittest -v.
+Open the review ledger and summarize the P2's correction report and
+verification state.
 ```
 
-<figure class="shot">
-  <a class="shot__zoom" href={shotWebSession.src} aria-label="Open the full-size screenshot: the same session in Mjolnir Web">
-    <Image src={shotWebSession} alt="Mjolnir Web showing the same session: the extended review recap with the invalidated P1 explanation in the transcript, and the P2 fix requested from the browser composer with the agent working." />
-  </a>
-  <figcaption>The browser is the same session, not a copy — Journey 2's review recap is right there in the transcript, and the <code>P2</code> fix starts from the web composer.</figcaption>
-</figure>
+The browser is the same session, not a copy — Journey 2's review recap and the
+<code>P2</code>'s correction evidence are both available there.
 
 Back at the terminal, exit with **Ctrl-D** on an empty prompt. Mjolnir asks
 whether to keep or remove the worktree, then prints the way back:

@@ -128,7 +128,9 @@ pub struct Config {
     /// Id source installed on the controller when the MCP server starts, so
     /// discrete-review lanes can draw from the same sequence.
     pub id_allocator: SubagentIdAllocator,
+    permission_mode: Option<mj_core::config::PermissionPreset>,
     headless_permission_mode: Option<mj_core::config::PermissionPreset>,
+    is_headless: bool,
     role_pool: Option<crate::quota::RolePool>,
     reports: Option<SubagentReportBus>,
     /// Live runs, shared with the orchestrator so every wake can ask the
@@ -198,7 +200,6 @@ impl Config {
                 model_id: role.model.model,
                 model_value: role.model_value,
                 adapter_source_id: role.launch.source_id,
-                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort,
@@ -208,7 +209,9 @@ impl Config {
             max_parallel: DEFAULT_MAX_PARALLEL,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
+            permission_mode: None,
             headless_permission_mode: None,
+            is_headless: false,
             role_pool,
             reports: None,
             runs: SubagentRegistry::default(),
@@ -244,11 +247,29 @@ impl Config {
         self
     }
 
+    /// Marks this configuration as a non-interactive run. Its autonomy
+    /// guidance applies even when the native policy comes from saved settings.
+    pub fn with_headless(mut self) -> Self {
+        self.is_headless = true;
+        self
+    }
+
+    /// Apply an explicit headless command-line policy. It takes precedence
+    /// over the saved seat policy for this invocation.
     pub fn with_headless_permission_mode(
         mut self,
         mode: mj_core::config::PermissionPreset,
     ) -> Self {
         self.headless_permission_mode = Some(mode);
+        self.is_headless = true;
+        self
+    }
+
+    /// Apply the saved provider-native permission policy to interactive
+    /// subagent or review lanes. The headless command-line policy wins when
+    /// both are present.
+    pub fn with_permission_mode(mut self, mode: mj_core::config::PermissionPreset) -> Self {
+        self.permission_mode = Some(mode);
         self
     }
 
@@ -348,7 +369,9 @@ impl Config {
             .map(|role| {
                 format!(
                     "{}\0{}\0{:?}",
-                    role.adapter_source_id, role.model_id, self.headless_permission_mode
+                    role.adapter_source_id,
+                    role.model_id,
+                    self.headless_permission_mode.or(self.permission_mode)
                 )
             })
             .unwrap_or_else(|| self.display_label.clone())
@@ -363,17 +386,12 @@ impl Config {
             .role_config
             .as_ref()
             .and_then(|config| config.session_tag.clone());
-        let require_native_read_only = self
-            .role_config
-            .as_ref()
-            .is_some_and(|config| config.require_native_read_only);
         let reasoning_effort = role.reasoning_effort.clone();
         self.role_config = Some(acp::RuntimeRoleConfig {
             label: LABEL.to_string(),
             model_id: role.model.model,
             model_value: role.model_value,
             adapter_source_id: role.launch.source_id,
-            require_native_read_only,
             permission: None,
             session_tag,
             reasoning_effort,
@@ -820,7 +838,7 @@ fn spawn_subagent_runtime(
     let cancel = termination.unwrap_or_default();
     let mut env = config.env.clone();
     let mut role_config = config.role_config.clone();
-    if let Some(mode) = config.headless_permission_mode
+    if let Some(mode) = config.headless_permission_mode.or(config.permission_mode)
         && let Some(role) = role_config.as_mut()
         && let Some(kind) = mj_core::roster::AdapterKind::from_source_id(&role.adapter_source_id)
     {
@@ -829,7 +847,7 @@ fn spawn_subagent_runtime(
     let agent_source_id = role_config
         .as_ref()
         .map(|role| role.adapter_source_id.clone());
-    let saved_session_config = role_config
+    let mut saved_session_config = role_config
         .as_ref()
         .map(|role| {
             mj_core::config::load_saved_session_config(
@@ -844,6 +862,7 @@ fn spawn_subagent_runtime(
             )
         })
         .unwrap_or_default();
+    discard_saved_permission_mode(&mut saved_session_config, role_config.as_ref());
     // Shared project knowledge flows into every worker lane; only primary
     // sessions get the memory_save/memory_forget tools.
     let memory = role_config.as_ref().and_then(|role| {
@@ -881,6 +900,18 @@ fn spawn_subagent_runtime(
     }
 }
 
+/// Permissions owns the provider's mode option for delegated seats. Ignore a
+/// stale saved session default so it cannot overwrite the configured preset.
+fn discard_saved_permission_mode(
+    saved_session_config: &mut HashMap<String, String>,
+    role_config: Option<&acp::RuntimeRoleConfig>,
+) {
+    let Some(permission) = role_config.and_then(|role| role.permission.as_ref()) else {
+        return;
+    };
+    saved_session_config.remove(&format!("config:{}", permission.config_id));
+}
+
 /// Appended to the MCP server instructions in non-interactive (headless)
 /// runs only. Interactive sessions have a human present, so deferring to
 /// them on approvals is correct there and this text must not appear.
@@ -890,7 +921,7 @@ impl McpHandler {
     fn server_info(&self) -> ServerInfo {
         let mut instructions =
             format!("{SERVER_DELEGATION_GUIDANCE}\n\n{PRIMARY_SESSION_DIRECTIVE}");
-        if self.config.headless_permission_mode.is_some() {
+        if self.config.is_headless {
             instructions.push_str("\n\n");
             instructions.push_str(HEADLESS_AUTONOMY_DIRECTIVE);
         }
@@ -3474,7 +3505,6 @@ mod tests {
                 model_id: "gpt-y".to_string(),
                 model_value: "gpt-y-value".to_string(),
                 adapter_source_id: "codex-acp".to_string(),
-                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort: None,
@@ -3484,7 +3514,9 @@ mod tests {
             max_parallel: 2,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
+            permission_mode: None,
             headless_permission_mode: None,
+            is_headless: false,
             role_pool: None,
             reports: None,
             runs: SubagentRegistry::default(),
@@ -3623,8 +3655,7 @@ mod tests {
     #[test]
     fn headless_runs_get_the_autonomy_directive_and_interactive_runs_do_not() {
         let interactive = test_config();
-        let headless =
-            test_config().with_headless_permission_mode(mj_core::config::PermissionPreset::Yolo);
+        let headless = test_config().with_headless();
         let (ui_tx, _rx) = mpsc::unbounded_channel();
         let a = McpHandler::new(
             interactive,
@@ -3643,6 +3674,35 @@ mod tests {
                 || bi.contains("Never stop to request permission"),
             "{bi}"
         );
+    }
+
+    #[test]
+    fn saved_permission_mode_cannot_replace_the_seat_policy() {
+        let mut saved = HashMap::from([
+            ("config:mode".to_string(), "read-only".to_string()),
+            ("config:service_tier".to_string(), "fast".to_string()),
+        ]);
+        let mut role = test_config().role_config.expect("role config");
+        role.permission = Some(mj_core::config::RuntimePermissionConfig {
+            config_id: "mode".to_string(),
+            value: "agent".to_string(),
+            manual_fallback: Some("read-only".to_string()),
+            mode: mj_core::config::PermissionPreset::Auto,
+        });
+
+        discard_saved_permission_mode(&mut saved, Some(&role));
+
+        assert!(!saved.contains_key("config:mode"));
+        assert_eq!(saved["config:service_tier"], "fast");
+    }
+
+    #[test]
+    fn saved_mode_stays_available_without_a_seat_permission_policy() {
+        let mut saved = HashMap::from([("config:mode".to_string(), "read-only".to_string())]);
+
+        discard_saved_permission_mode(&mut saved, None);
+
+        assert_eq!(saved["config:mode"], "read-only");
     }
 
     fn test_mcp_handler(controller: Controller) -> McpHandler {

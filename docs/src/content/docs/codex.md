@@ -14,6 +14,7 @@ instead? See [Start with Claude](/claude/).
 | --- | --- |
 | First-class coding teams | Run Codex, Claude, Codex coder + Claude reviewer, or Claude coder + Codex reviewer without changing tools or workflows |
 | Integrated adversarial review | Hold a workspace-changing turn while an independent reviewer challenges the diff before the turn is released |
+| Mid-turn steering | Queue a correction while a supported Codex session is streaming, then use Cancel or Stop to inject the oldest queued correction into that turn |
 | Self-hosted remote control | Drive the session from another browser or device while the repository and Mjolnir server remain on your machine |
 | Worktree-first workflow | Start Codex in a linked Git worktree so agent changes stay separate from your current checkout and easy to inspect |
 | Cross-platform voice | Add locally transcribed prompts with Ctrl-R on supported desktop platforms |

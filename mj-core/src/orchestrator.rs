@@ -372,6 +372,9 @@ struct ReviewInFlight {
     epoch: u64,
     workflow_id: WorkflowId,
     review_pass: u32,
+    /// The preceding pass whose correction this pass is verifying. Only a
+    /// clean verification may promote those corrections to `Fixed`.
+    verifies_pass: Option<u32>,
     /// The primary's withheld `PromptDone`. Released on a `Clean` verdict, dropped on
     /// `Findings` (the corrective turn produces the real completion).
     completion: UiEvent,
@@ -969,6 +972,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         epoch,
                         workflow_id,
                         review_pass: completed_pass,
+                        verifies_pass,
                         completion,
                         saved_turn,
                         reviewed_workspace_fingerprint,
@@ -1065,75 +1069,27 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 });
                             primary_review_prompt_active = true;
                         }
-                        ReviewVerdict::Advisory {
-                            synthesis,
-                            evidence: _,
-                        } => {
-                            review_findings.push(synthesis.clone());
-                            emit_workflow(
-                                &workflow,
-                                WorkflowEvent::new(
-                                    workflow_id,
-                                    WorkflowTransition::IssuesValidated {
-                                        pass: completed_pass,
-                                        summaries: review_issue_summaries(&synthesis),
-                                    },
-                                ),
-                            );
-                            let coverage = workflow_coverage(&workflow, workflow_id);
-                            let workflow_outcome = if coverage == WorkflowCoverage::Complete {
-                                WorkflowOutcome::Clean
-                            } else {
-                                WorkflowOutcome::Degraded
-                            };
-                            emit_workflow(
-                                &workflow,
-                                WorkflowEvent::new(
-                                    workflow_id,
-                                    WorkflowTransition::Terminal {
-                                        outcome: workflow_outcome,
-                                        coverage,
-                                    },
-                                ),
-                            );
-                            let _ = events_tx.send(UiEvent::Info(if matches!(
-                                workflow_outcome,
-                                WorkflowOutcome::Clean
-                            ) {
-                                "discrete review · advisory findings only".to_string()
-                            } else {
-                                "discrete review · advisory findings with degraded coverage"
-                                    .to_string()
-                            }));
-                            if let Some(saved_turn) = saved_turn {
-                                last_changed_turn = Some(saved_turn);
-                            }
-                            let prompt = post_review_recap_prompt(
-                                &turn.lock().await.task,
-                                original_review_result.as_deref().unwrap_or(&reviewed_result),
-                                &reviewed_result,
-                                &review_findings,
-                            );
-                            emit_internal(
-                                &events_tx,
-                                "review",
-                                "primary",
-                                InternalMessageKind::DiscreteReview,
-                                &prompt,
-                            );
-                            let _ = config.runtime_commands.send(UiCommand::SendPrompt {
-                                text: prompt,
-                                images: Vec::new(),
-                                resources: Vec::new(),
-                            });
-                            let _ = completion;
-                            trajectory.reset_attempt();
-                            post_review_recap_active = true;
-                            primary_review_prompt_active = true;
-                            continue;
-                        }
                         ReviewVerdict::Clean => {
                             let coverage = workflow_coverage(&workflow, workflow_id);
+                            if let Some(corrected_pass) = verifies_pass
+                                && coverage == WorkflowCoverage::Complete
+                            {
+                                emit_workflow(
+                                    &workflow,
+                                    WorkflowEvent::new(
+                                        workflow_id,
+                                        WorkflowTransition::IssuesResolved {
+                                            pass: corrected_pass,
+                                            status: crate::workflow::ReviewIssueStatus::Fixed,
+                                            reason: Some(format!(
+                                                "verification review pass {} returned clean after the correction",
+                                                completed_pass + 1
+                                            )),
+                                            details: None,
+                                        },
+                                    ),
+                                );
+                            }
                             let workflow_outcome = if coverage == WorkflowCoverage::Complete {
                                 WorkflowOutcome::Clean
                             } else {
@@ -1519,15 +1475,28 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     != Some(reviewed.fingerprint.as_str())
             });
             if correction_review_base.is_some() {
-                let (status, reason) = if correction_changed {
+                let correction_report = trajectory.final_message();
+                let correction_before = correction_review_base
+                    .as_ref()
+                    .and_then(|reviewed| reviewed.snapshot.clone());
+                let (status, reason, details) = if correction_changed {
                     (
-                        crate::workflow::ReviewIssueStatus::Fixed,
-                        "correction turn changed the workspace",
+                        crate::workflow::ReviewIssueStatus::Corrected,
+                        "the correction changed the workspace; verification is pending",
+                        Some(
+                            correction_evidence(
+                                delta.as_ref(),
+                                correction_before.as_ref(),
+                                &correction_report,
+                            )
+                            .await,
+                        ),
                     )
                 } else {
                     (
-                        crate::workflow::ReviewIssueStatus::Invalidated,
-                        "correction turn changed nothing in the workspace",
+                        crate::workflow::ReviewIssueStatus::Uncorrected,
+                        "the correction changed nothing in the workspace; this finding remains unresolved",
+                        Some(correction_no_change_evidence(&correction_report)),
                     )
                 };
                 emit_workflow(
@@ -1538,6 +1507,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             pass: review_pass.saturating_sub(1),
                             status,
                             reason: Some(reason.to_string()),
+                            details,
                         },
                     ),
                 );
@@ -1649,6 +1619,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     } else {
                         (None, None)
                     };
+                    let verifies_pass = correction_review_base
+                        .as_ref()
+                        .map(|_| review_pass.saturating_sub(1));
                     let reviewed_workspace_fingerprint = delta
                         .as_ref()
                         .and_then(WorkspaceDelta::review_fingerprint)
@@ -1703,6 +1676,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         epoch: active.epoch,
                         workflow_id,
                         review_pass,
+                        verifies_pass,
                         completion,
                         saved_turn,
                         reviewed_workspace_fingerprint,
@@ -1835,38 +1809,91 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
     }
 }
 
-fn review_issue_summaries(synthesis: &str) -> Vec<String> {
-    let mut summaries = synthesis
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            let line = line.strip_prefix(['-', '*']).map(str::trim).unwrap_or(line);
-            matches!(
-                line.get(..4),
-                Some("[P0]") | Some("[P1]") | Some("[P2]") | Some("[P3]")
-            )
-        })
-        .map(|line| {
-            line.strip_prefix(['-', '*'])
-                .map(str::trim)
-                .unwrap_or(line)
+/// Capture the correction evidence before the next review can overwrite the
+/// primary's answer or its exact workspace interval. The F9 reader needs the
+/// actual patch, not an inference from a later cumulative diff.
+async fn correction_evidence(
+    delta: Option<&WorkspaceDelta>,
+    previous: Option<&ReviewSnapshot>,
+    correction_report: &str,
+) -> String {
+    let report = if correction_report.trim().is_empty() {
+        "The primary correction turn returned no user-facing report.".to_string()
+    } else {
+        correction_report.trim().to_string()
+    };
+    let patch = match (
+        delta.and_then(WorkspaceDelta::review_snapshot),
+        previous,
+    ) {
+        (Some(current), Some(previous)) => match current.interval_since(previous).await {
+            Ok(interval) => match interval.full_patch().await {
+                Ok(patch) if patch.trim().is_empty() => {
+                    "The workspace fingerprint changed, but the exact correction diff is empty."
+                        .to_string()
+                }
+                Ok(patch) => patch,
+                Err(reason) => format!("Exact correction diff could not be read: {reason}"),
+            },
+            Err(reason) => format!("Exact correction diff could not be captured: {reason}"),
+        },
+        (None, _) => {
+            "Exact correction diff is unavailable because this turn did not retain a single-repository review snapshot."
                 .to_string()
-        })
-        .collect::<Vec<_>>();
-    if summaries.is_empty() {
-        summaries.push(first_line(synthesis, 240));
-    }
-    summaries
+        }
+        (_, None) => {
+            "Exact correction diff is unavailable because the reviewed pre-correction snapshot was not retained."
+                .to_string()
+        }
+    };
+    format!("Primary correction report:\n{report}\n\nExact correction diff:\n{patch}")
 }
 
-fn first_line(text: &str, max: usize) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    if line.chars().count() <= max {
-        line.to_string()
+fn correction_no_change_evidence(correction_report: &str) -> String {
+    let report = if correction_report.trim().is_empty() {
+        "The primary correction turn returned no user-facing report."
     } else {
-        let cut: String = line.chars().take(max.saturating_sub(1)).collect();
-        format!("{cut}…")
+        correction_report.trim()
+    };
+    format!(
+        "Primary correction report:\n{report}\n\nCorrection diff:\nNo workspace change was captured, so there is no fix to verify."
+    )
+}
+
+/// Preserve every supporting line the review supervisor attached to a
+/// priority finding. The compact board deliberately shows the first line;
+/// F9 owns the full report for each issue.
+fn review_issue_summaries(synthesis: &str) -> Vec<String> {
+    fn is_finding_start(line: &str) -> bool {
+        let line = line
+            .trim()
+            .strip_prefix(['-', '*'])
+            .map(str::trim)
+            .unwrap_or_else(|| line.trim());
+        matches!(
+            line.get(..4),
+            Some("[P0]") | Some("[P1]") | Some("[P2]") | Some("[P3]")
+        )
     }
+
+    let mut findings = Vec::new();
+    let mut current = Vec::new();
+    for line in synthesis.lines() {
+        if is_finding_start(line) && !current.is_empty() {
+            findings.push(current.join("\n").trim().to_string());
+            current.clear();
+        }
+        if !current.is_empty() || is_finding_start(line) {
+            current.push(line.trim_end().to_string());
+        }
+    }
+    if !current.is_empty() {
+        findings.push(current.join("\n").trim().to_string());
+    }
+    if findings.is_empty() {
+        findings.push(synthesis.trim().to_string());
+    }
+    findings
 }
 
 fn emit_workflow(workflow: &WorkflowEmitter, event: WorkflowEvent) {
@@ -2266,6 +2293,19 @@ mod tests {
 
     fn text_chunk(text: &str) -> ContentChunk {
         ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+    }
+
+    #[test]
+    fn review_issue_summaries_keep_supporting_evidence_with_its_finding() {
+        let findings = review_issue_summaries(
+            "[P1] src/cache.rs:12 -- stale cache entry leaks across sessions (evidence: source-reviewed)\n  observed through `lookup`; the caller reuses the entry.\n\n[P3] src/ui.rs:8 -- missing focused test (evidence: source-reviewed)\n  the current test only exercises the happy path.",
+        );
+
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].contains("stale cache entry"));
+        assert!(findings[0].contains("caller reuses the entry"));
+        assert!(findings[1].contains("missing focused test"));
+        assert!(findings[1].contains("happy path"));
     }
 
     #[test]
@@ -2818,7 +2858,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisory_only_findings_release_completion_without_correction() {
+    async fn p2_findings_dispatch_correction_before_recap() {
         let temp = tempfile::tempdir().expect("tempdir");
         let snapshot = changed_workspace(temp.path()).await;
         let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
@@ -2826,13 +2866,17 @@ mod tests {
         let passes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let spawned_passes = Arc::clone(&passes);
         let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
-            spawned_passes.fetch_add(1, Ordering::SeqCst);
+            let pass = spawned_passes.fetch_add(1, Ordering::SeqCst);
             let _ = outcomes.send(ReviewOutcome {
                 epoch: job.epoch,
-                verdict: ReviewVerdict::Advisory {
-                    synthesis: "[P2] src/header.rs:1 -- license header could be normalized"
-                        .to_string(),
-                    evidence: ReviewPassEvidence::default(),
+                verdict: if pass == 0 {
+                    ReviewVerdict::Findings {
+                        synthesis: "[P2] src/header.rs:1 -- license header could be normalized"
+                            .to_string(),
+                        evidence: ReviewPassEvidence::default(),
+                    }
+                } else {
+                    ReviewVerdict::Clean
                 },
             });
         });
@@ -2843,17 +2887,24 @@ mod tests {
             .await;
         runtime_tx.send(completion()).expect("send completion");
 
+        let correction = next_prompt(&mut command_rx).await;
+        assert!(correction.contains("<review_findings"));
+        assert!(correction.contains("[P2] src/header.rs:1"));
+        std::fs::write(temp.path().join("tracked.txt"), "corrected header\n")
+            .expect("write correction");
+        runtime_tx.send(completion()).expect("complete correction");
+
         let recap = next_prompt(&mut command_rx).await;
         assert!(recap.contains("the original work completed"));
         runtime_tx.send(completion()).expect("complete final recap");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut saw_advisory_summary = false;
-        let mut saw_advisory_info = false;
+        let mut saw_p2_summary = false;
+        let mut saw_correction = false;
         loop {
             let event = tokio::time::timeout_at(deadline, running.events.recv())
                 .await
-                .expect("advisory verdict released completion")
+                .expect("P2 correction released completion")
                 .expect("orchestrated event");
             if matches!(
                 &event,
@@ -2862,22 +2913,23 @@ mod tests {
                     ..
                 }) if summaries.iter().any(|summary| summary.contains("[P2] src/header.rs:1"))
             ) {
-                saw_advisory_summary = true;
+                saw_p2_summary = true;
             }
-            if matches!(&event, UiEvent::Info(text) if text.contains("advisory findings only")) {
-                saw_advisory_info = true;
+            if matches!(&event, UiEvent::Info(text) if text.contains("correcting the flagged findings"))
+            {
+                saw_correction = true;
             }
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
         }
 
-        assert_eq!(1, passes.load(Ordering::SeqCst));
-        assert!(saw_advisory_summary, "advisory findings must be reported");
-        assert!(saw_advisory_info, "advisory-only outcome must be visible");
+        assert_eq!(2, passes.load(Ordering::SeqCst));
+        assert!(saw_p2_summary, "P2 findings must be recorded");
+        assert!(saw_correction, "P2 findings must dispatch a correction");
         assert!(
             command_rx.try_recv().is_err(),
-            "advisory-only findings must not dispatch a corrective prompt"
+            "the completed P2 correction must not dispatch an extra prompt"
         );
 
         drop(runtime_tx);

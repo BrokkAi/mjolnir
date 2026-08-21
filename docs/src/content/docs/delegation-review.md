@@ -70,9 +70,17 @@ chooses the **review tier** — how much machinery one review may spend. The
 tier is read when a review dispatches, so a change applies to the next
 reviewed turn.
 
+The Reviewer tab has an independent **Permissions** setting. Its default,
+`Auto`, starts Codex with its native **Approve for me** policy and Claude Code
+with its native Auto policy; Mjolnir does not auto-answer approval requests.
+Other selected-provider session options remain separately available. The
+**Permissions** setting owns the provider's **Mode** option for reviewer
+sessions, so any older saved Mode value is ignored. Mjolnir-hosted ACP
+filesystem and terminal capabilities stay read-only for review sessions.
+
 ### Quick tier (default)
 
-One general read-only reviewer (Vör, visible as `review · vor`) works the
+One general reviewer (Vör, visible as `review · vor`) works the
 cumulative turn patch directly with Bifrost navigation tools, prioritizing
 correctness against the user's stated intent. No intent-extraction model call
 is made and no specialist lanes exist in this tier. Every finding it reports
@@ -86,16 +94,16 @@ The full adversarial pass, selected on the Reviewer tab or with
 thorough than Quick and spends far more tokens:
 
 1. A single self-contained user prompt goes directly to review without another
-   model call. For multi-message histories, a read-only intent analyst extracts
+   model call. For multi-message histories, an intent analyst extracts
    the governing contract and reconciles earlier corrections or requirements.
 2. A first-class internal review supervisor on the configured review model receives
    Bifrost core navigation tools and an immutable change packet. It runs in a
-   detached read-only session but is not a subagent. Changes under 200 lines
+   detached session but is not a subagent. Changes under 200 lines
    include the complete captured diff; larger changes include the complete
    semantic file totals and `patch_symbols` from `analyze_diff` for the
    captured base and target trees.
 3. The supervisor forms a risk map from the change packet and targeted source
-   inspection. It launches a read-only Norse reviewer only for a concrete
+   inspection. It launches a Norse reviewer only for a concrete
    unresolved hypothesis that the lane can investigate: Mímir (complexity),
    Völundr (duplication), Týr (error handling), Hel (dead code), Heimdall
    (tests), and Bragi (comments and contracts). Zero reviewers is a normal

@@ -51,6 +51,12 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         .with_context(|| format!("load {}", config_path.display()))?;
     app_config.apply_default_team();
     app_config.apply_model_overrides(&cfg.role_overrides);
+    // An explicit command-line permission policy applies to every seat for
+    // this run. Otherwise each delegated seat keeps its saved native policy.
+    let subagent_permission =
+        delegated_permission(cfg.permission_config_mode, app_config.subagents.permission);
+    let review_permission =
+        delegated_permission(cfg.permission_config_mode, app_config.review.permission);
     // A headless run is one long turn, so hold the sleep assertion for the
     // whole run; the guard drops on every return path.
     let _keep_awake = crate::keep_awake::KeepAwake::hold(app_config.keep_awake);
@@ -138,20 +144,20 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             model_id: primary.model.model.clone(),
             model_value: primary.model_value.clone(),
             adapter_source_id: primary.launch.source_id.clone(),
-            require_native_read_only: false,
             permission: primary_permission,
             session_tag: None,
             reasoning_effort: primary.reasoning_effort.clone(),
         }),
         subagents: subagent_pool
             .map(|subagent_pool| {
-                subagent::Config::new(subagent_pool, cfg.agent_stderr.clone())
+                let mut config = subagent::Config::new(subagent_pool, cfg.agent_stderr.clone())
                     .with_subagent_handoff_counter(subagent_handoffs.clone())
                     .with_id_allocator(subagent_ids.clone())
                     .with_active_implementation_workers(active_implementation_workers.clone())
                     .with_max_parallel(app_config.subagents.max_parallel)
                     .with_debrief(app_config.subagents.debrief)
-                    .with_headless_permission_mode(cfg.permission_mode.into())
+                    .with_permission_mode(subagent_permission)
+                    .with_headless()
                     .with_reports(subagent_reports.clone())
                     .with_run_registry(subagent_runs.clone())
                     .with_prewarm(subagent::RunContext {
@@ -160,7 +166,11 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         snapshot_exclusions: cfg.snapshot_exclusions.clone(),
                         fs_max_text_bytes: cfg.fs_max_text_bytes,
                         access_mode: acp::RuntimeAccessMode::Full,
-                    })
+                    });
+                if let Some(mode) = cfg.permission_config_mode {
+                    config = config.with_headless_permission_mode(mode);
+                }
+                config
             })
             .map(subagent::runtime_service),
         memory: crate::memory::SessionMemory::from_config(
@@ -237,6 +247,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         agent_stderr: cfg.agent_stderr.clone(),
                         snapshot_exclusions: cfg.snapshot_exclusions.clone(),
                         fs_max_text_bytes: cfg.fs_max_text_bytes,
+                        permission: review_permission,
                         id_allocator: subagent_ids.clone(),
                     })
                 }),
@@ -484,6 +495,13 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     }
 }
 
+fn delegated_permission(
+    command_line: Option<config::PermissionPreset>,
+    saved: config::PermissionPreset,
+) -> config::PermissionPreset {
+    command_line.unwrap_or(saved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +525,20 @@ mod tests {
         .await
         .expect_err("empty prompt must fail before configuration lookup");
         assert_eq!(error.to_string(), "empty prompt");
+    }
+
+    #[test]
+    fn delegated_permissions_use_saved_defaults_without_a_cli_override() {
+        assert_eq!(
+            delegated_permission(None, config::PermissionPreset::Auto),
+            config::PermissionPreset::Auto
+        );
+        assert_eq!(
+            delegated_permission(
+                Some(config::PermissionPreset::Manual),
+                config::PermissionPreset::Yolo,
+            ),
+            config::PermissionPreset::Manual
+        );
     }
 }

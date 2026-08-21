@@ -3010,15 +3010,7 @@ fn handle_crossterm(
             return TerminalRequest::None;
         }
         CtEvent::Mouse(mouse) => {
-            // The diff reader does not support mouse scrolling yet. In
-            // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer
-                || state.nested_agent_viewer
-                || state.review_issue_viewer
-                || state.terminals_viewer
-            {
-                return TerminalRequest::None;
-            } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
+            if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
                 handle_transcript_viewer_mouse(state, mouse);
             } else if mode == UiMode::FullscreenTui {
                 handle_mouse(state, mouse);
@@ -3031,16 +3023,14 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    if mode == UiMode::FullscreenTui
-        && is_text_selection_key(key.modifiers, key.code)
-        && can_toggle_text_selection_mode(state)
-    {
+    if mode == UiMode::FullscreenTui && is_text_selection_key(key.modifiers, key.code) {
         return TerminalRequest::ToggleTextSelectionMode;
     }
 
     if key.modifiers == KeyModifiers::CONTROL
         && matches!(key.code, KeyCode::Char('c'))
         && state.is_side
+        && !state.is_streaming()
         && state.input.is_empty()
         && attachment_count(state) == 0
     {
@@ -3585,6 +3575,32 @@ fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
     if state.connection_state() != ConnectionState::Streaming {
         return;
     }
+
+    // Enter always queues behind an active turn. Ctrl-C is the explicit
+    // gesture to apply the oldest queued correction now when the runtime can
+    // steer it into that turn.
+    if state.can_steer()
+        && let Some(queued) = state.take_queued_prompt()
+    {
+        let preview = queued_prompt_preview(&queued.display_text);
+        state.record_steered_prompt(queued.display_text, queued.resources.clone());
+        let _ = cmd_tx.send(UiCommand::SteerPrompt {
+            text: queued.text,
+            images: queued.images,
+            resources: queued.resources,
+        });
+        let remaining = state.queued_prompt_count();
+        let suffix = if remaining == 0 {
+            String::new()
+        } else {
+            format!(" ({remaining} still queued)")
+        };
+        state.status_line = Some(StatusMessage::info(format!(
+            "steering queued prompt into the current turn{suffix}: {preview}"
+        )));
+        return;
+    }
+
     let _ = cmd_tx.send(UiCommand::CancelPrompt);
     state.mark_cancelling();
     let queued = state.queued_prompt_count();
@@ -3696,23 +3712,27 @@ fn dictation_request_for_state(state: &AppState, voice_input_supported: bool) ->
 }
 
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
-    if state.text_selection_mode
-        || state.help_overlay
-        || state.has_pending_permission()
-        || state.has_pending_elicitation()
-        || state.team_picker.is_some()
-        || state.config_picker.is_some()
-    {
+    if state.text_selection_mode {
         return;
     }
 
+    let scroll_enabled = !state.help_overlay
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && state.team_picker.is_none()
+        && state.config_picker.is_none()
+        && !state.workspace_diff_viewer
+        && !state.nested_agent_viewer
+        && !state.review_issue_viewer
+        && !state.terminals_viewer;
+
     match mouse.kind {
-        MouseEventKind::ScrollUp => {
+        MouseEventKind::ScrollUp if scroll_enabled => {
             state.scroll_offset = state
                 .scroll_offset
                 .saturating_add(TRANSCRIPT_SCROLL_WHEEL_STEP);
         }
-        MouseEventKind::ScrollDown => {
+        MouseEventKind::ScrollDown if scroll_enabled => {
             state.scroll_offset = state
                 .scroll_offset
                 .saturating_sub(TRANSCRIPT_SCROLL_WHEEL_STEP);
@@ -3743,17 +3763,6 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
             }
         }
         _ => {}
-    }
-}
-
-/// Drop the drag selection and the captured panel geometry whenever another
-/// surface (viewer, arena) replaces the transcript: the previous frame's
-/// coordinates no longer describe what is on screen.
-fn invalidate_transcript_selection(state: &mut AppState) {
-    state.transcript_selection = None;
-    state.transcript_panel_area = None;
-    if !state.transcript_panel_grid.is_empty() {
-        state.transcript_panel_grid = Vec::new();
     }
 }
 
@@ -3880,6 +3889,20 @@ fn apply_selection_highlight(
             Rect::new(from, y, to - from + 1, 1),
             Style::default().add_modifier(Modifier::REVERSED),
         );
+    }
+}
+
+/// Make every visible cell selectable. Fullscreen mouse capture owns drag
+/// events, so selection cannot be limited to the transcript: prompts, paths,
+/// dialogs, and status text need the same copy path.
+fn capture_fullscreen_selection_surface(f: &mut ratatui::Frame, state: &mut AppState) {
+    let area = f.area();
+    state.transcript_panel_area = Some((area.x, area.y, area.width, area.height));
+    if let Some(selection) = state.transcript_selection {
+        state.transcript_panel_grid = capture_transcript_panel_grid(f.buffer_mut(), area);
+        apply_selection_highlight(f.buffer_mut(), area, &selection);
+    } else if !state.transcript_panel_grid.is_empty() {
+        state.transcript_panel_grid = Vec::new();
     }
 }
 
@@ -5165,13 +5188,6 @@ fn is_text_selection_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(12))
 }
 
-fn can_toggle_text_selection_mode(state: &AppState) -> bool {
-    !state.help_overlay
-        && !state.has_pending_permission()
-        && !state.has_pending_elicitation()
-        && state.config_picker.is_none()
-}
-
 #[cfg(target_os = "macos")]
 const PROMPT_NEWLINE_HINT: &str = "Ctrl-J";
 
@@ -5608,18 +5624,6 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.scroll_input_to_bottom();
 
     if state.is_busy() {
-        if state.can_steer() {
-            // The agent supports mid-turn steering: inject the message into
-            // the running turn instead of queueing it behind the turn.
-            state.record_steered_prompt(display_text, resources.clone());
-            let _ = cmd_tx.send(UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            });
-            state.status_line = Some(StatusMessage::info("steering into the current turn"));
-            return;
-        }
         // The previous turn is still running. Stash this submission and
         // keep it out of the transcript until it is actually sent.
         let preview = queued_prompt_preview(&display_text);
@@ -5630,14 +5634,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             display_text,
         });
         let queued = state.queued_prompt_count();
-        let steering_note = if state.is_streaming() && !state.steering_supported {
-            " (agent cannot steer mid-turn)"
-        } else {
-            ""
-        };
-        state.status_line = Some(StatusMessage::info(format!(
-            "queued {queued}{steering_note}: {preview}"
-        )));
+        state.status_line = Some(StatusMessage::info(format!("queued {queued}: {preview}")));
         return;
     }
 
@@ -5706,16 +5703,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
     match subcommand {
         "" => {
             let memory_config = memory_config_from_disk(state);
-            let mut listing = crate::memory::render_list(&store, &project, &memory_config);
-            if !state.agent_source_id.is_empty()
-                && crate::roster::AdapterKind::from_source_id(&state.agent_source_id)
-                    != Some(crate::roster::AdapterKind::Codex)
-            {
-                listing.push_str(
-                    "\nNote: memories apply only to Codex primary sessions; the current \
-                     primary agent will not receive them.",
-                );
-            }
+            let listing = crate::memory::render_list(&store, &project, &memory_config);
             state.push_system_message(listing);
         }
         "add" => {
@@ -5737,7 +5725,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 Ok(entry) => state.record_status_message(
                     StatusKind::Info,
                     format!(
-                        "saved memory m{} ({}); shared before the next Claude or Codex turn",
+                        "saved memory m{} ({}); synchronized into Claude and Codex native memory when their next sessions start",
                         entry.id,
                         if global { "global" } else { "this project" }
                     ),
@@ -7151,7 +7139,6 @@ fn draw(
     // screen. The safety-critical permission/elicitation modals still render
     // on top of it.
     if state.ragnarok.is_some() {
-        invalidate_transcript_selection(state);
         draw_ragnarok(f, f.area(), state);
         if let Some(pending) = state.pending_permission() {
             draw_permission_modal(
@@ -7170,6 +7157,7 @@ fn draw(
                 state.theme,
             );
         }
+        capture_fullscreen_selection_surface(f, state);
         return;
     }
 
@@ -7199,16 +7187,12 @@ fn draw(
         .split(f.area());
 
     if state.review_issue_viewer {
-        invalidate_transcript_selection(state);
         draw_review_issue_viewer(f, chunks[0], state);
     } else if state.nested_agent_viewer {
-        invalidate_transcript_selection(state);
         draw_nested_agent_viewer(f, chunks[0], state, false);
     } else if state.workspace_diff_viewer {
-        invalidate_transcript_selection(state);
         draw_workspace_diff_viewer(f, chunks[0], state, false);
     } else if state.terminals_viewer {
-        invalidate_transcript_selection(state);
         draw_terminals_viewer(f, chunks[0], state, false);
     } else {
         // An in-flight review with findings splits the stage: the issues
@@ -7280,6 +7264,7 @@ fn draw(
             state.theme,
         );
     }
+    capture_fullscreen_selection_surface(f, state);
 }
 
 fn inline_transcript_tail_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
@@ -7841,7 +7826,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         .split(area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" review issues — session ledger ")
+        .title(" review issues — full evidence ")
         .style(Style::default().ink(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
@@ -7871,15 +7856,19 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
             .add_modifier(Modifier::BOLD),
     )];
     for (count, label, ink) in [
-        (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.open, "● {} awaiting correction", theme.warning),
+        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.fixed, "✔ {} verified fixed", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
-        head.push(Span::styled("   ", Style::default()));
-        head.push(Span::styled(
-            label.replacen("{}", &count.to_string(), 1),
-            Style::default().ink(ink).add_modifier(Modifier::BOLD),
-        ));
+        if count > 0 {
+            head.push(Span::styled("   ", Style::default()));
+            head.push(Span::styled(
+                label.replacen("{}", &count.to_string(), 1),
+                Style::default().ink(ink).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     let mut lines = vec![Line::from(head)];
     if issues.is_empty() {
@@ -7907,10 +7896,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
                         .add_modifier(Modifier::BOLD),
                 )));
             }
-            lines.push(review_ledger_line(
-                &crate::app::review_issue_row(issue),
-                theme,
-            ));
+            lines.extend(review_issue_detail_lines(issue, theme));
         }
     }
     let total = Paragraph::new(lines.clone())
@@ -7926,10 +7912,111 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         inner,
     );
     f.render_widget(
-        Paragraph::new("F9/Esc close · Up/Down PgUp/PgDn Home/End scroll")
+        Paragraph::new(
+            "F9/Esc close · full finding, correction report, exact diff, and verification state · Up/Down PgUp/PgDn Home/End scroll",
+        )
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
+}
+
+/// Complete evidence for one review issue. The compact board and transcript
+/// deliberately show only the first line; F9 is the durable place where a
+/// user can inspect the reviewer's complete finding, the primary's correction
+/// report, the captured correction diff, and whether a later review verified
+/// that correction.
+fn review_issue_detail_lines(
+    issue: &crate::workflow::ReviewIssue,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    use crate::workflow::ReviewIssueStatus;
+
+    let (status, ink, explanation) = match issue.status {
+        ReviewIssueStatus::Validated => (
+            "validated — awaiting correction",
+            theme.warning,
+            "The review supervisor confirmed this finding. No correction has completed for it.",
+        ),
+        ReviewIssueStatus::Corrected => (
+            "corrected — verification pending",
+            theme.warning,
+            "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean, so this is not presented as fixed.",
+        ),
+        ReviewIssueStatus::Fixed => (
+            "fixed — independently verified",
+            theme.success,
+            "A later verification review returned clean after the correction.",
+        ),
+        ReviewIssueStatus::Uncorrected => (
+            "unresolved",
+            theme.warning,
+            "The primary correction turn completed without changing the workspace. This validated finding is not fixed.",
+        ),
+        ReviewIssueStatus::Invalidated => (
+            "invalidated",
+            theme.error,
+            "The review workflow explicitly invalidated this finding; the recorded reason is below.",
+        ),
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" #{} · {status}", issue.id),
+        Style::default().ink(ink).add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::from(Span::styled(
+        " Finding — validated review evidence",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(issue.summary.lines().map(|line| {
+        Line::from(Span::styled(
+            format!("   {line}"),
+            Style::default().ink(theme.text),
+        ))
+    }));
+    lines.push(Line::from(Span::styled(
+        " Status",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   {explanation}"),
+        Style::default().ink(theme.text),
+    )));
+    if let Some(reason) = issue.resolution_reason.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Recorded outcome",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(reason.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    if let Some(details) = issue.resolution_details.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Correction evidence",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(details.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    lines.push(Line::from(Span::styled(
+        " ───────────────────────────────────────",
+        Style::default().ink(theme.muted),
+    )));
+    lines
 }
 
 fn nested_actor_backend(actor: &SubagentStatus) -> String {
@@ -8681,12 +8768,38 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
         if !title.is_empty() {
-            // The title owns every cell after the version label.
-            let separator_width = 3;
+            // Label the title as session context. The header can sit directly
+            // below live review findings, where unlabelled prose reads like a
+            // continuation of the final issue. On narrow terminals preserve
+            // usable title space before adding chrome.
+            let full_session_prefix = "   │ Session: ";
+            let compact_session_prefix = "   │ ";
+            let title_separator = "   ";
+            const MIN_READABLE_TITLE_WIDTH: usize = 12;
             let used: usize = spans.iter().map(|span| span.content.width()).sum();
-            let max_width = width.saturating_sub(used).saturating_sub(separator_width);
+            let available = width.saturating_sub(used);
+            let session_prefix =
+                if available >= full_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
+                    full_session_prefix
+                } else if available >= compact_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
+                    compact_session_prefix
+                } else {
+                    title_separator
+                };
+            let max_width = width
+                .saturating_sub(used)
+                .saturating_sub(session_prefix.width());
             if max_width > 0 {
-                spans.push(Span::raw("   "));
+                if session_prefix == title_separator {
+                    spans.push(Span::raw(session_prefix));
+                } else {
+                    spans.push(Span::styled(
+                        session_prefix,
+                        Style::default()
+                            .ink(state.theme.muted)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
                 spans.push(Span::styled(
                     compact_middle_display(title, max_width),
                     Style::default()
@@ -8990,13 +9103,13 @@ fn draw_transcript(
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
 ) {
-    let title = transcript_block_title(state);
     // No border glyphs: when the user falls back to native terminal selection
     // (F12 text selection mode), side borders would be captured into every
     // copied line. The title still claims the top row on its own.
-    let block = Block::default().borders(Borders::NONE).title(title);
+    // A placeholder reserves the title row while the actual title waits for
+    // scroll reconciliation below.
+    let block = Block::default().borders(Borders::NONE).title(" ");
     let inner = block.inner(area);
-    f.render_widget(block, area);
 
     // Avoid rebuilding the lines and re-running `Paragraph::line_count`
     // (both O(text) with unicode segmentation) when neither the
@@ -9053,6 +9166,12 @@ fn draw_transcript(
             search.jump_pending = false;
         }
     }
+    f.render_widget(
+        Block::default()
+            .borders(Borders::NONE)
+            .title(transcript_block_title(state)),
+        area,
+    );
     let top = total
         .saturating_sub(inner.height as usize)
         .saturating_sub(state.scroll_offset);
@@ -9069,16 +9188,6 @@ fn draw_transcript(
         .wrap(Wrap { trim: false })
         .scroll((inner_scroll, 0));
     f.render_widget(paragraph, inner);
-
-    // Geometry lets mouse events hit-test the panel; the grid snapshot is
-    // only needed while a drag selection is active, so skip it otherwise.
-    state.transcript_panel_area = Some((inner.x, inner.y, inner.width, inner.height));
-    if let Some(selection) = state.transcript_selection {
-        state.transcript_panel_grid = capture_transcript_panel_grid(f.buffer_mut(), inner);
-        apply_selection_highlight(f.buffer_mut(), inner, &selection);
-    } else if !state.transcript_panel_grid.is_empty() {
-        state.transcript_panel_grid = Vec::new();
-    }
 }
 
 /// Render the transcript once and measure it, for either the chat pane
@@ -12445,15 +12554,18 @@ fn review_board_row_count(state: &AppState) -> u16 {
     (1 + visible + overflow).min(usize::from(u16::MAX)) as u16
 }
 
-/// Order the board so what needs the user's eyes comes first: still-open
-/// findings, then invalidations (loud, never buried), then the fixed tail.
+/// Order the board so what needs the user's eyes comes first: findings still
+/// awaiting correction, then corrections still awaiting verification, then
+/// unresolved/invalidated records, and finally independently verified fixes.
 fn review_board_rank(status: crate::workflow::ReviewIssueStatus) -> u8 {
     use crate::workflow::ReviewIssueStatus;
 
     match status {
         ReviewIssueStatus::Validated => 0,
-        ReviewIssueStatus::Invalidated => 1,
-        ReviewIssueStatus::Fixed => 2,
+        ReviewIssueStatus::Corrected => 1,
+        ReviewIssueStatus::Uncorrected => 2,
+        ReviewIssueStatus::Invalidated => 3,
+        ReviewIssueStatus::Fixed => 4,
     }
 }
 
@@ -12483,7 +12595,9 @@ fn draw_review_board(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     )];
     for (count, label, ink) in [
         (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.fixed, "✔ {} verified", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
         if count > 0 {
@@ -12744,9 +12858,11 @@ fn workflow_progress_line(
         let tally = workflow.issue_tally();
         let mut parts = vec![format!("issues {} found", tally.found)];
         for (count, label) in [
-            (tally.fixed, "fixed"),
+            (tally.fixed, "verified fixed"),
+            (tally.corrected, "corrected; unverified"),
+            (tally.uncorrected, "unresolved"),
             (tally.invalidated, "invalidated"),
-            (tally.open, "unresolved"),
+            (tally.open, "awaiting correction"),
         ] {
             if count > 0 {
                 parts.push(format!("{count} {label}"));
@@ -14083,7 +14199,7 @@ fn help_modal_lines(
         lines.extend([
             help_binding_line(
                 "mouse drag",
-                "select transcript text; released selection is copied to the clipboard",
+                "select visible text; released selection is copied to the clipboard",
                 theme,
             ),
             help_binding_line(
@@ -16254,6 +16370,7 @@ mod tests {
                 pass: 0,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
+                details: None,
             },
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
@@ -16277,6 +16394,111 @@ mod tests {
             "a finished review leaves the board to the verdict banner"
         );
         assert_eq!(inline_chat_layout(&state, area)[3].height, 0);
+    }
+
+    #[test]
+    fn review_issue_viewer_shows_full_finding_fix_evidence_and_verification_state() {
+        use crate::workflow::ReviewIssueStatus;
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(7);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![
+                    "[P1] src/cache.rs:12 -- stale cache entry leaks across sessions\n  The caller reuses this entry after logout."
+                        .to_string(),
+                ],
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some("the correction changed the workspace; verification is pending".to_string()),
+                details: Some(
+                    "Primary correction report:\ncleared the session cache on logout\n\nExact correction diff:\n+cache.clear();"
+                        .to_string(),
+                ),
+            },
+        );
+        state.open_review_issue_viewer();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_issue_viewer(frame, frame.area(), &mut state))
+            .expect("draw issue viewer");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("full evidence"), "{rendered}");
+        assert!(rendered.contains("caller reuses this entry"), "{rendered}");
+        assert!(
+            rendered.contains("corrected — verification pending"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("cleared the session cache on logout"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("+cache.clear();"), "{rendered}");
+    }
+
+    #[test]
+    fn session_header_is_explicit_below_a_live_review_board() {
+        let mut state = AppState::new();
+        state.session_title = Some("Correct review permissions".to_string());
+        let workflow_id = WorkflowId::review(4);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec!["review setting is ignored".to_string()],
+            },
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut TranscriptScrollState::default(),
+                    UiMode::FullscreenTui,
+                )
+            })
+            .expect("draw");
+        let lines = buffer_lines(terminal.backend().buffer());
+        let issue_row = lines
+            .iter()
+            .rposition(|line| line.contains("#1 review setting is ignored"))
+            .expect("live review issue row");
+        let header_row = lines
+            .iter()
+            .position(|line| line.contains("│ Session: Correct review permissions"))
+            .expect("labelled session header");
+
+        assert_eq!(
+            header_row,
+            issue_row + 1,
+            "the directly adjacent session line must name itself:\n{}",
+            lines.join("\n")
+        );
     }
 
     #[test]
@@ -17132,7 +17354,7 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_only_version_and_session_title() {
+    fn header_labels_the_session_title() {
         let mut state = AppState::new();
         state.agent_label = "uvx".to_string();
         state.project_label = "~/code/mjolnir/.mjolnir/worktrees/bold-willow".to_string();
@@ -17157,8 +17379,56 @@ mod tests {
         assert!(!rendered.contains("session"), "rendered:\n{rendered}");
         assert!(!rendered.contains("48c95a78"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("Review payment flow"),
+            rendered.contains("│ Session: Review payment flow"),
             "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn header_preserves_title_space_on_narrow_terminals() {
+        let mut state = AppState::new();
+        state.session_title = Some("narrow title".to_string());
+        let version_width = mjolnir_version_label().width();
+        let narrow_width = (version_width + 4) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(narrow_width, 1)).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!("{}   n", mjolnir_version_label())),
+            "narrow headers must retain title text instead of spending it on session chrome:\n{rendered}"
+        );
+
+        let compact_width = (version_width + "   │ ".width() + "narrow title".width()) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(compact_width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!("{}   │ narrow title", mjolnir_version_label())),
+            "mid-width headers must keep a session divider and a readable title:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Session:"),
+            "the full label belongs to wider headers:\n{rendered}"
+        );
+
+        let full_width = (version_width + "   │ Session: ".width() + "narrow title".width()) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(full_width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!(
+                "{}   │ Session: narrow title",
+                mjolnir_version_label()
+            )),
+            "standard-width headers must identify the session:\n{rendered}"
         );
     }
 
@@ -19614,7 +19884,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_memory_notes_when_the_primary_is_not_codex() {
+    fn slash_memory_is_available_to_claude_and_codex_primaries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = AppState::new();
         state.memory_store_path = dir.path().join("memories.json");
@@ -19625,7 +19895,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("apply only to Codex primary sessions")
+            Some(Entry::System(text)) if text.contains("Memories")
         ));
 
         state.agent_source_id = "codex-acp".to_string();
@@ -19633,7 +19903,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if !text.contains("apply only to Codex primary sessions")
+            Some(Entry::System(text)) if text.contains("Memories")
         ));
     }
 
@@ -19746,6 +20016,7 @@ mod tests {
         let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
         editor.tab = crate::settings::SettingsTab::Reviewer;
         editor.selected = 0;
+        state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Char(' '));
         state.mjconfig_menu_key(KeyCode::Down);
@@ -20335,6 +20606,33 @@ mod tests {
         tracker.reconcile(&mut offset, 100, 20);
 
         assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn empty_transcript_never_announces_scrollback() {
+        let mut state = AppState::new();
+        let mut tracker = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        // Establish the viewport, then receive a scroll event while there is
+        // still no rendered history to move through.
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
+            .expect("initial draw");
+        handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
+        assert_eq!(state.scroll_offset, TRANSCRIPT_SCROLL_WHEEL_STEP);
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
+            .expect("scroll draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert_eq!(state.scroll_offset, 0);
+        assert!(
+            !rendered.contains("[scrolled +"),
+            "empty transcript claimed a scrollback position:\n{rendered}"
+        );
     }
 
     #[test]
@@ -22284,7 +22582,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_drag_selection_tracks_anchor_and_clamps_head_to_panel() {
+    fn mouse_drag_selection_tracks_anchor_and_clamps_head_to_screen() {
         let mut state = AppState::new();
         state.transcript_panel_area = Some((0, 1, 40, 10));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -22310,12 +22608,12 @@ mod tests {
         assert_eq!(
             state.transcript_selection.expect("selection").head,
             (39, 10),
-            "drag past the panel edge must clamp to the last cell"
+            "drag past the screen edge must clamp to the last cell"
         );
     }
 
     #[test]
-    fn mouse_down_outside_transcript_panel_starts_no_selection() {
+    fn mouse_down_outside_selection_screen_starts_no_selection() {
         let mut state = AppState::new();
         state.transcript_panel_area = Some((0, 1, 40, 10));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -22479,10 +22777,33 @@ mod tests {
             rendered.contains("hello transcript"),
             "rendered:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn fullscreen_drag_selection_covers_prompt_status_and_overlays() {
+        let mut state = AppState::new();
+        state.help_overlay = true;
+        let mut scroll = TranscriptScrollState::default();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(state.transcript_panel_area, Some((0, 0, 40, 10)));
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 0),
+        );
         assert_eq!(
-            state.transcript_panel_area,
-            Some((0, 1, 40, 7)),
-            "title row is reserved, everything else belongs to the panel"
+            state.transcript_selection,
+            Some(TranscriptSelection {
+                anchor: (5, 0),
+                head: (5, 0),
+            })
         );
     }
 
@@ -23104,14 +23425,14 @@ mod tests {
     }
 
     #[test]
-    fn f12_ignores_text_selection_toggle_while_overlay_owns_input() {
+    fn f12_allows_terminal_text_selection_while_an_overlay_is_open() {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         let mut help_state = AppState::new();
         help_state.help_overlay = true;
         assert_eq!(
             handle_crossterm(&mut help_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(help_state.help_overlay);
 
@@ -23120,7 +23441,7 @@ mod tests {
         permission_state.apply_event(UiEvent::PermissionRequest(pending.prompt));
         assert_eq!(
             handle_crossterm(&mut permission_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(permission_state.has_pending_permission());
 
@@ -23137,7 +23458,7 @@ mod tests {
         assert!(config_state.open_config_value_picker(0));
         assert_eq!(
             handle_crossterm(&mut config_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(config_state.config_picker.is_some());
     }
@@ -23652,7 +23973,7 @@ mod tests {
             jump_pending: true,
             ..TranscriptSearch::default()
         });
-        let backend = TestBackend::new(70, 16);
+        let backend = TestBackend::new(120, 16);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut scroll = TranscriptScrollState::default();
 
@@ -23669,6 +23990,10 @@ mod tests {
         assert!(
             rendered.contains("selected target entry"),
             "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("[scrolled +"),
+            "search jump must update the scroll indicator in the same frame:\n{rendered}"
         );
     }
 
@@ -28580,10 +28905,17 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_with_empty_side_composer_returns_even_while_streaming() {
+    fn ctrl_c_with_empty_side_composer_steers_queued_prompt_while_streaming() {
         let mut state = ready_state_with_session();
         state.is_side = true;
+        state.steering_supported = true;
         state.record_user_prompt("long answer".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "focus on the error".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "focus on the error".to_string(),
+        });
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -28592,11 +28924,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
 
-        assert!(state.side_exit_requested);
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "cleanup is owned by the UI loop"
-        );
+        assert!(!state.side_exit_requested);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SteerPrompt { text, .. }) if text == "focus on the error"
+        ));
         assert!(state.exit_reason.is_none());
     }
 
@@ -28703,7 +29035,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_streaming_steers_when_the_agent_supports_it() {
+    fn enter_during_streaming_queues_when_the_agent_supports_steering() {
         let mut state = ready_state_with_session();
         state.steering_supported = true;
         state.record_user_prompt("first".to_string());
@@ -28713,35 +29045,27 @@ mod tests {
         type_string(&mut state, &cmd_tx, "try the other approach");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        match cmd_rx.try_recv().expect("steer must be sent immediately") {
-            UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            } => {
-                assert_eq!(text, "try the other approach");
-                assert!(images.is_empty());
-                assert!(resources.is_empty());
-            }
-            other => panic!("expected SteerPrompt, got {other:?}"),
-        }
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "Enter must queue even when steering is available"
+        );
         assert_eq!(
             state.queued_prompt_count(),
-            0,
-            "steered prompts must not queue"
+            1,
+            "the correction waits for Ctrl-C to steer it"
         );
         assert!(
-            state.transcript.iter().any(
+            !state.transcript.iter().any(
                 |entry| matches!(entry, Entry::UserPrompt(text) if text == "try the other approach")
             ),
-            "the steered message joins the transcript immediately"
+            "queued text stays out of the transcript"
         );
         assert_eq!(
             state.connection_state(),
             ConnectionState::Streaming,
-            "steering must not restart turn bookkeeping"
+            "queueing must not restart turn bookkeeping"
         );
-        assert!(state.input.is_empty(), "input cleared after steering");
+        assert!(state.input.is_empty(), "input cleared after queueing");
     }
 
     #[test]
@@ -28763,7 +29087,7 @@ mod tests {
     }
 
     #[test]
-    fn queueing_mentions_when_the_agent_cannot_steer() {
+    fn queueing_reports_fifo_without_a_capability_warning() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
@@ -28777,7 +29101,7 @@ mod tests {
             .expect("queued status line")
             .text
             .clone();
-        assert_eq!(status, "queued 1 (agent cannot steer mid-turn): next one");
+        assert_eq!(status, "queued 1: next one");
     }
 
     #[test]
@@ -29114,9 +29438,7 @@ mod tests {
             .clone()
             .expect("queue status set after submit");
         assert!(
-            queued_status
-                .text
-                .starts_with("queued 1 (agent cannot steer mid-turn): "),
+            queued_status.text.starts_with("queued 1: "),
             "expected queue status, got {:?}",
             queued_status.text
         );
@@ -29180,7 +29502,57 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_during_streaming_preserves_queued_prompt() {
+    fn ctrl_c_steers_oldest_queued_prompt_when_supported() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "redirect here".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "redirect here".to_string(),
+        });
+        state.push_queued_prompt(QueuedPrompt {
+            text: "then do this".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "then do this".to_string(),
+        });
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(
+            state.queued_prompt_count(),
+            1,
+            "only the oldest prompt steers"
+        );
+        assert_eq!(
+            state.queued_prompts().next().expect("queued prompt").text,
+            "then do this"
+        );
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        match cmd_rx.try_recv().expect("steer dispatched") {
+            UiCommand::SteerPrompt { text, images, .. } => {
+                assert_eq!(text, "redirect here");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, Entry::UserPrompt(text) if text == "redirect here"))
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancels_and_preserves_queue_when_steering_is_unsupported() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
         state.push_queued_prompt(QueuedPrompt {
@@ -29198,15 +29570,8 @@ mod tests {
         );
 
         assert_eq!(state.queued_prompt_count(), 1, "queue preserved by Ctrl-C");
-        assert_eq!(
-            state.queued_prompts().next().expect("queued prompt").text,
-            "keep me"
-        );
         assert_eq!(state.connection_state(), ConnectionState::Cancelling);
-        match cmd_rx.try_recv().expect("cancel dispatched") {
-            UiCommand::CancelPrompt => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelPrompt)));
     }
 
     #[test]
