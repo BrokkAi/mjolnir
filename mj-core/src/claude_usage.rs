@@ -48,6 +48,7 @@ pub enum ClaudeUsageError {
     Launch(String),
     Exit { status: String, detail: String },
     UnsupportedOutput,
+    LimitsNotReported,
     Parse,
 }
 
@@ -61,6 +62,7 @@ impl ClaudeUsageError {
             Self::Exit { detail, .. } if is_authentication_error(detail) => "not signed in",
             Self::Exit { .. } => "Claude /usage failed",
             Self::UnsupportedOutput => "Claude /usage is unsupported",
+            Self::LimitsNotReported => "Claude Code did not report quota limits",
             Self::Parse => "unrecognized Claude /usage response",
         }
     }
@@ -80,6 +82,7 @@ impl fmt::Display for ClaudeUsageError {
                 write!(f, "claude /usage exited with {status}: {detail}")
             }
             Self::UnsupportedOutput => write!(f, "Claude Code does not support /usage"),
+            Self::LimitsNotReported => write!(f, "Claude Code did not report quota limits"),
             Self::Parse => write!(f, "could not parse claude /usage output"),
         }
     }
@@ -633,6 +636,14 @@ fn classify_unparsed_output(output: &str) -> ClaudeUsageError {
         ClaudeUsageError::NotSignedIn
     } else if lower.contains("not supported") || lower.contains("unknown command") {
         ClaudeUsageError::UnsupportedOutput
+    } else if lower.contains("what's contributing to your limits usage?")
+        && lower.contains("last 24h")
+        && lower.contains("last 7d")
+    {
+        // Recent Claude Code versions can return activity summaries without
+        // either subscription window. Do not treat request/session counts as
+        // a quota percentage or invent a reset time.
+        ClaudeUsageError::LimitsNotReported
     } else {
         ClaudeUsageError::Parse
     }
@@ -1032,6 +1043,28 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_activity_only_usage_output_without_inventing_a_quota() {
+        let output = r#"
+            You are currently using your subscription to power your Claude Code usage
+
+            What's contributing to your limits usage?
+            Approximate, based on local sessions on this machine — does not include other devices or claude.ai.
+
+            Last 24h · 1517 requests · 18 sessions
+              71% of your usage was at >150k context
+
+            Last 7d · 3126 requests · 33 sessions
+              56% of your usage was at >150k context
+            "#;
+
+        assert!(parse(output).is_none());
+        assert_eq!(
+            classify_unparsed_output(output),
+            ClaudeUsageError::LimitsNotReported
+        );
+    }
+
+    #[test]
     fn parses_markdown_table_shape() {
         let report = parse(
             r#"
@@ -1115,6 +1148,10 @@ mod tests {
         assert_eq!(
             ClaudeUsageError::UnsupportedOutput.user_reason(),
             "Claude /usage is unsupported"
+        );
+        assert_eq!(
+            ClaudeUsageError::LimitsNotReported.user_reason(),
+            "Claude Code did not report quota limits"
         );
         assert_eq!(
             ClaudeUsageError::Parse.user_reason(),
