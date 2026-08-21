@@ -7,6 +7,7 @@ pub mod auth;
 pub mod claude_token;
 pub mod claude_usage;
 pub mod codex_usage;
+pub mod computer;
 pub mod config;
 pub mod deepswe;
 pub mod event;
