@@ -1,5 +1,5 @@
 //! Agentic discrete review over the changes a single user turn just authored.
-//! A first-class read-only supervisor may launch useful Norse reviewers
+//! A first-class supervisor may launch useful Norse reviewers
 //! asynchronously, then receives their reports in follow-up turns before
 //! returning one verdict.
 //!
@@ -8,8 +8,9 @@
 //! * Every dispatch produces **exactly one** [`ReviewOutcome`]. Model turns
 //!   have no wall-clock deadline; explicit user/session cancellation reaps
 //!   every owned agent before the review returns.
-//! * Reviewer sessions are fresh, read-only, visible through the ordinary
-//!   subagent UI, and never modify the workspace.
+//! * Reviewer sessions are fresh and visible through the ordinary subagent UI.
+//!   Mjolnir-hosted ACP filesystem and terminal capabilities are read-only;
+//!   provider-owned tools use the configured native permission mode.
 //! * Reviewer reports are untrusted evidence delivered asynchronously. The
 //!   supervisor must vet them and cannot issue a final verdict while selected
 //!   reviewers remain outstanding.
