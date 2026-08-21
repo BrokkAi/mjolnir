@@ -27574,6 +27574,27 @@ mod tests {
     }
 
     #[test]
+    fn silence_completed_dictation_stays_in_composer_when_auto_send_is_off() {
+        let mut state = AppState::new();
+        state.voice_input_active = true;
+        state.voice_input_range = Some((0, 0));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "review this first".to_string(),
+                finish: DictationFinish::Silence,
+            }),
+        );
+
+        assert!(!state.voice_input_active);
+        assert_eq!(state.input, "review this first");
+        assert!(cmd_rx.try_recv().is_err(), "auto-send stays disabled");
+    }
+
+    #[test]
     fn prompt_ctrl_k_and_ctrl_u_delete_to_line_edges() {
         let mut state = AppState::new();
         state.input = "hello world".to_string();
