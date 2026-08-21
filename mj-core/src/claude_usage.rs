@@ -133,6 +133,11 @@ where
     // colliding owners would both win the lease and both probe.
     static OWNER_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let started = crate::usage_fact::unix_now();
+    let current_fact_minimum = if max_age.is_zero() {
+        started.saturating_add(1)
+    } else {
+        started
+    };
     let owner = format!(
         "mj-{}-{}",
         std::process::id(),
@@ -147,7 +152,7 @@ where
         {
             return result;
         }
-        if checkout_fact(&store, &owner).await {
+        if checkout_fact(&store, &owner, current_fact_minimum).await {
             let result = probe().await;
             match serde_json::to_string(&result) {
                 Ok(payload) => publish_fact(&store, payload, owner).await,
@@ -203,12 +208,18 @@ async fn read_fact(store: &UsageFactStore) -> Option<StoredFact> {
 
 /// A storage failure counts as a successful checkout: the shared cache
 /// must never make usage reporting worse than probing directly.
-async fn checkout_fact(store: &UsageFactStore, owner: &str) -> bool {
+async fn checkout_fact(store: &UsageFactStore, owner: &str, current_fact_minimum: i64) -> bool {
     let store = store.clone();
     let owner = owner.to_string();
     let now = crate::usage_fact::unix_now();
     match tokio::task::spawn_blocking(move || {
-        store.try_checkout(SHARED_FACT_PROVIDER, &owner, CHECKOUT_LEASE, now)
+        store.try_checkout(
+            SHARED_FACT_PROVIDER,
+            &owner,
+            CHECKOUT_LEASE,
+            now,
+            current_fact_minimum,
+        )
     })
     .await
     {
@@ -836,6 +847,7 @@ mod tests {
                 "other-process",
                 CHECKOUT_LEASE,
                 crate::usage_fact::unix_now(),
+                i64::MAX,
             )
             .expect("checkout");
 

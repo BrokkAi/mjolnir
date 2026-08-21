@@ -237,7 +237,7 @@ where
         {
             return Some(decode_fact(&fact));
         }
-        if checkout_fact(&store, &owner).await {
+        if checkout_fact(&store, &owner, started).await {
             let result = probe().await;
             let payload =
                 serde_json::json!({ "ok": result.is_ok(), "error": result.as_ref().err() });
@@ -282,12 +282,18 @@ async fn read_fact(store: &UsageFactStore) -> Option<StoredFact> {
 
 /// A storage failure counts as a successful checkout: the shared lease
 /// must never make spawning worse than probing directly.
-async fn checkout_fact(store: &UsageFactStore, owner: &str) -> bool {
+async fn checkout_fact(store: &UsageFactStore, owner: &str, current_fact_minimum: i64) -> bool {
     let store = store.clone();
     let owner = owner.to_string();
     let now = crate::usage_fact::unix_now();
     match tokio::task::spawn_blocking(move || {
-        store.try_checkout(SHARED_FACT_PROVIDER, &owner, CHECKOUT_LEASE, now)
+        store.try_checkout(
+            SHARED_FACT_PROVIDER,
+            &owner,
+            CHECKOUT_LEASE,
+            now,
+            current_fact_minimum,
+        )
     })
     .await
     {
