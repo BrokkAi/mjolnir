@@ -5299,6 +5299,19 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 
     // Client-side commands are handled here without forwarding anything
     // to the agent.
+    if plain_text_only && text == "/exit" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        if state.is_side {
+            state.side_exit_requested = true;
+        } else {
+            state.exit_reason = Some(UiExitReason::Quit);
+        }
+        return;
+    }
+
     if plain_text_only && text == "/new" {
         state.input.clear();
         clear_attachments(state);
@@ -14199,7 +14212,7 @@ fn help_modal_lines(
         help_blank_line(),
         help_command_line(
             "Built-in commands:",
-            "/clear keeps model; /new applies saved models; /load opens session picker; /export full includes nested agents",
+            "/exit quits Mjolnir (or returns from side); /clear keeps model; /new applies saved models; /load opens session picker; /export full includes nested agents",
             theme,
         ),
     ]);
@@ -19561,6 +19574,36 @@ mod tests {
 
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
         // Must not forward the command to the agent.
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn slash_exit_quits_without_forwarding_to_the_agent() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/exit".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert_eq!(state.exit_reason, Some(UiExitReason::Quit));
+        assert!(state.input.is_empty());
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn slash_exit_returns_from_a_side_conversation() {
+        let mut state = AppState::new();
+        state.is_side = true;
+        state.session_id = Some("side-session".to_string());
+        state.input = "/exit".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.side_exit_requested);
+        assert_eq!(state.exit_reason, None);
+        assert!(state.input.is_empty());
         assert!(cmd_rx.try_recv().is_err());
     }
 

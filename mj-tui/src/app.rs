@@ -226,6 +226,7 @@ const BUILTIN_REVIEW_COMMAND: &str = "review";
 const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const BUILTIN_TERMINALS_COMMAND: &str = "terminals";
 const BUILTIN_MEMORY_COMMAND: &str = "memory";
+const BUILTIN_EXIT_COMMAND: &str = "exit";
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
 fn builtin_new_command() -> AvailableCommand {
@@ -324,6 +325,14 @@ fn builtin_memory_command() -> AvailableCommand {
     )
 }
 
+fn builtin_exit_command() -> AvailableCommand {
+    AvailableCommand::new(BUILTIN_EXIT_COMMAND, "quit Mjolnir")
+}
+
+fn builtin_exit_side_command() -> AvailableCommand {
+    AvailableCommand::new(BUILTIN_EXIT_COMMAND, "return to the primary conversation")
+}
+
 fn install_builtin_commands(
     commands: &mut Vec<AvailableCommand>,
     include_fork: bool,
@@ -345,6 +354,7 @@ fn install_builtin_commands(
             && command.name != BUILTIN_RAGNAROK_COMMAND
             && command.name != BUILTIN_TERMINALS_COMMAND
             && command.name != BUILTIN_MEMORY_COMMAND
+            && command.name != BUILTIN_EXIT_COMMAND
     });
     if include_fork {
         commands.insert(0, builtin_fork_command());
@@ -352,6 +362,7 @@ fn install_builtin_commands(
     if include_side {
         commands.insert(0, builtin_side_command());
     }
+    commands.insert(0, builtin_exit_command());
     commands.insert(0, builtin_ragnarok_command());
     commands.insert(0, builtin_memory_command());
     commands.insert(0, builtin_mjconfig_command());
@@ -384,11 +395,13 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_RAGNAROK_COMMAND,
             BUILTIN_TERMINALS_COMMAND,
             BUILTIN_MEMORY_COMMAND,
+            BUILTIN_EXIT_COMMAND,
         ]
         .contains(&command.name.as_str())
     });
     commands.insert(0, builtin_side_command());
     commands.insert(0, builtin_export_command());
+    commands.insert(0, builtin_exit_side_command());
 }
 
 /// How the UI loop ends, so `main` can decide whether to quit entirely
@@ -10887,8 +10900,26 @@ mod tests {
                 "diff",
                 "mjconfig",
                 "memory",
-                "ragnarok"
+                "ragnarok",
+                "exit"
             ]
+        );
+    }
+
+    #[test]
+    fn side_conversation_advertises_exit_to_return_to_primary() {
+        let main = AppState::new();
+        let side = main.side_conversation(None);
+
+        let exit_commands: Vec<_> = side
+            .available_commands
+            .iter()
+            .filter(|command| command.name == BUILTIN_EXIT_COMMAND)
+            .collect();
+        assert_eq!(exit_commands.len(), 1);
+        assert_eq!(
+            exit_commands[0].description,
+            "return to the primary conversation"
         );
     }
 
@@ -10931,6 +10962,7 @@ mod tests {
                 "mjconfig",
                 "memory",
                 "ragnarok",
+                "exit",
                 "fork"
             ]
         );
@@ -10981,6 +11013,7 @@ mod tests {
                 "mjconfig",
                 "memory",
                 "ragnarok",
+                "exit",
                 "fork",
                 "review_pr"
             ]
@@ -11047,6 +11080,7 @@ mod tests {
                 "mjconfig",
                 "memory",
                 "ragnarok",
+                "exit",
                 "review_pr"
             ]
         );

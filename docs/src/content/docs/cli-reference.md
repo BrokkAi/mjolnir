@@ -57,6 +57,7 @@ Web](/remote/) for behavioral boundaries.
 | `/compact` | Compact the primary agent's session where supported |
 | `/subagents` | Open the session-wide actor roster and its retained transcripts |
 | `/ragnarok TASK` | Summon the model-vs-model arena for one implementation task |
+| `/exit` | Quit Mjolnir; in a side conversation, return to the primary conversation |
 
 The interactive autocomplete is the source of truth for commands in the
 installed version.
