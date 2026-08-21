@@ -458,6 +458,10 @@ pub enum Entry {
     InternalMessage(InternalMessage),
     /// System-level note (errors, warnings, mode changes).
     System(String),
+    /// Full result of a user-invoked local command (`/memory`, `/agents`).
+    /// Styled like `System`, but the user explicitly asked for this output,
+    /// so it is as durable as their prompt and never collapses.
+    CommandOutput(String),
     /// Local Mjolnir feature-discovery hint. Never sent to the agent.
     FeatureHint(String),
     /// Settled review-issue record: validated findings, pass verdicts, and
@@ -3227,6 +3231,7 @@ impl AppState {
             | Entry::SubagentPlan(_)
             | Entry::InternalMessage(_)
             | Entry::System(_)
+            | Entry::CommandOutput(_)
             | Entry::FeatureHint(_)
             | Entry::ReviewLedger(_)
             | Entry::SessionBoundary(_) => None,
@@ -3356,6 +3361,11 @@ impl AppState {
         self.bump_transcript_revision();
     }
 
+    pub fn push_command_output(&mut self, text: impl Into<String>) {
+        self.transcript.push(Entry::CommandOutput(text.into()));
+        self.bump_transcript_revision();
+    }
+
     pub fn push_review_ledger(&mut self, lines: Vec<ReviewLedgerLine>) {
         if lines.is_empty() {
             return;
@@ -3379,6 +3389,15 @@ impl AppState {
             return;
         }
         self.push_system_message(transcript_text);
+    }
+
+    /// Like [`record_status_message`](Self::record_status_message), for a
+    /// command result that echoes user content of arbitrary length: the
+    /// transcript record never collapses, so the echoed text stays readable.
+    pub fn record_command_output(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.set_status_line(StatusKind::Info, text.clone());
+        self.push_command_output(text);
     }
 
     /// Record the next eligible local feature hint after a quiet run of turns.

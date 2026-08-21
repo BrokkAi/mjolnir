@@ -704,6 +704,7 @@ fn transcript_entry_matches(state: &AppState, entry: &Entry, query: &str) -> boo
         | Entry::AgentMessage(text)
         | Entry::SubagentMessage(text)
         | Entry::System(text)
+        | Entry::CommandOutput(text)
         | Entry::FeatureHint(text)
         | Entry::SessionBoundary(text) => search_text_contains(text, query),
         Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
@@ -1060,6 +1061,7 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
     match entry {
         Entry::UserPrompt(_)
         | Entry::System(_)
+        | Entry::CommandOutput(_)
         | Entry::FeatureHint(_)
         | Entry::ReviewLedger(_)
         | Entry::SessionBoundary(_)
@@ -5406,7 +5408,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         clear_attachments(state);
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
-        state.push_system_message(active_models_and_usage_report(state));
+        state.push_command_output(active_models_and_usage_report(state));
         return;
     }
 
@@ -5750,7 +5752,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
         "" => {
             let memory_config = memory_config_from_disk(state);
             let listing = crate::memory::render_list(&store, &project, &memory_config);
-            state.push_system_message(listing);
+            state.push_command_output(listing);
         }
         "add" => {
             let (global, text) = match rest.strip_prefix("--global") {
@@ -5787,10 +5789,11 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 state.record_status_message(StatusKind::Warning, "usage: /memory forget <id>");
             }
             Ok(id) => match crate::memory::forget(&store, id) {
-                Ok(Some(entry)) => state.record_status_message(
-                    StatusKind::Info,
-                    format!("forgot memory m{}: {}", entry.id, entry.text),
-                ),
+                // The confirmation echoes the stored text, which can be
+                // arbitrarily long — record it as uncollapsible command
+                // output so the forgotten memory stays fully readable.
+                Ok(Some(entry)) => state
+                    .record_command_output(format!("forgot memory m{}: {}", entry.id, entry.text)),
                 Ok(None) => state
                     .record_status_message(StatusKind::Warning, format!("no memory with id m{id}")),
                 Err(error) => state.record_status_message(
@@ -6217,7 +6220,9 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                 };
                 push_export_text(out, &heading, &message.text);
             }
-            Entry::System(text) => push_export_text(out, "System", text),
+            Entry::System(text) | Entry::CommandOutput(text) => {
+                push_export_text(out, "System", text)
+            }
             Entry::ReviewLedger(lines) => {
                 let text = lines
                     .iter()
@@ -8305,7 +8310,7 @@ fn render_nested_agent_lines(
                     }
                 }
             }
-            Entry::System(text) => {
+            Entry::System(text) | Entry::CommandOutput(text) => {
                 push_styled_message(&mut out, text, state.theme.accent, false, state.theme);
             }
             Entry::ReviewLedger(lines) => {
@@ -9834,6 +9839,11 @@ fn render_transcript_entry_range_with_turns(
             }
             Entry::System(text) => {
                 push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
+            }
+            Entry::CommandOutput(text) => {
+                // The user typed the command; its result is the answer they
+                // asked for and stays fully readable, like their own prompt.
+                push_styled_message(&mut out, text, theme.accent, false, theme);
             }
             Entry::ReviewLedger(lines) => {
                 push_review_ledger_record(&mut out, lines, theme);
@@ -19911,7 +19921,7 @@ mod tests {
         assert_eq!(state.input_cursor, 0);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text))
+            Some(Entry::CommandOutput(text))
                 if text
                     == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via opencode\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
@@ -19951,6 +19961,12 @@ mod tests {
         let remaining = crate::memory::entries(&state.memory_store_path).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, 2);
+        // The confirmation echoes the stored text, so it must land as
+        // uncollapsible command output rather than a collapsible system note.
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::CommandOutput(text)) if text == "forgot memory m1: uses pnpm"
+        ));
 
         // Clearing needs an explicit confirm round trip.
         state.input = "/memory clear".to_string();
@@ -19977,7 +19993,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_memory_lists_memories_as_a_system_entry() {
+    fn slash_memory_lists_memories_as_a_command_output_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = AppState::new();
         state.memory_store_path = dir.path().join("memories.json");
@@ -19991,7 +20007,7 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("[m1] global fact")
+            Some(Entry::CommandOutput(text)) if text.contains("[m1] global fact")
         ));
     }
 
@@ -20007,7 +20023,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("Memories")
+            Some(Entry::CommandOutput(text)) if text.contains("Memories")
         ));
 
         state.agent_source_id = "codex-acp".to_string();
@@ -20015,7 +20031,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("Memories")
+            Some(Entry::CommandOutput(text)) if text.contains("Memories")
         ));
     }
 
@@ -24309,6 +24325,31 @@ mod tests {
                 .count(),
             3,
             "user prompt, primary, and subagent answer tails must remain visible: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn command_output_never_collapses() {
+        let mut state = AppState::new();
+        let listing = format!(
+            "Memories — store\n{}  [m99] LAST_MEMORY_LINE (today)",
+            "  [m1] a durable fact worth keeping around (2d ago)\n".repeat(30)
+        );
+        state.transcript.push(Entry::CommandOutput(listing));
+
+        let rendered = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("LAST_MEMORY_LINE")),
+            "command output must stay fully readable: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("details hidden")),
+            "command output must never collapse: {rendered:?}"
         );
     }
 
