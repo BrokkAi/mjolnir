@@ -230,14 +230,34 @@ const CLAUDE_AUTO_CHUNK_LIMIT: usize = 1_800;
 const MANAGED_BLOCK_PREFIX: &str = "<!-- mjolnir:shared-memory:start";
 const MANAGED_BLOCK_END: &str = "<!-- mjolnir:shared-memory:end -->";
 
+#[derive(Clone, Copy)]
+enum ClaudeImportVisibility {
+    Project,
+    Global,
+    Disabled,
+    Unresolved,
+}
+
 /// Import Claude Code's project auto-memory into the shared store. Imported
 /// chunks have stable source identities, so repeated turn-boundary refreshes
 /// are cheap and edits replace earlier content instead of duplicating it.
-fn remove_claude_imports(store_path: &Path, project: &Path) -> Result<()> {
+fn remove_project_claude_imports(store_path: &Path, project: &Path) -> Result<()> {
     mutate_claude_imports(store_path, |entry| {
-        entry.source.as_deref().is_some_and(|source| {
-            entry.project.as_deref() == Some(project) && source.starts_with("claude-auto:")
-        })
+        entry.project.as_deref() == Some(project)
+            && entry
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("claude-auto:"))
+    })
+}
+
+fn remove_global_claude_imports(store_path: &Path) -> Result<()> {
+    mutate_claude_imports(store_path, |entry| {
+        entry.project.is_none()
+            && entry
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("claude-auto-global:"))
     })
 }
 
@@ -525,16 +545,48 @@ fn base36(mut value: u32) -> String {
 /// locations for `project`. This is deliberately file-based: neither provider
 /// receives a synthetic user prompt from Mjolnir.
 pub fn synchronize_native_memories(store_path: &Path, project: &Path) -> Result<()> {
-    let claude = match claude_auto_memory_path(project) {
-        ClaudeMemoryResolution::Location(location) => Some(location),
-        ClaudeMemoryResolution::Disabled => {
-            remove_claude_imports(store_path, project)?;
-            None
+    let (claude, visibility) = match claude_auto_memory_path(project) {
+        ClaudeMemoryResolution::Location(location) => {
+            // `autoMemoryDirectory` is configured above the project level. If
+            // it is no longer selected, its global import must not remain
+            // visible to Codex through the shared store.
+            if !location.global {
+                remove_global_claude_imports(store_path)?;
+            }
+            let visibility = if location.global {
+                ClaudeImportVisibility::Global
+            } else {
+                ClaudeImportVisibility::Project
+            };
+            (Some(location), visibility)
         }
-        ClaudeMemoryResolution::Unresolved => None,
+        ClaudeMemoryResolution::Disabled => {
+            // A project-level setting must not erase imports still used by
+            // another project. Its native Codex block omits all such imports.
+            remove_project_claude_imports(store_path, project)?;
+            (None, ClaudeImportVisibility::Disabled)
+        }
+        ClaudeMemoryResolution::Unresolved => (None, ClaudeImportVisibility::Unresolved),
     };
     synchronize_native_memories_at(
         store_path,
+        project,
+        claude
+            .as_ref()
+            .map(|location| (location.path.as_path(), location.global)),
+        codex_memories_root().as_deref(),
+        visibility,
+    )
+}
+
+/// Remove Mjolnir-owned native memory blocks when native memory use is
+/// disabled. Provider-owned content and the shared store are left untouched.
+pub fn remove_managed_native_memories(project: &Path) -> Result<()> {
+    let claude = match claude_auto_memory_path(project) {
+        ClaudeMemoryResolution::Location(location) => Some(location),
+        ClaudeMemoryResolution::Disabled | ClaudeMemoryResolution::Unresolved => None,
+    };
+    remove_managed_native_memories_at(
         project,
         claude
             .as_ref()
@@ -548,13 +600,14 @@ fn synchronize_native_memories_at(
     project: &Path,
     claude_memory: Option<(&Path, bool)>,
     codex_root: Option<&Path>,
+    visibility: ClaudeImportVisibility,
 ) -> Result<()> {
     if let Some((path, global)) = claude_memory {
         sync_claude_auto_memory_from(store_path, project, Some(path), global)?;
     }
-    let visible = entries_for_project(store_path, project)?;
+    let visible = native_visible_entries(store_path, project, visibility)?;
 
-    if let Some((path, global)) = claude_memory {
+    if let Some((path, _global)) = claude_memory {
         let native_entries: Vec<_> = visible
             .iter()
             .filter(|entry| {
@@ -563,7 +616,6 @@ fn synchronize_native_memories_at(
                     .as_deref()
                     .is_some_and(|source| source.starts_with(CLAUDE_AUTO_SOURCE))
             })
-            .filter(|entry| !global || entry.project.is_none())
             .cloned()
             .collect();
         replace_managed_project_block(path, project, &native_entries)?;
@@ -575,6 +627,51 @@ fn synchronize_native_memories_at(
         // same project-owned block there, rather than relying on the registry
         // file being read during a turn.
         replace_managed_project_block(&root.join("memory_summary.md"), project, &visible)?;
+    }
+    Ok(())
+}
+
+fn native_visible_entries(
+    store_path: &Path,
+    project: &Path,
+    visibility: ClaudeImportVisibility,
+) -> Result<Vec<MemoryEntry>> {
+    let mut entries = entries_for_project(store_path, project)?;
+    entries.retain(|entry| {
+        let source = entry.source.as_deref();
+        match visibility {
+            ClaudeImportVisibility::Global => {
+                !source.is_some_and(|source| source.starts_with("claude-auto:"))
+            }
+            ClaudeImportVisibility::Project => {
+                !source.is_some_and(|source| source.starts_with("claude-auto-global:"))
+            }
+            ClaudeImportVisibility::Disabled => {
+                !source.is_some_and(|source| source.starts_with(CLAUDE_AUTO_SOURCE))
+            }
+            ClaudeImportVisibility::Unresolved => true,
+        }
+    });
+    Ok(entries)
+}
+
+fn remove_managed_native_memories_at(
+    project: &Path,
+    claude_memory: Option<(&Path, bool)>,
+    codex_root: Option<&Path>,
+) -> Result<()> {
+    if let Some((path, global)) = claude_memory {
+        if global {
+            remove_all_managed_blocks(path)?;
+        } else {
+            replace_managed_project_block(path, project, &[])?;
+        }
+    }
+    if let Some(root) = codex_root {
+        // Codex's memory files are global to its installation, so disabling
+        // native memory use must remove blocks from every Mjolnir project.
+        remove_all_managed_blocks(&root.join("MEMORY.md"))?;
+        remove_all_managed_blocks(&root.join("memory_summary.md"))?;
     }
     Ok(())
 }
@@ -595,8 +692,11 @@ fn replace_managed_project_block(
         "{MANAGED_BLOCK_PREFIX} project={} -->",
         project_marker(project)
     );
-    let replacement = (!entries.is_empty()).then(|| render_project_block(&start, project, entries));
-    replace_managed_block(path, &start, replacement.as_deref())
+    if entries.is_empty() {
+        return remove_managed_block(path, &start);
+    }
+    let replacement = render_project_block(&start, project, entries);
+    replace_managed_block(path, &start, Some(&replacement))
 }
 
 fn render_project_block(start: &str, project: &Path, entries: &[MemoryEntry]) -> String {
@@ -639,6 +739,7 @@ fn project_marker(project: &Path) -> String {
 }
 
 fn replace_managed_block(path: &Path, start: &str, replacement: Option<&str>) -> Result<()> {
+    let _guard = lock_native_memory(path)?;
     let existing = if path.exists() {
         std::fs::read_to_string(path)
             .with_context(|| format!("read native memory {}", path.display()))?
@@ -670,6 +771,67 @@ fn replace_managed_block(path: &Path, start: &str, replacement: Option<&str>) ->
         },
     };
     write_native_memory(path, &updated)
+}
+
+fn remove_managed_block(path: &Path, start: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    replace_managed_block(path, start, None)
+}
+
+fn remove_all_managed_blocks(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let _guard = lock_native_memory(path)?;
+    let existing = if path.exists() {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("read native memory {}", path.display()))?
+    } else {
+        return Ok(());
+    };
+    let mut remaining = existing.as_str();
+    let mut updated = String::with_capacity(existing.len());
+    let mut removed = false;
+    while let Some(begin) = remaining.find(MANAGED_BLOCK_PREFIX) {
+        updated.push_str(&remaining[..begin]);
+        let after_start = &remaining[begin..];
+        let Some(end) = after_start.find(MANAGED_BLOCK_END) else {
+            return Err(anyhow!(
+                "managed memory block in {} has no closing marker",
+                path.display()
+            ));
+        };
+        remaining = &after_start[end + MANAGED_BLOCK_END.len()..];
+        removed = true;
+    }
+    if !removed {
+        return Ok(());
+    }
+    updated.push_str(remaining);
+    write_native_memory(path, &updated)
+}
+
+fn lock_native_memory(path: &Path) -> Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("native memory path {} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create native memory directory {}", parent.display()))?;
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".mjolnir.lock");
+    let lock_path = PathBuf::from(lock_path);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open native memory lock {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("lock native memory {}", lock_path.display()))?;
+    Ok(lock)
 }
 
 fn write_native_memory(path: &Path, content: &str) -> Result<()> {
@@ -756,10 +918,17 @@ fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct SessionMemory {
     pub store_path: PathBuf,
+    /// Config path to re-check before a fresh provider session starts. This
+    /// lets `/memory off` take effect on an already-running ACP runtime.
+    pub config_path: Option<PathBuf>,
     /// Project scope used for recall and for project-scoped saves.
     pub project: PathBuf,
     /// Synchronize stored knowledge into the provider's native memory files.
     pub inject: bool,
+    /// Remove Mjolnir-managed native blocks before the next provider session.
+    /// This is set when native memory use is disabled, so old blocks cannot
+    /// remain active in a provider after the toggle changes.
+    pub cleanup: bool,
     /// Expose the `memory_save` / `memory_forget` MCP tools.
     pub tools: bool,
 }
@@ -772,23 +941,20 @@ impl SessionMemory {
         cwd: &Path,
         adapter: Option<crate::roster::AdapterKind>,
     ) -> Option<Self> {
-        if !config.enabled {
-            return None;
-        }
         if !matches!(
             adapter,
             Some(crate::roster::AdapterKind::Codex | crate::roster::AdapterKind::Claude)
         ) {
             return None;
         }
-        if !config.use_memories && !config.generate_memories {
-            return None;
-        }
+        let inject = config.enabled && config.use_memories;
         Some(Self {
             store_path: default_path(),
+            config_path: Some(crate::config::default_config_path()),
             project: project_key(cwd),
-            inject: config.use_memories,
-            tools: config.generate_memories,
+            inject,
+            cleanup: !inject,
+            tools: config.enabled && config.generate_memories,
         })
     }
 
@@ -800,19 +966,19 @@ impl SessionMemory {
         cwd: &Path,
         adapter: Option<crate::roster::AdapterKind>,
     ) -> Option<Self> {
-        if !config.enabled || !config.use_memories {
-            return None;
-        }
         if !matches!(
             adapter,
             Some(crate::roster::AdapterKind::Codex | crate::roster::AdapterKind::Claude)
         ) {
             return None;
         }
+        let inject = config.enabled && config.use_memories;
         Some(Self {
             store_path: default_path(),
+            config_path: Some(crate::config::default_config_path()),
             project: project_key(cwd),
-            inject: true,
+            inject,
+            cleanup: !inject,
             tools: false,
         })
     }
@@ -821,13 +987,23 @@ impl SessionMemory {
     /// are non-fatal: a provider's private memory store must never block an
     /// agent session.
     pub(crate) fn synchronize_native(&self) {
-        if !self.inject {
-            return;
-        }
-        if let Err(error) = synchronize_native_memories(&self.store_path, &self.project) {
-            tracing::warn!("could not synchronize native memories: {error:#}");
+        if native_memory_enabled(self.config_path.as_deref(), self.inject) {
+            if let Err(error) = synchronize_native_memories(&self.store_path, &self.project) {
+                tracing::warn!("could not synchronize native memories: {error:#}");
+            }
+        } else if (self.cleanup || self.config_path.is_some())
+            && let Err(error) = remove_managed_native_memories(&self.project)
+        {
+            tracing::warn!("could not remove managed native memories: {error:#}");
         }
     }
+}
+
+fn native_memory_enabled(config_path: Option<&Path>, fallback: bool) -> bool {
+    config_path
+        .and_then(|path| crate::config::Config::load(path).ok())
+        .map(|config| config.memory.enabled && config.memory.use_memories)
+        .unwrap_or(fallback)
 }
 
 /// Native-memory synchronization for a worker lane identified by its adapter
@@ -1025,6 +1201,7 @@ struct McpHandler {
     store_path: PathBuf,
     project: PathBuf,
     sync_native: bool,
+    native_config_path: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -1035,6 +1212,7 @@ impl McpHandler {
             store_path: memory.store_path.clone(),
             project: memory.project.clone(),
             sync_native: memory.inject,
+            native_config_path: memory.config_path.clone(),
             tool_router: Self::tool_router(),
         }
     }
@@ -1094,10 +1272,16 @@ impl McpHandler {
     }
 
     fn synchronize_native(&self) {
-        if self.sync_native
-            && let Err(error) = synchronize_native_memories(&self.store_path, &self.project)
+        if native_memory_enabled(self.native_config_path.as_deref(), self.sync_native) {
+            if let Err(error) = synchronize_native_memories(&self.store_path, &self.project) {
+                tracing::warn!(
+                    "could not synchronize native memories after tool update: {error:#}"
+                );
+            }
+        } else if self.native_config_path.is_some()
+            && let Err(error) = remove_managed_native_memories(&self.project)
         {
-            tracing::warn!("could not synchronize native memories after tool update: {error:#}");
+            tracing::warn!("could not remove managed native memories after tool update: {error:#}");
         }
     }
 }
@@ -1340,6 +1524,7 @@ mod tests {
             &project,
             Some((&claude_memory, false)),
             Some(&codex_root),
+            ClaudeImportVisibility::Project,
         )
         .unwrap();
 
@@ -1365,8 +1550,14 @@ mod tests {
             Some(other_project.clone()),
         )
         .unwrap();
-        synchronize_native_memories_at(&store_path, &other_project, None, Some(&codex_root))
-            .unwrap();
+        synchronize_native_memories_at(
+            &store_path,
+            &other_project,
+            None,
+            Some(&codex_root),
+            ClaudeImportVisibility::Unresolved,
+        )
+        .unwrap();
         let summary = std::fs::read_to_string(codex_root.join("memory_summary.md")).unwrap();
         assert!(summary.contains("this-project fact"));
         assert!(summary.contains("other-project fact"));
@@ -1377,6 +1568,7 @@ mod tests {
             &project,
             Some((&claude_memory, false)),
             Some(&codex_root),
+            ClaudeImportVisibility::Project,
         )
         .unwrap();
         let codex = std::fs::read_to_string(codex_root.join("MEMORY.md")).unwrap();
@@ -1387,6 +1579,105 @@ mod tests {
         assert!(!summary.contains("this-project fact"));
         assert!(summary.contains("native Claude fact"));
         assert!(summary.contains("other-project fact"));
+
+        remove_managed_native_memories_at(
+            &project,
+            Some((&claude_memory, false)),
+            Some(&codex_root),
+        )
+        .unwrap();
+        let claude = std::fs::read_to_string(&claude_memory).unwrap();
+        assert!(claude.contains("native Claude fact"));
+        assert!(!claude.contains("global shared fact"));
+        let codex = std::fs::read_to_string(codex_root.join("MEMORY.md")).unwrap();
+        assert!(codex.contains("Codex's own memory"));
+        assert!(!codex.contains("other-project fact"));
+        let summary = std::fs::read_to_string(codex_root.join("memory_summary.md")).unwrap();
+        assert!(summary.contains("Existing summary"));
+        assert!(!summary.contains("other-project fact"));
+    }
+
+    #[test]
+    fn native_sync_keeps_project_knowledge_in_global_claude_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = store(&dir);
+        let project = dir.path().join("project");
+        let claude_memory = dir.path().join("claude/MEMORY.md");
+        std::fs::create_dir_all(claude_memory.parent().unwrap()).unwrap();
+        add(&store_path, "global fact", None).unwrap();
+        add(&store_path, "project fact", Some(project.clone())).unwrap();
+
+        synchronize_native_memories_at(
+            &store_path,
+            &project,
+            Some((&claude_memory, true)),
+            None,
+            ClaudeImportVisibility::Global,
+        )
+        .unwrap();
+
+        let claude = std::fs::read_to_string(&claude_memory).unwrap();
+        assert!(claude.contains("global fact"));
+        assert!(claude.contains("project fact"));
+    }
+
+    #[test]
+    fn native_sync_serializes_concurrent_project_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = store(&dir);
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let codex_root = dir.path().join("codex/memories");
+        add(&store_path, "first project fact", Some(first.clone())).unwrap();
+        add(&store_path, "second project fact", Some(second.clone())).unwrap();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                synchronize_native_memories_at(
+                    &store_path,
+                    &first,
+                    None,
+                    Some(&codex_root),
+                    ClaudeImportVisibility::Unresolved,
+                )
+                .unwrap();
+            });
+            scope.spawn(|| {
+                synchronize_native_memories_at(
+                    &store_path,
+                    &second,
+                    None,
+                    Some(&codex_root),
+                    ClaudeImportVisibility::Unresolved,
+                )
+                .unwrap();
+            });
+        });
+
+        for path in [
+            codex_root.join("MEMORY.md"),
+            codex_root.join("memory_summary.md"),
+        ] {
+            let content = std::fs::read_to_string(path).unwrap();
+            assert!(content.contains("first project fact"));
+            assert!(content.contains("second project fact"));
+        }
+    }
+
+    #[test]
+    fn native_memory_lock_is_held_on_a_stable_sibling_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex/memories/MEMORY.md");
+        let _first = lock_native_memory(&path).unwrap();
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".mjolnir.lock");
+        let second = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(PathBuf::from(lock_path))
+            .unwrap();
+
+        assert!(second.try_lock().is_err());
     }
 
     #[test]
@@ -1474,6 +1765,80 @@ mod tests {
     }
 
     #[test]
+    fn reconfiguring_claude_auto_memory_removes_global_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = store(&dir);
+        let memory = dir.path().join("MEMORY.md");
+        std::fs::write(&memory, "old global Claude fact").unwrap();
+        sync_claude_auto_memory_from(&store_path, Path::new("/one"), Some(&memory), true).unwrap();
+        add(&store_path, "locally saved global fact", None).unwrap();
+
+        remove_global_claude_imports(&store_path).unwrap();
+        let remaining = entries(&store_path).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].text, "locally saved global fact");
+    }
+
+    #[test]
+    fn disabling_one_project_claude_auto_memory_preserves_other_project_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = store(&dir);
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let first_memory = dir.path().join("first/MEMORY.md");
+        let second_memory = dir.path().join("second/MEMORY.md");
+        std::fs::create_dir_all(first_memory.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second_memory.parent().unwrap()).unwrap();
+        std::fs::write(&first_memory, "first Claude fact").unwrap();
+        std::fs::write(&second_memory, "second Claude fact").unwrap();
+        sync_claude_auto_memory_from(&store_path, &first, Some(&first_memory), false).unwrap();
+        sync_claude_auto_memory_from(&store_path, &second, Some(&second_memory), false).unwrap();
+
+        remove_project_claude_imports(&store_path, &first).unwrap();
+
+        assert!(entries_for_project(&store_path, &first).unwrap().is_empty());
+        let second_entries = entries_for_project(&store_path, &second).unwrap();
+        assert_eq!(second_entries.len(), 1);
+        assert!(second_entries[0].text.contains("second Claude fact"));
+    }
+
+    #[test]
+    fn native_codex_memory_hides_claude_imports_outside_selected_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = store(&dir);
+        let project = dir.path().join("project");
+        let global_memory = dir.path().join("global/MEMORY.md");
+        let project_memory = dir.path().join("project/MEMORY.md");
+        let codex_root = dir.path().join("codex/memories");
+        std::fs::create_dir_all(global_memory.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(project_memory.parent().unwrap()).unwrap();
+        std::fs::write(&global_memory, "global Claude fact").unwrap();
+        std::fs::write(&project_memory, "project Claude fact").unwrap();
+        sync_claude_auto_memory_from(&store_path, &project, Some(&global_memory), true).unwrap();
+        sync_claude_auto_memory_from(&store_path, &project, Some(&project_memory), false).unwrap();
+        add(&store_path, "local fact", Some(project.clone())).unwrap();
+
+        for (visibility, global, project_import) in [
+            (ClaudeImportVisibility::Global, true, false),
+            (ClaudeImportVisibility::Project, false, true),
+            (ClaudeImportVisibility::Disabled, false, false),
+        ] {
+            synchronize_native_memories_at(
+                &store_path,
+                &project,
+                None,
+                Some(&codex_root),
+                visibility,
+            )
+            .unwrap();
+            let codex = std::fs::read_to_string(codex_root.join("MEMORY.md")).unwrap();
+            assert!(codex.contains("local fact"));
+            assert_eq!(codex.contains("global Claude fact"), global);
+            assert_eq!(codex.contains("project Claude fact"), project_import);
+        }
+    }
+
+    #[test]
     fn imported_entries_are_owned_by_their_source_file() {
         let dir = tempfile::tempdir().unwrap();
         let store_path = store(&dir);
@@ -1505,24 +1870,6 @@ mod tests {
     }
 
     #[test]
-    fn scope_changes_clean_project_imports_without_cross_project_global_deletion() {
-        let dir = tempfile::tempdir().unwrap();
-        let store_path = store(&dir);
-        let project = Path::new("/project");
-        let memory = dir.path().join("MEMORY.md");
-        std::fs::write(&memory, "fact").unwrap();
-        sync_claude_auto_memory_from(&store_path, project, Some(&memory), false).unwrap();
-        sync_claude_auto_memory_from(&store_path, project, Some(&memory), true).unwrap();
-        let global = entries(&store_path).unwrap();
-        assert_eq!(global.len(), 1);
-        assert!(global[0].project.is_none());
-        remove_claude_imports(&store_path, Path::new("/another-project")).unwrap();
-        assert_eq!(entries(&store_path).unwrap().len(), 1);
-        remove_claude_imports(&store_path, project).unwrap();
-        assert_eq!(entries(&store_path).unwrap().len(), 1);
-    }
-
-    #[test]
     fn claude_disable_env_uses_claude_truthiness() {
         for value in ["1", "true", "YES", "on"] {
             assert!(claude_env_true(value));
@@ -1545,19 +1892,27 @@ mod tests {
         );
         assert!(SessionMemory::from_config(&defaults, project, Some(AdapterKind::Codex)).is_some());
 
-        // The master switch beats everything, including a Codex primary.
+        // Disabling native memory keeps a cleanup-only runtime so provider
+        // files cannot continue loading an old Mjolnir block.
         let config = crate::config::MemoryConfig {
             enabled: false,
             ..Default::default()
         };
-        assert!(SessionMemory::from_config(&config, project, Some(AdapterKind::Codex)).is_none());
+        let memory =
+            SessionMemory::from_config(&config, project, Some(AdapterKind::Codex)).unwrap();
+        assert!(!memory.inject);
+        assert!(memory.cleanup);
+        assert!(!memory.tools);
 
         let config = crate::config::MemoryConfig {
             enabled: true,
             use_memories: false,
             generate_memories: false,
         };
-        assert!(SessionMemory::from_config(&config, project, Some(AdapterKind::Codex)).is_none());
+        let memory =
+            SessionMemory::from_config(&config, project, Some(AdapterKind::Codex)).unwrap();
+        assert!(!memory.inject);
+        assert!(memory.cleanup);
         let config = crate::config::MemoryConfig {
             enabled: true,
             use_memories: true,
@@ -1566,8 +1921,22 @@ mod tests {
         let memory =
             SessionMemory::from_config(&config, project, Some(AdapterKind::Codex)).unwrap();
         assert!(memory.inject);
+        assert!(!memory.cleanup);
         assert!(!memory.tools);
         assert_eq!(memory.project, PathBuf::from("/tmp/proj"));
+    }
+
+    #[test]
+    fn native_memory_sync_reloads_the_saved_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut config = crate::config::Config::default();
+        config.save(&config_path).unwrap();
+        assert!(native_memory_enabled(Some(&config_path), false));
+
+        config.memory.use_memories = false;
+        config.save(&config_path).unwrap();
+        assert!(!native_memory_enabled(Some(&config_path), true));
     }
 
     #[test]
@@ -1579,10 +1948,12 @@ mod tests {
         let memory = SessionMemory::inject_only(&defaults, project, Some(AdapterKind::Codex))
             .expect("codex worker lanes receive memory");
         assert!(memory.inject);
+        assert!(!memory.cleanup);
         assert!(!memory.tools, "workers never get memory_save");
         let memory = SessionMemory::inject_only(&defaults, project, Some(AdapterKind::Claude))
             .expect("claude worker lanes receive memory");
         assert!(memory.inject);
+        assert!(!memory.cleanup);
         // Unknown/custom adapters remain opt-in, as for primaries.
         assert!(SessionMemory::inject_only(&defaults, project, None).is_none());
 
@@ -1590,13 +1961,19 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        assert!(SessionMemory::inject_only(&config, project, Some(AdapterKind::Codex)).is_none());
+        let memory =
+            SessionMemory::inject_only(&config, project, Some(AdapterKind::Codex)).unwrap();
+        assert!(!memory.inject);
+        assert!(memory.cleanup);
         let config = crate::config::MemoryConfig {
             enabled: true,
             use_memories: false,
             generate_memories: true,
         };
-        assert!(SessionMemory::inject_only(&config, project, Some(AdapterKind::Codex)).is_none());
+        let memory =
+            SessionMemory::inject_only(&config, project, Some(AdapterKind::Codex)).unwrap();
+        assert!(!memory.inject);
+        assert!(memory.cleanup);
     }
 
     #[test]
@@ -1682,8 +2059,10 @@ mod tests {
         let path = store(&dir);
         let handler = McpHandler::new(&SessionMemory {
             store_path: path.clone(),
+            config_path: None,
             project: PathBuf::from("/tmp/proj"),
             inject: false,
+            cleanup: false,
             tools: true,
         });
         handler
@@ -1712,8 +2091,10 @@ mod tests {
         add(&path, "fact", None).unwrap();
         let handler = McpHandler::new(&SessionMemory {
             store_path: path.clone(),
+            config_path: None,
             project: PathBuf::from("/tmp/proj"),
             inject: false,
+            cleanup: false,
             tools: true,
         });
         let ok = handler

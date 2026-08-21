@@ -419,10 +419,15 @@ impl WorkspaceSnapshot {
     }
 }
 
-pub async fn repository_review_patch(
+/// Capture immutable Git trees for an explicit discrete-review target.
+///
+/// This keeps reviewer tooling pinned to the target that the user selected,
+/// rather than approximating it with a live worktree diff while the review
+/// runs.
+pub async fn repository_review_snapshot(
     workspace_root: &Path,
     target: RepositoryReviewTarget,
-) -> Result<String, String> {
+) -> Result<ReviewSnapshot, String> {
     let root = tokio::fs::canonicalize(workspace_root)
         .await
         .map_err(|_| "workspace root is unavailable".to_string())?;
@@ -441,51 +446,108 @@ pub async fn repository_review_patch(
             let mut snapshot =
                 GitTreeSnapshot::capture_head(repo_root.clone(), common_dir, vec![pathspec])
                     .await?;
-            snapshot.delta().await.map(|delta| {
-                if delta.changed {
-                    bound_text(
-                        format!(
-                            "Repository: {}\n{}",
-                            repo_root.display(),
-                            delta.patch.trim_end()
-                        ),
-                        REVIEW_PATCH_LIMIT,
-                    )
-                } else {
-                    "No uncommitted changes.".to_string()
-                }
-            })
+            snapshot.delta().await.map(|delta| delta.review_snapshot)
         }
         RepositoryReviewTarget::Head => {
-            let pathspec = pathspec.to_string_lossy().to_string();
-            let output = run_plain_git(
-                &repo_root,
-                &[
-                    "diff-tree",
-                    "--root",
-                    "-p",
-                    "--first-parent",
-                    "--no-commit-id",
-                    "--no-color",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--find-renames",
-                    "HEAD",
-                    "--",
-                    &pathspec,
-                ],
-            )
-            .await?;
-            Ok(if output.trim().is_empty() {
-                "HEAD introduces no changes in this workspace root.".to_string()
-            } else {
-                bound_text(
-                    format!("Repository: {}\n{}", repo_root.display(), output.trim_end()),
-                    REVIEW_PATCH_LIMIT,
-                )
-            })
+            review_snapshot_for_head(repo_root, common_dir, pathspec).await
         }
     }
+}
+
+async fn review_snapshot_for_head(
+    repo_root: PathBuf,
+    common_dir: PathBuf,
+    pathspec: PathBuf,
+) -> Result<ReviewSnapshot, String> {
+    let target_tree = resolve_tree(&repo_root, "HEAD^{tree}").await?;
+    let base_tree = resolve_tree(&repo_root, "HEAD^1^{tree}").await.ok();
+    review_snapshot_from_trees(repo_root, common_dir, base_tree, target_tree, pathspec).await
+}
+
+async fn resolve_tree(repo_root: &Path, rev: &str) -> Result<String, String> {
+    let output = run_plain_git(repo_root, &["rev-parse", "--verify", rev]).await?;
+    output
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|tree| !tree.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Git returned an empty tree identifier".to_string())
+}
+
+async fn review_snapshot_from_trees(
+    repo_root: PathBuf,
+    common_dir: PathBuf,
+    base_tree: Option<String>,
+    target_tree: String,
+    pathspec: PathBuf,
+) -> Result<ReviewSnapshot, String> {
+    let scratch = tempfile::Builder::new()
+        .prefix("mj-workspace-review-")
+        .tempdir()
+        .map_err(|_| "could not create temporary snapshot storage".to_string())?;
+    let object_dir = scratch.path().join("objects");
+    std::fs::create_dir_all(object_dir.join("info"))
+        .and_then(|_| std::fs::create_dir_all(object_dir.join("pack")))
+        .map_err(|_| "could not initialize temporary snapshot storage".to_string())?;
+    let scratch = Arc::new(scratch);
+    let alternate_object_dir = common_dir.join("objects");
+    let base_tree = match base_tree {
+        Some(tree) => tree,
+        None => write_empty_tree(&repo_root, &object_dir, &alternate_object_dir).await?,
+    };
+    let pathspec = pathspec.to_string_lossy().to_string();
+    let patch = run_snapshot_git(
+        &repo_root,
+        &object_dir,
+        &alternate_object_dir,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+            &base_tree,
+            &target_tree,
+            "--",
+            &pathspec,
+        ],
+    )
+    .await?;
+    let full_patch_path = scratch.path().join("review-head.patch");
+    tokio::fs::write(&full_patch_path, patch)
+        .await
+        .map_err(|error| format!("could not persist captured review patch: {error}"))?;
+    Ok(ReviewSnapshot {
+        repo_root,
+        object_dir,
+        alternate_object_dir,
+        base_tree,
+        target_tree,
+        full_patch_path,
+        _lease: scratch,
+    })
+}
+
+async fn write_empty_tree(
+    repo_root: &Path,
+    object_dir: &Path,
+    alternate_object_dir: &Path,
+) -> Result<String, String> {
+    let output = run_snapshot_git(
+        repo_root,
+        object_dir,
+        alternate_object_dir,
+        &["hash-object", "-t", "tree", "-w", "--stdin"],
+    )
+    .await?;
+    output
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|tree| !tree.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Git returned an empty tree identifier".to_string())
 }
 
 impl GitTreeSnapshot {
@@ -792,6 +854,27 @@ async fn run_plain_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|_| "Git output was not UTF-8".to_string())
 }
 
+async fn run_snapshot_git(
+    cwd: &Path,
+    object_dir: &Path,
+    alternate_object_dir: &Path,
+    args: &[&str],
+) -> Result<String, String> {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .env_remove("GIT_INDEX_FILE")
+        .env("GIT_OBJECT_DIRECTORY", object_dir)
+        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate_object_dir)
+        .args(args)
+        .output()
+        .await
+        .map_err(|_| "could not launch Git snapshot command".to_string())?;
+    if !output.status.success() {
+        return Err(git_failure(&output));
+    }
+    String::from_utf8(output.stdout).map_err(|_| "Git snapshot output was not UTF-8".to_string())
+}
+
 fn git_failure(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let detail = stderr
@@ -859,27 +942,18 @@ mod tests {
         git(root, &["commit", "-qm", "baseline"]);
     }
 
-    fn object_files(root: &Path) -> BTreeSet<PathBuf> {
-        fn visit(root: &Path, dir: &Path, output: &mut BTreeSet<PathBuf>) {
-            for entry in std::fs::read_dir(dir).expect("read object directory") {
-                let entry = entry.expect("object entry");
-                let path = entry.path();
-                if path.is_dir() {
-                    visit(root, &path, output);
-                } else {
-                    output.insert(
-                        path.strip_prefix(root)
-                            .expect("relative object")
-                            .to_path_buf(),
-                    );
-                }
-            }
-        }
-
-        let objects = root.join(".git").join("objects");
-        let mut output = BTreeSet::new();
-        visit(&objects, &objects, &mut output);
-        output
+    fn object_ids(root: &Path) -> BTreeSet<String> {
+        git(
+            root,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objectname)",
+            ],
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
     }
 
     #[tokio::test]
@@ -890,26 +964,45 @@ mod tests {
         std::fs::write(root.join("tracked.txt"), "baseline\n").expect("baseline");
         commit_all(root);
 
+        let objects_before_root_review = object_ids(root);
+        let root_head_snapshot = repository_review_snapshot(root, RepositoryReviewTarget::Head)
+            .await
+            .expect("root HEAD review snapshot");
+        assert!(
+            root_head_snapshot
+                .full_patch()
+                .await
+                .expect("root HEAD patch")
+                .contains("tracked.txt")
+        );
+        assert_eq!(object_ids(root), objects_before_root_review);
+
         std::fs::write(root.join("tracked.txt"), "changed\n").expect("change tracked");
         git(root, &["add", "tracked.txt"]);
         std::fs::write(root.join("untracked.txt"), "new\n").expect("untracked");
         let status = git(root, &["status", "--porcelain=v1", "--untracked-files=all"]);
-        let patch = repository_review_patch(root, RepositoryReviewTarget::Uncommitted)
+        let uncommitted_snapshot =
+            repository_review_snapshot(root, RepositoryReviewTarget::Uncommitted)
+                .await
+                .expect("uncommitted review snapshot");
+        let uncommitted_full_patch = uncommitted_snapshot
+            .full_patch()
             .await
-            .expect("uncommitted patch");
-        assert!(patch.contains("tracked.txt"));
-        assert!(patch.contains("untracked.txt"));
+            .expect("uncommitted full patch");
+        assert!(uncommitted_full_patch.contains("tracked.txt"));
+        assert!(uncommitted_full_patch.contains("untracked.txt"));
         assert_eq!(
             git(root, &["status", "--porcelain=v1", "--untracked-files=all"]),
             status
         );
 
         commit_all(root);
-        let head = repository_review_patch(root, RepositoryReviewTarget::Head)
+        let head_snapshot = repository_review_snapshot(root, RepositoryReviewTarget::Head)
             .await
-            .expect("head patch");
-        assert!(head.contains("tracked.txt"));
-        assert!(head.contains("untracked.txt"));
+            .expect("HEAD review snapshot");
+        let head_full_patch = head_snapshot.full_patch().await.expect("HEAD full patch");
+        assert!(head_full_patch.contains("tracked.txt"));
+        assert!(head_full_patch.contains("untracked.txt"));
     }
 
     #[tokio::test]
@@ -956,7 +1049,7 @@ mod tests {
         let git_dir = root.join(".git");
         let index_before = std::fs::read(git_dir.join("index")).expect("read real index");
         let refs_before = git(root, &["show-ref"]);
-        let objects_before = object_files(root);
+        let objects_before = object_ids(root);
         let branch_before = git(root, &["symbolic-ref", "HEAD"]);
         let status_before = git(root, &["status", "--porcelain=v1", "--untracked-files=all"]);
         let snapshot = WorkspaceSnapshot::capture(&[root.to_path_buf()]).await;
@@ -1034,7 +1127,7 @@ mod tests {
         );
         assert_eq!(git(root, &["show-ref"]), refs_before);
         assert_eq!(git(root, &["symbolic-ref", "HEAD"]), branch_before);
-        assert_eq!(object_files(root), objects_before);
+        assert_eq!(object_ids(root), objects_before);
     }
 
     #[tokio::test]

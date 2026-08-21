@@ -58,7 +58,7 @@ use crate::clipboard::{
 };
 use crate::config;
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, ReviewTarget,
+    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, ReviewRequest, ReviewTarget,
     SessionConfigTarget, SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
     WorkspaceHeadDiffUnavailable,
 };
@@ -5430,10 +5430,19 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if plain_text_only
-        && let Some(rest) = text.strip_prefix("/review")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
+    if plain_text_only && retired_review_command_arguments(&text).is_some() {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        state.record_status_message(
+            StatusKind::Warning,
+            "use /discrete-review or /adversarial-review",
+        );
+        return;
+    }
+
+    if plain_text_only && let Some(rest) = discrete_review_command_arguments(&text) {
         state.input.clear();
         clear_attachments(state);
         state.input_cursor = 0;
@@ -5441,25 +5450,31 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         if state.is_side {
             state.record_status_message(
                 StatusKind::Warning,
-                "manual review is unavailable in side conversations",
+                "discrete review is unavailable in side conversations",
             );
         } else if state.runtime_closed || state.session_id.is_none() {
             state.record_status_message(StatusKind::Warning, "the primary agent is unavailable");
         } else if state.is_busy() {
             state.record_status_message(
                 StatusKind::Warning,
-                "manual review is only available while the primary agent is idle",
+                "discrete review is only available while the primary agent is idle",
             );
-        } else if rest.trim().is_empty() {
-            state.open_review_picker();
-        } else if let Some(target) = parse_review_target(rest.trim()) {
-            state.record_status_message(StatusKind::Info, "preparing manual review…");
-            let _ = cmd_tx.send(UiCommand::RunReview { target });
         } else {
-            state.record_status_message(
-                StatusKind::Warning,
-                "usage: /review [recent|uncommitted|head]",
-            );
+            match parse_discrete_review_args(rest.trim()) {
+                Some(request) => {
+                    state.record_status_message(StatusKind::Info, "preparing discrete review…");
+                    let _ = cmd_tx.send(UiCommand::RunReview { request });
+                }
+                None if rest.trim().is_empty()
+                    || rest.trim().parse::<crate::config::ReviewTier>().is_ok() =>
+                {
+                    state.open_review_picker(rest.trim().parse().ok());
+                }
+                None => state.record_status_message(
+                    StatusKind::Warning,
+                    "usage: /discrete-review [recent|uncommitted|head] [quick|extended]",
+                ),
+            }
         }
         return;
     }
@@ -5675,6 +5690,39 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         images,
         resources,
     });
+}
+
+fn discrete_review_command_arguments(text: &str) -> Option<&str> {
+    ["/discrete-review", "/adversarial-review"]
+        .into_iter()
+        .find_map(|command| {
+            text.strip_prefix(command)
+                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+}
+
+fn retired_review_command_arguments(text: &str) -> Option<&str> {
+    text.strip_prefix("/review")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn parse_discrete_review_args(value: &str) -> Option<ReviewRequest> {
+    let mut target = None;
+    let mut tier = None;
+    for token in value.split_whitespace() {
+        if let Some(parsed) = parse_review_target(token) {
+            if target.replace(parsed).is_some() {
+                return None;
+            }
+        } else if let Ok(parsed) = token.parse::<crate::config::ReviewTier>() {
+            if tier.replace(parsed).is_some() {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    target.map(|target| ReviewRequest { target, tier })
 }
 
 fn parse_review_target(value: &str) -> Option<ReviewTarget> {
@@ -6878,9 +6926,9 @@ fn handle_review_picker_key(
             inline_repair_request(mode)
         }
         PickerKeyAction::Accept => {
-            if let Some(target) = state.review_picker_accept() {
-                state.record_status_message(StatusKind::Info, "preparing manual review…");
-                let _ = cmd_tx.send(UiCommand::RunReview { target });
+            if let Some(request) = state.review_picker_accept() {
+                state.record_status_message(StatusKind::Info, "preparing discrete review…");
+                let _ = cmd_tx.send(UiCommand::RunReview { request });
                 inline_repair_request(mode)
             } else {
                 TerminalRequest::None
@@ -8778,11 +8826,11 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         if !title.is_empty() {
             // Label the title as session context. The header can sit directly
             // below live review findings, where unlabelled prose reads like a
-            // continuation of the final issue. On narrow terminals preserve
-            // usable title space before adding chrome.
+            // continuation of the final issue. On narrow terminals retain the
+            // separator while preserving usable title space.
             let full_session_prefix = "   │ Session: ";
             let compact_session_prefix = "   │ ";
-            let title_separator = "   ";
+            let narrow_session_prefix = " │ ";
             const MIN_READABLE_TITLE_WIDTH: usize = 12;
             let used: usize = spans.iter().map(|span| span.content.width()).sum();
             let available = width.saturating_sub(used);
@@ -8792,22 +8840,18 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 } else if available >= compact_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
                     compact_session_prefix
                 } else {
-                    title_separator
+                    narrow_session_prefix
                 };
             let max_width = width
                 .saturating_sub(used)
                 .saturating_sub(session_prefix.width());
             if max_width > 0 {
-                if session_prefix == title_separator {
-                    spans.push(Span::raw(session_prefix));
-                } else {
-                    spans.push(Span::styled(
-                        session_prefix,
-                        Style::default()
-                            .ink(state.theme.muted)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
+                spans.push(Span::styled(
+                    session_prefix,
+                    Style::default()
+                        .ink(state.theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                ));
                 spans.push(Span::styled(
                     compact_middle_display(title, max_width),
                     Style::default()
@@ -14464,7 +14508,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Review target ")
+        .title(" Discrete review target ")
         .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -14474,7 +14518,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
         .split(inner);
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[0]);
     f.render_widget(
-        Paragraph::new("Up/Down choose | Enter review | Esc cancel")
+        Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
@@ -14495,7 +14539,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         ])
         .split(content);
     f.render_widget(
-        Paragraph::new("Review target").style(
+        Paragraph::new("Discrete review target").style(
             Style::default()
                 .ink(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
@@ -14504,7 +14548,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
     );
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[1]);
     f.render_widget(
-        Paragraph::new("Up/Down choose | Enter review | Esc cancel")
+        Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
         layout[2],
     );
@@ -17413,8 +17457,8 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains(&format!("{}   n", mjolnir_version_label())),
-            "narrow headers must retain title text instead of spending it on session chrome:\n{rendered}"
+            rendered.contains(&format!("{} │ n", mjolnir_version_label())),
+            "narrow headers must retain both the session separator and title text:\n{rendered}"
         );
 
         let compact_width = (version_width + "   │ ".width() + "narrow title".width()) as u16;
@@ -19704,9 +19748,9 @@ mod tests {
     }
 
     #[test]
-    fn slash_review_opens_picker_and_direct_target_routes_locally() {
+    fn discrete_review_aliases_open_picker_and_route_tier_overrides_locally() {
         let mut state = ready_state_with_session();
-        state.input = "/review".to_string();
+        state.input = "/discrete-review".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         submit_prompt(&mut state, &cmd_tx);
@@ -19714,21 +19758,47 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
 
         state.review_picker = None;
-        state.input = "/review uncommitted".to_string();
+        state.input = "/adversarial-review uncommitted extended".to_string();
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(UiCommand::RunReview {
-                target: ReviewTarget::Uncommitted
+                request: ReviewRequest {
+                    target: ReviewTarget::Uncommitted,
+                    tier: Some(crate::config::ReviewTier::Extended),
+                }
             })
         ));
     }
 
     #[test]
-    fn slash_review_rejects_busy_turn_without_queueing() {
+    fn retired_review_command_is_not_forwarded_to_the_agent() {
+        let mut state = ready_state_with_session();
+        state.input = "/review".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(state.status_line.as_ref().is_some_and(|status| {
+            status
+                .text
+                .contains("/discrete-review or /adversarial-review")
+        }));
+
+        state.input = "/review-branch main".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, .. }) if text == "/review-branch main"
+        ));
+    }
+
+    #[test]
+    fn discrete_review_rejects_busy_turn_without_queueing() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("active".to_string());
-        state.input = "/review recent".to_string();
+        state.input = "/discrete-review recent".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         submit_prompt(&mut state, &cmd_tx);

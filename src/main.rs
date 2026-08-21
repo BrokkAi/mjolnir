@@ -2585,8 +2585,8 @@ async fn run_session(
                 cmd_orchestrator.set_correction_threshold(*correction_threshold);
                 continue;
             }
-            if let UiCommand::RunReview { target } = command {
-                cmd_orchestrator.request_review(target);
+            if let UiCommand::RunReview { request } = command {
+                cmd_orchestrator.request_review(request);
                 continue;
             }
             if matches!(command, UiCommand::CompactPrimary) {
@@ -4969,8 +4969,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("memory tempdir");
         let session_memory = memory::SessionMemory {
             store_path: temp.path().join("memories.json"),
+            config_path: None,
             project: temp.path().to_path_buf(),
             inject: true,
+            cleanup: false,
             tools: true,
         };
         let server = memory::ToolServer::start(&session_memory)

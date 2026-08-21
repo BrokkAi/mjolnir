@@ -682,8 +682,8 @@ fn start_server_agent_session(
                             continue;
                         }
                     }
-                    if let UiCommand::RunReview { target } = command {
-                        primary_orchestrator.request_review(target);
+                    if let UiCommand::RunReview { request } = command {
+                        primary_orchestrator.request_review(request);
                         continue;
                     }
                     if matches!(command, UiCommand::CompactPrimary)

@@ -74,6 +74,7 @@ impl BridgeServer {
         let task = tokio::spawn(async move {
             loop {
                 let stream = tokio::select! {
+                    biased;
                     _ = accept_cancellation.cancelled() => break,
                     accepted = listener.accept() => match accepted {
                         Ok((stream, _)) => stream,
@@ -83,6 +84,13 @@ impl BridgeServer {
                         }
                     },
                 };
+                // A connection may have been accepted in the same scheduler
+                // slice that shutdown was requested. Do not start a new MCP
+                // session after cancellation; dropping it also prevents the
+                // listener's shutdown from racing a fresh client connection.
+                if accept_cancellation.is_cancelled() {
+                    break;
+                }
                 let handler = handler.clone();
                 let expected = expected.clone();
                 let connection_cancellation = accept_cancellation.clone();
@@ -95,6 +103,10 @@ impl BridgeServer {
                     }
                 });
             }
+            // Close the listening socket before the join handle resolves.
+            // Shutdown callers may immediately try to reconnect to verify
+            // that the bridge is gone.
+            drop(listener);
         });
 
         let command =
@@ -443,6 +455,8 @@ mod tests {
         server.shutdown().await;
 
         assert!(lines.next_line().await.expect("read close").is_none());
+        drop(lines);
+        drop(write);
         assert!(TcpStream::connect(&addr).await.is_err());
     }
 }

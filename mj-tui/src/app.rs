@@ -25,8 +25,8 @@ use agent_client_protocol::schema::v1::{
 
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, InternalMessage, PermissionDecision, PermissionPrompt,
-    PromptImage, PromptResource, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
-    SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
+    PromptImage, PromptResource, ReviewRequest, ReviewTarget, SessionConfigTarget, SubagentEvent,
+    SubagentOutcome, SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
@@ -222,7 +222,9 @@ const BUILTIN_DIFF_COMMAND: &str = "diff";
 const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
 const BUILTIN_AGENTS_COMMAND: &str = "agents";
 const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
-const BUILTIN_REVIEW_COMMAND: &str = "review";
+const RETIRED_REVIEW_COMMAND: &str = "review";
+const BUILTIN_DISCRETE_REVIEW_COMMAND: &str = "discrete-review";
+const BUILTIN_ADVERSARIAL_REVIEW_COMMAND: &str = "adversarial-review";
 const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const BUILTIN_TERMINALS_COMMAND: &str = "terminals";
 const BUILTIN_MEMORY_COMMAND: &str = "memory";
@@ -297,10 +299,17 @@ fn builtin_subagents_command() -> AvailableCommand {
     )
 }
 
-fn builtin_review_command() -> AvailableCommand {
+fn builtin_discrete_review_command() -> AvailableCommand {
     AvailableCommand::new(
-        BUILTIN_REVIEW_COMMAND,
-        "review recent, uncommitted, or HEAD changes",
+        BUILTIN_DISCRETE_REVIEW_COMMAND,
+        "run the configured discrete review; add quick or extended to override its tier",
+    )
+}
+
+fn builtin_adversarial_review_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
+        "alias for discrete-review",
     )
 }
 
@@ -350,7 +359,9 @@ fn install_builtin_commands(
             && command.name != BUILTIN_MJCONFIG_COMMAND
             && command.name != BUILTIN_AGENTS_COMMAND
             && command.name != BUILTIN_SUBAGENTS_COMMAND
-            && command.name != BUILTIN_REVIEW_COMMAND
+            && command.name != RETIRED_REVIEW_COMMAND
+            && command.name != BUILTIN_DISCRETE_REVIEW_COMMAND
+            && command.name != BUILTIN_ADVERSARIAL_REVIEW_COMMAND
             && command.name != BUILTIN_RAGNAROK_COMMAND
             && command.name != BUILTIN_TERMINALS_COMMAND
             && command.name != BUILTIN_MEMORY_COMMAND
@@ -367,7 +378,8 @@ fn install_builtin_commands(
     commands.insert(0, builtin_memory_command());
     commands.insert(0, builtin_mjconfig_command());
     commands.insert(0, builtin_diff_command());
-    commands.insert(0, builtin_review_command());
+    commands.insert(0, builtin_adversarial_review_command());
+    commands.insert(0, builtin_discrete_review_command());
     commands.insert(0, builtin_terminals_command());
     commands.insert(0, builtin_subagents_command());
     commands.insert(0, builtin_agents_command());
@@ -391,7 +403,9 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_MJCONFIG_COMMAND,
             BUILTIN_AGENTS_COMMAND,
             BUILTIN_SUBAGENTS_COMMAND,
-            BUILTIN_REVIEW_COMMAND,
+            RETIRED_REVIEW_COMMAND,
+            BUILTIN_DISCRETE_REVIEW_COMMAND,
+            BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
             BUILTIN_RAGNAROK_COMMAND,
             BUILTIN_TERMINALS_COMMAND,
             BUILTIN_MEMORY_COMMAND,
@@ -803,7 +817,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Run /review to check recent, uncommitted, or HEAD changes; F9 opens the review issue ledger.",
+        text: "Run /discrete-review to check recent, uncommitted, or HEAD changes; add quick or extended to override the configured tier. F9 opens the review issue ledger.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -1954,6 +1968,7 @@ pub struct ConfigPicker {
 #[derive(Debug, Clone, Default)]
 pub struct ReviewPicker {
     pub selected: usize,
+    pub tier: Option<crate::config::ReviewTier>,
 }
 
 /// The candidate collection currently shown by the prompt autocomplete.
@@ -2482,8 +2497,8 @@ impl AppState {
         action
     }
 
-    pub fn open_review_picker(&mut self) {
-        self.review_picker = Some(ReviewPicker::default());
+    pub fn open_review_picker(&mut self, tier: Option<crate::config::ReviewTier>) {
+        self.review_picker = Some(ReviewPicker { selected: 0, tier });
     }
 
     pub fn review_picker_move(&mut self, delta: i32) {
@@ -2493,12 +2508,16 @@ impl AppState {
         picker.selected = (picker.selected as i32 + delta).rem_euclid(3) as usize;
     }
 
-    pub fn review_picker_accept(&mut self) -> Option<ReviewTarget> {
-        let selected = self.review_picker.take()?.selected;
-        Some(match selected {
+    pub fn review_picker_accept(&mut self) -> Option<ReviewRequest> {
+        let picker = self.review_picker.take()?;
+        let target = match picker.selected {
             0 => ReviewTarget::Recent,
             1 => ReviewTarget::Uncommitted,
             _ => ReviewTarget::Head,
+        };
+        Some(ReviewRequest {
+            target,
+            tier: picker.tier,
         })
     }
 
@@ -11009,7 +11028,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",
@@ -11070,7 +11090,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",
@@ -11121,7 +11142,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",
@@ -11188,7 +11210,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",
