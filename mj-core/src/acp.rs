@@ -1302,17 +1302,19 @@ pub async fn run(
         );
     }
 
-    // Rotate a near-expiry Claude OAuth token before the spawn so this
-    // seat never has to refresh concurrently with its siblings; see
-    // `claude_token` for why racing refreshes sign the account out.
-    if crate::claude_token::is_claude_invocation(
+    // Rotate a near-expiry OAuth token before the spawn so this seat
+    // never has to refresh concurrently with its siblings; see
+    // `claude_token` and `codex_token` for why racing refreshes sign
+    // the account out.
+    crate::token_gate::ensure_fresh_before_spawn(
         cfg.role_config
             .as_ref()
             .map(|role| role.adapter_source_id.as_str()),
         &cfg.args,
-    ) {
-        crate::claude_token::ensure_fresh_before_spawn(cfg.cwd.clone(), &cfg.env).await;
-    }
+        cfg.cwd.clone(),
+        &cfg.env,
+    )
+    .await;
 
     let prepared = match prepare_agent_command_for_spawn(&cfg.command, &cfg.env, &ui_tx).await {
         Ok(prepared) => prepared,

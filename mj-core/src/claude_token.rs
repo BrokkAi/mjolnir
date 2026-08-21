@@ -11,6 +11,12 @@
 //! token once for everyone: callers gate here before spawning a Claude
 //! process, the lease winner's `/usage` probe performs the rotation,
 //! and every waiter then spawns against the rewritten credential file.
+//!
+//! Claude Code keeps the credential in `$CLAUDE_CONFIG_DIR/.credentials.json`
+//! on Linux and Windows, but on macOS the default profile lives in the
+//! login Keychain (service `Claude Code-credentials`) and no file exists.
+//! The gate reads whichever store the spawned process will use; without
+//! the Keychain fallback every macOS host silently ran unprotected.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -102,7 +108,7 @@ pub fn steward_delay(env: &HashMap<String, String>) -> std::time::Duration {
     if env_defined(env, "CLAUDE_CODE_OAUTH_TOKEN") || env_defined(env, "ANTHROPIC_API_KEY") {
         return IDLE_RECHECK;
     }
-    let Some(expires_at) = credentials_path(env).and_then(oauth_expires_at_ms) else {
+    let Some(expires_at) = oauth_expires_at_ms(env) else {
         return IDLE_RECHECK;
     };
     let delay_ms = expires_at
@@ -118,7 +124,7 @@ fn needs_refresh(env: &HashMap<String, String>, now_ms: i64) -> bool {
     if env_defined(env, "CLAUDE_CODE_OAUTH_TOKEN") || env_defined(env, "ANTHROPIC_API_KEY") {
         return false;
     }
-    let Some(expires_at) = credentials_path(env).and_then(oauth_expires_at_ms) else {
+    let Some(expires_at) = oauth_expires_at_ms(env) else {
         return false;
     };
     expires_at.saturating_sub(now_ms) <= REFRESH_WINDOW_MS
@@ -141,13 +147,84 @@ fn credentials_path(env: &HashMap<String, String>) -> Option<PathBuf> {
     Some(root.join(".credentials.json"))
 }
 
-fn oauth_expires_at_ms(path: PathBuf) -> Option<i64> {
-    let contents = std::fs::read(path).ok()?;
-    let document: serde_json::Value = serde_json::from_slice(&contents).ok()?;
+/// Expiry of the OAuth access token the spawned process will load:
+/// the credential file when present, otherwise the macOS Keychain.
+fn oauth_expires_at_ms(env: &HashMap<String, String>) -> Option<i64> {
+    let path = credentials_path(env)?;
+    expires_at_from_store(
+        &path,
+        uses_default_config_dir(env),
+        read_keychain_credentials,
+    )
+}
+
+fn expires_at_from_store(
+    path: &std::path::Path,
+    default_profile: bool,
+    keychain: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<i64> {
+    let contents = match std::fs::read(path) {
+        Ok(contents) => contents,
+        // Only a missing file means "look elsewhere"; an unreadable or
+        // malformed file is a real answer (skip the gate), not a cue to
+        // consult a store the spawned process will not use.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !default_profile {
+                return None;
+            }
+            keychain()?
+        }
+        Err(_) => return None,
+    };
+    expires_at_from_credentials(&contents)
+}
+
+fn expires_at_from_credentials(contents: &[u8]) -> Option<i64> {
+    let document: serde_json::Value = serde_json::from_slice(contents).ok()?;
     let expires_at = document.pointer("/claudeAiOauth/expiresAt")?;
     expires_at
         .as_i64()
         .or_else(|| expires_at.as_f64().map(|value| value as i64))
+}
+
+/// Claude Code names the Keychain item for the default profile
+/// `Claude Code-credentials`; custom `CLAUDE_CONFIG_DIR` profiles use a
+/// name derived from the directory, which the gate does not reproduce
+/// — those profiles keep the file-only behavior.
+fn uses_default_config_dir(env: &HashMap<String, String>) -> bool {
+    let Some(configured) = env_value(env, "CLAUDE_CONFIG_DIR") else {
+        return true;
+    };
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return true;
+    }
+    dirs::home_dir().is_some_and(|home| std::path::Path::new(configured) == home.join(".claude"))
+}
+
+/// Claude Code's macOS credential store. Claude Code itself writes and
+/// reads the item through the `security` tool, so that tool is already
+/// on the item's access list and this read raises no Keychain prompt.
+#[cfg(target_os = "macos")]
+fn read_keychain_credentials() -> Option<Vec<u8>> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(output.stdout)
+}
+
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+#[cfg(not(target_os = "macos"))]
+fn read_keychain_credentials() -> Option<Vec<u8>> {
+    None
 }
 
 fn now_ms() -> i64 {
@@ -232,6 +309,94 @@ mod tests {
 
         write_credentials(dir.path(), serde_json::json!("soon"));
         assert!(!needs_refresh(&env, 1_000_000));
+    }
+
+    fn keychain_blob(expires_at: i64) -> Vec<u8> {
+        serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "token",
+                "refreshToken": "refresh",
+                "expiresAt": expires_at,
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn missing_file_on_the_default_profile_falls_back_to_the_keychain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+        // macOS default profile: no file, Keychain answers.
+        assert_eq!(
+            expires_at_from_store(&path, true, || Some(keychain_blob(42))),
+            Some(42)
+        );
+        // Keychain item absent (signed out, or not macOS): gate skips.
+        assert_eq!(expires_at_from_store(&path, true, || None), None);
+        // Keychain returns garbage: gate skips rather than guessing.
+        assert_eq!(
+            expires_at_from_store(&path, true, || Some(b"not json".to_vec())),
+            None
+        );
+    }
+
+    #[test]
+    fn custom_profiles_never_consult_the_keychain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".credentials.json");
+        assert_eq!(
+            expires_at_from_store(&path, false, || panic!("keychain must not be read")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_existing_file_wins_over_the_keychain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_credentials(dir.path(), serde_json::json!(7));
+        let path = dir.path().join(".credentials.json");
+        assert_eq!(
+            expires_at_from_store(&path, true, || panic!("keychain must not be read")),
+            Some(7)
+        );
+        // A present-but-malformed file is a real answer, not a fallback cue.
+        std::fs::write(&path, "not json").expect("write");
+        assert_eq!(
+            expires_at_from_store(&path, true, || panic!("keychain must not be read")),
+            None
+        );
+    }
+
+    #[test]
+    fn default_profile_detection_follows_claude_config_dir() {
+        assert!(uses_default_config_dir(&HashMap::new()));
+        assert!(uses_default_config_dir(&HashMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "  ".to_string()
+        )])));
+        let home_profile = dirs::home_dir().expect("home").join(".claude");
+        assert!(uses_default_config_dir(&HashMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            home_profile.to_string_lossy().into_owned()
+        )])));
+        assert!(!uses_default_config_dir(&HashMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/somewhere/else".to_string()
+        )])));
+    }
+
+    /// Live check against this machine's Keychain; run by hand on a
+    /// signed-in macOS host with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn live_keychain_holds_a_claude_expiry() {
+        let expires_at = read_keychain_credentials()
+            .as_deref()
+            .and_then(expires_at_from_credentials)
+            .expect("Claude Code-credentials item with claudeAiOauth.expiresAt");
+        assert!(expires_at > 0, "{expires_at}");
     }
 
     #[test]
