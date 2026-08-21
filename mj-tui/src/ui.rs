@@ -8722,11 +8722,11 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         if !title.is_empty() {
             // Label the title as session context. The header can sit directly
             // below live review findings, where unlabelled prose reads like a
-            // continuation of the final issue. On narrow terminals preserve
-            // usable title space before adding chrome.
+            // continuation of the final issue. On narrow terminals retain the
+            // separator while preserving usable title space.
             let full_session_prefix = "   │ Session: ";
             let compact_session_prefix = "   │ ";
-            let title_separator = "   ";
+            let narrow_session_prefix = " │ ";
             const MIN_READABLE_TITLE_WIDTH: usize = 12;
             let used: usize = spans.iter().map(|span| span.content.width()).sum();
             let available = width.saturating_sub(used);
@@ -8736,22 +8736,18 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 } else if available >= compact_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
                     compact_session_prefix
                 } else {
-                    title_separator
+                    narrow_session_prefix
                 };
             let max_width = width
                 .saturating_sub(used)
                 .saturating_sub(session_prefix.width());
             if max_width > 0 {
-                if session_prefix == title_separator {
-                    spans.push(Span::raw(session_prefix));
-                } else {
-                    spans.push(Span::styled(
-                        session_prefix,
-                        Style::default()
-                            .ink(state.theme.muted)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
+                spans.push(Span::styled(
+                    session_prefix,
+                    Style::default()
+                        .ink(state.theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                ));
                 spans.push(Span::styled(
                     compact_middle_display(title, max_width),
                     Style::default()
@@ -17344,8 +17340,8 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
-            rendered.contains(&format!("{}   n", mjolnir_version_label())),
-            "narrow headers must retain title text instead of spending it on session chrome:\n{rendered}"
+            rendered.contains(&format!("{} │ n", mjolnir_version_label())),
+            "narrow headers must retain both the session separator and title text:\n{rendered}"
         );
 
         let compact_width = (version_width + "   │ ".width() + "narrow title".width()) as u16;
