@@ -925,73 +925,6 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 });
                             primary_review_prompt_active = true;
                         }
-                        ReviewVerdict::Advisory {
-                            synthesis,
-                            evidence: _,
-                        } => {
-                            review_findings.push(synthesis.clone());
-                            emit_workflow(
-                                &workflow,
-                                WorkflowEvent::new(
-                                    workflow_id,
-                                    WorkflowTransition::IssuesValidated {
-                                        pass: completed_pass,
-                                        summaries: review_issue_summaries(&synthesis),
-                                    },
-                                ),
-                            );
-                            let coverage = workflow_coverage(&workflow, workflow_id);
-                            let workflow_outcome = if coverage == WorkflowCoverage::Complete {
-                                WorkflowOutcome::Clean
-                            } else {
-                                WorkflowOutcome::Degraded
-                            };
-                            emit_workflow(
-                                &workflow,
-                                WorkflowEvent::new(
-                                    workflow_id,
-                                    WorkflowTransition::Terminal {
-                                        outcome: workflow_outcome,
-                                        coverage,
-                                    },
-                                ),
-                            );
-                            let _ = events_tx.send(UiEvent::Info(if matches!(
-                                workflow_outcome,
-                                WorkflowOutcome::Clean
-                            ) {
-                                "discrete review · advisory findings only".to_string()
-                            } else {
-                                "discrete review · advisory findings with degraded coverage"
-                                    .to_string()
-                            }));
-                            if let Some(saved_turn) = saved_turn {
-                                last_changed_turn = Some(saved_turn);
-                            }
-                            let prompt = post_review_recap_prompt(
-                                &turn.lock().await.task,
-                                original_review_result.as_deref().unwrap_or(&reviewed_result),
-                                &reviewed_result,
-                                &review_findings,
-                            );
-                            emit_internal(
-                                &events_tx,
-                                "review",
-                                "primary",
-                                InternalMessageKind::DiscreteReview,
-                                &prompt,
-                            );
-                            let _ = config.runtime_commands.send(UiCommand::SendPrompt {
-                                text: prompt,
-                                images: Vec::new(),
-                                resources: Vec::new(),
-                            });
-                            let _ = completion;
-                            trajectory.reset_attempt();
-                            post_review_recap_active = true;
-                            primary_review_prompt_active = true;
-                            continue;
-                        }
                         ReviewVerdict::Clean => {
                             let coverage = workflow_coverage(&workflow, workflow_id);
                             if let Some(corrected_pass) = verifies_pass
@@ -2588,7 +2521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisory_only_findings_release_completion_without_correction() {
+    async fn p2_findings_dispatch_correction_before_recap() {
         let temp = tempfile::tempdir().expect("tempdir");
         let snapshot = changed_workspace(temp.path()).await;
         let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
@@ -2596,13 +2529,17 @@ mod tests {
         let passes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let spawned_passes = Arc::clone(&passes);
         let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
-            spawned_passes.fetch_add(1, Ordering::SeqCst);
+            let pass = spawned_passes.fetch_add(1, Ordering::SeqCst);
             let _ = outcomes.send(ReviewOutcome {
                 epoch: job.epoch,
-                verdict: ReviewVerdict::Advisory {
-                    synthesis: "[P2] src/header.rs:1 -- license header could be normalized"
-                        .to_string(),
-                    evidence: ReviewPassEvidence::default(),
+                verdict: if pass == 0 {
+                    ReviewVerdict::Findings {
+                        synthesis: "[P2] src/header.rs:1 -- license header could be normalized"
+                            .to_string(),
+                        evidence: ReviewPassEvidence::default(),
+                    }
+                } else {
+                    ReviewVerdict::Clean
                 },
             });
         });
@@ -2613,17 +2550,24 @@ mod tests {
             .await;
         runtime_tx.send(completion()).expect("send completion");
 
+        let correction = next_prompt(&mut command_rx).await;
+        assert!(correction.contains("<review_findings"));
+        assert!(correction.contains("[P2] src/header.rs:1"));
+        std::fs::write(temp.path().join("tracked.txt"), "corrected header\n")
+            .expect("write correction");
+        runtime_tx.send(completion()).expect("complete correction");
+
         let recap = next_prompt(&mut command_rx).await;
         assert!(recap.contains("the original work completed"));
         runtime_tx.send(completion()).expect("complete final recap");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut saw_advisory_summary = false;
-        let mut saw_advisory_info = false;
+        let mut saw_p2_summary = false;
+        let mut saw_correction = false;
         loop {
             let event = tokio::time::timeout_at(deadline, running.events.recv())
                 .await
-                .expect("advisory verdict released completion")
+                .expect("P2 correction released completion")
                 .expect("orchestrated event");
             if matches!(
                 &event,
@@ -2632,22 +2576,23 @@ mod tests {
                     ..
                 }) if summaries.iter().any(|summary| summary.contains("[P2] src/header.rs:1"))
             ) {
-                saw_advisory_summary = true;
+                saw_p2_summary = true;
             }
-            if matches!(&event, UiEvent::Info(text) if text.contains("advisory findings only")) {
-                saw_advisory_info = true;
+            if matches!(&event, UiEvent::Info(text) if text.contains("correcting the flagged findings"))
+            {
+                saw_correction = true;
             }
             if matches!(event, UiEvent::PromptDone { .. }) {
                 break;
             }
         }
 
-        assert_eq!(1, passes.load(Ordering::SeqCst));
-        assert!(saw_advisory_summary, "advisory findings must be reported");
-        assert!(saw_advisory_info, "advisory-only outcome must be visible");
+        assert_eq!(2, passes.load(Ordering::SeqCst));
+        assert!(saw_p2_summary, "P2 findings must be recorded");
+        assert!(saw_correction, "P2 findings must dispatch a correction");
         assert!(
             command_rx.try_recv().is_err(),
-            "advisory-only findings must not dispatch a corrective prompt"
+            "the completed P2 correction must not dispatch an extra prompt"
         );
 
         drop(runtime_tx);
