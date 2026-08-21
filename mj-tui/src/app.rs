@@ -1474,13 +1474,13 @@ pub struct AppState {
     pub help_scroll: u16,
     /// True while mouse capture is disabled so the terminal can select text.
     pub text_selection_mode: bool,
-    /// In-progress mouse drag selection over the fullscreen transcript panel.
+    /// In-progress mouse drag selection over the fullscreen UI.
     /// Cleared (and copied to the clipboard) on mouse-up.
     pub transcript_selection: Option<TranscriptSelection>,
-    /// Screen area `(x, y, width, height)` of the transcript panel, captured
+    /// Screen area `(x, y, width, height)` of the fullscreen UI, captured
     /// each frame so mouse events can be mapped onto the visible text.
     pub transcript_panel_area: Option<(u16, u16, u16, u16)>,
-    /// Per-cell symbols of the visible transcript rows, captured at draw time
+    /// Per-cell symbols of the visible fullscreen UI, captured at draw time
     /// while a selection is active. Continuation cells of wide graphemes hold
     /// empty strings so cell columns stay aligned with screen columns.
     pub transcript_panel_grid: Vec<Vec<String>>,

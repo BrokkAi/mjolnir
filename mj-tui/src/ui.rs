@@ -3010,15 +3010,7 @@ fn handle_crossterm(
             return TerminalRequest::None;
         }
         CtEvent::Mouse(mouse) => {
-            // The diff reader does not support mouse scrolling yet. In
-            // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer
-                || state.nested_agent_viewer
-                || state.review_issue_viewer
-                || state.terminals_viewer
-            {
-                return TerminalRequest::None;
-            } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
+            if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
                 handle_transcript_viewer_mouse(state, mouse);
             } else if mode == UiMode::FullscreenTui {
                 handle_mouse(state, mouse);
@@ -3031,10 +3023,7 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    if mode == UiMode::FullscreenTui
-        && is_text_selection_key(key.modifiers, key.code)
-        && can_toggle_text_selection_mode(state)
-    {
+    if mode == UiMode::FullscreenTui && is_text_selection_key(key.modifiers, key.code) {
         return TerminalRequest::ToggleTextSelectionMode;
     }
 
@@ -3696,23 +3685,27 @@ fn dictation_request_for_state(state: &AppState, voice_input_supported: bool) ->
 }
 
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
-    if state.text_selection_mode
-        || state.help_overlay
-        || state.has_pending_permission()
-        || state.has_pending_elicitation()
-        || state.team_picker.is_some()
-        || state.config_picker.is_some()
-    {
+    if state.text_selection_mode {
         return;
     }
 
+    let scroll_enabled = !state.help_overlay
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && state.team_picker.is_none()
+        && state.config_picker.is_none()
+        && !state.workspace_diff_viewer
+        && !state.nested_agent_viewer
+        && !state.review_issue_viewer
+        && !state.terminals_viewer;
+
     match mouse.kind {
-        MouseEventKind::ScrollUp => {
+        MouseEventKind::ScrollUp if scroll_enabled => {
             state.scroll_offset = state
                 .scroll_offset
                 .saturating_add(TRANSCRIPT_SCROLL_WHEEL_STEP);
         }
-        MouseEventKind::ScrollDown => {
+        MouseEventKind::ScrollDown if scroll_enabled => {
             state.scroll_offset = state
                 .scroll_offset
                 .saturating_sub(TRANSCRIPT_SCROLL_WHEEL_STEP);
@@ -3743,17 +3736,6 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
             }
         }
         _ => {}
-    }
-}
-
-/// Drop the drag selection and the captured panel geometry whenever another
-/// surface (viewer, arena) replaces the transcript: the previous frame's
-/// coordinates no longer describe what is on screen.
-fn invalidate_transcript_selection(state: &mut AppState) {
-    state.transcript_selection = None;
-    state.transcript_panel_area = None;
-    if !state.transcript_panel_grid.is_empty() {
-        state.transcript_panel_grid = Vec::new();
     }
 }
 
@@ -3880,6 +3862,20 @@ fn apply_selection_highlight(
             Rect::new(from, y, to - from + 1, 1),
             Style::default().add_modifier(Modifier::REVERSED),
         );
+    }
+}
+
+/// Make every visible cell selectable. Fullscreen mouse capture owns drag
+/// events, so selection cannot be limited to the transcript: prompts, paths,
+/// dialogs, and status text need the same copy path.
+fn capture_fullscreen_selection_surface(f: &mut ratatui::Frame, state: &mut AppState) {
+    let area = f.area();
+    state.transcript_panel_area = Some((area.x, area.y, area.width, area.height));
+    if let Some(selection) = state.transcript_selection {
+        state.transcript_panel_grid = capture_transcript_panel_grid(f.buffer_mut(), area);
+        apply_selection_highlight(f.buffer_mut(), area, &selection);
+    } else if !state.transcript_panel_grid.is_empty() {
+        state.transcript_panel_grid = Vec::new();
     }
 }
 
@@ -5163,13 +5159,6 @@ fn scroll_help_overlay(state: &mut AppState, code: KeyCode) {
 
 fn is_text_selection_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(12))
-}
-
-fn can_toggle_text_selection_mode(state: &AppState) -> bool {
-    !state.help_overlay
-        && !state.has_pending_permission()
-        && !state.has_pending_elicitation()
-        && state.config_picker.is_none()
 }
 
 #[cfg(target_os = "macos")]
@@ -7103,7 +7092,6 @@ fn draw(
     // screen. The safety-critical permission/elicitation modals still render
     // on top of it.
     if state.ragnarok.is_some() {
-        invalidate_transcript_selection(state);
         draw_ragnarok(f, f.area(), state);
         if let Some(pending) = state.pending_permission() {
             draw_permission_modal(
@@ -7122,6 +7110,7 @@ fn draw(
                 state.theme,
             );
         }
+        capture_fullscreen_selection_surface(f, state);
         return;
     }
 
@@ -7151,16 +7140,12 @@ fn draw(
         .split(f.area());
 
     if state.review_issue_viewer {
-        invalidate_transcript_selection(state);
         draw_review_issue_viewer(f, chunks[0], state);
     } else if state.nested_agent_viewer {
-        invalidate_transcript_selection(state);
         draw_nested_agent_viewer(f, chunks[0], state, false);
     } else if state.workspace_diff_viewer {
-        invalidate_transcript_selection(state);
         draw_workspace_diff_viewer(f, chunks[0], state, false);
     } else if state.terminals_viewer {
-        invalidate_transcript_selection(state);
         draw_terminals_viewer(f, chunks[0], state, false);
     } else {
         // An in-flight review with findings splits the stage: the issues
@@ -7232,6 +7217,7 @@ fn draw(
             state.theme,
         );
     }
+    capture_fullscreen_selection_surface(f, state);
 }
 
 fn inline_transcript_tail_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
@@ -9021,16 +9007,6 @@ fn draw_transcript(
         .wrap(Wrap { trim: false })
         .scroll((inner_scroll, 0));
     f.render_widget(paragraph, inner);
-
-    // Geometry lets mouse events hit-test the panel; the grid snapshot is
-    // only needed while a drag selection is active, so skip it otherwise.
-    state.transcript_panel_area = Some((inner.x, inner.y, inner.width, inner.height));
-    if let Some(selection) = state.transcript_selection {
-        state.transcript_panel_grid = capture_transcript_panel_grid(f.buffer_mut(), inner);
-        apply_selection_highlight(f.buffer_mut(), inner, &selection);
-    } else if !state.transcript_panel_grid.is_empty() {
-        state.transcript_panel_grid = Vec::new();
-    }
 }
 
 /// Render the transcript once and measure it, for either the chat pane
@@ -14035,7 +14011,7 @@ fn help_modal_lines(
         lines.extend([
             help_binding_line(
                 "mouse drag",
-                "select transcript text; released selection is copied to the clipboard",
+                "select visible text; released selection is copied to the clipboard",
                 theme,
             ),
             help_binding_line(
@@ -22210,7 +22186,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_drag_selection_tracks_anchor_and_clamps_head_to_panel() {
+    fn mouse_drag_selection_tracks_anchor_and_clamps_head_to_screen() {
         let mut state = AppState::new();
         state.transcript_panel_area = Some((0, 1, 40, 10));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -22236,12 +22212,12 @@ mod tests {
         assert_eq!(
             state.transcript_selection.expect("selection").head,
             (39, 10),
-            "drag past the panel edge must clamp to the last cell"
+            "drag past the screen edge must clamp to the last cell"
         );
     }
 
     #[test]
-    fn mouse_down_outside_transcript_panel_starts_no_selection() {
+    fn mouse_down_outside_selection_screen_starts_no_selection() {
         let mut state = AppState::new();
         state.transcript_panel_area = Some((0, 1, 40, 10));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -22405,10 +22381,33 @@ mod tests {
             rendered.contains("hello transcript"),
             "rendered:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn fullscreen_drag_selection_covers_prompt_status_and_overlays() {
+        let mut state = AppState::new();
+        state.help_overlay = true;
+        let mut scroll = TranscriptScrollState::default();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(state.transcript_panel_area, Some((0, 0, 40, 10)));
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 0),
+        );
         assert_eq!(
-            state.transcript_panel_area,
-            Some((0, 1, 40, 7)),
-            "title row is reserved, everything else belongs to the panel"
+            state.transcript_selection,
+            Some(TranscriptSelection {
+                anchor: (5, 0),
+                head: (5, 0),
+            })
         );
     }
 
@@ -23030,14 +23029,14 @@ mod tests {
     }
 
     #[test]
-    fn f12_ignores_text_selection_toggle_while_overlay_owns_input() {
+    fn f12_allows_terminal_text_selection_while_an_overlay_is_open() {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         let mut help_state = AppState::new();
         help_state.help_overlay = true;
         assert_eq!(
             handle_crossterm(&mut help_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(help_state.help_overlay);
 
@@ -23046,7 +23045,7 @@ mod tests {
         permission_state.apply_event(UiEvent::PermissionRequest(pending.prompt));
         assert_eq!(
             handle_crossterm(&mut permission_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(permission_state.has_pending_permission());
 
@@ -23063,7 +23062,7 @@ mod tests {
         assert!(config_state.open_config_value_picker(0));
         assert_eq!(
             handle_crossterm(&mut config_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(config_state.config_picker.is_some());
     }
