@@ -544,6 +544,14 @@ pub enum WorkflowTransition {
         /// exists; compact transcript rows intentionally omit it.
         details: Option<String>,
     },
+    /// Refreshes the evidence for a correction that is already recorded as
+    /// `Corrected`. This preserves the live board state without appending a
+    /// second resolution record when the primary finally ends its turn.
+    IssueEvidenceUpdated {
+        pass: u32,
+        reason: String,
+        details: String,
+    },
     Terminal {
         outcome: WorkflowOutcome,
         coverage: WorkflowCoverage,
@@ -855,6 +863,31 @@ impl WorkflowStore {
                         if details.is_some() {
                             issue.resolution_details = details.clone();
                         }
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return Ok(ApplyOutcome::Duplicate);
+                }
+            }
+            WorkflowTransition::IssueEvidenceUpdated {
+                pass,
+                reason,
+                details,
+            } => {
+                let mut changed = false;
+                for issue in state.issues.iter_mut().filter(|issue| issue.pass == *pass) {
+                    if issue.status != ReviewIssueStatus::Corrected {
+                        return Err(Self::error(
+                            event.workflow_id,
+                            "correction evidence can update only corrected issues",
+                        ));
+                    }
+                    if issue.resolution_reason.as_deref() != Some(reason)
+                        || issue.resolution_details.as_deref() != Some(details)
+                    {
+                        issue.resolution_reason = Some(reason.clone());
+                        issue.resolution_details = Some(details.clone());
                         changed = true;
                     }
                 }
@@ -1242,6 +1275,30 @@ mod tests {
         store
             .apply(&WorkflowEvent::new(
                 review(),
+                WorkflowTransition::IssueEvidenceUpdated {
+                    pass: 0,
+                    reason: "the correction validation completed; verification is pending"
+                        .to_string(),
+                    details: "final correction report and exact diff".to_string(),
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].status,
+            ReviewIssueStatus::Corrected
+        );
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].resolution_reason,
+            Some("the correction validation completed; verification is pending".to_string())
+        );
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].resolution_details,
+            Some("final correction report and exact diff".to_string())
+        );
+
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
                 WorkflowTransition::IssuesResolved {
                     pass: 0,
                     status: ReviewIssueStatus::Fixed,
@@ -1259,7 +1316,7 @@ mod tests {
         );
         assert_eq!(
             store.get(review()).unwrap().issues[0].resolution_details,
-            Some("exact correction diff".to_string()),
+            Some("final correction report and exact diff".to_string()),
             "verification preserves the exact correction evidence"
         );
 

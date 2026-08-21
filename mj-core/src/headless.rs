@@ -651,6 +651,9 @@ fn workflow_stream_record(
         WorkflowTransition::IssuesResolved { status, .. } => {
             (status.as_str(), None, None, None, None)
         }
+        WorkflowTransition::IssueEvidenceUpdated { .. } => {
+            ("issue_evidence_updated", None, None, None, None)
+        }
         WorkflowTransition::Terminal { .. } => ("terminal", None, None, None, None),
     };
     let waiting_on = state

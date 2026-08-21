@@ -2142,7 +2142,8 @@ impl TrackerState {
             | WorkflowTransition::ActorResumed { .. }
             | WorkflowTransition::ActorFinished { .. }
             | WorkflowTransition::IssuesValidated { .. }
-            | WorkflowTransition::IssuesResolved { .. } => None,
+            | WorkflowTransition::IssuesResolved { .. }
+            | WorkflowTransition::IssueEvidenceUpdated { .. } => None,
         };
 
         if let Some(notice) = notice {

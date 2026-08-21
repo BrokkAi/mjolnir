@@ -7809,7 +7809,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
     )];
     for (count, label, ink) in [
         (tally.open, "● {} awaiting correction", theme.warning),
-        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.corrected, "◐ {} unverified", theme.accent),
         (tally.fixed, "✔ {} verified fixed", theme.success),
         (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
@@ -7891,7 +7891,7 @@ fn review_issue_detail_lines(
         ),
         ReviewIssueStatus::Corrected => (
             "corrected — verification pending",
-            theme.warning,
+            theme.accent,
             "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean, so this is not presented as fixed.",
         ),
         ReviewIssueStatus::Fixed => (
@@ -10017,6 +10017,7 @@ fn review_tone_style(tone: crate::app::ReviewTone, theme: TerminalTheme) -> Styl
             .ink(theme.accent)
             .add_modifier(Modifier::BOLD),
         ReviewTone::Open => Style::default().ink(theme.warning),
+        ReviewTone::Corrected => Style::default().ink(theme.accent),
         ReviewTone::Fixed => Style::default().ink(theme.success),
         ReviewTone::Invalidated => Style::default()
             .ink(theme.error)
@@ -16308,6 +16309,27 @@ mod tests {
             rendered.contains("#1 cache write races the eviction sweep"),
             "{rendered}"
         );
+
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some(
+                    "the correction changed the workspace; verification is pending".to_string(),
+                ),
+                details: Some("exact correction diff".to_string()),
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_board(frame, frame.area(), &state))
+            .expect("draw board");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("◐ 2 unverified"), "{rendered}");
+        assert!(!rendered.contains("● 2 open"), "{rendered}");
+        assert!(rendered.contains("verification pending"), "{rendered}");
 
         apply_workflow(
             &mut state,
