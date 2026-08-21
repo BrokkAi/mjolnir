@@ -942,27 +942,18 @@ mod tests {
         git(root, &["commit", "-qm", "baseline"]);
     }
 
-    fn object_files(root: &Path) -> BTreeSet<PathBuf> {
-        fn visit(root: &Path, dir: &Path, output: &mut BTreeSet<PathBuf>) {
-            for entry in std::fs::read_dir(dir).expect("read object directory") {
-                let entry = entry.expect("object entry");
-                let path = entry.path();
-                if path.is_dir() {
-                    visit(root, &path, output);
-                } else {
-                    output.insert(
-                        path.strip_prefix(root)
-                            .expect("relative object")
-                            .to_path_buf(),
-                    );
-                }
-            }
-        }
-
-        let objects = root.join(".git").join("objects");
-        let mut output = BTreeSet::new();
-        visit(&objects, &objects, &mut output);
-        output
+    fn object_ids(root: &Path) -> BTreeSet<String> {
+        git(
+            root,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objectname)",
+            ],
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
     }
 
     #[tokio::test]
@@ -973,7 +964,7 @@ mod tests {
         std::fs::write(root.join("tracked.txt"), "baseline\n").expect("baseline");
         commit_all(root);
 
-        let objects_before_root_review = object_files(root);
+        let objects_before_root_review = object_ids(root);
         let root_head_snapshot = repository_review_snapshot(root, RepositoryReviewTarget::Head)
             .await
             .expect("root HEAD review snapshot");
@@ -984,7 +975,7 @@ mod tests {
                 .expect("root HEAD patch")
                 .contains("tracked.txt")
         );
-        assert_eq!(object_files(root), objects_before_root_review);
+        assert_eq!(object_ids(root), objects_before_root_review);
 
         std::fs::write(root.join("tracked.txt"), "changed\n").expect("change tracked");
         git(root, &["add", "tracked.txt"]);
@@ -1058,7 +1049,7 @@ mod tests {
         let git_dir = root.join(".git");
         let index_before = std::fs::read(git_dir.join("index")).expect("read real index");
         let refs_before = git(root, &["show-ref"]);
-        let objects_before = object_files(root);
+        let objects_before = object_ids(root);
         let branch_before = git(root, &["symbolic-ref", "HEAD"]);
         let status_before = git(root, &["status", "--porcelain=v1", "--untracked-files=all"]);
         let snapshot = WorkspaceSnapshot::capture(&[root.to_path_buf()]).await;
@@ -1136,7 +1127,7 @@ mod tests {
         );
         assert_eq!(git(root, &["show-ref"]), refs_before);
         assert_eq!(git(root, &["symbolic-ref", "HEAD"]), branch_before);
-        assert_eq!(object_files(root), objects_before);
+        assert_eq!(object_ids(root), objects_before);
     }
 
     #[tokio::test]
