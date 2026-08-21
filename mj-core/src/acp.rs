@@ -2594,8 +2594,8 @@ async fn drive_session(
     if let Some(server) = subagent_service.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
-    // Memory tools are additive: a failed listener downgrades to
-    // injection-only rather than aborting.
+    // Memory tools are additive: a failed listener leaves native-memory
+    // synchronization intact rather than aborting the session.
     let memory_tools = match memory.as_ref().filter(|memory| memory.tools) {
         Some(session_memory) => match crate::memory::ToolServer::start(session_memory).await {
             Ok(server) => Some(server),
@@ -2608,6 +2608,9 @@ async fn drive_session(
     };
     if let Some(server) = memory_tools.as_ref() {
         mcp_servers.push(server.advertised().clone());
+    }
+    if let Some(session_memory) = memory.clone() {
+        let _ = tokio::task::spawn_blocking(move || session_memory.synchronize_native()).await;
     }
     let side_session_unsupported_reason =
         side_session_capability_error(&init_resp.agent_capabilities);
@@ -2824,9 +2827,6 @@ async fn drive_session(
     workspace_roots.extend(additional_directories.iter().cloned());
     let mut next_turn_diff_id = 1_u64;
     let mut session_has_history = resumed;
-    // Reread shared knowledge at every turn boundary so concurrent Claude and
-    // Codex sessions observe one another's durable discoveries without restart.
-    let mut last_memory_entries: Option<Vec<crate::memory::MemoryEntry>> = None;
     // Prompts that arrived while another operation owned `ui_rx` (a turn, a
     // config update, a session fork). They are replayed here, ahead of any
     // command still sitting in the channel, instead of being dropped: an
@@ -2888,31 +2888,6 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let current_memory_entries = if let Some(memory) = memory.clone() {
-                    tokio::task::spawn_blocking(move || memory.refresh_entries())
-                        .await
-                        .unwrap_or_else(|error| {
-                            tracing::warn!("memory refresh task failed: {error}");
-                            None
-                        })
-                } else {
-                    None
-                };
-                let pending_memory = current_memory_entries.as_deref().and_then(|entries| {
-                    memory.as_ref().and_then(|memory| {
-                        crate::memory::render_preamble_update(
-                            entries,
-                            last_memory_entries.as_deref(),
-                            &memory.project,
-                            memory.tools,
-                        )
-                    })
-                });
-                let text = match pending_memory.as_ref().map(|update| update.text.as_str()) {
-                    Some(preamble) if text.is_empty() => preamble.to_string(),
-                    Some(preamble) => format!("{preamble}\n\n{text}"),
-                    None => text,
-                };
                 let prompt = prompt_content_blocks(text, images, resources, side_prompt_policy);
                 let req = PromptRequest::new(session_id.clone(), prompt);
                 let keep_running = drive_prompt_turn(
@@ -2938,16 +2913,6 @@ async fn drive_session(
                 )
                 .await?;
                 session_has_history = true;
-                if let Some(update) = pending_memory {
-                    let delivered = last_memory_entries.get_or_insert_with(Vec::new);
-                    for entry in update.delivered {
-                        if let Some(old) = delivered.iter_mut().find(|old| old.id == entry.id) {
-                            *old = entry;
-                        } else {
-                            delivered.push(entry);
-                        }
-                    }
-                }
                 if !keep_running {
                     break;
                 }
@@ -3003,6 +2968,11 @@ async fn drive_session(
                 }
             }
             UiCommand::NewSession { responder } => {
+                if let Some(session_memory) = memory.clone() {
+                    let _ =
+                        tokio::task::spawn_blocking(move || session_memory.synchronize_native())
+                            .await;
+                }
                 match start_fresh_session(
                     &conn,
                     &session_id,
@@ -3027,7 +2997,6 @@ async fn drive_session(
                         context_usage.reset_for_session();
                         session_has_history = false;
                         next_turn_diff_id = 1;
-                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(message) => {
@@ -3123,7 +3092,6 @@ async fn drive_session(
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
-                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
@@ -14068,7 +14036,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_preamble_rides_first_prompt_and_rearms_after_new_session() {
+    async fn shared_memory_never_changes_the_user_prompt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = dir.path().join("memories.json");
         crate::memory::add(&store, "prefers pnpm", None).expect("seed memory");
@@ -14106,9 +14074,8 @@ mod tests {
             Some(crate::memory::SessionMemory {
                 store_path: store.clone(),
                 project: PathBuf::from("/tmp/proj"),
-                inject: true,
+                inject: false,
                 tools: false,
-                import_claude_auto: false,
             }),
             false,
             None,
@@ -14125,10 +14092,7 @@ mod tests {
         wait_for_prompt_count(&prompts, 2).await;
         {
             let log = prompts.lock().expect("prompt log");
-            assert!(log[0].contains("<mj-memory>"), "first prompt: {:?}", log[0]);
-            assert!(log[0].contains("prefers pnpm"));
-            assert!(log[0].ends_with("first"));
-            // The preamble rides only the first prompt of a session.
+            assert_eq!(log[0], "first");
             assert_eq!(log[1], "second");
         }
 
@@ -14144,11 +14108,7 @@ mod tests {
         wait_for_prompt_count(&prompts, 3).await;
         {
             let log = prompts.lock().expect("prompt log");
-            assert!(
-                log[2].contains("parser paths are normalized"),
-                "live update: {:?}",
-                log[2]
-            );
+            assert_eq!(log[2], "after update");
         }
 
         let (responder, response) = oneshot::channel();
@@ -14164,12 +14124,7 @@ mod tests {
         wait_for_prompt_count(&prompts, 4).await;
         {
             let log = prompts.lock().expect("prompt log");
-            assert!(
-                log[3].contains("<mj-memory>"),
-                "fresh-session prompt must carry memories again: {:?}",
-                log[3]
-            );
-            assert!(log[3].ends_with("third"));
+            assert_eq!(log[3], "third");
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");

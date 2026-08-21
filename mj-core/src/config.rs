@@ -278,17 +278,17 @@ fn is_true(value: &bool) -> bool {
 }
 
 /// Persistent cross-session memories: whether the feature is on at all,
-/// whether stored entries are injected into new primary sessions, and
+/// whether stored entries are synchronized into native provider memory, and
 /// whether the agent may save new ones. The store itself lives next to the
 /// config as `memories.json`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MemoryConfig {
-    /// Master switch. `false` disables the whole feature — no injection and
+    /// Master switch. `false` disables the whole feature — no synchronization and
     /// no memory tools — regardless of the toggles below. The store and its
     /// management commands remain available.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
-    /// Inject stored memories into the first prompt of new primary sessions.
+    /// Synchronize stored memories into native Claude and Codex memory files.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_memories: bool,
     /// Expose the `memory_save` / `memory_forget` MCP tools so the agent can

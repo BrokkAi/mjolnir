@@ -5658,16 +5658,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
     match subcommand {
         "" => {
             let memory_config = memory_config_from_disk(state);
-            let mut listing = crate::memory::render_list(&store, &project, &memory_config);
-            if !state.agent_source_id.is_empty()
-                && crate::roster::AdapterKind::from_source_id(&state.agent_source_id)
-                    != Some(crate::roster::AdapterKind::Codex)
-            {
-                listing.push_str(
-                    "\nNote: memories apply only to Codex primary sessions; the current \
-                     primary agent will not receive them.",
-                );
-            }
+            let listing = crate::memory::render_list(&store, &project, &memory_config);
             state.push_system_message(listing);
         }
         "add" => {
@@ -5689,7 +5680,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 Ok(entry) => state.record_status_message(
                     StatusKind::Info,
                     format!(
-                        "saved memory m{} ({}); shared before the next Claude or Codex turn",
+                        "saved memory m{} ({}); synchronized into Claude and Codex native memory when their next sessions start",
                         entry.id,
                         if global { "global" } else { "this project" }
                     ),
@@ -19540,7 +19531,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_memory_notes_when_the_primary_is_not_codex() {
+    fn slash_memory_is_available_to_claude_and_codex_primaries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = AppState::new();
         state.memory_store_path = dir.path().join("memories.json");
@@ -19551,7 +19542,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("apply only to Codex primary sessions")
+            Some(Entry::System(text)) if text.contains("Memories")
         ));
 
         state.agent_source_id = "codex-acp".to_string();
@@ -19559,7 +19550,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if !text.contains("apply only to Codex primary sessions")
+            Some(Entry::System(text)) if text.contains("Memories")
         ));
     }
 
