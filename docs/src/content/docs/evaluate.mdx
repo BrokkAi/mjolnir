@@ -33,22 +33,72 @@ It does not prove large-repository performance, consistent quality across
 models, predictable provider cost, safe unattended shell execution, or
 remote-server security.
 
-## Before you start
+## Before you start: install and connect a team
 
-You need:
+Everything in this evaluation runs on a team you set up once, so do the setup
+first, up front. You need Python 3 for the fixture tests, Git, and a Codex or
+Claude account — ideally both, because the mixed teams are the interesting
+ones here: the provider that wrote the change is never the provider that
+reviews it. Provider use may cost money.
 
-- Mjolnir installed and `mj --version` working.
-- Python 3 for the fixture tests.
-- Git.
-- An authenticated, launchable Codex or Claude route. Provider use may cost
-  money.
+### 1. Install Mjolnir
 
-Run `mj` once and choose a team on onboarding's **Team** tab (or later on the
-same tab of `/mjconfig`): **Codex**, **Claude**, or a mixed team such as
+Any route from [Install and run](/install/) works; the quickest:
+
+```bash
+npm install -g @brokkai/mjolnir
+```
+
+```bash
+mj --version
+```
+
+### 2. Sign in to Codex, Claude, or both
+
+Run `mj` in any repository. First launch opens onboarding; its **ACP
+Servers** tab signs you in without leaving the terminal:
+
+- **Anthropic / Claude** — choose **Claude subscription** (Pro, Max, Team, or
+  Enterprise) or **Anthropic Console** (API usage billing). Mjolnir launches
+  the Claude Code executable supplied by the ACP route and returns to
+  onboarding after sign-in.
+- **OpenAI / ChatGPT** — choose **Browser** (`codex login`) or **Device
+  code** (`codex login --device-auth`).
+
+You do not need global `@anthropic-ai/claude-code` or `@openai/codex`
+installations: each ACP route ships a compatible CLI, and Mjolnir detects the
+credentials those sign-ins write. The equivalent manual commands, if you
+prefer to authenticate outside onboarding, are:
+
+```bash
+npx -y @agentclientprotocol/claude-agent-acp --cli auth login --claudeai
+```
+
+```bash
+npx --yes --package=@agentclientprotocol/codex-acp codex login
+```
+
+### 3. Choose the team
+
+Onboarding's **Team** tab (later: the same tab in `/mjconfig`) offers four
+configurations: **Codex**, **Claude**, **Codex coder + Claude reviewer**, and
 **Claude coder + Codex reviewer**. A team pins the primary seat to its coder
-and the review and subagent seats to its reviewer while keeping their models on
-Auto. The mixed teams are the interesting ones here: the provider that wrote
-the change is never the provider that reviews it.
+and the review and subagent seats to its reviewer while keeping all three
+models on Auto.
+
+With both providers signed in, Mjolnir defaults to **Claude coder + Codex
+reviewer** so review lands on the model that did not write the code. With one
+provider, that provider's own team is the default — every journey below still
+works, but the reviewer then shares the coder's provider. This page's
+screenshots come from a **Claude coder + Codex reviewer** run.
+
+### 4. Confirm the seats
+
+Before starting the journeys, check onboarding (or `/mjconfig`) reports your
+provider signed in and its ACP server enabled, and that **Discrete review**
+is on — the evaluation depends on it. After launch, `/agents` records the
+model and adapter that actually bound to each seat, and the status line shows
+the resolved primary model. Team changes apply to the next session.
 
 ## Prepare the disposable fixture
 
