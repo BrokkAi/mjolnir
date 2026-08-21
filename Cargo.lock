@@ -560,6 +560,7 @@ dependencies = [
  "shell-words",
  "signal-hook",
  "similar",
+ "subtle",
  "tar",
  "tempfile",
  "tokio",

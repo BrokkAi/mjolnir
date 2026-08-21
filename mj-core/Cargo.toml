@@ -41,6 +41,7 @@ tar = "0.4"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 toml = "0.8"
+subtle = "2"
 unicode-width = "0.2.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

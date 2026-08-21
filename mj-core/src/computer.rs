@@ -432,7 +432,7 @@ pub enum NamedKey {
 
 /// Native input after service-side observation validation and coordinate
 /// transformation. Policy and MCP transport remain outside the backend.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BackendAction {
     Move {
         x: f64,
@@ -468,7 +468,8 @@ pub enum BackendAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PermissionState {
     Granted,
     /// The OS did not grant the permission; CoreGraphics cannot distinguish a
@@ -479,13 +480,24 @@ pub enum PermissionState {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionReadiness {
     pub screen_recording: PermissionState,
     pub accessibility: PermissionState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A permission prompt owned by the dedicated platform host. The terminal and
+/// MCP service may request this through the authenticated host channel, but
+/// never call the OS permission API themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerPermission {
+    ScreenRecording,
+    Accessibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HostLockState {
     Unlocked,
     Locked,
@@ -508,6 +520,19 @@ pub trait ComputerBackend: Send + Sync {
         &self,
         cancellation: CancellationToken,
     ) -> Result<PermissionReadiness, ComputerError>;
+
+    async fn request_permission(
+        &self,
+        _permission: ComputerPermission,
+        cancellation: CancellationToken,
+    ) -> Result<PermissionReadiness, ComputerError> {
+        if cancellation.is_cancelled() {
+            return Err(ComputerError::Cancelled);
+        }
+        Err(ComputerError::Backend(
+            "this computer backend cannot request OS permission".to_string(),
+        ))
+    }
 
     async fn host_lock_state(
         &self,

@@ -24,10 +24,10 @@ use objc2_screen_capture_kit::SCScreenshotManager;
 use tokio_util::sync::CancellationToken;
 
 use crate::computer::{
-    BackendAction, CaptureRegion, ComputerBackend, ComputerError, CurrentDisplay, DesktopPoint,
-    DisplayId, EncodedImage, HostLockState, ImageLimits, Observation, ObservationId,
-    ObservationMetadata, ObserveArgs, PermissionReadiness, PermissionState, PixelSize,
-    SourceRegion,
+    BackendAction, CaptureRegion, ComputerBackend, ComputerError, ComputerPermission,
+    CurrentDisplay, DesktopPoint, DisplayId, EncodedImage, HostLockState, ImageLimits, KeyModifier,
+    NamedKey, Observation, ObservationId, ObservationMetadata, ObserveArgs, PermissionReadiness,
+    PermissionState, PixelSize, PointerButton, SourceRegion,
 };
 
 type CGDirectDisplayID = u32;
@@ -38,8 +38,28 @@ type CFDataRef = *const c_void;
 type CFMutableDataRef = *mut c_void;
 type CFStringRef = *const c_void;
 type CGImageDestinationRef = *mut c_void;
+type CGEventRef = *mut c_void;
+type CGEventSourceRef = *mut c_void;
+type CFDictionaryRef = *const c_void;
 
 const KCG_ERROR_SUCCESS: CGError = 0;
+const KCG_HID_EVENT_TAP: u32 = 0;
+const KCG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
+const KCG_SCROLL_EVENT_UNIT_PIXEL: u32 = 1;
+const KCG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
+const KCG_EVENT_LEFT_MOUSE_UP: u32 = 2;
+const KCG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
+const KCG_EVENT_RIGHT_MOUSE_UP: u32 = 4;
+const KCG_EVENT_MOUSE_MOVED: u32 = 5;
+const KCG_EVENT_LEFT_MOUSE_DRAGGED: u32 = 6;
+const KCG_EVENT_RIGHT_MOUSE_DRAGGED: u32 = 7;
+const KCG_EVENT_OTHER_MOUSE_DOWN: u32 = 25;
+const KCG_EVENT_OTHER_MOUSE_UP: u32 = 26;
+const KCG_EVENT_OTHER_MOUSE_DRAGGED: u32 = 27;
+const KCG_EVENT_FLAG_MASK_SHIFT: u64 = 1 << 17;
+const KCG_EVENT_FLAG_MASK_CONTROL: u64 = 1 << 18;
+const KCG_EVENT_FLAG_MASK_ALTERNATE: u64 = 1 << 19;
+const KCG_EVENT_FLAG_MASK_COMMAND: u64 = 1 << 20;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -75,6 +95,32 @@ unsafe extern "C" {
     fn CGDisplayModeGetPixelWidth(mode: CGDisplayModeRef) -> usize;
     fn CGDisplayModeGetPixelHeight(mode: CGDisplayModeRef) -> usize;
     fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
+    fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
+    fn CGEventCreateMouseEvent(
+        source: CGEventSourceRef,
+        mouse_type: u32,
+        mouse_cursor_position: CGPoint,
+        mouse_button: u32,
+    ) -> CGEventRef;
+    fn CGEventCreateKeyboardEvent(
+        source: CGEventSourceRef,
+        virtual_key: u16,
+        key_down: bool,
+    ) -> CGEventRef;
+    fn CGEventKeyboardSetUnicodeString(event: CGEventRef, length: u16, string: *const u16);
+    fn CGEventCreateScrollWheelEvent2(
+        source: CGEventSourceRef,
+        units: u32,
+        wheel_count: u32,
+        wheel1: i32,
+        wheel2: i32,
+        wheel3: i32,
+    ) -> CGEventRef;
+    fn CGEventSetFlags(event: CGEventRef, flags: u64);
+    fn CGEventSetLocation(event: CGEventRef, location: CGPoint);
+    fn CGEventPost(tap: u32, event: CGEventRef);
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -88,6 +134,24 @@ unsafe extern "C" {
         encoding: u32,
     ) -> CFStringRef;
     fn CFRelease(cf: *const c_void);
+    fn CFDictionaryGetValue(dictionary: CFDictionaryRef, key: *const c_void) -> *const c_void;
+    fn CFGetTypeID(cf: *const c_void) -> usize;
+    fn CFBooleanGetTypeID() -> usize;
+    fn CFBooleanGetValue(boolean: *const c_void) -> bool;
+    fn CFDictionaryCreateMutable(
+        allocator: *const c_void,
+        capacity: isize,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> *mut c_void;
+    fn CFDictionarySetValue(dictionary: *mut c_void, key: *const c_void, value: *const c_void);
+    static kCFBooleanTrue: *const c_void;
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
 }
 
 #[link(name = "ImageIO", kind = "framework")]
@@ -235,8 +299,44 @@ impl ComputerBackend for MacosComputerBackend {
         };
         Ok(PermissionReadiness {
             screen_recording,
-            accessibility: PermissionState::Unsupported,
+            accessibility: if accessibility_granted() {
+                PermissionState::Granted
+            } else {
+                PermissionState::NotGranted
+            },
         })
+    }
+
+    async fn request_permission(
+        &self,
+        permission: ComputerPermission,
+        cancellation: CancellationToken,
+    ) -> Result<PermissionReadiness, ComputerError> {
+        check_cancelled(&cancellation)?;
+        tokio::task::spawn_blocking(move || {
+            check_cancelled(&cancellation)?;
+            match permission {
+                ComputerPermission::ScreenRecording => request_screen_recording_permission(),
+                ComputerPermission::Accessibility => request_accessibility_permission(),
+            }
+            check_cancelled(&cancellation)?;
+            Ok(PermissionReadiness {
+                screen_recording: if screen_recording_granted() {
+                    PermissionState::Granted
+                } else {
+                    PermissionState::NotGranted
+                },
+                accessibility: if accessibility_granted() {
+                    PermissionState::Granted
+                } else {
+                    PermissionState::NotGranted
+                },
+            })
+        })
+        .await
+        .map_err(|error| {
+            ComputerError::Backend(format!("permission request task failed: {error}"))
+        })?
     }
 
     async fn host_lock_state(
@@ -244,20 +344,88 @@ impl ComputerBackend for MacosComputerBackend {
         cancellation: CancellationToken,
     ) -> Result<HostLockState, ComputerError> {
         check_cancelled(&cancellation)?;
-        // This observation-only backend does not infer host lock state. The
-        // later input policy treats Unknown as a hard denial.
-        Ok(HostLockState::Unknown)
+        Ok(host_lock_state())
     }
 
     async fn execute(
         &self,
-        _action: BackendAction,
+        action: BackendAction,
         cancellation: CancellationToken,
     ) -> Result<(), ComputerError> {
-        check_cancelled(&cancellation)?;
-        Err(ComputerError::Backend(
-            "macOS observation backend does not implement input".to_string(),
-        ))
+        let backend = *self;
+        tokio::task::spawn_blocking(move || backend.execute_action(action, &cancellation))
+            .await
+            .map_err(|error| ComputerError::Backend(format!("input task failed: {error}")))?
+    }
+}
+
+impl MacosComputerBackend {
+    fn execute_action(
+        &self,
+        action: BackendAction,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ComputerError> {
+        check_cancelled(cancellation)?;
+        if !accessibility_granted() {
+            return Err(ComputerError::AccessibilityPermission(
+                PermissionState::NotGranted,
+            ));
+        }
+        match host_lock_state() {
+            HostLockState::Unlocked => {}
+            HostLockState::Locked => return Err(ComputerError::HostLocked),
+            HostLockState::Unknown => return Err(ComputerError::HostLockStateUnknown),
+        }
+        let source = EventSource::new()?;
+        match action {
+            BackendAction::Move { x, y } => {
+                post_mouse(&source, KCG_EVENT_MOUSE_MOVED, x, y, PointerButton::Left)?;
+            }
+            BackendAction::Click { x, y, button } => {
+                post_mouse(&source, mouse_down_event(button), x, y, button)?;
+                check_cancelled(cancellation)?;
+                post_mouse(&source, mouse_up_event(button), x, y, button)?;
+            }
+            BackendAction::DoubleClick { x, y, button } => {
+                for _ in 0..2 {
+                    post_mouse(&source, mouse_down_event(button), x, y, button)?;
+                    check_cancelled(cancellation)?;
+                    post_mouse(&source, mouse_up_event(button), x, y, button)?;
+                    check_cancelled(cancellation)?;
+                }
+            }
+            BackendAction::Drag { from, to, button } => {
+                post_mouse(&source, KCG_EVENT_MOUSE_MOVED, from.0, from.1, button)?;
+                check_cancelled(cancellation)?;
+                post_mouse(&source, mouse_down_event(button), from.0, from.1, button)?;
+                check_cancelled(cancellation)?;
+                post_mouse(&source, mouse_drag_event(button), to.0, to.1, button)?;
+                check_cancelled(cancellation)?;
+                post_mouse(&source, mouse_up_event(button), to.0, to.1, button)?;
+            }
+            BackendAction::TypeText { text } => {
+                for character in text.chars() {
+                    check_cancelled(cancellation)?;
+                    post_text(&source, character)?;
+                    check_cancelled(cancellation)?;
+                }
+            }
+            BackendAction::Key { key, modifiers } => {
+                let flags = key_modifier_flags(&modifiers);
+                post_key(&source, key_code(key), true, flags)?;
+                check_cancelled(cancellation)?;
+                post_key(&source, key_code(key), false, flags)?;
+            }
+            BackendAction::Scroll {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => {
+                post_scroll(&source, x, y, delta_x, delta_y)?;
+            }
+        }
+        check_cancelled(cancellation)
     }
 }
 
@@ -292,6 +460,309 @@ fn screen_recording_granted() -> bool {
     // SAFETY: This read-only CoreGraphics check does not show a permission
     // prompt and has no ownership requirements.
     unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+fn accessibility_granted() -> bool {
+    // SAFETY: AXIsProcessTrusted only queries the host app's Accessibility
+    // grant. It neither opens a prompt nor injects any input.
+    unsafe { AXIsProcessTrusted() }
+}
+
+fn request_screen_recording_permission() {
+    // SAFETY: this is called only by Mjolnir Computer.app through its
+    // authenticated host IPC. macOS owns whether a prompt is shown.
+    let _ = unsafe { CGRequestScreenCaptureAccess() };
+}
+
+fn request_accessibility_permission() {
+    let Ok(key) = CoreFoundationString::new("AXTrustedCheckOptionPrompt") else {
+        return;
+    };
+    // SAFETY: the mutable dictionary is retained by CoreFoundation and both
+    // key/value stay valid through AXIsProcessTrustedWithOptions below.
+    let options = unsafe {
+        CFDictionaryCreateMutable(std::ptr::null(), 1, std::ptr::null(), std::ptr::null())
+    };
+    if options.is_null() {
+        return;
+    }
+    let options = CoreFoundationObject(options.cast());
+    // SAFETY: options is a valid mutable dictionary; the key is a live CFString
+    // and kCFBooleanTrue is a process-lifetime CoreFoundation singleton.
+    unsafe { CFDictionarySetValue(options.0.cast_mut(), key.0, kCFBooleanTrue) };
+    // SAFETY: options remains valid throughout this synchronous permission
+    // request; no ownership transfers to Accessibility.
+    let _ = unsafe { AXIsProcessTrustedWithOptions(options.0) };
+}
+
+fn host_lock_state() -> HostLockState {
+    // SAFETY: CoreGraphics returns a retained snapshot of the current login
+    // session dictionary. The wrapper releases it before returning.
+    let dictionary = unsafe { CGSessionCopyCurrentDictionary() };
+    if dictionary.is_null() {
+        return HostLockState::Unknown;
+    }
+    let dictionary = CoreFoundationObject(dictionary);
+    let Ok(key) = CoreFoundationString::new("kCGSessionOnConsoleKey") else {
+        return HostLockState::Unknown;
+    };
+    // SAFETY: both CoreFoundation objects remain valid for this lookup.
+    let value = unsafe { CFDictionaryGetValue(dictionary.0, key.0) };
+    if value.is_null()
+        // SAFETY: CoreFoundation type-id queries are valid for a non-null
+        // object pointer and do not transfer ownership.
+        || unsafe { CFGetTypeID(value) } != unsafe { CFBooleanGetTypeID() }
+    {
+        return HostLockState::Unknown;
+    }
+    // SAFETY: the type check above proves the dictionary value is a CFBoolean.
+    if unsafe { CFBooleanGetValue(value) } {
+        HostLockState::Unlocked
+    } else {
+        HostLockState::Locked
+    }
+}
+
+struct EventSource(CGEventSourceRef);
+
+impl EventSource {
+    fn new() -> Result<Self, ComputerError> {
+        // SAFETY: CoreGraphics returns a retained event source owned by this
+        // wrapper, or null on allocation failure.
+        let source = unsafe { CGEventSourceCreate(KCG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE) };
+        if source.is_null() {
+            return Err(ComputerError::Backend(
+                "create CoreGraphics event source failed".to_string(),
+            ));
+        }
+        Ok(Self(source))
+    }
+}
+
+impl Drop for EventSource {
+    fn drop(&mut self) {
+        // SAFETY: EventSource::new created a retained CoreFoundation object.
+        unsafe { CFRelease(self.0) };
+    }
+}
+
+struct Event(CGEventRef);
+
+impl Event {
+    fn mouse(
+        source: &EventSource,
+        event_type: u32,
+        x: f64,
+        y: f64,
+        button: PointerButton,
+    ) -> Result<Self, ComputerError> {
+        validate_point(x, y)?;
+        // SAFETY: source is a valid retained event source and the scalar
+        // values are finite desktop coordinates checked above.
+        let event = unsafe {
+            CGEventCreateMouseEvent(source.0, event_type, CGPoint { x, y }, mouse_button(button))
+        };
+        Self::from_raw(event, "create mouse event")
+    }
+
+    fn keyboard(
+        source: &EventSource,
+        virtual_key: u16,
+        key_down: bool,
+    ) -> Result<Self, ComputerError> {
+        // SAFETY: source is a valid retained event source and virtual key is
+        // one of the named-key constants selected below.
+        let event = unsafe { CGEventCreateKeyboardEvent(source.0, virtual_key, key_down) };
+        Self::from_raw(event, "create keyboard event")
+    }
+
+    fn scroll(source: &EventSource, delta_x: i32, delta_y: i32) -> Result<Self, ComputerError> {
+        // SAFETY: source is valid; a two-axis pixel scroll has the supplied
+        // bounded signed deltas and no borrowed pointers.
+        let event = unsafe {
+            CGEventCreateScrollWheelEvent2(
+                source.0,
+                KCG_SCROLL_EVENT_UNIT_PIXEL,
+                2,
+                delta_y,
+                delta_x,
+                0,
+            )
+        };
+        Self::from_raw(event, "create scroll event")
+    }
+
+    fn from_raw(event: CGEventRef, operation: &str) -> Result<Self, ComputerError> {
+        if event.is_null() {
+            Err(ComputerError::Backend(format!("{operation} failed")))
+        } else {
+            Ok(Self(event))
+        }
+    }
+
+    fn set_flags(&self, flags: u64) {
+        // SAFETY: self.0 is a valid event owned by this wrapper.
+        unsafe { CGEventSetFlags(self.0, flags) };
+    }
+
+    fn set_location(&self, x: f64, y: f64) -> Result<(), ComputerError> {
+        validate_point(x, y)?;
+        // SAFETY: self.0 is valid and the location uses checked finite values.
+        unsafe { CGEventSetLocation(self.0, CGPoint { x, y }) };
+        Ok(())
+    }
+
+    fn set_unicode(&self, units: &[u16]) -> Result<(), ComputerError> {
+        let length = u16::try_from(units.len()).map_err(|_| {
+            ComputerError::Backend("unicode key event exceeds u16 length".to_string())
+        })?;
+        // SAFETY: self.0 is valid and `units` remains alive for the call.
+        unsafe { CGEventKeyboardSetUnicodeString(self.0, length, units.as_ptr()) };
+        Ok(())
+    }
+
+    fn post(&self) {
+        // SAFETY: self.0 is a valid event. Posting is intentionally confined
+        // to the Mjolnir Computer app after readiness and lock checks.
+        unsafe { CGEventPost(KCG_HID_EVENT_TAP, self.0) };
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // SAFETY: Event::from_raw accepts only a retained CGEventRef.
+        unsafe { CFRelease(self.0) };
+    }
+}
+
+fn post_mouse(
+    source: &EventSource,
+    event_type: u32,
+    x: f64,
+    y: f64,
+    button: PointerButton,
+) -> Result<(), ComputerError> {
+    let event = Event::mouse(source, event_type, x, y, button)?;
+    event.post();
+    Ok(())
+}
+
+fn post_text(source: &EventSource, character: char) -> Result<(), ComputerError> {
+    let mut units = [0_u16; 2];
+    let units = character.encode_utf16(&mut units);
+    let key_down = Event::keyboard(source, 0, true)?;
+    key_down.set_unicode(units)?;
+    key_down.post();
+    let key_up = Event::keyboard(source, 0, false)?;
+    key_up.set_unicode(units)?;
+    key_up.post();
+    Ok(())
+}
+
+fn post_key(
+    source: &EventSource,
+    virtual_key: u16,
+    key_down: bool,
+    flags: u64,
+) -> Result<(), ComputerError> {
+    let event = Event::keyboard(source, virtual_key, key_down)?;
+    event.set_flags(flags);
+    event.post();
+    Ok(())
+}
+
+fn post_scroll(
+    source: &EventSource,
+    x: f64,
+    y: f64,
+    delta_x: f64,
+    delta_y: f64,
+) -> Result<(), ComputerError> {
+    validate_point(x, y)?;
+    let delta_x = scroll_delta(delta_x)?;
+    let delta_y = scroll_delta(delta_y)?;
+    let event = Event::scroll(source, delta_x, delta_y)?;
+    event.set_location(x, y)?;
+    event.post();
+    Ok(())
+}
+
+fn validate_point(x: f64, y: f64) -> Result<(), ComputerError> {
+    if x.is_finite() && y.is_finite() {
+        Ok(())
+    } else {
+        Err(ComputerError::InvalidCoordinate)
+    }
+}
+
+fn scroll_delta(value: f64) -> Result<i32, ComputerError> {
+    if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+        return Err(ComputerError::InvalidCoordinate);
+    }
+    Ok(value.round() as i32)
+}
+
+fn mouse_button(button: PointerButton) -> u32 {
+    match button {
+        PointerButton::Left => 0,
+        PointerButton::Right => 1,
+        PointerButton::Middle => 2,
+    }
+}
+
+fn mouse_down_event(button: PointerButton) -> u32 {
+    match button {
+        PointerButton::Left => KCG_EVENT_LEFT_MOUSE_DOWN,
+        PointerButton::Right => KCG_EVENT_RIGHT_MOUSE_DOWN,
+        PointerButton::Middle => KCG_EVENT_OTHER_MOUSE_DOWN,
+    }
+}
+
+fn mouse_up_event(button: PointerButton) -> u32 {
+    match button {
+        PointerButton::Left => KCG_EVENT_LEFT_MOUSE_UP,
+        PointerButton::Right => KCG_EVENT_RIGHT_MOUSE_UP,
+        PointerButton::Middle => KCG_EVENT_OTHER_MOUSE_UP,
+    }
+}
+
+fn mouse_drag_event(button: PointerButton) -> u32 {
+    match button {
+        PointerButton::Left => KCG_EVENT_LEFT_MOUSE_DRAGGED,
+        PointerButton::Right => KCG_EVENT_RIGHT_MOUSE_DRAGGED,
+        PointerButton::Middle => KCG_EVENT_OTHER_MOUSE_DRAGGED,
+    }
+}
+
+fn key_modifier_flags(modifiers: &[KeyModifier]) -> u64 {
+    modifiers.iter().fold(0, |flags, modifier| {
+        flags
+            | match modifier {
+                KeyModifier::Alt => KCG_EVENT_FLAG_MASK_ALTERNATE,
+                KeyModifier::Control => KCG_EVENT_FLAG_MASK_CONTROL,
+                KeyModifier::Meta => KCG_EVENT_FLAG_MASK_COMMAND,
+                KeyModifier::Shift => KCG_EVENT_FLAG_MASK_SHIFT,
+            }
+    })
+}
+
+fn key_code(key: NamedKey) -> u16 {
+    match key {
+        NamedKey::ArrowDown => 125,
+        NamedKey::ArrowLeft => 123,
+        NamedKey::ArrowRight => 124,
+        NamedKey::ArrowUp => 126,
+        NamedKey::Backspace => 51,
+        NamedKey::Delete => 117,
+        NamedKey::End => 119,
+        NamedKey::Enter => 36,
+        NamedKey::Escape => 53,
+        NamedKey::Home => 115,
+        NamedKey::PageDown => 121,
+        NamedKey::PageUp => 116,
+        NamedKey::Space => 49,
+        NamedKey::Tab => 48,
+    }
 }
 
 fn active_displays() -> Result<Vec<CGDirectDisplayID>, ComputerError> {
@@ -679,6 +1150,56 @@ mod tests {
         let image = image::DynamicImage::new_rgba8(800, 600);
         let returned = downscale_to_limits(image, 2_048, 2_048);
         assert_eq!(returned.dimensions(), (800, 600));
+    }
+
+    #[test]
+    fn named_keys_and_modifiers_use_the_documented_macos_virtual_keys() {
+        assert_eq!(key_code(NamedKey::Enter), 36);
+        assert_eq!(key_code(NamedKey::Escape), 53);
+        assert_eq!(key_code(NamedKey::ArrowLeft), 123);
+        assert_eq!(
+            key_modifier_flags(&[KeyModifier::Meta, KeyModifier::Shift]),
+            KCG_EVENT_FLAG_MASK_COMMAND | KCG_EVENT_FLAG_MASK_SHIFT
+        );
+    }
+
+    #[test]
+    fn mouse_button_variants_select_matching_event_families() {
+        assert_eq!(mouse_button(PointerButton::Left), 0);
+        assert_eq!(mouse_button(PointerButton::Right), 1);
+        assert_eq!(mouse_button(PointerButton::Middle), 2);
+        assert_eq!(
+            mouse_down_event(PointerButton::Middle),
+            KCG_EVENT_OTHER_MOUSE_DOWN
+        );
+        assert_eq!(
+            mouse_drag_event(PointerButton::Right),
+            KCG_EVENT_RIGHT_MOUSE_DRAGGED
+        );
+        assert_eq!(mouse_up_event(PointerButton::Left), KCG_EVENT_LEFT_MOUSE_UP);
+    }
+
+    #[test]
+    fn scroll_deltas_reject_non_finite_or_unrepresentable_values() {
+        assert_eq!(scroll_delta(2.6), Ok(3));
+        assert_eq!(scroll_delta(-2.6), Ok(-3));
+        assert_eq!(
+            scroll_delta(f64::NAN),
+            Err(ComputerError::InvalidCoordinate)
+        );
+        assert_eq!(
+            scroll_delta(f64::from(i32::MAX) + 1.0),
+            Err(ComputerError::InvalidCoordinate)
+        );
+    }
+
+    #[test]
+    fn input_coordinates_must_be_finite() {
+        assert_eq!(validate_point(0.0, -1.0), Ok(()));
+        assert_eq!(
+            validate_point(f64::INFINITY, 0.0),
+            Err(ComputerError::InvalidCoordinate)
+        );
     }
 
     #[test]
