@@ -151,6 +151,17 @@ where
             return result;
         }
         if checkout_fact(&store, &owner).await {
+            // A lease holder can publish after our read above but before this
+            // checkout. Re-read after acquiring the now-clear lease so that
+            // race uses the published fact instead of launching another probe.
+            if let Some(result) = read_fact(&store)
+                .await
+                .filter(|fact| fact_is_current(fact, started, max_age))
+                .and_then(|fact| decode_fact(&fact))
+            {
+                release_fact(&store, owner.clone()).await;
+                return result;
+            }
             let result = probe().await;
             match serde_json::to_string(&result) {
                 Ok(payload) => publish_fact(&store, payload, owner).await,
