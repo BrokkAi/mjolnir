@@ -495,6 +495,9 @@ pub enum ReviewTone {
     Header,
     /// A finding still awaiting its fix.
     Open,
+    /// A workspace correction was captured but no verification review has
+    /// independently confirmed it yet.
+    Corrected,
     /// A finding a verification review confirmed fixed.
     Fixed,
     /// A validated finding deliberately retained by the correction policy.
@@ -528,7 +531,7 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
                 " · verification pending".to_string(),
             ]
             .concat(),
-            ReviewTone::Open,
+            ReviewTone::Corrected,
         )]),
         ReviewIssueStatus::Fixed => ReviewLedgerLine::new(vec![(
             format!("   ✔ {label} · verified"),
@@ -622,9 +625,8 @@ fn review_resolved_record(
         ReviewIssueStatus::Fixed => ReviewTone::Fixed,
         ReviewIssueStatus::Deferred => ReviewTone::Deferred,
         ReviewIssueStatus::Invalidated => ReviewTone::Invalidated,
-        ReviewIssueStatus::Validated
-        | ReviewIssueStatus::Corrected
-        | ReviewIssueStatus::Uncorrected => ReviewTone::Open,
+        ReviewIssueStatus::Corrected => ReviewTone::Corrected,
+        ReviewIssueStatus::Validated | ReviewIssueStatus::Uncorrected => ReviewTone::Open,
     };
     let mut head = vec![
         (
@@ -676,7 +678,11 @@ fn review_verdict_record(
     ];
     for (count, label, tone) in [
         (tally.fixed, "verified fixed", ReviewTone::Fixed),
-        (tally.corrected, "corrected; unverified", ReviewTone::Open),
+        (
+            tally.corrected,
+            "corrected; unverified",
+            ReviewTone::Corrected,
+        ),
         (tally.deferred, "deferred by policy", ReviewTone::Deferred),
         (tally.uncorrected, "unresolved", ReviewTone::Open),
         (tally.invalidated, "invalidated", ReviewTone::Invalidated),
@@ -4793,6 +4799,12 @@ impl AppState {
                 self.set_status_line(
                     StatusKind::Info,
                     format!("review issues {}: {count} · F9 details", status.as_str()),
+                );
+            }
+            WorkflowTransition::IssueEvidenceUpdated { .. } => {
+                self.set_status_line(
+                    StatusKind::Info,
+                    "review correction evidence recorded · F9 details".to_string(),
                 );
             }
             WorkflowTransition::PhaseChanged { .. }
