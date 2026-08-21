@@ -853,8 +853,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             .expect("manual review matched by epoch");
                         await_review_task(review_task).await;
                         let (report, outcome, has_findings) = match outcome.verdict {
-                            ReviewVerdict::Findings { synthesis, .. }
-                            | ReviewVerdict::Advisory { synthesis, .. } => {
+                            ReviewVerdict::Findings { synthesis, .. } => {
                                 emit_workflow(
                                     &workflow,
                                     WorkflowEvent::new(

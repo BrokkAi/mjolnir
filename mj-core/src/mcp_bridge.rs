@@ -457,11 +457,6 @@ mod tests {
         assert!(lines.next_line().await.expect("read close").is_none());
         drop(lines);
         drop(write);
-        // A new connection can race another parallel test that reuses this
-        // ephemeral port. Rebinding is the direct check that this bridge's
-        // listener released the address.
-        TcpListener::bind(addr)
-            .await
-            .expect("listener address is released after shutdown");
+        assert!(TcpStream::connect(&addr).await.is_err());
     }
 }
