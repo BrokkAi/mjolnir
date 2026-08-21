@@ -81,6 +81,7 @@ enum SettingsRow {
     },
     DiscreteReview,
     ReviewTier,
+    CorrectionThreshold,
     MaxParallelSubagents,
     AutomaticQuotaFailover,
 }
@@ -248,6 +249,7 @@ impl SettingsEditor {
                         (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
                 }
                 SettingsRow::ReviewTier => self.cycle_review_tier(delta),
+                SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(delta),
                 SettingsRow::DiscreteReview | SettingsRow::AutomaticQuotaFailover => {
                     return SettingsAction::None;
                 }
@@ -335,6 +337,7 @@ impl SettingsEditor {
                 // Two tiers, so the toggle key advances the same way the
                 // left/right keys do rather than doing nothing here.
                 SettingsRow::ReviewTier => self.cycle_review_tier(1),
+                SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(1),
                 SettingsRow::AutomaticQuotaFailover => {
                     self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
                 }
@@ -400,6 +403,7 @@ impl SettingsEditor {
                 );
                 rows.push(SettingsRow::DiscreteReview);
                 rows.push(SettingsRow::ReviewTier);
+                rows.push(SettingsRow::CorrectionThreshold);
                 rows
             }
             SettingsTab::Subagents => {
@@ -700,6 +704,16 @@ impl SettingsEditor {
             .unwrap_or(0);
         let next = (current as i32 + delta).rem_euclid(tiers.len() as i32) as usize;
         self.config.agent.review_tier = tiers[next];
+    }
+
+    fn cycle_correction_threshold(&mut self, delta: i32) {
+        let thresholds = mj_core::config::ReviewCorrectionThreshold::ALL;
+        let current = thresholds
+            .iter()
+            .position(|threshold| *threshold == self.config.agent.correction_threshold)
+            .unwrap_or(thresholds.len() - 1);
+        let next = (current as i32 + delta).rem_euclid(thresholds.len() as i32) as usize;
+        self.config.agent.correction_threshold = thresholds[next];
     }
 
     fn cycle_team(&mut self, delta: i32) {

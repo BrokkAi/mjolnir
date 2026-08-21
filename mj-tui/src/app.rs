@@ -483,6 +483,8 @@ pub enum ReviewTone {
     Open,
     /// A finding a verification review confirmed fixed.
     Fixed,
+    /// A validated finding deliberately retained by the correction policy.
+    Deferred,
     /// A finding that did not survive: full error weight, never muted.
     Invalidated,
     /// The summary text of an invalidated finding, struck through.
@@ -518,6 +520,20 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
             format!("   ✔ {label} · verified"),
             ReviewTone::Fixed,
         )]),
+        ReviewIssueStatus::Deferred => {
+            let mut spans = vec![
+                ("   ⏸ ".to_string(), ReviewTone::Deferred),
+                (label, ReviewTone::Deferred),
+                (" · deferred".to_string(), ReviewTone::Deferred),
+            ];
+            if let Some(reason) = issue.resolution_reason.as_deref() {
+                spans.push((
+                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    ReviewTone::Detail,
+                ));
+            }
+            ReviewLedgerLine::new(spans)
+        }
         ReviewIssueStatus::Uncorrected => {
             let mut spans = vec![(format!("   ! {label}"), ReviewTone::Open)];
             if let Some(reason) = issue.resolution_reason.as_deref() {
@@ -572,19 +588,25 @@ fn review_resolved_record(
     pass: u32,
     status: crate::workflow::ReviewIssueStatus,
     reason: Option<&str>,
+    summaries: Option<&[String]>,
     issues: &[crate::workflow::ReviewIssue],
 ) -> Vec<ReviewLedgerLine> {
     use crate::workflow::ReviewIssueStatus;
 
     let resolved: Vec<_> = issues
         .iter()
-        .filter(|issue| issue.pass == pass && issue.status == status)
+        .filter(|issue| {
+            issue.pass == pass
+                && issue.status == status
+                && summaries.is_none_or(|summaries| summaries.contains(&issue.summary))
+        })
         .collect();
     if resolved.is_empty() {
         return Vec::new();
     }
     let verdict_tone = match status {
         ReviewIssueStatus::Fixed => ReviewTone::Fixed,
+        ReviewIssueStatus::Deferred => ReviewTone::Deferred,
         ReviewIssueStatus::Invalidated => ReviewTone::Invalidated,
         ReviewIssueStatus::Validated
         | ReviewIssueStatus::Corrected
@@ -641,6 +663,7 @@ fn review_verdict_record(
     for (count, label, tone) in [
         (tally.fixed, "verified fixed", ReviewTone::Fixed),
         (tally.corrected, "corrected; unverified", ReviewTone::Open),
+        (tally.deferred, "deferred by policy", ReviewTone::Deferred),
         (tally.uncorrected, "unresolved", ReviewTone::Open),
         (tally.invalidated, "invalidated", ReviewTone::Invalidated),
         (tally.open, "awaiting correction", ReviewTone::Open),
@@ -1546,6 +1569,7 @@ pub struct AppState {
     pub active_models: crate::config::ModelsConfig,
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
+    pub correction_threshold: crate::config::ReviewCorrectionThreshold,
     pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
@@ -2287,6 +2311,7 @@ impl AppState {
             active_models: crate::config::ModelsConfig::default(),
             review_enabled: true,
             review_tier: crate::config::ReviewTier::default(),
+            correction_threshold: crate::config::ReviewCorrectionThreshold::default(),
             ragnarok_models: Vec::new(),
             clipboard_lease: None,
             queued_prompts: VecDeque::new(),
@@ -2305,6 +2330,9 @@ impl AppState {
         side.thought_output = self.thought_output;
         side.feature_hints_enabled = self.feature_hints_enabled;
         side.keep_awake.set_enabled(self.keep_awake.enabled());
+        side.review_enabled = self.review_enabled;
+        side.review_tier = self.review_tier;
+        side.correction_threshold = self.correction_threshold;
         side.project_label = self.project_label.clone();
         side.worktree_label = self.worktree_label.clone();
         side.additional_roots = self.additional_roots;
@@ -4708,6 +4736,7 @@ impl AppState {
             }
             WorkflowTransition::IssuesResolved {
                 pass,
+                summaries,
                 status,
                 reason,
                 ..
@@ -4716,7 +4745,13 @@ impl AppState {
                     .workflows
                     .get(event.workflow_id)
                     .map(|state| {
-                        review_resolved_record(*pass, *status, reason.as_deref(), &state.issues)
+                        review_resolved_record(
+                            *pass,
+                            *status,
+                            reason.as_deref(),
+                            summaries.as_deref(),
+                            &state.issues,
+                        )
                     })
                     .unwrap_or_default();
                 self.push_review_ledger(record);
@@ -4727,7 +4762,12 @@ impl AppState {
                         workflow
                             .issues
                             .iter()
-                            .filter(|issue| issue.status == *status)
+                            .filter(|issue| {
+                                issue.status == *status
+                                    && summaries
+                                        .as_ref()
+                                        .is_none_or(|summaries| summaries.contains(&issue.summary))
+                            })
                             .count()
                     })
                     .unwrap_or(0);
@@ -8301,6 +8341,7 @@ mod tests {
             workflow_id,
             WorkflowTransition::IssuesResolved {
                 pass: 0,
+                summaries: None,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
                 details: None,
@@ -8350,6 +8391,75 @@ mod tests {
                 Entry::System(text) if text.starts_with("review complete")
             )),
             "the banner replaces the bare system notice"
+        );
+    }
+
+    #[test]
+    fn deferred_review_issue_names_the_automatic_correction_policy() {
+        use crate::workflow::{
+            ReviewIssueStatus, WorkflowEvent, WorkflowId, WorkflowKind, WorkflowPhase,
+            WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(5);
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        )));
+        let summary = "[P2] src/header.rs:1 -- license header could be normalized".to_string();
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![summary.clone()],
+            },
+        )));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: Some(vec![summary]),
+                status: ReviewIssueStatus::Deferred,
+                reason: Some(
+                    "validated finding is below the automatic correction threshold P1; it remains tracked but was not sent to the primary".to_string(),
+                ),
+                details: None,
+            },
+        )));
+
+        let ledger = state
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::ReviewLedger(lines) => Some(
+                    lines
+                        .iter()
+                        .map(ReviewLedgerLine::plain_text)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            ledger.contains("deferred by correction threshold"),
+            "{ledger}"
+        );
+        assert!(ledger.contains("threshold P1"), "{ledger}");
+        assert!(
+            state.transcript.iter().any(|entry| match entry {
+                Entry::ReviewLedger(lines) => lines
+                    .iter()
+                    .flat_map(|line| line.spans.iter())
+                    .any(|(_, tone)| *tone == ReviewTone::Deferred),
+                _ => false,
+            }),
+            "deferred findings have a distinct ledger treatment"
         );
     }
 

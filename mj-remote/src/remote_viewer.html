@@ -4229,6 +4229,30 @@
           tierRow.appendChild(mjDetail(selectedTier.description));
         }
         mjconfigBodyEl.appendChild(tierRow);
+
+        const thresholdRow = mjRow("Automatic correction through");
+        const threshold = mjEditedValue("correction_threshold", panel.correction_threshold);
+        thresholdRow.appendChild(
+          mjCombo(
+            panel.correction_thresholds.map((entry) => ({
+              value: entry.threshold,
+              label: entry.label,
+              description: entry.description,
+            })),
+            threshold,
+            (next) => {
+              mjcfg.edits.correction_threshold = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selectedThreshold = panel.correction_thresholds.find(
+          (entry) => entry.threshold === threshold,
+        );
+        if (selectedThreshold) {
+          thresholdRow.appendChild(mjDetail(selectedThreshold.description));
+        }
+        mjconfigBodyEl.appendChild(thresholdRow);
       }
 
       function renderMjSubagents() {

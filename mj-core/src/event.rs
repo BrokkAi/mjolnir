@@ -438,6 +438,7 @@ pub enum UiCommand {
     SetReviewPolicy {
         enabled: bool,
         tier: crate::config::ReviewTier,
+        correction_threshold: crate::config::ReviewCorrectionThreshold,
     },
     /// Run one Mjolnir-owned findings-only review while the primary is idle.
     RunReview { target: ReviewTarget },

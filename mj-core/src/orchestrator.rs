@@ -17,7 +17,7 @@ pub use crate::orchestrator_contract::*;
 
 use crate::{
     agent_usage::{Record, Seat},
-    config::ReviewTier,
+    config::{ReviewCorrectionThreshold, ReviewTier},
     event::{
         AgentCommandOutcome, CompactTrigger, InternalMessage, InternalMessageKind, PromptImage,
         ReviewTarget, SubagentOutcome, UiCommand, UiEvent, content_block_text,
@@ -108,6 +108,9 @@ pub struct Handle {
     /// Live [`ReviewTier`] switch, read once per dispatch so a `/mjconfig`
     /// change applies to the next turn without replacing the ACP session.
     review_tier: Arc<AtomicU8>,
+    /// Live automatic-correction threshold, read after a finding survives
+    /// validation and before it is handed to the primary.
+    correction_threshold: Arc<AtomicU8>,
     runtime_commands: mpsc::UnboundedSender<UiCommand>,
     events: mpsc::UnboundedSender<UiEvent>,
     review_requests: mpsc::UnboundedSender<ReviewTarget>,
@@ -144,6 +147,11 @@ impl Handle {
 
     pub fn set_review_tier(&self, tier: ReviewTier) {
         self.review_tier.store(tier.as_index(), Ordering::Release);
+    }
+
+    pub fn set_correction_threshold(&self, threshold: ReviewCorrectionThreshold) {
+        self.correction_threshold
+            .store(threshold.as_index(), Ordering::Release);
     }
 
     pub fn request_review(&self, target: ReviewTarget) {
@@ -351,6 +359,9 @@ pub struct Config {
     pub discrete_review: bool,
     /// How much machinery each discrete review may spend.
     pub review_tier: ReviewTier,
+    /// Lowest-severity validated finding that still receives automatic
+    /// correction. Lower-priority findings remain explicitly deferred.
+    pub correction_threshold: ReviewCorrectionThreshold,
     /// Explicit corrective re-review budget. When absent, the live review tier
     /// supplies its default: zero for Quick and one for Extended.
     pub max_correction_rounds: Option<u32>,
@@ -375,6 +386,9 @@ struct ReviewInFlight {
     /// The preceding pass whose correction this pass is verifying. Only a
     /// clean verification may promote those corrections to `Fixed`.
     verifies_pass: Option<u32>,
+    /// Exact findings from `verifies_pass` that the primary was asked to
+    /// correct. Deferred findings in that pass must remain deferred.
+    verifies_summaries: Option<Vec<String>>,
     /// The primary's withheld `PromptDone`. Released on a `Clean` verdict, dropped on
     /// `Findings` (the corrective turn produces the real completion).
     completion: UiEvent,
@@ -397,6 +411,7 @@ struct CorrectionReviewBase {
     fingerprint: String,
     snapshot: Option<ReviewSnapshot>,
     synthesis: String,
+    summaries: Vec<String>,
     evidence: ReviewPassEvidence,
     max_correction_rounds: u32,
 }
@@ -416,11 +431,13 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
     let user_messages = Arc::new(Mutex::new(UserMessageHistory::default()));
     let review_enabled = Arc::new(AtomicBool::new(config.discrete_review));
     let review_tier = Arc::new(AtomicU8::new(config.review_tier.as_index()));
+    let correction_threshold = Arc::new(AtomicU8::new(config.correction_threshold.as_index()));
     let handle = Handle {
         turn: turn.clone(),
         user_messages: user_messages.clone(),
         review_enabled: review_enabled.clone(),
         review_tier: review_tier.clone(),
+        correction_threshold: correction_threshold.clone(),
         runtime_commands: config.runtime_commands.clone(),
         events: events_tx.clone(),
         review_requests,
@@ -442,6 +459,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         let mut post_review_recap_active = false;
         let mut original_review_result: Option<String> = None;
         let mut review_findings = Vec::<String>::new();
+        let mut deferred_review_findings = Vec::<String>::new();
         let mut review_cancel_pending: Option<u64> = None;
         let mut idle_epoch = None;
         let mut observed_epoch = 0;
@@ -587,6 +605,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         post_review_recap_active = false;
                         original_review_result = None;
                         review_findings.clear();
+                        deferred_review_findings.clear();
                         if review_cancel_pending != Some(active.epoch) {
                             review_cancel_pending = None;
                         }
@@ -719,6 +738,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             post_review_recap_active = false;
                             original_review_result = None;
                             review_findings.clear();
+                            deferred_review_findings.clear();
                             idle_epoch = None;
                             manual_review_active = false;
                         }
@@ -743,6 +763,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             post_review_recap_active = false;
                             original_review_result = None;
                             review_findings.clear();
+                            deferred_review_findings.clear();
                             idle_epoch = None;
                             manual_review_active = false;
                         }
@@ -829,6 +850,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         workflow_id,
                         review_pass: completed_pass,
                         verifies_pass,
+                        verifies_summaries,
                         completion,
                         saved_turn,
                         reviewed_workspace_fingerprint,
@@ -844,16 +866,100 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             evidence,
                         } => {
                             review_findings.push(synthesis.clone());
+                            let validated_summaries = review_issue_summaries(&synthesis);
                             emit_workflow(
                                 &workflow,
                                 WorkflowEvent::new(
                                     workflow_id,
                                     WorkflowTransition::IssuesValidated {
                                         pass: completed_pass,
-                                        summaries: review_issue_summaries(&synthesis),
+                                        summaries: validated_summaries.clone(),
                                     },
                                 ),
                             );
+                            let threshold = ReviewCorrectionThreshold::from_index(
+                                correction_threshold.load(Ordering::Acquire),
+                            );
+                            let (correctable, deferred): (Vec<_>, Vec<_>) = validated_summaries
+                                .into_iter()
+                                .partition(|summary| match review_finding_priority(summary) {
+                                    Some(priority) => threshold.corrects(priority),
+                                    // `synthesis_verdict` is deliberately
+                                    // conservative about malformed markers.
+                                    // Preserve that safety here: an unclear
+                                    // finding is corrected, never silently
+                                    // deferred by policy.
+                                    None => true,
+                                });
+                            if !deferred.is_empty() {
+                                let reason = deferred_finding_reason(threshold);
+                                emit_workflow(
+                                    &workflow,
+                                    WorkflowEvent::new(
+                                        workflow_id,
+                                        WorkflowTransition::IssuesResolved {
+                                            pass: completed_pass,
+                                            summaries: Some(deferred.clone()),
+                                            status: crate::workflow::ReviewIssueStatus::Deferred,
+                                            reason: Some(reason.clone()),
+                                            details: None,
+                                        },
+                                    ),
+                                );
+                                deferred_review_findings.extend(deferred.iter().map(|summary| {
+                                    format!("{summary}\nReason: {reason}")
+                                }));
+                            }
+                            if correctable.is_empty() {
+                                let coverage = workflow_coverage(&workflow, workflow_id);
+                                let workflow_outcome = if coverage == WorkflowCoverage::Complete {
+                                    WorkflowOutcome::Completed
+                                } else {
+                                    WorkflowOutcome::Degraded
+                                };
+                                emit_workflow(
+                                    &workflow,
+                                    WorkflowEvent::new(
+                                        workflow_id,
+                                        WorkflowTransition::Terminal {
+                                            outcome: workflow_outcome,
+                                            coverage,
+                                        },
+                                    ),
+                                );
+                                let _ = events_tx.send(UiEvent::Info(format!(
+                                    "discrete review · {} validated finding{} deferred by automatic correction threshold {}",
+                                    deferred.len(),
+                                    if deferred.len() == 1 { "" } else { "s" },
+                                    threshold.label(),
+                                )));
+                                if let Some(saved_turn) = saved_turn {
+                                    last_changed_turn = Some(saved_turn);
+                                }
+                                let prompt = post_review_recap_prompt(
+                                    &turn.lock().await.task,
+                                    original_review_result.as_deref().unwrap_or(&reviewed_result),
+                                    &reviewed_result,
+                                    &review_findings,
+                                    &deferred_review_findings,
+                                );
+                                emit_internal(
+                                    &events_tx,
+                                    "review",
+                                    "primary",
+                                    InternalMessageKind::DiscreteReview,
+                                    &prompt,
+                                );
+                                let _ = config.runtime_commands.send(UiCommand::SendPrompt {
+                                    text: prompt,
+                                    images: Vec::new(),
+                                    resources: Vec::new(),
+                                });
+                                let _ = completion;
+                                trajectory.reset_attempt();
+                                post_review_recap_active = true;
+                                continue;
+                            }
                             // The withheld completion is deliberately dropped:
                             // the corrective turn produces the real one, the
                             // same way today's single-prompt review does.
@@ -868,8 +974,11 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             );
                             let verification_follows =
                                 correction_rounds < max_correction_rounds;
-                            let prompt =
-                                fanout_corrective_prompt(&synthesis, verification_follows);
+                            let correction_synthesis = correctable.join("\n\n");
+                            let prompt = fanout_corrective_prompt(
+                                &correction_synthesis,
+                                verification_follows,
+                            );
                             emit_workflow(
                                 &workflow,
                                 WorkflowEvent::new(
@@ -918,7 +1027,8 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                     CorrectionReviewBase {
                                         fingerprint,
                                         snapshot: reviewed_snapshot,
-                                        synthesis,
+                                        synthesis: correction_synthesis,
+                                        summaries: correctable,
                                         evidence,
                                         max_correction_rounds,
                                     }
@@ -936,6 +1046,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                         workflow_id,
                                         WorkflowTransition::IssuesResolved {
                                             pass: corrected_pass,
+                                            summaries: verifies_summaries,
                                             status: crate::workflow::ReviewIssueStatus::Fixed,
                                             reason: Some(format!(
                                                 "verification review pass {} returned clean after the correction",
@@ -977,6 +1088,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 original_review_result.as_deref().unwrap_or(&reviewed_result),
                                 &reviewed_result,
                                 &review_findings,
+                                &deferred_review_findings,
                             );
                             emit_internal(
                                 &events_tx,
@@ -1215,6 +1327,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 post_review_recap_active = false;
                 original_review_result = None;
                 review_findings.clear();
+                deferred_review_findings.clear();
                 idle_epoch = Some(active.epoch);
                 continue;
             }
@@ -1279,6 +1392,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         WorkflowId::review(active.epoch),
                         WorkflowTransition::IssuesResolved {
                             pass: review_pass.saturating_sub(1),
+                            summaries: correction_review_base
+                                .as_ref()
+                                .map(|reviewed| reviewed.summaries.clone()),
                             status,
                             reason: Some(reason.to_string()),
                             details,
@@ -1396,6 +1512,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     let verifies_pass = correction_review_base
                         .as_ref()
                         .map(|_| review_pass.saturating_sub(1));
+                    let verifies_summaries = correction_review_base
+                        .as_ref()
+                        .map(|previous| previous.summaries.clone());
                     let reviewed_workspace_fingerprint = delta
                         .as_ref()
                         .and_then(WorkspaceDelta::review_fingerprint)
@@ -1451,6 +1570,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         workflow_id,
                         review_pass,
                         verifies_pass,
+                        verifies_summaries,
                         completion,
                         saved_turn,
                         reviewed_workspace_fingerprint,
@@ -1528,6 +1648,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     original_review_result.as_deref().unwrap_or(&final_result),
                     &final_result,
                     &review_findings,
+                    &deferred_review_findings,
                 );
                 emit_internal(
                     &events_tx,
@@ -1638,15 +1759,7 @@ fn correction_no_change_evidence(correction_report: &str) -> String {
 /// F9 owns the full report for each issue.
 fn review_issue_summaries(synthesis: &str) -> Vec<String> {
     fn is_finding_start(line: &str) -> bool {
-        let line = line
-            .trim()
-            .strip_prefix(['-', '*'])
-            .map(str::trim)
-            .unwrap_or_else(|| line.trim());
-        matches!(
-            line.get(..4),
-            Some("[P0]") | Some("[P1]") | Some("[P2]") | Some("[P3]")
-        )
+        review_finding_priority(line).is_some()
     }
 
     let mut findings = Vec::new();
@@ -1667,6 +1780,38 @@ fn review_issue_summaries(synthesis: &str) -> Vec<String> {
         findings.push(synthesis.trim().to_string());
     }
     findings
+}
+
+/// Priority attached to a supervisor finding. The parser deliberately accepts
+/// only the output shape that becomes a `ReviewVerdict::Findings`. A malformed
+/// line returns `None`, which the caller keeps on the correction path.
+fn review_finding_priority(summary: &str) -> Option<ReviewCorrectionThreshold> {
+    let line = summary
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix(['-', '*'])
+        .map(str::trim)
+        .unwrap_or_else(|| summary.trim());
+    let marker = line.get(..4)?;
+    if marker.eq_ignore_ascii_case("[P0]") {
+        Some(ReviewCorrectionThreshold::P0)
+    } else if marker.eq_ignore_ascii_case("[P1]") {
+        Some(ReviewCorrectionThreshold::P1)
+    } else if marker.eq_ignore_ascii_case("[P2]") {
+        Some(ReviewCorrectionThreshold::P2)
+    } else if marker.eq_ignore_ascii_case("[P3]") {
+        Some(ReviewCorrectionThreshold::P3)
+    } else {
+        None
+    }
+}
+
+fn deferred_finding_reason(threshold: ReviewCorrectionThreshold) -> String {
+    format!(
+        "validated finding is below the automatic correction threshold {}; it remains tracked but was not sent to the primary",
+        threshold.label()
+    )
 }
 
 fn emit_workflow(workflow: &WorkflowEmitter, event: WorkflowEvent) {
@@ -1961,14 +2106,23 @@ fn post_review_recap_prompt(
     original_result: &str,
     final_result: &str,
     findings: &[String],
+    deferred_findings: &[String],
 ) -> String {
     let findings = if findings.is_empty() {
         "No material findings survived review.".to_string()
     } else {
         findings.join("\n\n")
     };
+    let deferred = if deferred_findings.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n<deferred_review_findings>\nEvery entry below survived validation. It was not sent to the primary because it was below the selected automatic correction threshold. State that reason plainly in the recap; do not call it invalidated and do not describe review as failed.\n\n{}\n</deferred_review_findings>",
+            deferred_findings.join("\n\n")
+        )
+    };
     format!(
-        "The implementation and every discrete-review or correction pass for this user turn are now complete. Write the final user-facing recap now, after all that work. Lead with the finished outcome, then clearly cover: (1) the original work completed, (2) the review findings, explicitly saying when there were none, (3) fixes made for each valid finding or findings rejected after verification, and (4) the final validation performed and any remaining limitations. Preserve concrete file names, behavior, and test commands from the supplied answers. Do not modify files, run tools, start more work, or discuss this instruction. Do not merely say that review passed. Return only the self-contained recap.\n\n<original_task>\n{task}\n</original_task>\n\n<original_result>\n{original_result}\n</original_result>\n\n<final_reviewed_result>\n{final_result}\n</final_reviewed_result>\n\n<review_findings>\n{findings}\n</review_findings>"
+        "The implementation and every discrete-review or correction pass for this user turn are now complete. Write the final user-facing recap now, after all that work. Lead with the finished outcome, then clearly cover: (1) the original work completed, (2) the review findings, explicitly saying when there were none, (3) fixes made for each valid finding or findings rejected after verification, and (4) final validation and the disposition of every validated finding. Preserve concrete file names, behavior, and test commands from the supplied answers. Do not modify files, run tools, start more work, or discuss this instruction. Do not merely say that review passed. Return only the self-contained recap.\n\n<original_task>\n{task}\n</original_task>\n\n<original_result>\n{original_result}\n</original_result>\n\n<final_reviewed_result>\n{final_result}\n</final_reviewed_result>\n\n<review_findings>\n{findings}\n</review_findings>{deferred}"
     )
 }
 
@@ -2073,6 +2227,19 @@ mod tests {
         assert!(findings[0].contains("caller reuses the entry"));
         assert!(findings[1].contains("missing focused test"));
         assert!(findings[1].contains("happy path"));
+    }
+
+    #[test]
+    fn correction_priority_parser_is_case_insensitive_and_conservative() {
+        assert_eq!(
+            review_finding_priority("- [p2] src/ui.rs:8 -- missing focused test"),
+            Some(ReviewCorrectionThreshold::P2)
+        );
+        assert_eq!(
+            review_finding_priority("Review summary: [P2] src/ui.rs:8 -- missing focused test"),
+            None,
+            "a malformed line remains on the correction path rather than being deferred"
+        );
     }
 
     #[test]
@@ -2207,6 +2374,7 @@ mod tests {
             "Originally changed retry scheduling and ran cargo test retry.",
             "Fixed the swallowed error and ran cargo test plus cargo clippy.",
             &["[P1] src/upload.rs:12 -- swallowed error".to_string()],
+            &[],
         );
 
         assert!(prompt.contains("make retries reliable"));
@@ -2219,11 +2387,27 @@ mod tests {
 
     #[test]
     fn post_review_recap_marks_only_an_empty_findings_set_clean() {
-        let prompt = post_review_recap_prompt("task", "original", "reviewed", &[]);
+        let prompt = post_review_recap_prompt("task", "original", "reviewed", &[], &[]);
 
         assert!(prompt.contains("No material findings survived review."));
         assert!(prompt.contains("<original_result>\noriginal\n</original_result>"));
         assert!(prompt.contains("<final_reviewed_result>\nreviewed\n</final_reviewed_result>"));
+    }
+
+    #[test]
+    fn post_review_recap_explains_validated_findings_deferred_by_policy() {
+        let prompt = post_review_recap_prompt(
+            "task",
+            "original",
+            "reviewed",
+            &["[P2] src/upload.rs:12 -- a real defect".to_string()],
+            &["[P2] src/upload.rs:12 -- a real defect\nReason: validated finding is below the automatic correction threshold P1; it remains tracked but was not sent to the primary".to_string()],
+        );
+
+        assert!(prompt.contains("<deferred_review_findings>"));
+        assert!(prompt.contains("survived validation"));
+        assert!(prompt.contains("do not call it invalidated"));
+        assert!(prompt.contains("automatic correction threshold P1"));
     }
 
     #[test]
@@ -2398,6 +2582,7 @@ mod tests {
             progress_wake: None,
             discrete_review: true,
             review_tier: ReviewTier::Extended,
+            correction_threshold: ReviewCorrectionThreshold::default(),
             max_correction_rounds: None,
             primary_model: None,
             review_root: PathBuf::from("."),
@@ -2594,6 +2779,110 @@ mod tests {
             command_rx.try_recv().is_err(),
             "the completed P2 correction must not dispatch an extra prompt"
         );
+
+        drop(runtime_tx);
+        running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn correction_threshold_defers_validated_p2_but_corrects_p1() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let passes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawned_passes = Arc::clone(&passes);
+        let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
+            let pass = spawned_passes.fetch_add(1, Ordering::SeqCst);
+            let verdict = if pass == 0 {
+                ReviewVerdict::Findings {
+                    synthesis: "[P1] src/retry.rs:12 -- retries drop the final error\n\n[P2] src/header.rs:1 -- license header could be normalized".to_string(),
+                    evidence: ReviewPassEvidence::default(),
+                }
+            } else {
+                ReviewVerdict::Clean
+            };
+            let _ = outcomes.send(ReviewOutcome {
+                epoch: job.epoch,
+                verdict,
+            });
+        });
+        let mut config = fanout_config(command_tx, spawner);
+        config.correction_threshold = ReviewCorrectionThreshold::P1;
+        let mut running = spawn(runtime_rx, config);
+        running
+            .handle
+            .begin_turn(1, "repair retries".to_string(), Vec::new(), snapshot)
+            .await;
+        runtime_tx.send(completion()).expect("send completion");
+
+        let correction = next_prompt(&mut command_rx).await;
+        assert!(correction.contains("[P1] src/retry.rs:12"));
+        assert!(
+            !correction.contains("[P2] src/header.rs:1"),
+            "the deferred P2 must not be sent to the primary"
+        );
+        std::fs::write(temp.path().join("tracked.txt"), "corrected retry\n")
+            .expect("write correction");
+        runtime_tx.send(completion()).expect("complete correction");
+
+        let recap = next_prompt(&mut command_rx).await;
+        assert!(recap.contains("<deferred_review_findings>"));
+        assert!(recap.contains("[P2] src/header.rs:1"));
+        assert!(recap.contains("automatic correction threshold P1"));
+        runtime_tx.send(completion()).expect("complete recap");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut saw_deferred_p2 = false;
+        let mut saw_fixed_p1 = false;
+        loop {
+            let event = tokio::time::timeout_at(deadline, running.events.recv())
+                .await
+                .expect("threshold workflow completed")
+                .expect("orchestrated event");
+            match event {
+                UiEvent::Workflow(WorkflowEvent {
+                    transition:
+                        WorkflowTransition::IssuesResolved {
+                            summaries,
+                            status: crate::workflow::ReviewIssueStatus::Deferred,
+                            reason,
+                            ..
+                        },
+                    ..
+                }) => {
+                    saw_deferred_p2 = summaries.as_ref().is_some_and(|summaries| {
+                        summaries
+                            .iter()
+                            .any(|summary| summary.contains("[P2] src/header.rs:1"))
+                    }) && reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("threshold P1"));
+                }
+                UiEvent::Workflow(WorkflowEvent {
+                    transition:
+                        WorkflowTransition::IssuesResolved {
+                            summaries,
+                            status: crate::workflow::ReviewIssueStatus::Fixed,
+                            ..
+                        },
+                    ..
+                }) => {
+                    saw_fixed_p1 = summaries.as_ref().is_some_and(|summaries| {
+                        summaries.len() == 1 && summaries[0].contains("[P1] src/retry.rs:12")
+                    });
+                }
+                UiEvent::PromptDone { .. } => break,
+                _ => {}
+            }
+        }
+
+        assert_eq!(passes.load(Ordering::SeqCst), 2);
+        assert!(
+            saw_deferred_p2,
+            "P2 must remain tracked with the policy reason"
+        );
+        assert!(saw_fixed_p1, "only the P1 correction may be verified fixed");
 
         drop(runtime_tx);
         running.task.await.expect("orchestrator task");
@@ -3744,6 +4033,7 @@ mod tests {
                 progress_wake: None,
                 discrete_review: false,
                 review_tier: ReviewTier::default(),
+                correction_threshold: ReviewCorrectionThreshold::default(),
                 max_correction_rounds: Some(1),
                 primary_model: None,
                 review_root: PathBuf::from("."),
@@ -3805,6 +4095,7 @@ mod tests {
             progress_wake,
             discrete_review: false,
             review_tier: ReviewTier::default(),
+            correction_threshold: ReviewCorrectionThreshold::default(),
             max_correction_rounds: Some(1),
             primary_model: None,
             review_root: PathBuf::from("."),

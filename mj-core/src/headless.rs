@@ -1886,6 +1886,7 @@ mod tests {
             (
                 WorkflowTransition::IssuesResolved {
                     pass: 0,
+                    summaries: None,
                     status: ReviewIssueStatus::Invalidated,
                     reason: None,
                     details: None,
