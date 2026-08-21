@@ -121,12 +121,6 @@ struct Cli {
     #[arg(long, value_enum)]
     permission_mode: Option<HeadlessPermissionMode>,
 
-    /// Expose the observation-only `computer_observe` MCP tool to this local
-    /// primary session. The tool can capture the visible macOS desktop when
-    /// Screen Recording permission is granted; it cannot control the computer.
-    #[arg(long, global = true)]
-    computer: bool,
-
     /// Working directory used when opening a new session. Defaults to
     /// the current directory.
     #[arg(long)]
@@ -670,7 +664,6 @@ async fn main() -> Result<()> {
                     top_level_additional_directories,
                     debug_file,
                     cli.permission_mode.map(Into::into),
-                    cli.computer,
                     termination.token(),
                 )
                 .await
@@ -713,7 +706,6 @@ async fn main() -> Result<()> {
                 .unwrap_or(HeadlessPermissionMode::Manual)
                 .into(),
             permission_config_mode: cli.permission_mode.map(Into::into),
-            computer: cli.computer,
             role_overrides: config::ModelOverrides {
                 primary: cli.model.as_ref().map(|(model, _)| model.clone()),
                 primary_effort: cli.model.and_then(|(_, effort)| effort),
@@ -751,7 +743,6 @@ async fn main() -> Result<()> {
             additional_directories: workspace_roots.additional_directories().to_vec(),
             fs_max_text_bytes,
             permission_mode: cli.permission_mode.map(Into::into),
-            computer: cli.computer,
             termination: termination.token(),
         },
         project_label,
@@ -976,7 +967,6 @@ async fn run_resume(
     top_level_additional_directories: Vec<PathBuf>,
     debug_file: Option<PathBuf>,
     permission_mode: Option<config::PermissionPreset>,
-    computer: bool,
     termination: CancellationToken,
 ) -> Result<()> {
     let cwd = match args.cwd.clone() {
@@ -1106,7 +1096,6 @@ async fn run_resume(
                 additional_directories: additional_directories.clone(),
                 fs_max_text_bytes,
                 permission_mode,
-                computer,
                 termination: termination.clone(),
             },
             project_label,
@@ -1201,7 +1190,6 @@ async fn run_resume(
                         additional_directories: additional_directories.clone(),
                         fs_max_text_bytes,
                         permission_mode,
-                        computer,
                         termination: termination.clone(),
                     },
                     project_label,
@@ -1385,7 +1373,6 @@ struct RuntimeOptions {
     additional_directories: Vec<PathBuf>,
     fs_max_text_bytes: u64,
     permission_mode: Option<config::PermissionPreset>,
-    computer: bool,
     termination: CancellationToken,
 }
 
@@ -2270,42 +2257,12 @@ async fn run_session(
     let memory_config = Config::load(&config::default_config_path())
         .map(|config| config.memory)
         .unwrap_or_default();
-    #[cfg(target_os = "macos")]
-    let computer_tools = if runtime_options.computer {
-        match mj_core::computer_mcp::ToolServer::start().await {
-            Ok(server) => {
-                let _ = ui_event_tx.send(crate::event::UiEvent::Info(
-                    "Computer observation enabled for this primary session.".to_string(),
-                ));
-                Some(server)
-            }
-            Err(error) => {
-                let _ = ui_event_tx.send(crate::event::UiEvent::Warning(format!(
-                    "Computer observation could not start: {error:#}"
-                )));
-                None
-            }
-        }
-    } else {
-        None
-    };
-    #[cfg(not(target_os = "macos"))]
-    if runtime_options.computer {
-        let _ = ui_event_tx.send(crate::event::UiEvent::Warning(
-            "--computer is currently available only on macOS.".to_string(),
-        ));
-    }
-    let mut mcp_servers = Vec::new();
-    #[cfg(target_os = "macos")]
-    if let Some(server) = computer_tools.as_ref() {
-        mcp_servers.push(server.advertised().clone());
-    }
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
         args: agent.args.clone(),
         cwd: cwd.clone(),
         additional_directories: runtime_options.additional_directories.clone(),
-        mcp_servers,
+        mcp_servers: Vec::new(),
         resume_session,
         session_restore_mode: acp::SessionRestoreMode::Replay,
         env: primary_env,
@@ -2368,8 +2325,6 @@ async fn run_session(
     // talks to the agent's stdout/stdin, which are separate file
     // descriptors).
     let acp_handle = tokio::spawn(async move {
-        #[cfg(target_os = "macos")]
-        let _computer_tools = computer_tools;
         if let Err(e) = acp::run(runtime_cfg, event_tx, cmd_rx).await {
             tracing::error!("acp runtime error: {e:#}");
         }
@@ -4095,16 +4050,6 @@ mod tests {
         let cli = try_parse_hermetic(&["mj", "--fullscreen-tui", "resume", "sess-123"])
             .expect("parse top-level resume");
         assert!(cli.fullscreen_tui);
-    }
-
-    #[test]
-    fn parse_accepts_computer_opt_in_for_new_and_resumed_sessions() {
-        let cli = try_parse_hermetic(&["mj", "--computer"]).expect("parse new session");
-        assert!(cli.computer);
-
-        let cli = try_parse_hermetic(&["mj", "--computer", "resume", "sess-123"])
-            .expect("parse resumed session");
-        assert!(cli.computer);
     }
 
     /// Parse argv with every env-backed default detached. Tests must use this

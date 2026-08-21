@@ -35,9 +35,6 @@ pub struct RunConfig {
     pub output_format: OutputFormat,
     pub permission_mode: PermissionMode,
     pub permission_config_mode: Option<config::PermissionPreset>,
-    /// Expose the observation-only local computer MCP server to the primary
-    /// agent for this invocation.
-    pub computer: bool,
     pub role_overrides: config::ModelOverrides,
     /// Process-wide graceful termination.  Headless owns its shutdown so it
     /// can stop the ACP runtime and subagent workers before returning.
@@ -121,31 +118,12 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     let primary_permission = cfg.permission_config_mode.and_then(|mode| {
         roster::configure_permissions(primary.launch.kind, mode, &mut primary_env)
     });
-    #[cfg(target_os = "macos")]
-    let computer_tools = if cfg.computer {
-        Some(
-            mj_core::computer_mcp::ToolServer::start()
-                .await
-                .context("start computer observation MCP server")?,
-        )
-    } else {
-        None
-    };
-    #[cfg(not(target_os = "macos"))]
-    if cfg.computer {
-        bail!("--computer is currently available only on macOS");
-    }
-    let mut mcp_servers = Vec::new();
-    #[cfg(target_os = "macos")]
-    if let Some(server) = computer_tools.as_ref() {
-        mcp_servers.push(server.advertised().clone());
-    }
     let runtime_cfg = AcpRuntimeConfig {
         command: primary.launch.command.clone(),
         args: primary.launch.args.clone(),
         cwd: cfg.cwd.clone(),
         additional_directories: cfg.additional_directories.clone(),
-        mcp_servers,
+        mcp_servers: Vec::new(),
         resume_session: cfg.resume_session.clone(),
         session_restore_mode: acp::SessionRestoreMode::Continue,
         env: primary_env,
@@ -214,11 +192,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         event_tx.clone(),
     );
 
-    let runtime = tokio::spawn(async move {
-        #[cfg(target_os = "macos")]
-        let _computer_tools = computer_tools;
-        acp::run(runtime_cfg, event_tx, runtime_cmd_rx).await
-    });
+    let runtime =
+        tokio::spawn(async move { acp::run(runtime_cfg, event_tx, runtime_cmd_rx).await });
     // No UI event channel: headless answers permissions by policy, so
     // remote decisions have nothing to resolve.
     let remote_tracker = remote::RemoteSessionTracker::new(
@@ -526,7 +501,6 @@ mod tests {
             output_format: OutputFormat::Json,
             permission_mode: PermissionMode::Manual,
             permission_config_mode: None,
-            computer: false,
             role_overrides: config::ModelOverrides::default(),
             termination: CancellationToken::new(),
         })
