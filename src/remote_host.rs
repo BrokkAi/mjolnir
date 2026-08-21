@@ -533,6 +533,7 @@ fn start_server_agent_session(
             ),
             discrete_review: app_config.agent.discrete_review,
             review_tier: app_config.agent.review_tier,
+            correction_threshold: app_config.agent.correction_threshold,
             max_correction_rounds: app_config.agent.max_correction_rounds,
             primary_model: roster
                 .as_ref()
@@ -681,8 +682,8 @@ fn start_server_agent_session(
                             continue;
                         }
                     }
-                    if let UiCommand::RunReview { target } = command {
-                        primary_orchestrator.request_review(target);
+                    if let UiCommand::RunReview { request } = command {
+                        primary_orchestrator.request_review(request);
                         continue;
                     }
                     if matches!(command, UiCommand::CompactPrimary)

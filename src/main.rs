@@ -2407,6 +2407,7 @@ async fn run_session(
             ),
             discrete_review: agent_config.discrete_review,
             review_tier: agent_config.review_tier,
+            correction_threshold: agent_config.correction_threshold,
             max_correction_rounds: agent_config.max_correction_rounds,
             primary_model: Some(roster.primary.model.model.clone()),
             review_root: cwd.clone(),
@@ -2573,13 +2574,19 @@ async fn run_session(
                 }
             }
             cmd_tracker.observe_command(&command);
-            if let UiCommand::SetReviewPolicy { enabled, tier } = &command {
+            if let UiCommand::SetReviewPolicy {
+                enabled,
+                tier,
+                correction_threshold,
+            } = &command
+            {
                 cmd_orchestrator.set_review_enabled(*enabled);
                 cmd_orchestrator.set_review_tier(*tier);
+                cmd_orchestrator.set_correction_threshold(*correction_threshold);
                 continue;
             }
-            if let UiCommand::RunReview { target } = command {
-                cmd_orchestrator.request_review(target);
+            if let UiCommand::RunReview { request } = command {
+                cmd_orchestrator.request_review(request);
                 continue;
             }
             if matches!(command, UiCommand::CompactPrimary) {
@@ -2677,6 +2684,7 @@ async fn run_session(
                 },
                 review_enabled: agent_config.discrete_review,
                 review_tier: agent_config.review_tier,
+                correction_threshold: agent_config.correction_threshold,
                 ragnarok_models: roster.available.clone(),
                 ragnarok_observer: Some(ragnarok_observer_tx.clone()),
                 primary_acp_name: roster.primary.launch.kind.display_name().to_string(),

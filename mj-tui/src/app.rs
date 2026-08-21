@@ -25,8 +25,8 @@ use agent_client_protocol::schema::v1::{
 
 use crate::event::{
     ElicitationOutcome, ElicitationPrompt, InternalMessage, PermissionDecision, PermissionPrompt,
-    PromptImage, PromptResource, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
-    SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
+    PromptImage, PromptResource, ReviewRequest, ReviewTarget, SessionConfigTarget, SubagentEvent,
+    SubagentOutcome, SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
@@ -222,7 +222,9 @@ const BUILTIN_DIFF_COMMAND: &str = "diff";
 const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
 const BUILTIN_AGENTS_COMMAND: &str = "agents";
 const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
-const BUILTIN_REVIEW_COMMAND: &str = "review";
+const RETIRED_REVIEW_COMMAND: &str = "review";
+const BUILTIN_DISCRETE_REVIEW_COMMAND: &str = "discrete-review";
+const BUILTIN_ADVERSARIAL_REVIEW_COMMAND: &str = "adversarial-review";
 const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const BUILTIN_TERMINALS_COMMAND: &str = "terminals";
 const BUILTIN_MEMORY_COMMAND: &str = "memory";
@@ -297,10 +299,17 @@ fn builtin_subagents_command() -> AvailableCommand {
     )
 }
 
-fn builtin_review_command() -> AvailableCommand {
+fn builtin_discrete_review_command() -> AvailableCommand {
     AvailableCommand::new(
-        BUILTIN_REVIEW_COMMAND,
-        "review recent, uncommitted, or HEAD changes",
+        BUILTIN_DISCRETE_REVIEW_COMMAND,
+        "run the configured discrete review; add quick or extended to override its tier",
+    )
+}
+
+fn builtin_adversarial_review_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
+        "alias for discrete-review",
     )
 }
 
@@ -350,7 +359,9 @@ fn install_builtin_commands(
             && command.name != BUILTIN_MJCONFIG_COMMAND
             && command.name != BUILTIN_AGENTS_COMMAND
             && command.name != BUILTIN_SUBAGENTS_COMMAND
-            && command.name != BUILTIN_REVIEW_COMMAND
+            && command.name != RETIRED_REVIEW_COMMAND
+            && command.name != BUILTIN_DISCRETE_REVIEW_COMMAND
+            && command.name != BUILTIN_ADVERSARIAL_REVIEW_COMMAND
             && command.name != BUILTIN_RAGNAROK_COMMAND
             && command.name != BUILTIN_TERMINALS_COMMAND
             && command.name != BUILTIN_MEMORY_COMMAND
@@ -367,7 +378,8 @@ fn install_builtin_commands(
     commands.insert(0, builtin_memory_command());
     commands.insert(0, builtin_mjconfig_command());
     commands.insert(0, builtin_diff_command());
-    commands.insert(0, builtin_review_command());
+    commands.insert(0, builtin_adversarial_review_command());
+    commands.insert(0, builtin_discrete_review_command());
     commands.insert(0, builtin_terminals_command());
     commands.insert(0, builtin_subagents_command());
     commands.insert(0, builtin_agents_command());
@@ -391,7 +403,9 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_MJCONFIG_COMMAND,
             BUILTIN_AGENTS_COMMAND,
             BUILTIN_SUBAGENTS_COMMAND,
-            BUILTIN_REVIEW_COMMAND,
+            RETIRED_REVIEW_COMMAND,
+            BUILTIN_DISCRETE_REVIEW_COMMAND,
+            BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
             BUILTIN_RAGNAROK_COMMAND,
             BUILTIN_TERMINALS_COMMAND,
             BUILTIN_MEMORY_COMMAND,
@@ -481,8 +495,13 @@ pub enum ReviewTone {
     Header,
     /// A finding still awaiting its fix.
     Open,
+    /// A workspace correction was captured but no verification review has
+    /// independently confirmed it yet.
+    Corrected,
     /// A finding a verification review confirmed fixed.
     Fixed,
+    /// A validated finding deliberately retained by the correction policy.
+    Deferred,
     /// A finding that did not survive: full error weight, never muted.
     Invalidated,
     /// The summary text of an invalidated finding, struck through.
@@ -512,12 +531,26 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
                 " · verification pending".to_string(),
             ]
             .concat(),
-            ReviewTone::Open,
+            ReviewTone::Corrected,
         )]),
         ReviewIssueStatus::Fixed => ReviewLedgerLine::new(vec![(
             format!("   ✔ {label} · verified"),
             ReviewTone::Fixed,
         )]),
+        ReviewIssueStatus::Deferred => {
+            let mut spans = vec![
+                ("   ⏸ ".to_string(), ReviewTone::Deferred),
+                (label, ReviewTone::Deferred),
+                (" · deferred".to_string(), ReviewTone::Deferred),
+            ];
+            if let Some(reason) = issue.resolution_reason.as_deref() {
+                spans.push((
+                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    ReviewTone::Detail,
+                ));
+            }
+            ReviewLedgerLine::new(spans)
+        }
         ReviewIssueStatus::Uncorrected => {
             let mut spans = vec![(format!("   ! {label}"), ReviewTone::Open)];
             if let Some(reason) = issue.resolution_reason.as_deref() {
@@ -572,23 +605,28 @@ fn review_resolved_record(
     pass: u32,
     status: crate::workflow::ReviewIssueStatus,
     reason: Option<&str>,
+    summaries: Option<&[String]>,
     issues: &[crate::workflow::ReviewIssue],
 ) -> Vec<ReviewLedgerLine> {
     use crate::workflow::ReviewIssueStatus;
 
     let resolved: Vec<_> = issues
         .iter()
-        .filter(|issue| issue.pass == pass && issue.status == status)
+        .filter(|issue| {
+            issue.pass == pass
+                && issue.status == status
+                && summaries.is_none_or(|summaries| summaries.contains(&issue.summary))
+        })
         .collect();
     if resolved.is_empty() {
         return Vec::new();
     }
     let verdict_tone = match status {
         ReviewIssueStatus::Fixed => ReviewTone::Fixed,
+        ReviewIssueStatus::Deferred => ReviewTone::Deferred,
         ReviewIssueStatus::Invalidated => ReviewTone::Invalidated,
-        ReviewIssueStatus::Validated
-        | ReviewIssueStatus::Corrected
-        | ReviewIssueStatus::Uncorrected => ReviewTone::Open,
+        ReviewIssueStatus::Corrected => ReviewTone::Corrected,
+        ReviewIssueStatus::Validated | ReviewIssueStatus::Uncorrected => ReviewTone::Open,
     };
     let mut head = vec![
         (
@@ -640,7 +678,12 @@ fn review_verdict_record(
     ];
     for (count, label, tone) in [
         (tally.fixed, "verified fixed", ReviewTone::Fixed),
-        (tally.corrected, "corrected; unverified", ReviewTone::Open),
+        (
+            tally.corrected,
+            "corrected; unverified",
+            ReviewTone::Corrected,
+        ),
+        (tally.deferred, "deferred by policy", ReviewTone::Deferred),
         (tally.uncorrected, "unresolved", ReviewTone::Open),
         (tally.invalidated, "invalidated", ReviewTone::Invalidated),
         (tally.open, "awaiting correction", ReviewTone::Open),
@@ -780,7 +823,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Run /review to check recent, uncommitted, or HEAD changes; F9 opens the review issue ledger.",
+        text: "Run /discrete-review to check recent, uncommitted, or HEAD changes; add quick or extended to override the configured tier. F9 opens the review issue ledger.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -1546,6 +1589,7 @@ pub struct AppState {
     pub active_models: crate::config::ModelsConfig,
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
+    pub correction_threshold: crate::config::ReviewCorrectionThreshold,
     pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
@@ -1930,6 +1974,7 @@ pub struct ConfigPicker {
 #[derive(Debug, Clone, Default)]
 pub struct ReviewPicker {
     pub selected: usize,
+    pub tier: Option<crate::config::ReviewTier>,
 }
 
 /// The candidate collection currently shown by the prompt autocomplete.
@@ -2287,6 +2332,7 @@ impl AppState {
             active_models: crate::config::ModelsConfig::default(),
             review_enabled: true,
             review_tier: crate::config::ReviewTier::default(),
+            correction_threshold: crate::config::ReviewCorrectionThreshold::default(),
             ragnarok_models: Vec::new(),
             clipboard_lease: None,
             queued_prompts: VecDeque::new(),
@@ -2305,6 +2351,9 @@ impl AppState {
         side.thought_output = self.thought_output;
         side.feature_hints_enabled = self.feature_hints_enabled;
         side.keep_awake.set_enabled(self.keep_awake.enabled());
+        side.review_enabled = self.review_enabled;
+        side.review_tier = self.review_tier;
+        side.correction_threshold = self.correction_threshold;
         side.project_label = self.project_label.clone();
         side.worktree_label = self.worktree_label.clone();
         side.additional_roots = self.additional_roots;
@@ -2454,8 +2503,8 @@ impl AppState {
         action
     }
 
-    pub fn open_review_picker(&mut self) {
-        self.review_picker = Some(ReviewPicker::default());
+    pub fn open_review_picker(&mut self, tier: Option<crate::config::ReviewTier>) {
+        self.review_picker = Some(ReviewPicker { selected: 0, tier });
     }
 
     pub fn review_picker_move(&mut self, delta: i32) {
@@ -2465,12 +2514,16 @@ impl AppState {
         picker.selected = (picker.selected as i32 + delta).rem_euclid(3) as usize;
     }
 
-    pub fn review_picker_accept(&mut self) -> Option<ReviewTarget> {
-        let selected = self.review_picker.take()?.selected;
-        Some(match selected {
+    pub fn review_picker_accept(&mut self) -> Option<ReviewRequest> {
+        let picker = self.review_picker.take()?;
+        let target = match picker.selected {
             0 => ReviewTarget::Recent,
             1 => ReviewTarget::Uncommitted,
             _ => ReviewTarget::Head,
+        };
+        Some(ReviewRequest {
+            target,
+            tier: picker.tier,
         })
     }
 
@@ -4708,6 +4761,7 @@ impl AppState {
             }
             WorkflowTransition::IssuesResolved {
                 pass,
+                summaries,
                 status,
                 reason,
                 ..
@@ -4716,7 +4770,13 @@ impl AppState {
                     .workflows
                     .get(event.workflow_id)
                     .map(|state| {
-                        review_resolved_record(*pass, *status, reason.as_deref(), &state.issues)
+                        review_resolved_record(
+                            *pass,
+                            *status,
+                            reason.as_deref(),
+                            summaries.as_deref(),
+                            &state.issues,
+                        )
                     })
                     .unwrap_or_default();
                 self.push_review_ledger(record);
@@ -4727,13 +4787,24 @@ impl AppState {
                         workflow
                             .issues
                             .iter()
-                            .filter(|issue| issue.status == *status)
+                            .filter(|issue| {
+                                issue.status == *status
+                                    && summaries
+                                        .as_ref()
+                                        .is_none_or(|summaries| summaries.contains(&issue.summary))
+                            })
                             .count()
                     })
                     .unwrap_or(0);
                 self.set_status_line(
                     StatusKind::Info,
                     format!("review issues {}: {count} · F9 details", status.as_str()),
+                );
+            }
+            WorkflowTransition::IssueEvidenceUpdated { .. } => {
+                self.set_status_line(
+                    StatusKind::Info,
+                    "review correction evidence recorded · F9 details".to_string(),
                 );
             }
             WorkflowTransition::PhaseChanged { .. }
@@ -8301,6 +8372,7 @@ mod tests {
             workflow_id,
             WorkflowTransition::IssuesResolved {
                 pass: 0,
+                summaries: None,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
                 details: None,
@@ -8350,6 +8422,75 @@ mod tests {
                 Entry::System(text) if text.starts_with("review complete")
             )),
             "the banner replaces the bare system notice"
+        );
+    }
+
+    #[test]
+    fn deferred_review_issue_names_the_automatic_correction_policy() {
+        use crate::workflow::{
+            ReviewIssueStatus, WorkflowEvent, WorkflowId, WorkflowKind, WorkflowPhase,
+            WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(5);
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        )));
+        let summary = "[P2] src/header.rs:1 -- license header could be normalized".to_string();
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![summary.clone()],
+            },
+        )));
+        state.apply_event(UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: Some(vec![summary]),
+                status: ReviewIssueStatus::Deferred,
+                reason: Some(
+                    "validated finding is below the automatic correction threshold P1; it remains tracked but was not sent to the primary".to_string(),
+                ),
+                details: None,
+            },
+        )));
+
+        let ledger = state
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::ReviewLedger(lines) => Some(
+                    lines
+                        .iter()
+                        .map(ReviewLedgerLine::plain_text)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            ledger.contains("deferred by correction threshold"),
+            "{ledger}"
+        );
+        assert!(ledger.contains("threshold P1"), "{ledger}");
+        assert!(
+            state.transcript.iter().any(|entry| match entry {
+                Entry::ReviewLedger(lines) => lines
+                    .iter()
+                    .flat_map(|line| line.spans.iter())
+                    .any(|(_, tone)| *tone == ReviewTone::Deferred),
+                _ => false,
+            }),
+            "deferred findings have a distinct ledger treatment"
         );
     }
 
@@ -10899,7 +11040,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",
@@ -10960,7 +11102,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",
@@ -11011,7 +11154,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",
@@ -11078,7 +11222,8 @@ mod tests {
                 "agents",
                 "subagents",
                 "terminals",
-                "review",
+                "discrete-review",
+                "adversarial-review",
                 "diff",
                 "mjconfig",
                 "memory",

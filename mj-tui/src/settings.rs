@@ -99,6 +99,7 @@ enum SettingsRow {
     },
     DiscreteReview,
     ReviewTier,
+    CorrectionThreshold,
     MaxParallelSubagents,
     AutomaticQuotaFailover,
 }
@@ -264,6 +265,7 @@ impl SettingsEditor {
                         (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
                 }
                 SettingsRow::ReviewTier => self.cycle_review_tier(delta),
+                SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(delta),
                 SettingsRow::DiscreteReview | SettingsRow::AutomaticQuotaFailover => {
                     return SettingsAction::None;
                 }
@@ -369,6 +371,7 @@ impl SettingsEditor {
                 // Two tiers, so the toggle key advances the same way the
                 // left/right keys do rather than doing nothing here.
                 SettingsRow::ReviewTier => self.cycle_review_tier(1),
+                SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(1),
                 SettingsRow::AutomaticQuotaFailover => {
                     self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
                 }
@@ -434,6 +437,7 @@ impl SettingsEditor {
                 );
                 rows.push(SettingsRow::DiscreteReview);
                 rows.push(SettingsRow::ReviewTier);
+                rows.push(SettingsRow::CorrectionThreshold);
                 rows
             }
             SettingsTab::Subagents => {
@@ -742,6 +746,16 @@ impl SettingsEditor {
             .unwrap_or(0);
         let next = (current as i32 + delta).rem_euclid(tiers.len() as i32) as usize;
         self.config.agent.review_tier = tiers[next];
+    }
+
+    fn cycle_correction_threshold(&mut self, delta: i32) {
+        let thresholds = crate::config::ReviewCorrectionThreshold::ALL;
+        let current = thresholds
+            .iter()
+            .position(|threshold| *threshold == self.config.agent.correction_threshold)
+            .unwrap_or(thresholds.len() - 1);
+        let next = (current as i32 + delta).rem_euclid(thresholds.len() as i32) as usize;
+        self.config.agent.correction_threshold = thresholds[next];
     }
 
     fn cycle_team(&mut self, delta: i32) {
@@ -1207,6 +1221,7 @@ fn draw_agents(
             | SettingsRow::SubagentPermissions
             | SettingsRow::DiscreteReview
             | SettingsRow::ReviewTier
+            | SettingsRow::CorrectionThreshold
             | SettingsRow::MaxParallelSubagents
             | SettingsRow::AutomaticQuotaFailover => {}
         }
@@ -1312,6 +1327,28 @@ fn draw_reviewer(
                     ));
                 }
             }
+            SettingsRow::CorrectionThreshold => {
+                let threshold = editor.config.agent.correction_threshold;
+                lines.push(selected_line(
+                    selected,
+                    format!("Automatic correction through < {} >", threshold.label()),
+                    theme,
+                ));
+                lines.push(Line::styled(
+                    format!("  {}", threshold.description()),
+                    Style::default().ink(if editor.config.agent.discrete_review {
+                        theme.muted
+                    } else {
+                        theme.warning
+                    }),
+                ));
+                if !editor.config.agent.discrete_review {
+                    lines.push(Line::styled(
+                        "  discrete review is off, so no finding is corrected automatically",
+                        Style::default().ink(theme.warning),
+                    ));
+                }
+            }
             SettingsRow::PrimaryModel
             | SettingsRow::SubagentModel
             | SettingsRow::SubagentPermissions
@@ -1410,7 +1447,8 @@ fn draw_subagents(
             | SettingsRow::ReviewModel
             | SettingsRow::ReviewPermissions
             | SettingsRow::DiscreteReview
-            | SettingsRow::ReviewTier => {}
+            | SettingsRow::ReviewTier
+            | SettingsRow::CorrectionThreshold => {}
         }
     }
     draw_scrolling_settings_lines(frame, area, lines, selected_line_index);
@@ -2435,12 +2473,41 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::ReviewTier)
             .expect("review tier row");
+        let threshold = rows
+            .iter()
+            .position(|row| *row == SettingsRow::CorrectionThreshold)
+            .expect("correction threshold row");
         assert_eq!(tier, review + 1, "the tier belongs beside the switch");
+        assert_eq!(
+            threshold,
+            tier + 1,
+            "the correction policy belongs beside review depth"
+        );
 
         editor.selected = tier;
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Quick);
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Extended);
+
+        editor.selected = threshold;
+        assert_eq!(
+            editor.config.agent.correction_threshold,
+            crate::config::ReviewCorrectionThreshold::P3
+        );
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.agent.correction_threshold,
+            crate::config::ReviewCorrectionThreshold::P2
+        );
+        assert_eq!(
+            editor.handle_key(KeyCode::Char(' ')),
+            SettingsAction::Changed
+        );
+        assert_eq!(
+            editor.config.agent.correction_threshold,
+            crate::config::ReviewCorrectionThreshold::P3
+        );
+        editor.selected = tier;
         // Two tiers, so left, right, and the toggle key all return to Quick.
         assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Quick);

@@ -30,6 +30,15 @@ impl WorkflowId {
         }
     }
 
+    /// An explicit review is not tied to the preceding completed turn's
+    /// automatic review workflow, so it keeps a distinct operation identity.
+    pub const fn manual_review(turn_id: u64) -> Self {
+        Self {
+            turn_id,
+            operation: 2,
+        }
+    }
+
     pub const fn delegation(turn_id: u64) -> Self {
         Self {
             turn_id,
@@ -236,6 +245,10 @@ pub enum ReviewIssueStatus {
     Corrected,
     /// A verification review completed clean after the correction.
     Fixed,
+    /// The finding survived review but was below the configured automatic
+    /// correction threshold. It remains tracked, with the threshold recorded
+    /// as its explicit reason for not being sent to the primary.
+    Deferred,
     /// The primary correction completed without changing the workspace, so
     /// this validated finding remains unresolved.
     Uncorrected,
@@ -250,6 +263,7 @@ impl ReviewIssueStatus {
             Self::Validated => "validated",
             Self::Corrected => "corrected; verification pending",
             Self::Fixed => "verified fixed",
+            Self::Deferred => "deferred by correction threshold",
             Self::Uncorrected => "unresolved",
             Self::Invalidated => "invalidated",
         }
@@ -278,6 +292,7 @@ pub struct ReviewIssueTally {
     pub open: usize,
     pub corrected: usize,
     pub fixed: usize,
+    pub deferred: usize,
     pub uncorrected: usize,
     pub invalidated: usize,
 }
@@ -293,6 +308,7 @@ impl ReviewIssueTally {
                 ReviewIssueStatus::Validated => tally.open += 1,
                 ReviewIssueStatus::Corrected => tally.corrected += 1,
                 ReviewIssueStatus::Fixed => tally.fixed += 1,
+                ReviewIssueStatus::Deferred => tally.deferred += 1,
                 ReviewIssueStatus::Uncorrected => tally.uncorrected += 1,
                 ReviewIssueStatus::Invalidated => tally.invalidated += 1,
             }
@@ -439,6 +455,7 @@ impl WorkflowState {
                 for (count, label) in [
                     (tally.fixed, "verified fixed"),
                     (tally.corrected, "corrected; unverified"),
+                    (tally.deferred, "deferred by policy"),
                     (tally.uncorrected, "unresolved"),
                     (tally.invalidated, "invalidated"),
                     (tally.open, "awaiting correction"),
@@ -535,6 +552,10 @@ pub enum WorkflowTransition {
     },
     IssuesResolved {
         pass: u32,
+        /// When present, update only these exact finding summaries in the
+        /// pass. This lets a mixed-priority verdict defer P2/P3 findings while
+        /// still sending P0/P1 findings through correction.
+        summaries: Option<Vec<String>>,
         status: ReviewIssueStatus,
         /// Concise outcome for compact rows, for example that a correction
         /// changed no files or that a verification pass completed clean.
@@ -543,6 +564,18 @@ pub enum WorkflowTransition {
         /// primary's report and the exact captured correction patch when one
         /// exists; compact transcript rows intentionally omit it.
         details: Option<String>,
+    },
+    /// Refreshes the evidence for a correction that is already recorded as
+    /// `Corrected`. This preserves the live board state without appending a
+    /// second resolution record when the primary finally ends its turn.
+    IssueEvidenceUpdated {
+        pass: u32,
+        /// Limit the evidence refresh to the exact findings that were sent to
+        /// the primary. Deferred findings in a mixed-priority pass remain
+        /// deferred rather than being treated as part of that correction.
+        summaries: Option<Vec<String>>,
+        reason: String,
+        details: String,
     },
     Terminal {
         outcome: WorkflowOutcome,
@@ -843,18 +876,55 @@ impl WorkflowStore {
             }
             WorkflowTransition::IssuesResolved {
                 pass,
+                summaries,
                 status,
                 reason,
                 details,
             } => {
                 let mut changed = false;
-                for issue in state.issues.iter_mut().filter(|issue| issue.pass == *pass) {
+                for issue in state.issues.iter_mut().filter(|issue| {
+                    issue.pass == *pass
+                        && summaries
+                            .as_ref()
+                            .is_none_or(|summaries| summaries.contains(&issue.summary))
+                }) {
                     if issue.status != *status {
                         issue.status = *status;
                         issue.resolution_reason = reason.clone();
                         if details.is_some() {
                             issue.resolution_details = details.clone();
                         }
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return Ok(ApplyOutcome::Duplicate);
+                }
+            }
+            WorkflowTransition::IssueEvidenceUpdated {
+                pass,
+                summaries,
+                reason,
+                details,
+            } => {
+                let mut changed = false;
+                for issue in state.issues.iter_mut().filter(|issue| {
+                    issue.pass == *pass
+                        && summaries
+                            .as_ref()
+                            .is_none_or(|summaries| summaries.contains(&issue.summary))
+                }) {
+                    if issue.status != ReviewIssueStatus::Corrected {
+                        return Err(Self::error(
+                            event.workflow_id,
+                            "correction evidence can update only corrected issues",
+                        ));
+                    }
+                    if issue.resolution_reason.as_deref() != Some(reason)
+                        || issue.resolution_details.as_deref() != Some(details)
+                    {
+                        issue.resolution_reason = Some(reason.clone());
+                        issue.resolution_details = Some(details.clone());
                         changed = true;
                     }
                 }
@@ -1218,6 +1288,7 @@ mod tests {
                 review(),
                 WorkflowTransition::IssuesResolved {
                     pass: 0,
+                    summaries: None,
                     status: ReviewIssueStatus::Corrected,
                     reason: Some(
                         "correction changed the workspace; verification is pending".to_string(),
@@ -1242,8 +1313,34 @@ mod tests {
         store
             .apply(&WorkflowEvent::new(
                 review(),
+                WorkflowTransition::IssueEvidenceUpdated {
+                    pass: 0,
+                    summaries: None,
+                    reason: "the correction validation completed; verification is pending"
+                        .to_string(),
+                    details: "final correction report and exact diff".to_string(),
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].status,
+            ReviewIssueStatus::Corrected
+        );
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].resolution_reason,
+            Some("the correction validation completed; verification is pending".to_string())
+        );
+        assert_eq!(
+            store.get(review()).unwrap().issues[0].resolution_details,
+            Some("final correction report and exact diff".to_string())
+        );
+
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
                 WorkflowTransition::IssuesResolved {
                     pass: 0,
+                    summaries: None,
                     status: ReviewIssueStatus::Fixed,
                     reason: Some(
                         "verification review pass 2 returned clean after the correction"
@@ -1259,7 +1356,7 @@ mod tests {
         );
         assert_eq!(
             store.get(review()).unwrap().issues[0].resolution_details,
-            Some("exact correction diff".to_string()),
+            Some("final correction report and exact diff".to_string()),
             "verification preserves the exact correction evidence"
         );
 
@@ -1277,6 +1374,7 @@ mod tests {
                 review(),
                 WorkflowTransition::IssuesResolved {
                     pass: 1,
+                    summaries: None,
                     status: ReviewIssueStatus::Uncorrected,
                     reason: Some("correction turn changed nothing in the workspace; this finding remains unresolved".to_string()),
                     details: Some("no correction diff".to_string()),
@@ -1303,6 +1401,7 @@ mod tests {
                 open: 0,
                 corrected: 0,
                 fixed: 1,
+                deferred: 0,
                 uncorrected: 1,
                 invalidated: 0,
             }
@@ -1311,6 +1410,52 @@ mod tests {
             state.terminal_notice(WorkflowOutcome::Completed),
             "review complete · 2 issues · 1 verified fixed · 1 unresolved"
         );
+    }
+
+    #[test]
+    fn targeted_resolution_defers_only_lower_priority_validated_findings() {
+        let mut store = WorkflowStore::default();
+        store.apply(&started()).expect("start review");
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::IssuesValidated {
+                    pass: 0,
+                    summaries: vec![
+                        "[P1] src/retry.rs:12 -- retries drop the final error".to_string(),
+                        "[P2] src/header.rs:1 -- license header could be normalized".to_string(),
+                    ],
+                },
+            ))
+            .expect("validate findings");
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::IssuesResolved {
+                    pass: 0,
+                    summaries: Some(vec![
+                        "[P2] src/header.rs:1 -- license header could be normalized".to_string(),
+                    ]),
+                    status: ReviewIssueStatus::Deferred,
+                    reason: Some(
+                        "validated finding is below the automatic correction threshold P1; it remains tracked but was not sent to the primary".to_string(),
+                    ),
+                    details: None,
+                },
+            ))
+            .expect("defer P2");
+
+        let state = store.get(review()).expect("review state");
+        assert_eq!(state.issues[0].status, ReviewIssueStatus::Validated);
+        assert_eq!(state.issues[1].status, ReviewIssueStatus::Deferred);
+        assert!(
+            state.issues[1]
+                .resolution_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("threshold P1"))
+        );
+        assert_eq!(state.issue_tally().open, 1);
+        assert_eq!(state.issue_tally().deferred, 1);
     }
 
     #[test]

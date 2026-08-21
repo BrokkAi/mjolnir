@@ -136,12 +136,14 @@ the review seat.
 | Surface | Behavior |
 | --- | --- |
 | Discrete review | Automatic end-of-turn review whenever the completed turn changed the workspace |
-| `/review recent` | Findings-only review of the latest change-producing turn |
-| `/review uncommitted` | Findings-only review of all current worktree changes |
-| `/review head` | Findings-only review of `HEAD` |
+| `/discrete-review recent` | Run the configured discrete-review tier over the latest change-producing turn |
+| `/discrete-review uncommitted` | Run the configured discrete-review tier over all current worktree changes |
+| `/discrete-review head` | Run the configured discrete-review tier over `HEAD` |
+| `/adversarial-review …` | Alias for `/discrete-review …` |
 
-A review can legitimately report no findings. Findings are evidence to consider,
-not an automatic rollback or proof that the change is safe.
+Append `quick` or `extended` to any on-demand command to override the configured
+tier for that pass, for example `/discrete-review head extended`. On-demand
+passes report their findings without starting a corrective turn.
 
 ## Record evaluations
 

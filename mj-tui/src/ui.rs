@@ -58,7 +58,7 @@ use crate::clipboard::{
 };
 use crate::config;
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, ReviewTarget,
+    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, ReviewRequest, ReviewTarget,
     SessionConfigTarget, SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
     WorkspaceHeadDiffUnavailable,
 };
@@ -1159,6 +1159,7 @@ pub struct UiRunOptions<'a> {
     pub active_models: crate::config::ModelsConfig,
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
+    pub correction_threshold: crate::config::ReviewCorrectionThreshold,
     pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     pub ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
     pub primary_acp_name: String,
@@ -1197,6 +1198,7 @@ struct UiInitialState {
     active_models: crate::config::ModelsConfig,
     review_enabled: bool,
     review_tier: crate::config::ReviewTier,
+    correction_threshold: crate::config::ReviewCorrectionThreshold,
     ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
     primary_acp_name: String,
@@ -1280,6 +1282,7 @@ pub async fn run(
             active_models: options.active_models,
             review_enabled: options.review_enabled,
             review_tier: options.review_tier,
+            correction_threshold: options.correction_threshold,
             ragnarok_models: options.ragnarok_models,
             ragnarok_observer: options.ragnarok_observer,
             primary_acp_name: options.primary_acp_name,
@@ -1532,6 +1535,7 @@ async fn ui_loop(
     state.active_models = initial.active_models;
     state.review_enabled = initial.review_enabled;
     state.review_tier = initial.review_tier;
+    state.correction_threshold = initial.correction_threshold;
     state.ragnarok_models = initial.ragnarok_models;
     let ragnarok_observer = initial.ragnarok_observer;
     let mut last_ragnarok_observation = None;
@@ -5426,10 +5430,19 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if plain_text_only
-        && let Some(rest) = text.strip_prefix("/review")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
+    if plain_text_only && retired_review_command_arguments(&text).is_some() {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        state.record_status_message(
+            StatusKind::Warning,
+            "use /discrete-review or /adversarial-review",
+        );
+        return;
+    }
+
+    if plain_text_only && let Some(rest) = discrete_review_command_arguments(&text) {
         state.input.clear();
         clear_attachments(state);
         state.input_cursor = 0;
@@ -5437,25 +5450,31 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         if state.is_side {
             state.record_status_message(
                 StatusKind::Warning,
-                "manual review is unavailable in side conversations",
+                "discrete review is unavailable in side conversations",
             );
         } else if state.runtime_closed || state.session_id.is_none() {
             state.record_status_message(StatusKind::Warning, "the primary agent is unavailable");
         } else if state.is_busy() {
             state.record_status_message(
                 StatusKind::Warning,
-                "manual review is only available while the primary agent is idle",
+                "discrete review is only available while the primary agent is idle",
             );
-        } else if rest.trim().is_empty() {
-            state.open_review_picker();
-        } else if let Some(target) = parse_review_target(rest.trim()) {
-            state.record_status_message(StatusKind::Info, "preparing manual review…");
-            let _ = cmd_tx.send(UiCommand::RunReview { target });
         } else {
-            state.record_status_message(
-                StatusKind::Warning,
-                "usage: /review [recent|uncommitted|head]",
-            );
+            match parse_discrete_review_args(rest.trim()) {
+                Some(request) => {
+                    state.record_status_message(StatusKind::Info, "preparing discrete review…");
+                    let _ = cmd_tx.send(UiCommand::RunReview { request });
+                }
+                None if rest.trim().is_empty()
+                    || rest.trim().parse::<crate::config::ReviewTier>().is_ok() =>
+                {
+                    state.open_review_picker(rest.trim().parse().ok());
+                }
+                None => state.record_status_message(
+                    StatusKind::Warning,
+                    "usage: /discrete-review [recent|uncommitted|head] [quick|extended]",
+                ),
+            }
         }
         return;
     }
@@ -5671,6 +5690,39 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         images,
         resources,
     });
+}
+
+fn discrete_review_command_arguments(text: &str) -> Option<&str> {
+    ["/discrete-review", "/adversarial-review"]
+        .into_iter()
+        .find_map(|command| {
+            text.strip_prefix(command)
+                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+}
+
+fn retired_review_command_arguments(text: &str) -> Option<&str> {
+    text.strip_prefix("/review")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn parse_discrete_review_args(value: &str) -> Option<ReviewRequest> {
+    let mut target = None;
+    let mut tier = None;
+    for token in value.split_whitespace() {
+        if let Some(parsed) = parse_review_target(token) {
+            if target.replace(parsed).is_some() {
+                return None;
+            }
+        } else if let Ok(parsed) = token.parse::<crate::config::ReviewTier>() {
+            if tier.replace(parsed).is_some() {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    target.map(|target| ReviewRequest { target, tier })
 }
 
 fn parse_review_target(value: &str) -> Option<ReviewTarget> {
@@ -5912,7 +5964,8 @@ fn persist_mjconfig_selection(
     let theme = config.theme;
     let style = config.spinner;
     let review_changed = state.review_enabled != config.agent.discrete_review
-        || state.review_tier != config.agent.review_tier;
+        || state.review_tier != config.agent.review_tier
+        || state.correction_threshold != config.agent.correction_threshold;
     let feature_hints_enabled = config.feature_hints;
     let keep_awake_enabled = config.keep_awake;
     let thought_output = config.thought_output;
@@ -5931,6 +5984,7 @@ fn persist_mjconfig_selection(
                     crate::roster::rediscover_inventory(&config, &state.acp_inventory);
                 state.review_enabled = config.agent.discrete_review;
                 state.review_tier = config.agent.review_tier;
+                state.correction_threshold = config.agent.correction_threshold;
                 state.feature_hints_enabled = feature_hints_enabled;
                 state.keep_awake.set_enabled(keep_awake_enabled);
                 state.set_thought_output(thought_output);
@@ -5939,6 +5993,7 @@ fn persist_mjconfig_selection(
                     let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
                         enabled: config.agent.discrete_review,
                         tier: config.agent.review_tier,
+                        correction_threshold: config.agent.correction_threshold,
                     });
                 }
                 for (target, value) in live_session_updates {
@@ -6871,9 +6926,9 @@ fn handle_review_picker_key(
             inline_repair_request(mode)
         }
         PickerKeyAction::Accept => {
-            if let Some(target) = state.review_picker_accept() {
-                state.record_status_message(StatusKind::Info, "preparing manual review…");
-                let _ = cmd_tx.send(UiCommand::RunReview { target });
+            if let Some(request) = state.review_picker_accept() {
+                state.record_status_message(StatusKind::Info, "preparing discrete review…");
+                let _ = cmd_tx.send(UiCommand::RunReview { request });
                 inline_repair_request(mode)
             } else {
                 TerminalRequest::None
@@ -7853,7 +7908,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
     )];
     for (count, label, ink) in [
         (tally.open, "● {} awaiting correction", theme.warning),
-        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.corrected, "◐ {} unverified", theme.accent),
         (tally.fixed, "✔ {} verified fixed", theme.success),
         (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
@@ -7935,13 +7990,18 @@ fn review_issue_detail_lines(
         ),
         ReviewIssueStatus::Corrected => (
             "corrected — verification pending",
-            theme.warning,
+            theme.accent,
             "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean, so this is not presented as fixed.",
         ),
         ReviewIssueStatus::Fixed => (
             "fixed — independently verified",
             theme.success,
             "A later verification review returned clean after the correction.",
+        ),
+        ReviewIssueStatus::Deferred => (
+            "deferred by automatic correction threshold",
+            theme.accent,
+            "The review supervisor validated this finding, but its priority is below the configured automatic correction threshold. It remains tracked and was not sent to the primary for a correction turn.",
         ),
         ReviewIssueStatus::Uncorrected => (
             "unresolved",
@@ -10063,7 +10123,11 @@ fn review_tone_style(tone: crate::app::ReviewTone, theme: TerminalTheme) -> Styl
             .ink(theme.accent)
             .add_modifier(Modifier::BOLD),
         ReviewTone::Open => Style::default().ink(theme.warning),
+        ReviewTone::Corrected => Style::default().ink(theme.accent),
         ReviewTone::Fixed => Style::default().ink(theme.success),
+        ReviewTone::Deferred => Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
         ReviewTone::Invalidated => Style::default()
             .ink(theme.error)
             .add_modifier(Modifier::BOLD),
@@ -12554,10 +12618,11 @@ fn review_board_rank(status: crate::workflow::ReviewIssueStatus) -> u8 {
 
     match status {
         ReviewIssueStatus::Validated => 0,
-        ReviewIssueStatus::Corrected => 1,
-        ReviewIssueStatus::Uncorrected => 2,
-        ReviewIssueStatus::Invalidated => 3,
-        ReviewIssueStatus::Fixed => 4,
+        ReviewIssueStatus::Deferred => 1,
+        ReviewIssueStatus::Corrected => 2,
+        ReviewIssueStatus::Uncorrected => 3,
+        ReviewIssueStatus::Invalidated => 4,
+        ReviewIssueStatus::Fixed => 5,
     }
 }
 
@@ -12587,6 +12652,7 @@ fn draw_review_board(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     )];
     for (count, label, ink) in [
         (tally.open, "● {} open", theme.warning),
+        (tally.deferred, "⏸ {} deferred by policy", theme.accent),
         (tally.corrected, "◐ {} unverified", theme.warning),
         (tally.fixed, "✔ {} verified", theme.success),
         (tally.uncorrected, "! {} unresolved", theme.warning),
@@ -14443,7 +14509,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Review target ")
+        .title(" Discrete review target ")
         .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -14453,7 +14519,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
         .split(inner);
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[0]);
     f.render_widget(
-        Paragraph::new("Up/Down choose | Enter review | Esc cancel")
+        Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
@@ -14474,7 +14540,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         ])
         .split(content);
     f.render_widget(
-        Paragraph::new("Review target").style(
+        Paragraph::new("Discrete review target").style(
             Style::default()
                 .ink(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
@@ -14483,7 +14549,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
     );
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[1]);
     f.render_widget(
-        Paragraph::new("Up/Down choose | Enter review | Esc cancel")
+        Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
         layout[2],
     );
@@ -16360,6 +16426,29 @@ mod tests {
             workflow_id,
             WorkflowTransition::IssuesResolved {
                 pass: 0,
+                summaries: None,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some(
+                    "the correction changed the workspace; verification is pending".to_string(),
+                ),
+                details: Some("exact correction diff".to_string()),
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_board(frame, frame.area(), &state))
+            .expect("draw board");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("◐ 2 unverified"), "{rendered}");
+        assert!(!rendered.contains("● 2 open"), "{rendered}");
+        assert!(rendered.contains("verification pending"), "{rendered}");
+
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: None,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
                 details: None,
@@ -16416,6 +16505,7 @@ mod tests {
             workflow_id,
             WorkflowTransition::IssuesResolved {
                 pass: 0,
+                summaries: None,
                 status: ReviewIssueStatus::Corrected,
                 reason: Some("the correction changed the workspace; verification is pending".to_string()),
                 details: Some(
@@ -19681,9 +19771,9 @@ mod tests {
     }
 
     #[test]
-    fn slash_review_opens_picker_and_direct_target_routes_locally() {
+    fn discrete_review_aliases_open_picker_and_route_tier_overrides_locally() {
         let mut state = ready_state_with_session();
-        state.input = "/review".to_string();
+        state.input = "/discrete-review".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         submit_prompt(&mut state, &cmd_tx);
@@ -19691,21 +19781,47 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
 
         state.review_picker = None;
-        state.input = "/review uncommitted".to_string();
+        state.input = "/adversarial-review uncommitted extended".to_string();
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(UiCommand::RunReview {
-                target: ReviewTarget::Uncommitted
+                request: ReviewRequest {
+                    target: ReviewTarget::Uncommitted,
+                    tier: Some(crate::config::ReviewTier::Extended),
+                }
             })
         ));
     }
 
     #[test]
-    fn slash_review_rejects_busy_turn_without_queueing() {
+    fn retired_review_command_is_not_forwarded_to_the_agent() {
+        let mut state = ready_state_with_session();
+        state.input = "/review".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(state.status_line.as_ref().is_some_and(|status| {
+            status
+                .text
+                .contains("/discrete-review or /adversarial-review")
+        }));
+
+        state.input = "/review-branch main".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, .. }) if text == "/review-branch main"
+        ));
+    }
+
+    #[test]
+    fn discrete_review_rejects_busy_turn_without_queueing() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("active".to_string());
-        state.input = "/review recent".to_string();
+        state.input = "/discrete-review recent".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         submit_prompt(&mut state, &cmd_tx);
@@ -20007,8 +20123,8 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed_thought_output = state.thought_output;
 
-        // Reviewer tab: toggle discrete review, deepen the review tier, and
-        // apply both to the running session.
+        // Reviewer tab: toggle discrete review, deepen the review tier, lower
+        // the automatic correction threshold, and apply the policy live.
         let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
         editor.tab = crate::settings::SettingsTab::Reviewer;
         editor.selected = 0;
@@ -20017,6 +20133,8 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Char(' '));
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
+        state.mjconfig_menu_key(KeyCode::Down);
+        state.mjconfig_menu_key(KeyCode::Left);
 
         handle_mjconfig_menu_key(
             &mut state,
@@ -20037,11 +20155,16 @@ mod tests {
         );
         assert!(!saved.agent.discrete_review);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
+        assert_eq!(
+            saved.agent.correction_threshold,
+            config::ReviewCorrectionThreshold::P2
+        );
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(UiCommand::SetReviewPolicy {
                 enabled: false,
-                tier: config::ReviewTier::Extended
+                tier: config::ReviewTier::Extended,
+                correction_threshold: config::ReviewCorrectionThreshold::P2,
             })
         ));
     }

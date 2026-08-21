@@ -79,8 +79,8 @@ Review depth is controlled by the review tier on the **Reviewer** tab of
 Surviving findings return to the coder as a corrective turn, framed as strong
 leads to verify rather than instructions to obey. See
 [Delegation and adversarial review](/delegation-review/) for the full
-mechanics, and `/review` for explicit findings-only reviews of recent,
-uncommitted, or `HEAD` changes.
+mechanics, including on-demand discrete reviews of recent, uncommitted, or
+`HEAD` changes.
 
 ## Requirements
 

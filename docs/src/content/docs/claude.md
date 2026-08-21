@@ -83,8 +83,8 @@ for an end-to-end exercise in a disposable repository.
 - Run `mj server` to open the same session through the self-hosted remote
   viewer.
 - Ask Claude to launch a subagent for bounded parallel work.
-- Run `/review recent` for a findings-only review of the latest
-  change-producing turn.
+- Run `/discrete-review recent` to send the latest change-producing turn
+  through the configured review tier.
 - Run `mj --print` for scripts and machine-readable output.
 
 Continue with [Mjolnir Web](/remote/), [Voice dictation](/voice/), or

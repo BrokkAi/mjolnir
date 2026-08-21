@@ -707,6 +707,101 @@ impl std::str::FromStr for ReviewTier {
     }
 }
 
+/// The lowest-severity validated review finding that still starts an automatic
+/// correction. Lower-priority findings remain visible in the ledger with the
+/// configured threshold as their reason for being deferred.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewCorrectionThreshold {
+    P0,
+    P1,
+    P2,
+    #[default]
+    P3,
+}
+
+impl ReviewCorrectionThreshold {
+    pub const ALL: [Self; 4] = [Self::P0, Self::P1, Self::P2, Self::P3];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "p0",
+            Self::P1 => "p1",
+            Self::P2 => "p2",
+            Self::P3 => "p3",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::P0 => "P0",
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::P0 => {
+                "automatically correct validated P0 findings only; retain P1-P3 in the ledger"
+            }
+            Self::P1 => {
+                "automatically correct validated P0-P1 findings; retain P2-P3 in the ledger"
+            }
+            Self::P2 => "automatically correct validated P0-P2 findings; retain P3 in the ledger",
+            Self::P3 => "automatically correct every validated P0-P3 finding",
+        }
+    }
+
+    /// Does this configured threshold dispatch a correction for `priority`?
+    pub const fn corrects(self, priority: Self) -> bool {
+        priority.as_index() <= self.as_index()
+    }
+
+    /// Compact representation for the orchestrator's atomic live switch.
+    pub const fn as_index(self) -> u8 {
+        match self {
+            Self::P0 => 0,
+            Self::P1 => 1,
+            Self::P2 => 2,
+            Self::P3 => 3,
+        }
+    }
+
+    /// An unreadable switch must retain the established default: correct all
+    /// validated priority findings rather than silently leaving one open.
+    pub const fn from_index(index: u8) -> Self {
+        match index {
+            0 => Self::P0,
+            1 => Self::P1,
+            2 => Self::P2,
+            _ => Self::P3,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        matches!(self, Self::P3)
+    }
+}
+
+impl std::fmt::Display for ReviewCorrectionThreshold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReviewCorrectionThreshold {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|threshold| threshold.as_str().eq_ignore_ascii_case(value))
+            .ok_or(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentConfig {
     #[serde(default = "default_auto")]
@@ -737,6 +832,10 @@ pub struct AgentConfig {
     /// `Quick` without editing anything.
     #[serde(default, skip_serializing_if = "ReviewTier::is_default")]
     pub review_tier: ReviewTier,
+    /// Highest numerical priority included in automatic correction. The P3
+    /// default preserves the original all-priority corrective behavior.
+    #[serde(default, skip_serializing_if = "ReviewCorrectionThreshold::is_default")]
+    pub correction_threshold: ReviewCorrectionThreshold,
     /// Explicit override for how many corrective re-review passes one user
     /// turn may dispatch after its initial discrete review. When omitted,
     /// Quick uses zero and Extended uses one.
@@ -754,6 +853,7 @@ impl Default for AgentConfig {
             session_defaults: BTreeMap::new(),
             discrete_review: true,
             review_tier: ReviewTier::default(),
+            correction_threshold: ReviewCorrectionThreshold::default(),
             max_correction_rounds: None,
         }
     }
@@ -1525,6 +1625,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
             session_defaults: BTreeMap::new(),
             discrete_review: old.thor.discrete_review,
             review_tier: ReviewTier::default(),
+            correction_threshold: ReviewCorrectionThreshold::default(),
             max_correction_rounds,
         },
         review: ReviewConfig {
@@ -2501,6 +2602,7 @@ origin = "custom"
                 session_defaults: BTreeMap::new(),
                 discrete_review: false,
                 review_tier: ReviewTier::Extended,
+                correction_threshold: ReviewCorrectionThreshold::P1,
                 max_correction_rounds: Some(1),
             },
             subagents: SubagentsConfig {
@@ -2515,6 +2617,10 @@ origin = "custom"
         assert_eq!(loaded.agent.model, "gpt-5-6-sol");
         assert!(!loaded.agent.discrete_review);
         assert_eq!(loaded.agent.review_tier, ReviewTier::Extended);
+        assert_eq!(
+            loaded.agent.correction_threshold,
+            ReviewCorrectionThreshold::P1
+        );
         assert!(!loaded.subagents.auto_failover);
     }
 
