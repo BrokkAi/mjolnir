@@ -8883,16 +8883,17 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     } else {
         state.agent_label.trim()
     };
-    let source = state
-        .active_models
-        .primary_source
-        .as_deref()
-        .filter(|source| !source.is_empty())
-        .unwrap_or(state.agent_source_id.as_str());
-    let model_with_source = if source.is_empty() {
-        model_name.to_string()
+    // The adapter is visible in /model; the status line shows only the model
+    // name, using the adapter solely as a stand-in until a model is known.
+    let model_name = if model_name.is_empty() {
+        state
+            .active_models
+            .primary_source
+            .as_deref()
+            .filter(|source| !source.is_empty())
+            .unwrap_or(state.agent_source_id.as_str())
     } else {
-        format!("{model_name} via {source}")
+        model_name
     };
     let effort = state
         .primary_reasoning_effort
@@ -8904,7 +8905,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     let primary_field = format!("primary: {primary}");
     let review_field = format!("review: {review}");
     let mut full_fields = vec![
-        (model_with_source.clone(), state.theme.primary),
+        (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
         (project.to_string(), state.theme.secondary),
         (primary_field.clone(), state.theme.success),
@@ -8917,8 +8918,8 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         return status_line_from_fields(full_fields, state.theme.muted);
     }
 
-    // Preserve every requested field at common terminal widths by dropping
-    // the adapter suffix and assigning the remaining space to the path.
+    // Preserve every requested field at common terminal widths by assigning
+    // the remaining space to the path.
     let mut medium_fields = vec![
         (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
@@ -17335,7 +17336,7 @@ mod tests {
         let line = status_line(&state, 200);
         assert_eq!(
             line_text(&line),
-            "gpt-5-6-terra via codex-acp · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
+            "gpt-5-6-terra · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
         );
         assert!(!line_text(&line).contains("github.com"));
         // Compare whole styles rather than bare colors: hierarchy now lives
