@@ -168,22 +168,39 @@ granular than the terminal's aggregate workflow progress rows.
 
 ## Side conversations
 
-When the connected agent supports ephemeral side sessions, the web command
-palette exposes `/side` with an optional question. The same transcript stays open
-in a visible side mode, but side prompts, replies, and tools are labelled with
-the `Side` actor so they cannot be mistaken for main-session history. Use the
-**Exit side** action (or send `exit`) to delete the temporary session and return
-the composer to the main conversation.
+Side conversations are available only on **Claude-primary teams**. They belong
+to the primary session, not the reviewer, so the team's coder decides whether
+`/side` exists at all:
+
+| Team | `/side` |
+| --- | --- |
+| Claude | Yes |
+| Claude coder + Codex reviewer | Yes |
+| Codex | No |
+| Codex coder + Claude reviewer | No |
+
+Mjolnir only exposes `/side` when the primary agent advertises ACP
+`session/fork`, `session/resume` (or `session/load`), and `session/delete`.
+Claude's ACP adapter advertises all three; Codex's advertises load/resume and
+delete but not `session/fork`, so Codex-primary sessions never see the command.
+
+On a Claude-primary team the web command palette exposes `/side` with an
+optional question. The same transcript stays open in a visible side mode, but
+side prompts, replies, and tools are labelled with the `Side` actor so they
+cannot be mistaken for main-session history. Use the **Exit side** action (or
+send `exit`) to delete the temporary session and return the composer to the
+main conversation.
 
 Typing `/` opens the palette of commands the connected agent advertises, so the
-list reflects that agent's capabilities rather than a fixed menu — `/side` only
-appears on an agent that supports side sessions.
+list reflects that agent's capabilities rather than a fixed menu. The palette
+below comes from a Codex-primary session, which is why `/side` is absent from
+it.
 
 <figure class="shot">
-  <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: the command palette">
-    <Image src={shotCommandPalette} alt="The Mjolnir Web composer with a slash typed, showing a command palette listing /new, /clear, /compact, /export, /mjconfig, and discrete-review commands with their descriptions." />
+  <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: the command palette on a Codex-primary session">
+    <Image src={shotCommandPalette} alt="The Mjolnir Web composer with a slash typed, showing a command palette listing /new, /clear, /compact, /export, /mjconfig, and discrete-review commands with their descriptions. /side is not listed because the primary agent is Codex." />
   </a>
-  <figcaption>The command palette over a finished turn — the commands this agent advertises, not a fixed list.</figcaption>
+  <figcaption>The command palette on a Codex-primary session — the commands this agent advertises, not a fixed list. On a Claude-primary team, <code>/side</code> appears here too.</figcaption>
 </figure>
 
 ## Status line
