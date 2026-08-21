@@ -503,23 +503,40 @@ fn host_lock_state() -> HostLockState {
         return HostLockState::Unknown;
     }
     let dictionary = CoreFoundationObject(dictionary);
-    let Ok(key) = CoreFoundationString::new("kCGSessionOnConsoleKey") else {
-        return HostLockState::Unknown;
-    };
+    host_lock_state_from_session_flags(
+        session_boolean(dictionary.0, "kCGSSessionOnConsoleKey"),
+        session_boolean(dictionary.0, "CGSSessionScreenIsLocked"),
+    )
+}
+
+fn session_boolean(dictionary: CFDictionaryRef, key_name: &str) -> Option<bool> {
+    let key = CoreFoundationString::new(key_name).ok()?;
     // SAFETY: both CoreFoundation objects remain valid for this lookup.
-    let value = unsafe { CFDictionaryGetValue(dictionary.0, key.0) };
+    let value = unsafe { CFDictionaryGetValue(dictionary, key.0) };
     if value.is_null()
         // SAFETY: CoreFoundation type-id queries are valid for a non-null
         // object pointer and do not transfer ownership.
         || unsafe { CFGetTypeID(value) } != unsafe { CFBooleanGetTypeID() }
     {
-        return HostLockState::Unknown;
+        return None;
     }
     // SAFETY: the type check above proves the dictionary value is a CFBoolean.
-    if unsafe { CFBooleanGetValue(value) } {
-        HostLockState::Unlocked
-    } else {
-        HostLockState::Locked
+    Some(unsafe { CFBooleanGetValue(value) })
+}
+
+fn host_lock_state_from_session_flags(
+    on_console: Option<bool>,
+    screen_is_locked: Option<bool>,
+) -> HostLockState {
+    match (on_console, screen_is_locked) {
+        // The screen-lock key is authoritative: the console can stay active
+        // while macOS presents the lock screen.
+        (_, Some(true)) => HostLockState::Locked,
+        (Some(true), Some(false)) => HostLockState::Unlocked,
+        // A session that is not on the console cannot safely receive input.
+        (Some(false), Some(false)) => HostLockState::Locked,
+        // Missing or malformed state is fail-closed at the policy boundary.
+        _ => HostLockState::Unknown,
     }
 }
 
@@ -1177,6 +1194,30 @@ mod tests {
             KCG_EVENT_RIGHT_MOUSE_DRAGGED
         );
         assert_eq!(mouse_up_event(PointerButton::Left), KCG_EVENT_LEFT_MOUSE_UP);
+    }
+
+    #[test]
+    fn host_lock_state_uses_the_screen_lock_signal_not_console_presence() {
+        assert_eq!(
+            host_lock_state_from_session_flags(Some(true), Some(false)),
+            HostLockState::Unlocked
+        );
+        assert_eq!(
+            host_lock_state_from_session_flags(Some(true), Some(true)),
+            HostLockState::Locked
+        );
+        assert_eq!(
+            host_lock_state_from_session_flags(Some(false), Some(false)),
+            HostLockState::Locked
+        );
+        assert_eq!(
+            host_lock_state_from_session_flags(None, Some(true)),
+            HostLockState::Locked
+        );
+        assert_eq!(
+            host_lock_state_from_session_flags(Some(true), None),
+            HostLockState::Unknown
+        );
     }
 
     #[test]

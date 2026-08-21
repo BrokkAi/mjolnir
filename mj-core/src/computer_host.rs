@@ -162,6 +162,7 @@ pub struct HostService<B> {
     capability: HostCapability,
     state: Mutex<CapabilityState>,
     revoked: CancellationToken,
+    authenticated: CancellationToken,
 }
 
 impl<B> HostService<B> {
@@ -177,6 +178,7 @@ impl<B> HostService<B> {
             capability,
             state: Mutex::new(CapabilityState::AwaitingAuthentication),
             revoked: CancellationToken::new(),
+            authenticated: CancellationToken::new(),
         })
     }
 
@@ -199,6 +201,12 @@ impl<B> HostService<B> {
         self.revoked.clone()
     }
 
+    /// A host process uses this token to enforce a short startup timeout. It
+    /// is cancelled after the first successful capability handshake.
+    pub fn authentication_token(&self) -> CancellationToken {
+        self.authenticated.clone()
+    }
+
     async fn authenticate(&self, hello: HostHello) -> Result<(), HostCallError> {
         if hello.protocol_version != HOST_PROTOCOL_VERSION {
             return Err(HostCallError::UnsupportedProtocol {
@@ -216,6 +224,7 @@ impl<B> HostService<B> {
                 *state = CapabilityState::Active {
                     cancellation: CancellationToken::new(),
                 };
+                self.authenticated.cancel();
                 Ok(())
             }
             CapabilityState::Active { .. } => Ok(()),
@@ -363,7 +372,17 @@ where
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut authenticated = false;
-    while let Some(request) = read_frame::<_, HostRequestEnvelope>(&mut reader).await? {
+    loop {
+        let request = match read_frame::<_, HostRequestEnvelope>(&mut reader).await {
+            Ok(Some(request)) => request,
+            Ok(None) => break,
+            Err(error) => {
+                if authenticated {
+                    service.revoke().await;
+                }
+                return Err(error);
+            }
+        };
         if !authenticated && !matches!(request.request, HostRequest::Hello(_)) {
             write_frame(
                 &mut writer,
@@ -395,14 +414,20 @@ where
             service.handle(request.request).await
         };
         authenticated = authenticated || matches!(response, HostResponse::Hello { .. });
-        write_frame(
+        if let Err(error) = write_frame(
             &mut writer,
             &HostResponseEnvelope {
                 id: request.id,
                 response,
             },
         )
-        .await?;
+        .await
+        {
+            if authenticated {
+                service.revoke().await;
+            }
+            return Err(error);
+        }
         if shutdown {
             return Ok(());
         }
@@ -523,11 +548,13 @@ where
     T: DeserializeOwned,
 {
     let mut header = [0_u8; 4];
-    match stream.read_exact(&mut header).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(HostWireError::Io(error)),
-    }
+    match stream.read(&mut header).await.map_err(HostWireError::Io)? {
+        0 => return Ok(None),
+        read => stream
+            .read_exact(&mut header[read..])
+            .await
+            .map_err(HostWireError::Io)?,
+    };
     let len = u32::from_be_bytes(header) as usize;
     if len > MAX_HOST_FRAME_BYTES {
         return Err(HostWireError::FrameTooLarge(len));
@@ -800,6 +827,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authentication_token_is_cancelled_only_after_a_valid_hello() {
+        let session_id = HostSessionId("session-a".to_string());
+        let capability = HostCapability::generate().unwrap();
+        let service = HostService::new(
+            MockBackend::default(),
+            session_id.clone(),
+            capability.clone(),
+        )
+        .unwrap();
+        let authenticated = service.authentication_token();
+
+        assert_eq!(
+            service
+                .handle(HostRequest::Hello(HostHello {
+                    protocol_version: HOST_PROTOCOL_VERSION,
+                    session_id: HostSessionId("other-session".to_string()),
+                    capability: capability.clone(),
+                }))
+                .await,
+            HostResponse::Error(HostCallError::Unauthorized)
+        );
+        assert!(!authenticated.is_cancelled());
+        assert!(matches!(
+            service.handle(hello(&session_id, &capability)).await,
+            HostResponse::Hello { .. }
+        ));
+        assert!(authenticated.is_cancelled());
+    }
+
+    #[tokio::test]
     async fn revocation_cancels_in_flight_action_and_blocks_replay() {
         let session_id = HostSessionId("session-a".to_string());
         let capability = HostCapability::generate().unwrap();
@@ -961,6 +1018,45 @@ mod tests {
         assert_eq!(backend_state.execute_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             service.handle(HostRequest::Execute(action())).await,
+            HostResponse::Error(HostCallError::Revoked)
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_frame_after_authentication_revokes_the_host() {
+        let session_id = HostSessionId("session-a".to_string());
+        let capability = HostCapability::generate().unwrap();
+        let service = Arc::new(
+            HostService::new(
+                MockBackend::default(),
+                session_id.clone(),
+                capability.clone(),
+            )
+            .unwrap(),
+        );
+        let (mut client, mut server_stream) = duplex(8 * 1024);
+        let server = {
+            let service = service.clone();
+            tokio::spawn(async move { serve_connection(&service, &mut server_stream).await })
+        };
+
+        write_frame(
+            &mut client,
+            &HostRequestEnvelope {
+                id: 1,
+                request: hello(&session_id, &capability),
+            },
+        )
+        .await
+        .unwrap();
+        let _: HostResponseEnvelope = read_frame(&mut client).await.unwrap().unwrap();
+        client.write_all(&2_u32.to_be_bytes()).await.unwrap();
+        client.write_all(b"{").await.unwrap();
+        drop(client);
+
+        assert!(matches!(server.await.unwrap(), Err(HostWireError::Io(_))));
+        assert_eq!(
+            service.handle(HostRequest::PermissionReadiness).await,
             HostResponse::Error(HostCallError::Revoked)
         );
     }

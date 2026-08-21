@@ -22,6 +22,8 @@ mod macos {
     };
     use tokio::net::UnixListener;
 
+    const AUTHENTICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     #[derive(Debug, Parser)]
     #[command(name = "mj-computer-host", disable_version_flag = true)]
     struct Args {
@@ -71,10 +73,20 @@ mod macos {
             .context("validate computer host launch descriptor")?,
         );
         let revocation = service.revocation_token();
+        let authenticated = service.authentication_token();
+        let authentication_timeout = tokio::time::sleep(AUTHENTICATION_TIMEOUT);
+        tokio::pin!(authentication_timeout);
 
         loop {
             tokio::select! {
                 _ = revocation.cancelled() => return Ok(()),
+                _ = &mut authentication_timeout, if !authenticated.is_cancelled() => {
+                    // `mj` failed before it established the capability
+                    // handshake. Do not leave an inaccessible LSUIElement app
+                    // holding macOS automation permissions.
+                    service.revoke().await;
+                    return Ok(());
+                }
                 accepted = listener.accept() => {
                     let (mut stream, _) = accepted.context("accept Mjolnir computer host connection")?;
                     let service = service.clone();
@@ -90,6 +102,10 @@ mod macos {
 
     fn require_mjolnir_computer_bundle() -> Result<()> {
         let executable = std::env::current_exe().context("locate computer host executable")?;
+        validate_mjolnir_computer_bundle(&executable)
+    }
+
+    fn validate_mjolnir_computer_bundle(executable: &Path) -> Result<()> {
         let Some(macos) = executable.parent() else {
             bail!("Mjolnir Computer host executable has no parent directory");
         };
@@ -183,16 +199,26 @@ mod macos {
 
         #[test]
         fn bundle_check_rejects_an_ordinary_binary_path() {
-            // The logic is intentionally structural so test builds never claim
-            // a Terminal-launched process is production-safe.
             let temporary = tempfile::tempdir().unwrap();
             let binary = temporary.path().join("mj-computer-host");
             fs::write(&binary, []).unwrap();
-            assert!(
-                !binary
-                    .ancestors()
-                    .any(|path| path.extension().is_some_and(|extension| extension == "app"))
-            );
+            assert!(validate_mjolnir_computer_bundle(&binary).is_err());
+        }
+
+        #[test]
+        fn bundle_check_accepts_the_expected_app_structure() {
+            let temporary = tempfile::tempdir().unwrap();
+            let executable = temporary
+                .path()
+                .join("Mjolnir Computer.app/Contents/MacOS/mj-computer-host");
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(
+                executable.ancestors().nth(2).unwrap().join("Info.plist"),
+                [],
+            )
+            .unwrap();
+            fs::write(&executable, []).unwrap();
+            assert!(validate_mjolnir_computer_bundle(&executable).is_ok());
         }
 
         #[test]
