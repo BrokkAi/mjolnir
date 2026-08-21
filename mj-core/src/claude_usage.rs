@@ -424,9 +424,15 @@ fn output_detail(output: &Output) -> String {
 /// lines, markdown-ish tables, and the ACP metadata wording all show up in the
 /// wild), so the parser intentionally keys off semantic labels plus nearby
 /// percentage words rather than a single exact template.
+/// Heading that starts Claude Code's local activity summary. Everything
+/// below it is request/session statistics, not quota, and must never be
+/// mined for window percentages.
+const ACTIVITY_HEADING: &str = "what's contributing to your limits usage?";
+
 pub fn parse(output: &str) -> Option<ClaudeUsageReport> {
     let stripped = strip_ansi(output);
-    let lines = stripped
+    let quota_text = quota_section(&stripped);
+    let lines = quota_text
         .lines()
         .map(normalize_line)
         .filter(|line| !line.is_empty())
@@ -438,6 +444,21 @@ pub fn parse(output: &str) -> Option<ClaudeUsageReport> {
     };
 
     (report.five_hour.is_some() || report.week.is_some()).then_some(report)
+}
+
+/// Returns the portion of `output` above the activity heading (or all of it
+/// when the heading is absent). Matching is case-insensitive; the heading
+/// has only ASCII letters so byte offsets line up with the original text.
+fn quota_section(output: &str) -> &str {
+    let lower = output.to_ascii_lowercase();
+    match lower.find(ACTIVITY_HEADING) {
+        Some(idx) => &output[..idx],
+        None => output,
+    }
+}
+
+fn has_activity_section(output: &str) -> bool {
+    output.to_ascii_lowercase().contains(ACTIVITY_HEADING)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,9 +550,22 @@ fn preferred_window_line(line: &str, kind: UsageWindowKind) -> bool {
         return true;
     }
     let lower = line.to_ascii_lowercase();
-    // Prefer the global weekly bucket when Claude also emits model-specific
-    // weekly buckets such as Opus/Sonnet.
-    !lower.contains("opus") && !lower.contains("sonnet")
+    if lower.contains("all models") {
+        return true;
+    }
+    // Claude Code emits model-specific weekly buckets alongside the global
+    // one, e.g. `Current week (Fable): 41% used`. Any parenthesised
+    // qualifier other than "all models" is a per-model bucket, and so are
+    // the older bare `Opus`/`Sonnet` spellings.
+    let has_qualifier = lower
+        .find('(')
+        .and_then(|open| {
+            lower[open..]
+                .find(')')
+                .map(|close| &lower[open + 1..open + close])
+        })
+        .is_some_and(|inner| !inner.trim().is_empty());
+    !has_qualifier && !lower.contains("opus") && !lower.contains("sonnet")
 }
 
 fn matches_any_window(line: &str) -> bool {
@@ -647,12 +681,11 @@ fn classify_unparsed_output(output: &str) -> ClaudeUsageError {
         ClaudeUsageError::NotSignedIn
     } else if lower.contains("not supported") || lower.contains("unknown command") {
         ClaudeUsageError::UnsupportedOutput
-    } else if lower.contains("what's contributing to your limits usage?")
-        && lower.contains("last 24h")
-        && lower.contains("last 7d")
-    {
-        // Recent Claude Code versions can return activity summaries without
-        // either subscription window. Do not treat request/session counts as
+    } else if has_activity_section(&lower) {
+        // Recent Claude Code versions can return the local activity summary
+        // without either subscription window. `parse` already ignored
+        // everything below the heading, so reaching here means no quota
+        // line was present above it. Do not treat request/session counts as
         // a quota percentage or invent a reset time.
         ClaudeUsageError::LimitsNotReported
     } else {
@@ -1066,6 +1099,128 @@ mod tests {
 
             Last 7d · 3126 requests · 33 sessions
               56% of your usage was at >150k context
+            "#;
+
+        assert!(parse(output).is_none());
+        assert_eq!(
+            classify_unparsed_output(output),
+            ClaudeUsageError::LimitsNotReported
+        );
+    }
+
+    #[test]
+    fn parses_current_cli_shape_with_model_specific_week_and_activity() {
+        // Captured from Claude Code 2.1.228 (`claude -p /usage`).
+        let report = parse(
+            r#"
+            You are currently using your subscription to power your Claude Code usage
+
+            Current session: 23% used · resets Aug 21 at 11:50am (Europe/Paris)
+            Current week (all models): 23% used · resets Aug 27 at 1am (Europe/Paris)
+            Current week (Fable): 41% used · resets Aug 27 at 1am (Europe/Paris)
+
+            What's contributing to your limits usage?
+            Approximate, based on local sessions on this machine — does not include other devices or claude.ai. Behaviors are independent characteristics, not a breakdown.
+
+            Last 24h · 1756 requests · 34 sessions
+              68% of your usage was at >150k context
+              39% of your usage was while 4+ sessions ran in parallel
+              Top MCP servers: Claude Browser 2%, mj-memory 1%
+
+            Last 7d · 3365 requests · 49 sessions
+              56% of your usage was at >150k context
+              44% of your usage was while 4+ sessions ran in parallel
+              20% of your usage came from subagent-heavy sessions
+              Top skills: /code-review 1%
+              Top subagents: code-review 4%
+              Top MCP servers: Claude Browser 1%, mj-memory 1%
+            "#,
+        )
+        .expect("report");
+
+        assert_eq!(report.five_hour.as_ref().unwrap().remaining_percent, 77);
+        assert_eq!(report.week.as_ref().unwrap().remaining_percent, 77);
+        assert_eq!(
+            report.week.as_ref().unwrap().reset_context.as_deref(),
+            Some("Aug 27 at 1am (Europe/Paris)")
+        );
+    }
+
+    #[test]
+    fn prefers_all_models_week_regardless_of_line_order() {
+        let report = parse(
+            r#"
+            Current session: 23% used · resets Aug 21 at 11:50am (Europe/Paris)
+            Current week (Fable): 41% used · resets Aug 27 at 1am (Europe/Paris)
+            Current week (all models): 23% used · resets Aug 27 at 1am (Europe/Paris)
+            "#,
+        )
+        .expect("report");
+
+        assert_eq!(report.week.as_ref().unwrap().remaining_percent, 77);
+    }
+
+    #[test]
+    fn falls_back_to_model_specific_week_when_global_is_absent() {
+        let report = parse(
+            r#"
+            Current session: 23% used · resets Aug 21 at 11:50am (Europe/Paris)
+            Current week (Fable): 41% used · resets Aug 27 at 1am (Europe/Paris)
+            "#,
+        )
+        .expect("report");
+
+        assert_eq!(report.week.as_ref().unwrap().remaining_percent, 59);
+    }
+
+    #[test]
+    fn activity_section_never_contributes_window_percentages() {
+        // Skill, subagent, and MCP names are free text; a "week" or "session"
+        // in them must not turn activity percentages into a quota.
+        let activity_only = r#"
+            You are currently using your subscription to power your Claude Code usage
+
+            What's contributing to your limits usage?
+            Approximate, based on local sessions on this machine — does not include other devices or claude.ai.
+
+            Last 24h · 1517 requests · 18 sessions
+              71% of your usage was at >150k context
+              Top skills: /weekly-report 3%
+              Top subagents: current-session-summary 2%
+
+            Last 7d · 3126 requests · 33 sessions
+              56% of your usage was at >150k context
+            "#;
+
+        assert!(parse(activity_only).is_none());
+        assert_eq!(
+            classify_unparsed_output(activity_only),
+            ClaudeUsageError::LimitsNotReported
+        );
+
+        // Same names below a real session line: the week must stay absent
+        // rather than being invented from the activity section.
+        let session_only = r#"
+            Current session: 23% used · resets Aug 21 at 11:50am (Europe/Paris)
+
+            What's contributing to your limits usage?
+            Last 7d · 3126 requests · 33 sessions
+              56% of your usage was at >150k context
+              Top skills: /weekly-report 3%
+            "#;
+        let report = parse(session_only).expect("report");
+        assert_eq!(report.five_hour.as_ref().unwrap().remaining_percent, 77);
+        assert!(report.week.is_none());
+    }
+
+    #[test]
+    fn activity_heading_alone_classifies_as_limits_not_reported() {
+        let output = r#"
+            What's contributing to your limits usage?
+            Approximate, based on local sessions on this machine.
+
+            Last 7d · 12 requests · 1 sessions
+              100% of your usage was at <32k context
             "#;
 
         assert!(parse(output).is_none());
