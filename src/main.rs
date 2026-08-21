@@ -4960,8 +4960,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("memory tempdir");
         let session_memory = memory::SessionMemory {
             store_path: temp.path().join("memories.json"),
+            config_path: None,
             project: temp.path().to_path_buf(),
             inject: true,
+            cleanup: false,
             tools: true,
         };
         let server = memory::ToolServer::start(&session_memory)

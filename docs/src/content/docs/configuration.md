@@ -207,9 +207,9 @@ settings, user settings, and project/local `autoMemoryEnabled`. A policy- or
 user-configured `autoMemoryDirectory` is global; otherwise the standard
 per-project path is used. Topic files are not flattened into the prompt.
 Imports are source-tracked and updated in place. Project-scoped imports are
-removed when disabled or superseded; global imports are filtered outside their
-resolved scope and removed only when their global file is confirmed absent, so
-one project cannot delete another's data. Imported entries are a projection of
+removed when disabled or superseded. Global imports are removed when their
+source is reconfigured or confirmed absent; while auto-memory is disabled,
+Codex's native block omits all Claude imports. Imported entries are a projection of
 `MEMORY.md` rather than knowledge Mjolnir owns, so `/memory forget` declines
 them and names the file; remove the text there and the next synchronization
 drops it. Users can also manage knowledge with `/memory` or `mj memory`.
@@ -229,7 +229,9 @@ entirely — no native synchronization and no tools, regardless of the other tog
 store and the management commands below keep working while disabled, and
 `/memory` and `mj memory list` call out the disabled state. Toggle the
 sub-switches with `/memory use on|off` and `/memory generate on|off`; all
-changes apply to sessions started afterwards. `/memory` lists the stored
+changes apply to sessions started afterwards. Before the next Claude or Codex
+session starts, Mjolnir removes its managed native-memory blocks while leaving
+provider-owned memory and `memories.json` intact. `/memory` lists the stored
 entries, `/memory forget <id>` deletes one, and `/memory clear confirm` (or
 `mj memory clear --yes`) deletes everything.
 

@@ -13728,8 +13728,10 @@ mod tests {
             None,
             Some(crate::memory::SessionMemory {
                 store_path: store.clone(),
+                config_path: None,
                 project: PathBuf::from("/tmp/proj"),
                 inject: false,
+                cleanup: false,
                 tools: false,
             }),
             false,

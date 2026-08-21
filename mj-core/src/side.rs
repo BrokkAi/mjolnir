@@ -241,8 +241,10 @@ mod tests {
 
         let memory = crate::memory::SessionMemory {
             store_path: PathBuf::from("/tmp/memories.json"),
+            config_path: None,
             project: PathBuf::from("/workspace"),
             inject: true,
+            cleanup: false,
             tools: false,
         };
         let cfg = isolated_runtime_config(
