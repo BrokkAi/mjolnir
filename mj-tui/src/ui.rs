@@ -8942,13 +8942,13 @@ fn draw_transcript(
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
 ) {
-    let title = transcript_block_title(state);
     // No border glyphs: when the user falls back to native terminal selection
     // (F12 text selection mode), side borders would be captured into every
     // copied line. The title still claims the top row on its own.
-    let block = Block::default().borders(Borders::NONE).title(title);
+    // A placeholder reserves the title row while the actual title waits for
+    // scroll reconciliation below.
+    let block = Block::default().borders(Borders::NONE).title(" ");
     let inner = block.inner(area);
-    f.render_widget(block, area);
 
     // Avoid rebuilding the lines and re-running `Paragraph::line_count`
     // (both O(text) with unicode segmentation) when neither the
@@ -9005,6 +9005,12 @@ fn draw_transcript(
             search.jump_pending = false;
         }
     }
+    f.render_widget(
+        Block::default()
+            .borders(Borders::NONE)
+            .title(transcript_block_title(state)),
+        area,
+    );
     let top = total
         .saturating_sub(inner.height as usize)
         .saturating_sub(state.scroll_offset);
@@ -20264,6 +20270,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_transcript_never_announces_scrollback() {
+        let mut state = AppState::new();
+        let mut tracker = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        // Establish the viewport, then receive a scroll event while there is
+        // still no rendered history to move through.
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
+            .expect("initial draw");
+        handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
+        assert_eq!(state.scroll_offset, TRANSCRIPT_SCROLL_WHEEL_STEP);
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
+            .expect("scroll draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert_eq!(state.scroll_offset, 0);
+        assert!(
+            !rendered.contains("[scrolled +"),
+            "empty transcript claimed a scrollback position:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn transcript_scroll_preserves_position_when_new_rows_arrive() {
         let mut tracker = TranscriptScrollState::default();
         let mut offset = 0;
@@ -23578,7 +23611,7 @@ mod tests {
             jump_pending: true,
             ..TranscriptSearch::default()
         });
-        let backend = TestBackend::new(70, 16);
+        let backend = TestBackend::new(120, 16);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut scroll = TranscriptScrollState::default();
 
@@ -23595,6 +23628,10 @@ mod tests {
         assert!(
             rendered.contains("selected target entry"),
             "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("[scrolled +"),
+            "search jump must update the scroll indicator in the same frame:\n{rendered}"
         );
     }
 
