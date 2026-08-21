@@ -21,6 +21,11 @@ use crate::usage_fact::{StoredFact, UsageFactStore};
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const RUNTIME_PREPARE_TIMEOUT: Duration = Duration::from_secs(180);
+/// The quota probe is implementation detail, not a resumable Claude session.
+const USAGE_PROBE_ARGS: &[&str] = &["-p", "/usage"];
+/// Supported by current Claude Code and harmless on older versions that do not
+/// recognize it, unlike the print-mode-only command-line flag.
+const CLAUDE_CODE_SKIP_PROMPT_HISTORY: &str = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
 static CLAUDE_RUNTIME_READY: OnceCell<()> = OnceCell::const_new();
 
 /// Provider key of the machine-wide shared `/usage` fact.
@@ -256,7 +261,7 @@ async fn probe(
         .await
         .map_err(|error| ClaudeUsageError::Launch(error.to_string()))?;
     ensure_runtime_ready(&prepared, &cwd).await?;
-    let output = run_cli(&prepared, &cwd, &["-p", "/usage"], USAGE_TIMEOUT).await?;
+    let output = run_usage_probe(&prepared, &cwd).await?;
 
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -322,6 +327,30 @@ async fn run_cli(
     args: &[&str],
     timeout: Duration,
 ) -> Result<Output, ClaudeUsageError> {
+    run_command(provider_cli_command(prepared, cwd, args), timeout).await
+}
+
+async fn run_usage_probe(
+    prepared: &crate::acp::PreparedProviderCli,
+    cwd: &std::path::Path,
+) -> Result<Output, ClaudeUsageError> {
+    run_command(usage_probe_command(prepared, cwd), USAGE_TIMEOUT).await
+}
+
+fn usage_probe_command(
+    prepared: &crate::acp::PreparedProviderCli,
+    cwd: &std::path::Path,
+) -> Command {
+    let mut command = provider_cli_command(prepared, cwd, USAGE_PROBE_ARGS);
+    command.env(CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
+    command
+}
+
+fn provider_cli_command(
+    prepared: &crate::acp::PreparedProviderCli,
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> Command {
     let mut command = Command::new(&prepared.command);
     command
         .args(&prepared.args)
@@ -330,10 +359,13 @@ async fn run_cli(
         .envs(&prepared.env)
         .stderr(Stdio::piped());
     crate::acp::configure_isolated_child(&mut command, crate::acp::SpawnIsolation::ProcessGroup);
-    // Quota polling is non-interactive. Override the helper's piped stdin
+    // Provider commands here are non-interactive. Override the helper's piped stdin
     // after applying its process-group contract.
     command.stdin(Stdio::null());
+    command
+}
 
+async fn run_command(mut command: Command, timeout: Duration) -> Result<Output, ClaudeUsageError> {
     let mut child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ClaudeUsageError::NotInstalled
@@ -757,6 +789,32 @@ fn normalize_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_probe_command_disables_prompt_history() {
+        let prepared = crate::acp::PreparedProviderCli {
+            command: "/usr/local/bin/claude".into(),
+            args: vec!["--from-acp".into()],
+            env: HashMap::from([("INHERITED".to_string(), "yes".to_string())]),
+        };
+        let command = usage_probe_command(&prepared, std::path::Path::new("/tmp/project"));
+        let command = command.as_std();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            ["--from-acp", "-p", "/usage"],
+            "the usage probe must remain a non-interactive /usage request"
+        );
+        let skip_history = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(CLAUDE_CODE_SKIP_PROMPT_HISTORY))
+            .and_then(|(_, value)| value)
+            .and_then(|value| value.to_str());
+        assert_eq!(skip_history, Some("1"));
+    }
 
     fn shared_store() -> (tempfile::TempDir, UsageFactStore) {
         let dir = tempfile::tempdir().expect("tempdir");
