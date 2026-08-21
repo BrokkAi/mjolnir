@@ -30,6 +30,15 @@ impl WorkflowId {
         }
     }
 
+    /// An explicit review is not tied to the preceding completed turn's
+    /// automatic review workflow, so it keeps a distinct operation identity.
+    pub const fn manual_review(turn_id: u64) -> Self {
+        Self {
+            turn_id,
+            operation: 2,
+        }
+    }
+
     pub const fn delegation(turn_id: u64) -> Self {
         Self {
             turn_id,

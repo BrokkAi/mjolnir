@@ -2554,8 +2554,8 @@ async fn run_session(
                 cmd_orchestrator.set_review_tier(*tier);
                 continue;
             }
-            if let UiCommand::RunReview { target } = command {
-                cmd_orchestrator.request_review(target);
+            if let UiCommand::RunReview { request } = command {
+                cmd_orchestrator.request_review(request);
                 continue;
             }
             if matches!(command, UiCommand::CompactPrimary) {

@@ -48,10 +48,9 @@ Web](/remote/) for behavioral boundaries.
 | `/mjconfig` | Configure agents, ACP servers, and appearance |
 | `/diff` | Show workspace changes against `HEAD` |
 | `/agents` | Show the active model selections and per-seat usage |
-| `/review` | Choose a recent, uncommitted, or HEAD findings-only review |
-| `/review recent` | Review the latest change-producing turn |
-| `/review uncommitted` | Review all current worktree changes |
-| `/review head` | Review `HEAD` |
+| `/discrete-review` | Choose a target for the configured discrete-review tier |
+| `/discrete-review <recent\|uncommitted\|head> [quick\|extended]` | Run an on-demand discrete-review pass, optionally overriding the configured tier |
+| `/adversarial-review …` | Alias for `/discrete-review …` |
 | `/memory` | List stored memories and the use/generate toggles |
 | `/memory add [--global] <text>` | Save a memory for this project (or globally) |
 | `/compact` | Compact the primary agent's session where supported |

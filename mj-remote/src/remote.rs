@@ -55,8 +55,8 @@ use mj_core::acp;
 use mj_core::config::{self, SelectedAgent};
 use mj_core::event::{
     ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
-    PromptImage, SessionConfigTarget, SubagentEvent, SubagentOutcome, TerminalOutputSnapshot,
-    UiCommand, UiEvent,
+    PromptImage, ReviewRequest, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
+    TerminalOutputSnapshot, UiCommand, UiEvent,
 };
 use mj_core::roster;
 use mj_core::session_state::{StatusKind, status_transcript_text};
@@ -124,7 +124,9 @@ const REMOTE_BUILTIN_LOAD_COMMAND: &str = "load";
 const REMOTE_BUILTIN_FORK_COMMAND: &str = "fork";
 const REMOTE_BUILTIN_EXPORT_COMMAND: &str = "export";
 const REMOTE_BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
-const REMOTE_BUILTIN_REVIEW_COMMAND: &str = "review";
+const REMOTE_RETIRED_REVIEW_COMMAND: &str = "review";
+const REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND: &str = "discrete-review";
+const REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND: &str = "adversarial-review";
 const REMOTE_BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const REMOTE_BUILTIN_SIDE_COMMAND: &str = "side";
 const REMOTE_BUILTIN_EXIT_SIDE_COMMAND: &str = "exit";
@@ -443,9 +445,15 @@ fn remote_builtin_command_records(include_fork: bool, include_load: bool) -> Vec
             "mjolnir",
         ),
         command_record(
-            REMOTE_BUILTIN_REVIEW_COMMAND,
-            "review selected changes without modifying them",
-            Some("recent|uncommitted|head".to_string()),
+            REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND,
+            "run the configured discrete review",
+            Some("recent|uncommitted|head [quick|extended]".to_string()),
+            "mjolnir",
+        ),
+        command_record(
+            REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
+            "alias for discrete-review",
+            Some("recent|uncommitted|head [quick|extended]".to_string()),
             "mjolnir",
         ),
     ];
@@ -537,7 +545,9 @@ fn is_remote_reserved_command(name: &str) -> bool {
             | REMOTE_BUILTIN_FORK_COMMAND
             | REMOTE_BUILTIN_EXPORT_COMMAND
             | REMOTE_BUILTIN_MJCONFIG_COMMAND
-            | REMOTE_BUILTIN_REVIEW_COMMAND
+            | REMOTE_RETIRED_REVIEW_COMMAND
+            | REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND
+            | REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND
             | REMOTE_BUILTIN_RAGNAROK_COMMAND
             | REMOTE_BUILTIN_SIDE_COMMAND
             | REMOTE_BUILTIN_EXIT_SIDE_COMMAND
@@ -1090,8 +1100,9 @@ enum RemoteQueuedPromptAction {
     RejectUnsupportedLoad,
     ForkSession,
     RejectUnsupportedFork,
-    RunReview(mj_core::event::ReviewTarget),
+    RunReview(ReviewRequest),
     RejectInvalidReview,
+    RejectRetiredReview,
     CompactPrimary,
     RefreshWorkspaceDiff,
 }
@@ -1152,16 +1163,11 @@ fn remote_queued_prompt_action(
             RemoteQueuedPromptAction::RejectUnsupportedLoad
         };
     }
-    if let Some(rest) = trimmed.strip_prefix("/review")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
-        let target = match rest.trim().to_ascii_lowercase().as_str() {
-            "recent" => Some(mj_core::event::ReviewTarget::Recent),
-            "uncommitted" => Some(mj_core::event::ReviewTarget::Uncommitted),
-            "head" => Some(mj_core::event::ReviewTarget::Head),
-            _ => None,
-        };
-        return target.map_or(
+    if retired_review_command_arguments(trimmed).is_some() {
+        return RemoteQueuedPromptAction::RejectRetiredReview;
+    }
+    if let Some(rest) = discrete_review_command_arguments(trimmed) {
+        return parse_discrete_review_request(rest).map_or(
             RemoteQueuedPromptAction::RejectInvalidReview,
             RemoteQueuedPromptAction::RunReview,
         );
@@ -1185,6 +1191,45 @@ fn remote_queued_prompt_action(
     } else {
         RemoteQueuedPromptAction::RejectUnsupportedFork
     }
+}
+
+fn discrete_review_command_arguments(text: &str) -> Option<&str> {
+    ["/discrete-review", "/adversarial-review"]
+        .into_iter()
+        .find_map(|command| {
+            text.strip_prefix(command)
+                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+}
+
+fn retired_review_command_arguments(text: &str) -> Option<&str> {
+    text.strip_prefix("/review")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn parse_discrete_review_request(value: &str) -> Option<ReviewRequest> {
+    let mut target = None;
+    let mut tier = None;
+    for token in value.split_whitespace() {
+        let token = token.to_ascii_lowercase();
+        if let Some(parsed) = match token.as_str() {
+            "recent" => Some(ReviewTarget::Recent),
+            "uncommitted" => Some(ReviewTarget::Uncommitted),
+            "head" => Some(ReviewTarget::Head),
+            _ => None,
+        } {
+            if target.replace(parsed).is_some() {
+                return None;
+            }
+        } else if let Ok(parsed) = token.parse::<config::ReviewTier>() {
+            if tier.replace(parsed).is_some() {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    target.map(|target| ReviewRequest { target, tier })
 }
 
 fn dispatch_remote_side_start(
@@ -3733,8 +3778,8 @@ impl RemoteSessionTracker {
                                     guard.push_system_notice(message);
                                 }
                             }
-                            RemoteQueuedPromptAction::RunReview(target) => {
-                                if command_tx.send(UiCommand::RunReview { target }).is_err() {
+                            RemoteQueuedPromptAction::RunReview(request) => {
+                                if command_tx.send(UiCommand::RunReview { request }).is_err() {
                                     break;
                                 }
                             }
@@ -3766,7 +3811,17 @@ impl RemoteSessionTracker {
                                 }
                             }
                             RemoteQueuedPromptAction::RejectInvalidReview => {
-                                let message = "usage: /review recent|uncommitted|head".to_string();
+                                let message = "usage: /discrete-review <recent|uncommitted|head> [quick|extended]".to_string();
+                                if let Some(ui_event_tx) = ui_event_tx.as_ref() {
+                                    let _ = ui_event_tx.send(UiEvent::Warning(message.clone()));
+                                }
+                                if let Ok(mut guard) = state.lock() {
+                                    guard.push_system_notice(message);
+                                }
+                            }
+                            RemoteQueuedPromptAction::RejectRetiredReview => {
+                                let message =
+                                    "use /discrete-review or /adversarial-review".to_string();
                                 if let Some(ui_event_tx) = ui_event_tx.as_ref() {
                                     let _ = ui_event_tx.send(UiEvent::Warning(message.clone()));
                                 }
@@ -6489,7 +6544,13 @@ async fn queue_prompt(
         RemoteQueuedPromptAction::RejectInvalidReview => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "usage: /review recent|uncommitted|head".to_string(),
+                "usage: /discrete-review <recent|uncommitted|head> [quick|extended]".to_string(),
+            ));
+        }
+        RemoteQueuedPromptAction::RejectRetiredReview => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "use /discrete-review or /adversarial-review".to_string(),
             ));
         }
         RemoteQueuedPromptAction::RejectInvalidLoad => {
@@ -11759,7 +11820,7 @@ mod tests {
         assert!(record.diffs.is_empty());
     }
 
-    /// A remote `/diff` is a client-side command like `/review`, not text for
+    /// A remote `/diff` is a client-side command like the discrete-review aliases, not text for
     /// the agent, and it must never be forwarded as a prompt.
     #[test]
     fn remote_diff_command_requests_a_worktree_read() {
@@ -13631,7 +13692,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_queued_prompt_action_routes_fork_commands() {
+    fn remote_queued_prompt_action_routes_review_and_fork_commands() {
         assert_eq!(
             remote_queued_prompt_action("/fork".to_string(), false, true, true, true, false, false),
             RemoteQueuedPromptAction::ForkSession
@@ -13666,7 +13727,7 @@ mod tests {
         );
         assert_eq!(
             remote_queued_prompt_action(
-                "/review recent".to_string(),
+                "/discrete-review recent".to_string(),
                 false,
                 true,
                 true,
@@ -13674,11 +13735,14 @@ mod tests {
                 false,
                 false
             ),
-            RemoteQueuedPromptAction::RunReview(mj_core::event::ReviewTarget::Recent)
+            RemoteQueuedPromptAction::RunReview(ReviewRequest {
+                target: ReviewTarget::Recent,
+                tier: None,
+            })
         );
         assert_eq!(
             remote_queued_prompt_action(
-                "/review head".to_string(),
+                "/adversarial-review head extended".to_string(),
                 false,
                 true,
                 true,
@@ -13686,7 +13750,22 @@ mod tests {
                 false,
                 false
             ),
-            RemoteQueuedPromptAction::RunReview(mj_core::event::ReviewTarget::Head)
+            RemoteQueuedPromptAction::RunReview(ReviewRequest {
+                target: ReviewTarget::Head,
+                tier: Some(config::ReviewTier::Extended),
+            })
+        );
+        assert_eq!(
+            remote_queued_prompt_action(
+                "/discrete-review".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
+            RemoteQueuedPromptAction::RejectInvalidReview
         );
         assert_eq!(
             remote_queued_prompt_action(
@@ -13698,7 +13777,19 @@ mod tests {
                 false,
                 false
             ),
-            RemoteQueuedPromptAction::RejectInvalidReview
+            RemoteQueuedPromptAction::RejectRetiredReview
+        );
+        assert_eq!(
+            remote_queued_prompt_action(
+                "/review-branch main".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
+            RemoteQueuedPromptAction::SendPrompt("/review-branch main".to_string())
         );
         assert_eq!(
             remote_queued_prompt_action("/fork".to_string(), true, true, true, true, false, false),
@@ -14898,10 +14989,10 @@ mod tests {
                 AvailableCommand::new("fork ", "agent fork should be hidden"),
                 AvailableCommand::new("New", "agent case variant should be hidden"),
                 AvailableCommand::new("", "empty should be hidden"),
-                AvailableCommand::new("review", "review the workspace").input(
+                AvailableCommand::new("discrete-review", "agent command should be hidden").input(
                     AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("scope")),
                 ),
-                AvailableCommand::new(" review ", "duplicate review should be hidden"),
+                AvailableCommand::new(" adversarial-review ", "duplicate alias should be hidden"),
             ])),
         ));
 
@@ -14915,14 +15006,22 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "new", "clear", "compact", "export", "mjconfig", "review", "fork", "load",
+                "new",
+                "clear",
+                "compact",
+                "export",
+                "mjconfig",
+                "discrete-review",
+                "adversarial-review",
+                "fork",
+                "load",
             ]
         );
         assert_eq!(snapshot.available_commands[0].source, "mjolnir");
         assert_eq!(snapshot.available_commands[5].source, "mjolnir");
         assert_eq!(
             snapshot.available_commands[5].input_hint.as_deref(),
-            Some("recent|uncommitted|head")
+            Some("recent|uncommitted|head [quick|extended]")
         );
     }
 
@@ -14945,7 +15044,7 @@ mod tests {
         });
         state.observe_event(&UiEvent::SessionUpdate(
             SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
-                AvailableCommand::new("review", "review the workspace"),
+                AvailableCommand::new("review_pr", "review the pull request"),
             ])),
         ));
         assert!(
@@ -14954,7 +15053,7 @@ mod tests {
                 .expect("snapshot")
                 .available_commands
                 .iter()
-                .any(|command| command.name == "review")
+                .any(|command| command.name == "review_pr")
         );
 
         state.observe_event(&UiEvent::SessionStarted {
@@ -14971,13 +15070,20 @@ mod tests {
         assert_eq!(
             same_session_names,
             vec![
-                "new", "clear", "compact", "export", "mjconfig", "review", "fork",
+                "new",
+                "clear",
+                "compact",
+                "export",
+                "mjconfig",
+                "discrete-review",
+                "adversarial-review",
+                "fork",
             ]
         );
 
         state.observe_event(&UiEvent::SessionUpdate(
             SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
-                AvailableCommand::new("review", "review the workspace"),
+                AvailableCommand::new("review_pr", "review the pull request"),
             ])),
         ));
         state.observe_event(&UiEvent::SessionStarted {
@@ -14994,7 +15100,14 @@ mod tests {
         assert_eq!(
             new_session_names,
             vec![
-                "new", "clear", "compact", "export", "mjconfig", "review", "fork",
+                "new",
+                "clear",
+                "compact",
+                "export",
+                "mjconfig",
+                "discrete-review",
+                "adversarial-review",
+                "fork",
             ]
         );
     }

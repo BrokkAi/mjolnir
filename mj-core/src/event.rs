@@ -401,6 +401,13 @@ pub enum ReviewTarget {
     Head,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewRequest {
+    pub target: ReviewTarget,
+    /// `None` uses the configured default tier for this one review.
+    pub tier: Option<crate::config::ReviewTier>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SideSessionSource {
     pub session_id: String,
@@ -439,8 +446,8 @@ pub enum UiCommand {
         enabled: bool,
         tier: crate::config::ReviewTier,
     },
-    /// Run one Mjolnir-owned findings-only review while the primary is idle.
-    RunReview { target: ReviewTarget },
+    /// Run one Mjolnir-owned discrete review while the primary is idle.
+    RunReview { request: ReviewRequest },
     /// Recompute the worktree-versus-`HEAD` diff for the Ctrl-G reader. Sent
     /// on open and on explicit refresh; the reader pulls rather than replaying
     /// retained turn events, so what it shows is current as of the request.
