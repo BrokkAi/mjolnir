@@ -1523,6 +1523,7 @@
         gap: 2px;
         padding: 5px 18px 6px;
         padding-right: calc(18px + env(safe-area-inset-right));
+        padding-bottom: calc(6px + env(safe-area-inset-bottom));
         border-top: 1px solid var(--line);
         background: var(--surface-chrome);
       }
@@ -2065,7 +2066,7 @@
       .composer {
         border-top: 1px solid var(--line);
         background: var(--surface-chrome);
-        padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+        padding: 12px 16px;
         display: flex;
         flex-direction: column;
         gap: 10px;
@@ -3297,7 +3298,7 @@
 
         .composer {
           gap: 8px;
-          padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+          padding: 8px 10px;
         }
 
         .console-strip {
@@ -3453,7 +3454,7 @@
           <div id="queue-list" class="queue-list"></div>
           <div class="console">
             <span class="console-frame" aria-hidden="true"></span>
-            <span id="working-badge" class="working-badge" aria-label="Working" hidden>
+            <span id="working-badge" class="working-badge" role="status" aria-label="Working" hidden>
               <span id="working-spinner" class="working-spinner" aria-hidden="true"></span>
             </span>
             <div id="queue-input" class="composer-input" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Message the agent" enterkeyhint="send" spellcheck="true" aria-label="Message the agent"></div>
