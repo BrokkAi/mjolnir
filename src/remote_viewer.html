@@ -1551,134 +1551,6 @@
         letter-spacing: 0.04em;
       }
 
-      /* Read-only projection of the local `/ragnarok` arena. Decisions stay
-         in the TUI; this panel only exposes the compact battle state. */
-      .ragnarok-panel {
-        display: grid;
-        gap: 10px;
-        padding: 10px 18px 12px;
-        padding-right: calc(18px + env(safe-area-inset-right));
-        border-bottom: 1px solid var(--line);
-        background:
-          linear-gradient(90deg, rgb(235 63 51 / 0.1), transparent 55%),
-          var(--surface-terminal);
-      }
-
-      .ragnarok-head {
-        display: flex;
-        align-items: baseline;
-        gap: 10px;
-        min-width: 0;
-      }
-
-      .ragnarok-kicker,
-      .ragnarok-read-only {
-        flex: none;
-        color: var(--red-hot);
-        font: 700 9.5px/1 var(--font-mono);
-        letter-spacing: 0.13em;
-        text-transform: uppercase;
-      }
-
-      .ragnarok-task {
-        flex: 1;
-        min-width: 0;
-        color: var(--text);
-        font: 600 12px/1.4 var(--font-body);
-        overflow-wrap: anywhere;
-      }
-
-      .ragnarok-read-only {
-        color: var(--dim);
-        letter-spacing: 0.08em;
-      }
-
-      .ragnarok-fighters {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-        gap: 7px;
-      }
-
-      .ragnarok-fighter {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 5px 10px;
-        padding: 8px 9px;
-        border: 1px solid var(--line-row);
-        background: var(--surface-control);
-      }
-
-      .ragnarok-fighter-name {
-        min-width: 0;
-        color: var(--text-control);
-        font: 700 11px/1.35 var(--font-mono);
-        overflow-wrap: anywhere;
-      }
-
-      .ragnarok-fighter-source,
-      .ragnarok-fighter-status {
-        color: var(--dim);
-        font: 500 9.5px/1.35 var(--font-mono);
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-
-      .ragnarok-fighter-status {
-        color: var(--muted);
-        text-align: right;
-      }
-
-      .ragnarok-vigor {
-        grid-column: 1 / -1;
-        height: 3px;
-        background: var(--line-row);
-        overflow: hidden;
-
-        &::before {
-          content: "";
-          display: block;
-          width: 24%;
-          height: 100%;
-          background: var(--thought);
-        }
-
-        &[data-vigor="active"]::before {
-          width: 66%;
-          background: var(--red-hot);
-        }
-
-        &[data-vigor="full"]::before {
-          width: 100%;
-          background: var(--agent);
-        }
-
-        &[data-vigor="empty"]::before {
-          width: 0;
-        }
-      }
-
-      .ragnarok-result {
-        display: grid;
-        gap: 4px;
-        padding-left: 9px;
-        border-left: 2px solid rgb(235 63 51 / 0.55);
-        color: var(--muted);
-        font: 400 11px/1.45 var(--font-body);
-      }
-
-      .ragnarok-verdict {
-        color: var(--text);
-      }
-
-      .ragnarok-adoption {
-        color: var(--thought);
-        font-family: var(--font-mono);
-      }
-
-      .ragnarok-failure {
-        color: var(--red-hot);
-      }
-
       @keyframes attention-fade {
         50% {
           opacity: 0.55;
@@ -3180,21 +3052,6 @@
           order: 1;
         }
 
-        .ragnarok-panel {
-          max-height: 34dvh;
-          overflow-y: auto;
-          padding: 9px 12px 10px;
-        }
-
-        .ragnarok-head {
-          flex-wrap: wrap;
-          gap: 5px 9px;
-        }
-
-        .ragnarok-task {
-          flex-basis: calc(100% - 90px);
-        }
-
         .composer {
           gap: 8px;
           padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
@@ -3348,15 +3205,6 @@
           <div id="status-fields" class="status-fields"></div>
           <div id="status-quotas" class="status-quotas" hidden></div>
         </div>
-        <section id="ragnarok-panel" class="ragnarok-panel" aria-label="Ragnarok arena" hidden>
-          <div class="ragnarok-head">
-            <span id="ragnarok-phase" class="ragnarok-kicker"></span>
-            <span id="ragnarok-task" class="ragnarok-task"></span>
-            <span class="ragnarok-read-only">read only</span>
-          </div>
-          <div id="ragnarok-fighters" class="ragnarok-fighters"></div>
-          <div id="ragnarok-result" class="ragnarok-result" hidden></div>
-        </section>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
@@ -3601,11 +3449,6 @@
       const statusLineEl = $("status-line");
       const statusFieldsEl = $("status-fields");
       const statusQuotasEl = $("status-quotas");
-      const ragnarokPanelEl = $("ragnarok-panel");
-      const ragnarokPhaseEl = $("ragnarok-phase");
-      const ragnarokTaskEl = $("ragnarok-task");
-      const ragnarokFightersEl = $("ragnarok-fighters");
-      const ragnarokResultEl = $("ragnarok-result");
       const workingBadgeEl = $("working-badge");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
@@ -8580,86 +8423,6 @@
         statusLineEl.hidden = false;
       }
 
-      function renderRagnarok(session) {
-        const arena = session?.ragnarok;
-        if (!arena) {
-          ragnarokPanelEl.hidden = true;
-          ragnarokPhaseEl.textContent = "";
-          ragnarokTaskEl.textContent = "";
-          ragnarokFightersEl.replaceChildren();
-          ragnarokResultEl.replaceChildren();
-          ragnarokResultEl.hidden = true;
-          return;
-        }
-
-        const fighters = Array.isArray(arena.fighters) ? arena.fighters : [];
-        const fighterName = (id) => fighters.find((fighter) => fighter.id === id)?.model || `fighter ${id}`;
-        const phase = String(arena.phase || "arena").replaceAll("_", " ");
-        ragnarokPhaseEl.textContent = arena.awaiting_approval
-          ? `${phase} · awaiting local unleash`
-          : phase;
-        ragnarokTaskEl.textContent = arena.task || "Ragnarok arena";
-
-        ragnarokFightersEl.replaceChildren(...fighters.map((fighter) => {
-          const card = document.createElement("article");
-          card.className = "ragnarok-fighter";
-
-          const name = document.createElement("span");
-          name.className = "ragnarok-fighter-name";
-          name.textContent = fighter.model || `fighter ${fighter.id}`;
-          const status = document.createElement("span");
-          status.className = "ragnarok-fighter-status";
-          status.textContent = fighter.status || "waiting";
-          const source = document.createElement("span");
-          source.className = "ragnarok-fighter-source";
-          source.textContent = fighter.source || "unknown source";
-          const vigor = document.createElement("span");
-          vigor.className = "ragnarok-vigor";
-          vigor.dataset.vigor = fighter.vigor || "waiting";
-          vigor.setAttribute("aria-label", `Vigor: ${fighter.vigor || "waiting"}`);
-          card.append(name, status, source, vigor);
-          return card;
-        }));
-
-        const result = [];
-        const verdict = arena.verdict;
-        if (verdict) {
-          const summary = document.createElement("div");
-          summary.className = "ragnarok-verdict";
-          if (verdict.clear_winner != null) {
-            summary.textContent = `Winner: ${fighterName(verdict.clear_winner)}`;
-          } else if (Array.isArray(verdict.finalists) && verdict.finalists.length === 2) {
-            summary.textContent = `Finalists: ${fighterName(verdict.finalists[0])} and ${fighterName(verdict.finalists[1])}`;
-          } else {
-            summary.textContent = "Verdict available";
-          }
-          if (verdict.thor_fallback) {
-            summary.textContent += " · local fallback judgment";
-          }
-          result.push(summary);
-          if (verdict.reasoning) {
-            const reasoning = document.createElement("div");
-            reasoning.textContent = verdict.reasoning;
-            result.push(reasoning);
-          }
-        }
-        if (arena.adoption_hint) {
-          const adoption = document.createElement("div");
-          adoption.className = "ragnarok-adoption";
-          adoption.textContent = arena.adoption_hint;
-          result.push(adoption);
-        }
-        if (arena.failed) {
-          const failure = document.createElement("div");
-          failure.className = "ragnarok-failure";
-          failure.textContent = `Arena failed: ${arena.failed}`;
-          result.push(failure);
-        }
-        ragnarokResultEl.replaceChildren(...result);
-        ragnarokResultEl.hidden = !result.length;
-        ragnarokPanelEl.hidden = false;
-      }
-
       function renderChat() {
         const session = selectedSession();
         const archived = selectedSessionIsArchived();
@@ -8669,7 +8432,6 @@
         archiveBadgeEl.hidden = !archived;
         sideBadgeEl.hidden = readOnly || !sideActive;
         renderStatusLine(session);
-        renderRagnarok(session);
         renderTranscript(session, archived);
         renderConfig(readOnly || sideActive ? null : session);
         renderSubagents(session);

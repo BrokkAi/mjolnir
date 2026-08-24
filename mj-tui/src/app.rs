@@ -30,10 +30,10 @@ use crate::event::{
 };
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
-use crate::ragnarok;
 use crate::session_state::SessionState;
 use crate::settings::{SettingsAction, SettingsEditor};
 use crate::spinner::SpinnerStyle;
+use crate::text::first_line;
 use crate::theme::TerminalThemeKind;
 
 /// Maximum width of the queued-prompt preview shown above the input.
@@ -225,7 +225,6 @@ const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
 const RETIRED_REVIEW_COMMAND: &str = "review";
 const BUILTIN_DISCRETE_REVIEW_COMMAND: &str = "discrete-review";
 const BUILTIN_ADVERSARIAL_REVIEW_COMMAND: &str = "adversarial-review";
-const BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
 const BUILTIN_TERMINALS_COMMAND: &str = "terminals";
 const BUILTIN_MEMORY_COMMAND: &str = "memory";
 const BUILTIN_EXIT_COMMAND: &str = "exit";
@@ -313,13 +312,6 @@ fn builtin_adversarial_review_command() -> AvailableCommand {
     )
 }
 
-fn builtin_ragnarok_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_RAGNAROK_COMMAND,
-        "⚡ rival models battle over a task; Thor judges (usage: /ragnarok <task>)",
-    )
-}
-
 fn builtin_terminals_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_TERMINALS_COMMAND,
@@ -362,7 +354,6 @@ fn install_builtin_commands(
             && command.name != RETIRED_REVIEW_COMMAND
             && command.name != BUILTIN_DISCRETE_REVIEW_COMMAND
             && command.name != BUILTIN_ADVERSARIAL_REVIEW_COMMAND
-            && command.name != BUILTIN_RAGNAROK_COMMAND
             && command.name != BUILTIN_TERMINALS_COMMAND
             && command.name != BUILTIN_MEMORY_COMMAND
             && command.name != BUILTIN_EXIT_COMMAND
@@ -374,7 +365,6 @@ fn install_builtin_commands(
         commands.insert(0, builtin_side_command());
     }
     commands.insert(0, builtin_exit_command());
-    commands.insert(0, builtin_ragnarok_command());
     commands.insert(0, builtin_memory_command());
     commands.insert(0, builtin_mjconfig_command());
     commands.insert(0, builtin_diff_command());
@@ -406,7 +396,6 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             RETIRED_REVIEW_COMMAND,
             BUILTIN_DISCRETE_REVIEW_COMMAND,
             BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
-            BUILTIN_RAGNAROK_COMMAND,
             BUILTIN_TERMINALS_COMMAND,
             BUILTIN_MEMORY_COMMAND,
             BUILTIN_EXIT_COMMAND,
@@ -458,6 +447,10 @@ pub enum Entry {
     InternalMessage(InternalMessage),
     /// System-level note (errors, warnings, mode changes).
     System(String),
+    /// Full result of a user-invoked local command (`/memory`, `/agents`).
+    /// Styled like `System`, but the user explicitly asked for this output,
+    /// so it is as durable as their prompt and never collapses.
+    CommandOutput(String),
     /// Local Mjolnir feature-discovery hint. Never sent to the agent.
     FeatureHint(String),
     /// Settled review-issue record: validated findings, pass verdicts, and
@@ -515,11 +508,7 @@ pub const REVIEW_GLYPH: &str = "⚖";
 pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLedgerLine {
     use crate::workflow::ReviewIssueStatus;
 
-    let label = format!(
-        "#{} {}",
-        issue.id,
-        crate::ragnarok::first_line(&issue.summary, 200)
-    );
+    let label = format!("#{} {}", issue.id, first_line(&issue.summary, 200));
     match issue.status {
         ReviewIssueStatus::Validated => {
             ReviewLedgerLine::new(vec![(format!("   ● {label}"), ReviewTone::Open)])
@@ -545,7 +534,7 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
             ];
             if let Some(reason) = issue.resolution_reason.as_deref() {
                 spans.push((
-                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    format!(" — {}", first_line(reason, 160)),
                     ReviewTone::Detail,
                 ));
             }
@@ -555,7 +544,7 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
             let mut spans = vec![(format!("   ! {label}"), ReviewTone::Open)];
             if let Some(reason) = issue.resolution_reason.as_deref() {
                 spans.push((
-                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    format!(" — {}", first_line(reason, 160)),
                     ReviewTone::Detail,
                 ));
             }
@@ -568,7 +557,7 @@ pub(crate) fn review_issue_row(issue: &crate::workflow::ReviewIssue) -> ReviewLe
             ];
             if let Some(reason) = issue.resolution_reason.as_deref() {
                 spans.push((
-                    format!(" — {}", crate::ragnarok::first_line(reason, 160)),
+                    format!(" — {}", first_line(reason, 160)),
                     ReviewTone::Detail,
                 ));
             }
@@ -734,7 +723,6 @@ const FEATURE_HINT_INTERVAL_TURNS: usize = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureHintCapabilities {
     pub subagents: bool,
-    pub ragnarok: bool,
     pub voice: bool,
     pub fork: bool,
     pub side: bool,
@@ -750,7 +738,6 @@ enum FeatureHintRequirement {
     /// switcher would point at a key that does nothing.
     TeamChoice,
     Subagents,
-    Ragnarok,
     Voice,
     Fork,
     Side,
@@ -805,10 +792,6 @@ const FEATURE_HINTS: &[FeatureHint] = &[
     FeatureHint {
         text: "Launch and monitor specialist subagents from the agent; F8 opens the nested-agent viewer.",
         requirement: FeatureHintRequirement::Subagents,
-    },
-    FeatureHint {
-        text: "Use /ragnarok <task> to compare independent implementations and adopt the strongest result.",
-        requirement: FeatureHintRequirement::Ragnarok,
     },
     FeatureHint {
         text: "Press Ctrl+R to dictate a prompt when voice input is available.",
@@ -885,7 +868,7 @@ pub struct ConfigValueChoice {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolCallView {
     pub title: String,
     pub kind: ToolKind,
@@ -1019,6 +1002,25 @@ impl ToolCallView {
                     .push(ToolCallOutput::Note("unsupported tool content".to_string())),
             }
         }
+    }
+
+    /// True when this view's rendered form can no longer change: the call
+    /// reached a terminal status and every embedded terminal has exited.
+    /// This is the render-side stability contract — scrollback commits and
+    /// the settled-prefix cache both freeze entries on it.
+    pub(crate) fn render_settled(&self) -> bool {
+        matches!(
+            self.status,
+            ToolCallStatus::Completed | ToolCallStatus::Failed
+        ) && self.body.iter().all(|output| {
+            !matches!(
+                output,
+                ToolCallOutput::Terminal {
+                    exit_status: None,
+                    ..
+                }
+            )
+        })
     }
 
     fn apply_terminal_output(&mut self, snapshot: &TerminalOutputSnapshot) -> bool {
@@ -1353,13 +1355,7 @@ pub struct AppState {
     /// Open `/mjconfig` overlay, if any.
     pub mjconfig_menu: Option<MjConfigMenu>,
     pub acp_inventory: crate::roster::AcpInventory,
-    /// Active `/ragnarok` battle (arena overlay), if any.
-    pub ragnarok: Option<RagnarokUi>,
-    /// One-shot launch request set by `/ragnarok <task>`. The UI loop takes
-    /// it and spawns the battle task, because the loop owns the event channel.
-    ragnarok_launch: Option<String>,
-    /// The ACP session cwd; `/ragnarok` forges its worktrees off this
-    /// directory's git project.
+    /// The ACP session cwd used for workspace-scoped features.
     pub session_cwd: PathBuf,
     /// Persistent memory store `/memory` operates on. Tests point this at a
     /// temp file; production uses the default path.
@@ -1376,10 +1372,6 @@ pub struct AppState {
     /// Reasoning effort resolved for the active primary session. `None`
     /// means the ACP adapter selected its own default.
     pub primary_reasoning_effort: Option<String>,
-    /// Launch command for the active session agent. Ragnarok uses this for
-    /// the primary agent so the router follows the user's current agent instead of the
-    /// competitor pool.
-    pub active_agent_launch: Option<crate::ragnarok::Launch>,
     /// Score catalog for this UI run. It may be populated asynchronously after
     /// startup; render code reads through this explicit state rather than a
     /// process-global catalog.
@@ -1590,7 +1582,6 @@ pub struct AppState {
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
     pub correction_threshold: crate::config::ReviewCorrectionThreshold,
-    pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
     /// Holds the platform clipboard lease so copied text remains available
     /// on Linux/X11 where the owning process must stay alive.
     #[allow(dead_code)]
@@ -2230,15 +2221,12 @@ impl AppState {
             voice_auto_send: crate::config::VoiceAutoSend::default(),
             mjconfig_menu: None,
             acp_inventory: crate::roster::AcpInventory::default(),
-            ragnarok: None,
-            ragnarok_launch: None,
             session_cwd: PathBuf::from("."),
             memory_store_path: crate::memory::default_path(),
             agent_label: String::new(),
             primary_acp_name: "ACP server".to_string(),
             agent_source_id: String::new(),
             primary_reasoning_effort: None,
-            active_agent_launch: None,
             session: SessionState::new(now, {
                 let mut commands = Vec::new();
                 install_builtin_commands(&mut commands, false, false);
@@ -2333,7 +2321,6 @@ impl AppState {
             review_enabled: true,
             review_tier: crate::config::ReviewTier::default(),
             correction_threshold: crate::config::ReviewCorrectionThreshold::default(),
-            ragnarok_models: Vec::new(),
             clipboard_lease: None,
             queued_prompts: VecDeque::new(),
             startup_prompt: None,
@@ -2363,7 +2350,6 @@ impl AppState {
         side.primary_acp_name = self.primary_acp_name.clone();
         side.agent_source_id = self.agent_source_id.clone();
         side.primary_reasoning_effort = self.primary_reasoning_effort.clone();
-        side.active_agent_launch = self.active_agent_launch.clone();
         side.current_branch_pull_request = self.current_branch_pull_request.clone();
         side.current_branch_pull_request_branch = self.current_branch_pull_request_branch.clone();
         side.transcript_export_dir = self.transcript_export_dir.clone();
@@ -2396,6 +2382,7 @@ impl AppState {
     pub fn set_theme(&mut self, theme_kind: TerminalThemeKind) {
         if self.theme_kind != theme_kind {
             self.bump_transcript_revision();
+            self.bump_settled_render_epoch();
         }
         self.theme_kind = theme_kind;
         self.theme = theme_kind.palette();
@@ -2408,6 +2395,7 @@ impl AppState {
     pub fn set_thought_output(&mut self, thought_output: crate::config::ThoughtOutput) {
         if self.thought_output != thought_output {
             self.bump_transcript_revision();
+            self.bump_settled_render_epoch();
         }
         self.thought_output = thought_output;
     }
@@ -2745,6 +2733,25 @@ impl AppState {
         self.transcript_revision
     }
 
+    pub(crate) fn settled_render_epoch(&self) -> u64 {
+        self.settled_render_epoch
+    }
+
+    /// Invalidate renders of entries the renderer may have frozen. Every
+    /// bump site must also bump the transcript revision (they all reach a
+    /// visible render change), but not vice versa: streaming appends and
+    /// reveal pacing leave settled renders intact.
+    fn bump_settled_render_epoch(&mut self) {
+        self.settled_render_epoch = self.settled_render_epoch.wrapping_add(1);
+    }
+
+    /// Lowest transcript entry currently limited to a reveal prefix. Entries
+    /// at or above this index render a growing slice of their text and must
+    /// not be frozen.
+    pub(crate) fn min_stream_visible_entry(&self) -> Option<usize> {
+        self.stream_visible_bytes.keys().min().copied()
+    }
+
     /// Limit an active transcript entry to a source prefix for live rendering.
     /// This is deliberately transient: exports, history, and replay continue
     /// to read the complete entry.
@@ -2834,13 +2841,23 @@ impl AppState {
         let snapshots: Vec<TerminalOutputSnapshot> =
             self.terminal_outputs.values().cloned().collect();
         let mut changed = false;
+        let mut settled_changed = false;
         for snapshot in &snapshots {
             for view in self.tool_calls.values_mut() {
-                changed |= view.apply_terminal_output(snapshot);
+                // A snapshot that still mutates a settled view (a late or
+                // diverging report after the terminal exited) invalidates
+                // renders the settled-prefix cache may have frozen.
+                let was_settled = view.render_settled();
+                let view_changed = view.apply_terminal_output(snapshot);
+                changed |= view_changed;
+                settled_changed |= view_changed && was_settled;
             }
         }
         if changed {
             self.bump_transcript_revision();
+        }
+        if settled_changed {
+            self.bump_settled_render_epoch();
         }
     }
 
@@ -2851,6 +2868,7 @@ impl AppState {
         self.expand_transcript_details = !self.expand_transcript_details;
         self.tool_detail_overrides.clear();
         self.bump_transcript_revision();
+        self.bump_settled_render_epoch();
     }
 
     /// Toggle one tool's details relative to the current renderer default.
@@ -2874,6 +2892,7 @@ impl AppState {
             self.tool_detail_overrides.insert(id.to_string(), expanded);
         }
         self.bump_transcript_revision();
+        self.bump_settled_render_epoch();
         true
     }
 
@@ -3227,6 +3246,7 @@ impl AppState {
             | Entry::SubagentPlan(_)
             | Entry::InternalMessage(_)
             | Entry::System(_)
+            | Entry::CommandOutput(_)
             | Entry::FeatureHint(_)
             | Entry::ReviewLedger(_)
             | Entry::SessionBoundary(_) => None,
@@ -3356,6 +3376,11 @@ impl AppState {
         self.bump_transcript_revision();
     }
 
+    pub fn push_command_output(&mut self, text: impl Into<String>) {
+        self.transcript.push(Entry::CommandOutput(text.into()));
+        self.bump_transcript_revision();
+    }
+
     pub fn push_review_ledger(&mut self, lines: Vec<ReviewLedgerLine>) {
         if lines.is_empty() {
             return;
@@ -3381,6 +3406,15 @@ impl AppState {
         self.push_system_message(transcript_text);
     }
 
+    /// Like [`record_status_message`](Self::record_status_message), for a
+    /// command result that echoes user content of arbitrary length: the
+    /// transcript record never collapses, so the echoed text stays readable.
+    pub fn record_command_output(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.set_status_line(StatusKind::Info, text.clone());
+        self.push_command_output(text);
+    }
+
     /// Record the next eligible local feature hint after a quiet run of turns.
     /// The hint is transcript-only UI state and never becomes ACP history.
     pub fn maybe_record_feature_hint(&mut self, capabilities: FeatureHintCapabilities) -> bool {
@@ -3399,7 +3433,6 @@ impl AppState {
                 FeatureHintRequirement::Always => true,
                 FeatureHintRequirement::TeamChoice => crate::roster::external_adapter().is_none(),
                 FeatureHintRequirement::Subagents => capabilities.subagents,
-                FeatureHintRequirement::Ragnarok => capabilities.ragnarok,
                 FeatureHintRequirement::Voice => capabilities.voice,
                 FeatureHintRequirement::Fork => capabilities.fork,
                 FeatureHintRequirement::Side => capabilities.side,
@@ -4396,6 +4429,7 @@ impl AppState {
                     self.close_nested_agent_viewer();
                     self.nested_agent_selected = None;
                     self.subagents.clear();
+                    let tool_calls_before = self.tool_calls.len();
                     self.tool_calls
                         .retain(|id, _| !id.starts_with(SUBAGENT_ID_PREFIX));
                     self.terminal_outputs
@@ -4404,9 +4438,15 @@ impl AppState {
                     self.subagent_label = None;
                     self.active_subagents = 0;
                     self.workflow_clocks.clear();
-                    if !self.tool_detail_overrides.is_empty() {
+                    // Dropping a tool view changes how its (possibly settled)
+                    // transcript entry renders, as does clearing the per-tool
+                    // detail overrides.
+                    if self.tool_calls.len() != tool_calls_before
+                        || !self.tool_detail_overrides.is_empty()
+                    {
                         self.tool_detail_overrides.clear();
                         self.bump_transcript_revision();
+                        self.bump_settled_render_epoch();
                     }
                 }
                 self.session_id = Some(session_id);
@@ -4614,6 +4654,10 @@ impl AppState {
                 self.record_status_message(StatusKind::Warning, message);
             }
             UiEvent::RemoteSideStartRequested { .. } | UiEvent::RemoteSideExitRequested => {}
+            // The transcript already shows the steered message from the
+            // user's own submission; delivery confirmation feeds the
+            // orchestrator's user-message history, not the TUI.
+            UiEvent::SteeredPromptDelivered { .. } => {}
             UiEvent::Warning(msg) => {
                 self.record_status_message(StatusKind::Warning, msg);
             }
@@ -4837,9 +4881,9 @@ impl AppState {
                             status.objective = objective.clone();
                         }
                         status.activity = if objective.is_empty() {
-                            ragnarok::first_line(&status.objective, SUBAGENT_RECORD_LINE_CHARS)
+                            first_line(&status.objective, SUBAGENT_RECORD_LINE_CHARS)
                         } else {
-                            ragnarok::first_line(&objective, SUBAGENT_RECORD_LINE_CHARS)
+                            first_line(&objective, SUBAGENT_RECORD_LINE_CHARS)
                         };
                         status.lifecycle = Some(crate::workflow::WorkflowActorLifecycle::Running);
                         status.started_at = now;
@@ -4875,7 +4919,7 @@ impl AppState {
                     // A retained actor has one identity across ACP turns. Its
                     // later resumes update the durable detail without
                     // manufacturing another permanent "started" record.
-                    let headline = ragnarok::first_line(&objective, SUBAGENT_RECORD_LINE_CHARS);
+                    let headline = first_line(&objective, SUBAGENT_RECORD_LINE_CHARS);
                     let actor = role
                         .as_ref()
                         .filter(|role| {
@@ -5056,7 +5100,7 @@ impl AppState {
             SubagentOutcome::Cancelled => "cancelled".to_string(),
             SubagentOutcome::Failed(message) => format!(
                 "failed: {}",
-                ragnarok::first_line(message, SUBAGENT_RECORD_LINE_CHARS)
+                first_line(message, SUBAGENT_RECORD_LINE_CHARS)
             ),
         };
         let record = match self.subagents.get_mut(&subagent_id) {
@@ -5362,7 +5406,7 @@ impl AppState {
             && matches!(message.kind, crate::event::InternalMessageKind::Delegation)
         {
             state.objective = message.text.clone();
-            state.activity = ragnarok::first_line(&message.text, SUBAGENT_RECORD_LINE_CHARS);
+            state.activity = first_line(&message.text, SUBAGENT_RECORD_LINE_CHARS);
         }
         state.transcript.push(Entry::InternalMessage(message));
     }
@@ -5389,6 +5433,13 @@ impl AppState {
                 let key = format!("{prefix}{}", tool_call.tool_call_id);
                 let mut view = ToolCallView::from_tool_call(&tool_call);
                 view.namespace_terminal_ids(prefix);
+                if self
+                    .tool_calls
+                    .get(&key)
+                    .is_some_and(ToolCallView::render_settled)
+                {
+                    self.bump_settled_render_epoch();
+                }
                 self.tool_calls.insert(key.clone(), view);
                 self.ensure_subagent_state(subagent_id)
                     .transcript
@@ -5399,8 +5450,13 @@ impl AppState {
                 self.finalize_subagent_message(subagent_id);
                 let key = format!("{prefix}{}", update.tool_call_id);
                 if let Some(view) = self.tool_calls.get_mut(&key) {
+                    let settled_before = view.render_settled().then(|| view.clone());
                     view.apply_update(&update);
                     view.namespace_terminal_ids(prefix);
+                    let settled_changed = settled_before.is_some_and(|before| before != *view);
+                    if settled_changed {
+                        self.bump_settled_render_epoch();
+                    }
                 } else {
                     let mut view = ToolCallView {
                         title: update
@@ -5591,6 +5647,15 @@ impl AppState {
                 self.finalize_message(EntryKind::Agent);
                 let id = tc.tool_call_id.to_string();
                 let suppressed = is_subagent_transport_call(&tc);
+                // A duplicate id replacing a settled view changes a render
+                // the settled-prefix cache may have frozen.
+                if self
+                    .tool_calls
+                    .get(&id)
+                    .is_some_and(ToolCallView::render_settled)
+                {
+                    self.bump_settled_render_epoch();
+                }
                 self.tool_calls
                     .insert(id.clone(), ToolCallView::from_tool_call(&tc));
                 self.register_terminals_for_tool_call(&id);
@@ -5615,7 +5680,15 @@ impl AppState {
                     }
                 }
                 if let Some(view) = self.tool_calls.get_mut(&id) {
+                    // A late update that still changes a settled view (a
+                    // trailing report after failure or completion) mutates a
+                    // render the settled-prefix cache may have frozen.
+                    let settled_before = view.render_settled().then(|| view.clone());
                     view.apply_update(&u);
+                    let settled_changed = settled_before.is_some_and(|before| before != *view);
+                    if settled_changed {
+                        self.bump_settled_render_epoch();
+                    }
                 } else {
                     // Update before create; synthesize a placeholder.
                     let mut view = ToolCallView {
@@ -6049,643 +6122,6 @@ pub(crate) fn status_transcript_text(kind: StatusKind, text: &str) -> String {
         StatusKind::Warning => format!("warning: {text}"),
         StatusKind::Fatal => format!("fatal: {text}"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Ragnarok arena state
-// ---------------------------------------------------------------------------
-
-/// Battle-feed lines retained for rendering.
-const RAGNAROK_FEED_CAP: usize = 250;
-/// Per-fighter transcript buffer cap (bytes); trimmed from the front.
-const RAGNAROK_TRANSCRIPT_CAP: usize = 96 * 1024;
-/// Cap on Thor's streamed text.
-const RAGNAROK_THOR_CAP: usize = 32 * 1024;
-
-/// Which pane the arena shows. `Enter` toggles during active combat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArenaPane {
-    Arena,
-    Transcript,
-}
-
-/// Per-fighter render state, folded from [`ragnarok::RagnarokEvent`]s.
-#[derive(Debug)]
-pub struct RagnarokFighterUi {
-    pub card: ragnarok::FighterCard,
-    pub state: ragnarok::FighterState,
-    /// Most recent action flourish: (kind, caption, when). Drives the pose
-    /// and caption in the arena; treated as faded after a few seconds.
-    pub action: Option<(ragnarok::ActionKind, String, Instant)>,
-    pub actions_seen: u64,
-    /// Combat-phase transcript (messages, thoughts, tool lines).
-    pub transcript: String,
-    /// What this fighter wrote while reviewing a rival.
-    pub review_transcript: String,
-    /// Last lane appended to `transcript` / `review_transcript`. Streaming
-    /// chunks arrive as tiny deltas, so a separator belongs at lane changes,
-    /// not between every chunk.
-    last_transcript_lane: Option<ragnarok::TextLane>,
-    last_review_lane: Option<ragnarok::TextLane>,
-    pub diffstat: Option<String>,
-    pub worktree_name: Option<String>,
-    pub worktree_path: Option<PathBuf>,
-    pub worktree_base_sha: Option<String>,
-    pub review_progress: Option<ragnarok::ReviewProgress>,
-}
-
-impl RagnarokFighterUi {
-    fn new(card: ragnarok::FighterCard) -> Self {
-        Self {
-            card,
-            state: ragnarok::FighterState::Summoned,
-            action: None,
-            actions_seen: 0,
-            transcript: String::new(),
-            review_transcript: String::new(),
-            last_transcript_lane: None,
-            last_review_lane: None,
-            diffstat: None,
-            worktree_name: None,
-            worktree_path: None,
-            worktree_base_sha: None,
-            review_progress: None,
-        }
-    }
-
-    /// Append a streaming transcript delta, inserting a blank-line break and
-    /// a small header when a new lane starts.
-    fn push_transcript_chunk(&mut self, lane: ragnarok::TextLane, chunk: &str) {
-        if chunk.is_empty() {
-            return;
-        }
-
-        let review = lane == ragnarok::TextLane::Review;
-        let (buf, last): (&mut String, &mut Option<ragnarok::TextLane>) = if review {
-            (&mut self.review_transcript, &mut self.last_review_lane)
-        } else {
-            (&mut self.transcript, &mut self.last_transcript_lane)
-        };
-
-        let chunk = if *last != Some(lane) {
-            if !buf.is_empty() {
-                let trimmed = buf.trim_end_matches(['\n', ' ']).len();
-                buf.truncate(trimmed);
-                buf.push_str("\n\n");
-                match lane {
-                    ragnarok::TextLane::Message | ragnarok::TextLane::Review => {
-                        buf.push_str("💬 message\n");
-                    }
-                    ragnarok::TextLane::Thought => buf.push_str("🧠 thinking\n"),
-                    ragnarok::TextLane::Tool => {}
-                }
-            }
-            chunk.trim_start_matches('\n')
-        } else {
-            chunk
-        };
-
-        *last = Some(lane);
-        push_capped(buf, chunk, RAGNAROK_TRANSCRIPT_CAP);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RagnarokDraftPrStatus {
-    Publishing {
-        winner: ragnarok::FighterId,
-    },
-    Published {
-        winner: ragnarok::FighterId,
-        url: String,
-    },
-    Failed {
-        winner: ragnarok::FighterId,
-        message: String,
-    },
-}
-
-/// Compact arena state shared with read-only observers such as the remote
-/// viewer. This is derived from the TUI reducer after every battle update, so
-/// observers cannot drift from the state the operator sees locally.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RagnarokObservation {
-    pub task: String,
-    pub phase: ragnarok::Phase,
-    pub awaiting_approval: bool,
-    pub fighters: Vec<RagnarokFighterObservation>,
-    pub verdict: Option<RagnarokVerdictObservation>,
-    pub chosen_finalist: Option<ragnarok::FighterId>,
-    pub draft_pr_status: Option<RagnarokDraftPrStatus>,
-    pub failed: Option<String>,
-    pub done: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RagnarokFighterObservation {
-    pub id: ragnarok::FighterId,
-    pub agent_source_id: String,
-    pub model_name: String,
-    pub state: ragnarok::FighterState,
-    pub worktree_name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RagnarokVerdictObservation {
-    pub clear_winner: Option<ragnarok::FighterId>,
-    pub finalists: Option<(ragnarok::FighterId, ragnarok::FighterId)>,
-    pub ranking: Vec<ragnarok::FighterId>,
-    pub reasoning: String,
-    pub thor_fallback: bool,
-}
-
-/// All render state for one `/ragnarok` battle.
-#[derive(Debug)]
-pub struct RagnarokUi {
-    pub task: String,
-    pub phase: ragnarok::Phase,
-    pub fighters: Vec<RagnarokFighterUi>,
-    /// The scrolling battle feed: (fighter, themed line).
-    pub feed: VecDeque<(Option<ragnarok::FighterId>, String)>,
-    /// Number of newest feed lines hidden below the viewport. Zero follows
-    /// live output at the bottom.
-    pub feed_scroll: usize,
-    pub thor_text: String,
-    pub thor_action: Option<ragnarok::ThorAction>,
-    pub thor_action_at: Instant,
-    pub assignments: Vec<ragnarok::Assignment>,
-    pub verdict: Option<ragnarok::Verdict>,
-    pub failed: Option<String>,
-    pub done: bool,
-    pub pane: ArenaPane,
-    pub selected_fighter: usize,
-    /// In the transcript pane, show the fighter's review instead of their
-    /// combat transcript.
-    pub show_review_lane: bool,
-    /// The finalist chosen by the user at a split decision.
-    pub chosen_finalist: Option<ragnarok::FighterId>,
-    pub draft_pr_status: Option<RagnarokDraftPrStatus>,
-    draft_pr_requested_for: Option<ragnarok::FighterId>,
-    draft_pr_request: Option<ragnarok::DraftPrRequest>,
-    /// First `q` arms quitting; the second `q` aborts the battle.
-    pub quit_armed: bool,
-    pub started_at: Instant,
-    abort_tx: tokio::sync::watch::Sender<bool>,
-    proceed_tx: tokio::sync::watch::Sender<bool>,
-}
-
-impl RagnarokUi {
-    pub fn new(
-        task: String,
-        abort_tx: tokio::sync::watch::Sender<bool>,
-        proceed_tx: tokio::sync::watch::Sender<bool>,
-    ) -> Self {
-        Self {
-            task,
-            phase: ragnarok::Phase::Mustering,
-            fighters: Vec::new(),
-            feed: VecDeque::new(),
-            feed_scroll: 0,
-            thor_text: String::new(),
-            thor_action: None,
-            thor_action_at: Instant::now(),
-            assignments: Vec::new(),
-            verdict: None,
-            failed: None,
-            done: false,
-            pane: ArenaPane::Arena,
-            selected_fighter: 0,
-            show_review_lane: false,
-            chosen_finalist: None,
-            draft_pr_status: None,
-            draft_pr_requested_for: None,
-            draft_pr_request: None,
-            quit_armed: false,
-            started_at: Instant::now(),
-            abort_tx,
-            proceed_tx,
-        }
-    }
-
-    /// Signal the battle task to stop. Idempotent.
-    pub fn abort(&self) {
-        let _ = self.abort_tx.send(true);
-    }
-
-    /// Unleash combat from the pre-combat approval gate. Idempotent.
-    pub fn unleash(&self) {
-        let _ = self.proceed_tx.send(true);
-    }
-
-    /// True while the battle waits at the pre-combat approval gate.
-    pub fn awaiting_approval(&self) -> bool {
-        self.phase == ragnarok::Phase::Approval && !self.battle_over()
-    }
-
-    /// The battle reached a terminal state (verdict, failure, or done).
-    pub fn battle_over(&self) -> bool {
-        self.done || self.failed.is_some() || self.verdict.is_some()
-    }
-
-    pub fn queue_draft_pr_publish(&mut self, winner: ragnarok::FighterId) {
-        if self.draft_pr_requested_for.is_some() {
-            return;
-        }
-        if matches!(
-            self.draft_pr_status,
-            Some(RagnarokDraftPrStatus::Published { winner: published, .. }) if published == winner
-        ) {
-            return;
-        }
-        let Some(fighter) = self.fighter(winner) else {
-            return;
-        };
-        let Some(worktree_path) = fighter.worktree_path.clone() else {
-            self.draft_pr_status = Some(RagnarokDraftPrStatus::Failed {
-                winner,
-                message: "winner worktree path is unavailable".to_string(),
-            });
-            return;
-        };
-        let Some(base_sha) = fighter.worktree_base_sha.clone() else {
-            self.draft_pr_status = Some(RagnarokDraftPrStatus::Failed {
-                winner,
-                message: "winner worktree base SHA is unavailable".to_string(),
-            });
-            return;
-        };
-        let winner_tag = fighter.card.tag();
-        self.draft_pr_requested_for = Some(winner);
-        self.draft_pr_request = Some(ragnarok::DraftPrRequest {
-            winner,
-            winner_tag,
-            task: self.task.clone(),
-            worktree_path,
-            base_sha,
-        });
-    }
-
-    pub fn take_draft_pr_publish_request(&mut self) -> Option<ragnarok::DraftPrRequest> {
-        self.draft_pr_request.take()
-    }
-
-    pub fn fighter(&self, id: ragnarok::FighterId) -> Option<&RagnarokFighterUi> {
-        self.fighters.iter().find(|f| f.card.id == id)
-    }
-
-    pub fn fighter_mut(&mut self, id: ragnarok::FighterId) -> Option<&mut RagnarokFighterUi> {
-        self.fighters.iter_mut().find(|f| f.card.id == id)
-    }
-
-    pub fn fighter_name(&self, id: ragnarok::FighterId) -> String {
-        self.fighter(id)
-            .map(|f| f.card.model_name.clone())
-            .unwrap_or_else(|| format!("champion {id}"))
-    }
-
-    pub fn observation(&self) -> RagnarokObservation {
-        RagnarokObservation {
-            task: self.task.clone(),
-            phase: self.phase,
-            awaiting_approval: self.awaiting_approval(),
-            fighters: self
-                .fighters
-                .iter()
-                .map(|fighter| RagnarokFighterObservation {
-                    id: fighter.card.id,
-                    agent_source_id: fighter.card.agent_source_id.clone(),
-                    model_name: fighter.card.model_name.clone(),
-                    state: fighter.state.clone(),
-                    worktree_name: fighter.worktree_name.clone(),
-                })
-                .collect(),
-            verdict: self
-                .verdict
-                .as_ref()
-                .map(|verdict| RagnarokVerdictObservation {
-                    clear_winner: verdict.clear_winner,
-                    finalists: verdict.finalists,
-                    ranking: verdict.ranking.clone(),
-                    reasoning: verdict.reasoning.clone(),
-                    thor_fallback: verdict.thor_fallback,
-                }),
-            chosen_finalist: self.chosen_finalist,
-            draft_pr_status: self.draft_pr_status.clone(),
-            failed: self.failed.clone(),
-            done: self.done,
-        }
-    }
-
-    fn push_feed(&mut self, fighter: Option<ragnarok::FighterId>, text: String) {
-        let preserve_scrolled_view = self.feed_scroll > 0;
-        self.feed.push_back((fighter, text));
-        if preserve_scrolled_view {
-            self.feed_scroll = self.feed_scroll.saturating_add(1);
-        }
-        while self.feed.len() > RAGNAROK_FEED_CAP {
-            self.feed.pop_front();
-        }
-        self.feed_scroll = self.feed_scroll.min(self.feed.len().saturating_sub(1));
-    }
-
-    pub fn scroll_feed(&mut self, delta: isize) {
-        if delta > 0 {
-            self.feed_scroll = self
-                .feed_scroll
-                .saturating_add(delta as usize)
-                .min(self.feed.len().saturating_sub(1));
-        } else if delta < 0 {
-            self.feed_scroll = self.feed_scroll.saturating_sub((-delta) as usize);
-        }
-    }
-
-    pub fn feed_max_scroll_for_rows(&self, visible_rows: usize) -> usize {
-        if visible_rows == 0 {
-            0
-        } else {
-            self.feed.len().saturating_sub(visible_rows)
-        }
-    }
-
-    pub fn feed_scroll_for_rows(&self, visible_rows: usize) -> usize {
-        self.feed_scroll
-            .min(self.feed_max_scroll_for_rows(visible_rows))
-    }
-
-    pub fn cycle_fighter(&mut self, delta: isize) {
-        if self.fighters.is_empty() {
-            return;
-        }
-        let len = self.fighters.len() as isize;
-        let next = (self.selected_fighter as isize + delta).rem_euclid(len);
-        self.selected_fighter = next as usize;
-    }
-}
-
-/// Append while trimming the front (at a char boundary) once over `cap`.
-fn push_capped(buf: &mut String, chunk: &str, cap: usize) {
-    buf.push_str(chunk);
-    if buf.len() > cap {
-        let mut cut = buf.len() - cap * 3 / 4;
-        while cut < buf.len() && !buf.is_char_boundary(cut) {
-            cut += 1;
-        }
-        buf.replace_range(..cut, "…");
-    }
-}
-
-impl AppState {
-    /// `/ragnarok <task>`: stash a launch request for the UI loop (which owns
-    /// the battle event channel and the tokio spawn).
-    pub fn request_ragnarok(&mut self, task: String) {
-        self.ragnarok_launch = Some(task);
-    }
-
-    pub fn take_ragnarok_launch(&mut self) -> Option<String> {
-        self.ragnarok_launch.take()
-    }
-
-    /// Fold one battle event into the arena state.
-    pub fn apply_ragnarok_event(&mut self, ev: ragnarok::RagnarokEvent) {
-        use ragnarok::RagnarokEvent as E;
-        let Some(arena) = self.ragnarok.as_mut() else {
-            return;
-        };
-        match ev {
-            E::Phase(phase) => {
-                arena.phase = phase;
-                arena.quit_armed = false;
-                arena.push_feed(None, format!("━━ {} ━━", phase.banner()));
-            }
-            E::Log { fighter, text } => arena.push_feed(fighter, text),
-            E::ThorSpeaks(chunk) => push_capped(&mut arena.thor_text, &chunk, RAGNAROK_THOR_CAP),
-            E::ThorAction(action) => {
-                arena.thor_action = Some(action);
-                arena.thor_action_at = Instant::now();
-            }
-            E::Roster(cards) => {
-                arena.fighters = cards.into_iter().map(RagnarokFighterUi::new).collect();
-                arena.selected_fighter = 0;
-            }
-            E::FighterJoined(card) => {
-                let id = card.id;
-                let tag = card.tag();
-                arena.fighters.push(RagnarokFighterUi::new(card));
-                arena.push_feed(
-                    Some(id),
-                    format!("⚖ {tag} enters only to judge the survivor."),
-                );
-            }
-            E::FighterState { id, state } => {
-                let slain_line = if let ragnarok::FighterState::Slain(reason) = &state {
-                    Some(format!("☠ {} is slain: {reason}", arena.fighter_name(id)))
-                } else {
-                    None
-                };
-                if let Some(f) = arena.fighter_mut(id) {
-                    f.state = state;
-                }
-                if let Some(line) = slain_line {
-                    arena.push_feed(Some(id), line);
-                }
-            }
-            E::FighterWorktree {
-                id,
-                name,
-                path,
-                base_sha,
-            } => {
-                let line = format!("🏕 {} pitches camp in {name}", arena.fighter_name(id));
-                if let Some(f) = arena.fighter_mut(id) {
-                    f.worktree_name = Some(name);
-                    f.worktree_path = Some(path);
-                    f.worktree_base_sha = Some(base_sha);
-                }
-                arena.push_feed(Some(id), line);
-            }
-            E::FighterAction { id, action, detail } => {
-                if let Some(f) = arena.fighter_mut(id) {
-                    f.action = Some((action, detail, Instant::now()));
-                    f.actions_seen += 1;
-                }
-            }
-            E::FighterText { id, lane, chunk } => {
-                if let Some(f) = arena.fighter_mut(id) {
-                    f.push_transcript_chunk(lane, &chunk);
-                }
-            }
-            E::FighterDiffStat { id, stat } => {
-                let tally = stat.lines().last().unwrap_or("").trim().to_string();
-                let line = format!("📜 the saga of {}: {tally}", arena.fighter_name(id));
-                if let Some(f) = arena.fighter_mut(id) {
-                    f.diffstat = Some(stat);
-                }
-                if !tally.is_empty() {
-                    arena.push_feed(Some(id), line);
-                }
-            }
-            E::Assignments(assignments) => arena.assignments = assignments,
-            E::ReviewState { reviewer, progress } => {
-                if let Some(f) = arena.fighter_mut(reviewer) {
-                    f.review_progress = Some(progress);
-                }
-            }
-            E::Verdict(verdict) => {
-                arena.verdict = Some(*verdict);
-                arena.phase = ragnarok::Phase::Verdict;
-                if let Some(winner) = arena.verdict.as_ref().and_then(|v| v.clear_winner) {
-                    arena.queue_draft_pr_publish(winner);
-                }
-            }
-            E::DraftPrPublishing { winner } => {
-                arena.draft_pr_status = Some(RagnarokDraftPrStatus::Publishing { winner });
-                arena.push_feed(
-                    Some(winner),
-                    format!(
-                        "🚀 publishing {} as a draft PR...",
-                        arena.fighter_name(winner)
-                    ),
-                );
-            }
-            E::DraftPrPublished { winner, url } => {
-                arena.draft_pr_status = Some(RagnarokDraftPrStatus::Published {
-                    winner,
-                    url: url.clone(),
-                });
-                arena.push_feed(
-                    Some(winner),
-                    format!("🔗 draft PR for {}: {url}", arena.fighter_name(winner)),
-                );
-            }
-            E::DraftPrFailed { winner, message } => {
-                arena.draft_pr_status = Some(RagnarokDraftPrStatus::Failed {
-                    winner,
-                    message: message.clone(),
-                });
-                arena.push_feed(
-                    Some(winner),
-                    format!(
-                        "⚠ draft PR for {} failed: {message}",
-                        arena.fighter_name(winner)
-                    ),
-                );
-            }
-            E::Failed(message) => {
-                arena.push_feed(None, format!("💀 RAGNAROK HAS FALLEN: {message}"));
-                arena.failed = Some(message);
-            }
-            E::Done => arena.done = true,
-        }
-    }
-
-    /// Close the arena: abort the battle if still raging and drop a summary
-    /// into the main transcript so the outcome survives in scrollback.
-    pub fn close_ragnarok(&mut self) {
-        let Some(arena) = self.ragnarok.take() else {
-            return;
-        };
-        arena.abort();
-        let summary = ragnarok_summary(&arena);
-        self.push_system_message(summary);
-    }
-
-    pub fn take_ragnarok_draft_pr_publish_request(&mut self) -> Option<ragnarok::DraftPrRequest> {
-        self.ragnarok
-            .as_mut()
-            .and_then(RagnarokUi::take_draft_pr_publish_request)
-    }
-}
-
-/// Human-readable battle summary for the main transcript.
-fn ragnarok_summary(arena: &RagnarokUi) -> String {
-    let mut out = format!("⚡ RAGNAROK — task: {}\n", arena.task);
-    if let Some(failed) = &arena.failed {
-        out.push_str(&format!("outcome: failed — {failed}\n"));
-    }
-    if let Some(verdict) = &arena.verdict {
-        match (verdict.clear_winner, verdict.finalists) {
-            (Some(id), _) => {
-                out.push_str(&format!(
-                    "👑 winner (Thor's recommendation): {}\n",
-                    arena
-                        .fighter(id)
-                        .map(|f| f.card.tag())
-                        .unwrap_or_else(|| format!("champion {id}"))
-                ));
-            }
-            (None, Some((a, b))) => {
-                out.push_str("⚖ split decision — finalists:\n");
-                for (n, id) in [a, b].into_iter().enumerate() {
-                    let marker = if arena.chosen_finalist == Some(id) {
-                        " ← your pick"
-                    } else {
-                        ""
-                    };
-                    out.push_str(&format!(
-                        "  {}. {}{marker}\n",
-                        n + 1,
-                        arena
-                            .fighter(id)
-                            .map(|f| f.card.tag())
-                            .unwrap_or_else(|| format!("champion {id}"))
-                    ));
-                }
-            }
-            (None, None) => {}
-        }
-        if !verdict.review_verdicts.is_empty() {
-            out.push_str("review honesty/validity (Thor's scores):\n");
-            for rv in &verdict.review_verdicts {
-                out.push_str(&format!(
-                    "  {} reviewing {}: honesty {}/10, validity {}/10 — {}\n",
-                    arena.fighter_name(rv.reviewer),
-                    arena.fighter_name(rv.defender),
-                    rv.honesty,
-                    rv.validity,
-                    rv.notes
-                ));
-            }
-        }
-        out.push_str(&format!("Thor's reasoning: {}\n", verdict.reasoning));
-    }
-    if let Some(status) = &arena.draft_pr_status {
-        match status {
-            RagnarokDraftPrStatus::Publishing { winner } => {
-                out.push_str(&format!(
-                    "draft PR: publishing for {}\n",
-                    arena.fighter_name(*winner)
-                ));
-            }
-            RagnarokDraftPrStatus::Published { winner, url } => {
-                out.push_str(&format!(
-                    "draft PR for {}: {url}\n",
-                    arena.fighter_name(*winner)
-                ));
-            }
-            RagnarokDraftPrStatus::Failed { winner, message } => {
-                out.push_str(&format!(
-                    "draft PR for {} failed: {message}\n",
-                    arena.fighter_name(*winner)
-                ));
-            }
-        }
-    }
-    let with_worktrees: Vec<&RagnarokFighterUi> = arena
-        .fighters
-        .iter()
-        .filter(|f| f.worktree_name.is_some())
-        .collect();
-    if !with_worktrees.is_empty() {
-        out.push_str("worktrees (inspect or adopt with `mj --worktree <name>`):\n");
-        for f in with_worktrees {
-            out.push_str(&format!(
-                "  {} → {}\n",
-                f.card.tag(),
-                f.worktree_name.as_deref().unwrap_or("?")
-            ));
-        }
-    }
-    out.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -8546,11 +7982,15 @@ mod tests {
             WorkflowTransition::ActorStarted {
                 actor_id: WorkflowActorId::Subagent(12),
                 role: WorkflowActorRole::SpecialistReviewer {
-                    lane: "Týr".to_string(),
+                    lane: "Error handling".to_string(),
                 },
             },
         )));
-        state.apply_event(subagent_started(12, "review · Týr", "inspect correctness"));
+        state.apply_event(subagent_started(
+            12,
+            "review · Error handling",
+            "inspect correctness",
+        ));
         state.apply_event(UiEvent::Subagent(SubagentEvent::Finished {
             subagent_id: 12,
             outcome: SubagentOutcome::Completed,
@@ -8558,7 +7998,7 @@ mod tests {
 
         assert!(state.transcript.iter().any(|entry| matches!(
             entry,
-            Entry::System(text) if text.starts_with("reviewer Týr #12 · report delivered")
+            Entry::System(text) if text.starts_with("reviewer Error handling #12 · report delivered")
         )));
     }
 
@@ -11045,7 +10485,6 @@ mod tests {
                 "diff",
                 "mjconfig",
                 "memory",
-                "ragnarok",
                 "exit"
             ]
         );
@@ -11107,7 +10546,6 @@ mod tests {
                 "diff",
                 "mjconfig",
                 "memory",
-                "ragnarok",
                 "exit",
                 "fork"
             ]
@@ -11159,7 +10597,6 @@ mod tests {
                 "diff",
                 "mjconfig",
                 "memory",
-                "ragnarok",
                 "exit",
                 "fork",
                 "review_pr"
@@ -11227,7 +10664,6 @@ mod tests {
                 "diff",
                 "mjconfig",
                 "memory",
-                "ragnarok",
                 "exit",
                 "review_pr"
             ]
@@ -11791,344 +11227,9 @@ mod tests {
         assert_eq!(s.input, "b");
     }
 
-    // ---- Ragnarok arena state ----------------------------------------------
-
-    fn ragnarok_card(id: usize, name: &str) -> crate::ragnarok::FighterCard {
-        crate::ragnarok::FighterCard {
-            id,
-            agent_source_id: format!("agent-{id}"),
-            model_value: name.to_lowercase(),
-            model_name: name.to_string(),
-            pass_at_1_bps: 1400 + id as u32,
-            mean_cost_usd: 0.0,
-        }
-    }
-
-    fn arena_state() -> AppState {
-        let mut s = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        s.ragnarok = Some(RagnarokUi::new(
-            "build a thing".into(),
-            abort_tx,
-            proceed_tx,
-        ));
-        s
-    }
-
-    #[test]
-    fn ragnarok_launch_request_roundtrips() {
-        let mut s = AppState::new();
-        assert!(s.take_ragnarok_launch().is_none());
-        s.request_ragnarok("forge a hammer".into());
-        assert_eq!(s.take_ragnarok_launch().as_deref(), Some("forge a hammer"));
-        assert!(s.take_ragnarok_launch().is_none(), "request is one-shot");
-    }
-
-    #[test]
-    fn ragnarok_observation_mirrors_the_reduced_arena() {
-        use crate::ragnarok::{FighterState, Phase, RagnarokEvent};
-
-        let mut s = arena_state();
-        s.apply_ragnarok_event(RagnarokEvent::Roster(vec![ragnarok_card(0, "Opus")]));
-        s.apply_ragnarok_event(RagnarokEvent::Phase(Phase::Approval));
-        s.apply_ragnarok_event(RagnarokEvent::FighterState {
-            id: 0,
-            state: FighterState::Fighting,
-        });
-        s.apply_ragnarok_event(RagnarokEvent::FighterWorktree {
-            id: 0,
-            name: "ragnarok-opus".into(),
-            path: PathBuf::from("/tmp/ragnarok-opus"),
-            base_sha: "base-opus".into(),
-        });
-
-        let observation = s.ragnarok.as_ref().expect("arena").observation();
-        assert_eq!(observation.task, "build a thing");
-        assert_eq!(observation.phase, Phase::Approval);
-        assert!(observation.awaiting_approval);
-        assert_eq!(observation.fighters.len(), 1);
-        assert_eq!(observation.fighters[0].agent_source_id, "agent-0");
-        assert_eq!(observation.fighters[0].model_name, "Opus");
-        assert_eq!(observation.fighters[0].state, FighterState::Fighting);
-        assert_eq!(
-            observation.fighters[0].worktree_name.as_deref(),
-            Some("ragnarok-opus")
-        );
-    }
-
-    #[test]
-    fn ragnarok_events_fold_into_arena_state() {
-        use crate::ragnarok::{ActionKind, FighterState, Phase, RagnarokEvent, TextLane, Verdict};
-        let mut s = arena_state();
-        s.apply_ragnarok_event(RagnarokEvent::Phase(Phase::Combat));
-        s.apply_ragnarok_event(RagnarokEvent::Roster(vec![
-            ragnarok_card(0, "Opus"),
-            ragnarok_card(1, "GPT-5.5"),
-        ]));
-        s.apply_ragnarok_event(RagnarokEvent::FighterState {
-            id: 1,
-            state: FighterState::Fighting,
-        });
-        s.apply_ragnarok_event(RagnarokEvent::FighterAction {
-            id: 1,
-            action: ActionKind::Forge,
-            detail: "src/main.rs".into(),
-        });
-        s.apply_ragnarok_event(RagnarokEvent::FighterText {
-            id: 1,
-            lane: TextLane::Message,
-            chunk: "I shall".into(),
-        });
-        s.apply_ragnarok_event(RagnarokEvent::FighterText {
-            id: 1,
-            lane: TextLane::Review,
-            chunk: "their code is bad".into(),
-        });
-        s.apply_ragnarok_event(RagnarokEvent::FighterWorktree {
-            id: 1,
-            name: "ragnarok-gpt".into(),
-            path: PathBuf::from("/tmp/ragnarok-gpt"),
-            base_sha: "base-gpt".into(),
-        });
-        s.apply_ragnarok_event(RagnarokEvent::FighterJoined(ragnarok_card(2, "Judge")));
-        s.apply_ragnarok_event(RagnarokEvent::FighterState {
-            id: 0,
-            state: FighterState::Slain("tripped on a rune".into()),
-        });
-
-        let arena = s.ragnarok.as_ref().expect("arena");
-        assert_eq!(arena.phase, Phase::Combat);
-        assert_eq!(arena.fighters.len(), 3);
-        let f1 = arena.fighter(1).expect("fighter 1");
-        assert_eq!(f1.state, FighterState::Fighting);
-        assert_eq!(f1.transcript, "I shall");
-        assert_eq!(f1.review_transcript, "their code is bad");
-        assert_eq!(f1.worktree_name.as_deref(), Some("ragnarok-gpt"));
-        assert_eq!(f1.actions_seen, 1);
-        assert_eq!(
-            arena.fighter(2).expect("late judge").card.model_name,
-            "Judge"
-        );
-        // The slain fighter's reason lands in the feed.
-        assert!(
-            arena
-                .feed
-                .iter()
-                .any(|(id, text)| *id == Some(0) && text.contains("tripped on a rune"))
-        );
-
-        s.apply_ragnarok_event(RagnarokEvent::Verdict(Box::new(Verdict {
-            clear_winner: Some(1),
-            finalists: None,
-            ranking: vec![1, 0],
-            review_verdicts: Vec::new(),
-            reasoning: "the hammer spoke".into(),
-            thor_fallback: false,
-        })));
-        s.apply_ragnarok_event(RagnarokEvent::Done);
-        let arena = s.ragnarok.as_ref().expect("arena");
-        assert!(arena.battle_over());
-        assert_eq!(arena.verdict.as_ref().and_then(|v| v.clear_winner), Some(1));
-    }
-
-    #[test]
-    fn fighter_transcript_separates_message_thought_and_tool_segments() {
-        use crate::ragnarok::{RagnarokEvent, TextLane};
-        let mut s = arena_state();
-        s.apply_ragnarok_event(RagnarokEvent::Roster(vec![ragnarok_card(0, "Opus")]));
-
-        for (lane, chunk) in [
-            (TextLane::Message, "I will forge "),
-            (TextLane::Message, "the hammer."),
-            (TextLane::Thought, "but first I must read"),
-            (TextLane::Tool, "\n⚙ [read] src/main.rs\n"),
-            (TextLane::Message, "Reading the file now."),
-        ] {
-            s.apply_ragnarok_event(RagnarokEvent::FighterText {
-                id: 0,
-                lane,
-                chunk: chunk.into(),
-            });
-        }
-
-        let arena = s.ragnarok.as_ref().expect("arena");
-        let body = &arena.fighter(0).expect("fighter 0").transcript;
-
-        assert!(
-            body.contains("I will forge the hammer."),
-            "message deltas should not be broken mid-sentence: {body:?}"
-        );
-        assert!(
-            body.contains("the hammer.\n\n🧠 thinking\nbut first I must read"),
-            "thought should start a new labeled block: {body:?}"
-        );
-        assert!(
-            body.contains("but first I must read\n\n⚙ [read] src/main.rs"),
-            "tool header should be preserved after a clean break: {body:?}"
-        );
-        assert!(
-            body.contains("src/main.rs\n\n💬 message\nReading the file now."),
-            "message after a thought should start a new labeled block: {body:?}"
-        );
-        assert!(
-            !body.contains("readReading"),
-            "thought must not bleed into the following message: {body:?}"
-        );
-    }
-
-    #[test]
-    fn close_ragnarok_pushes_summary_with_winner_and_worktrees() {
-        use crate::ragnarok::{RagnarokEvent, Verdict};
-        let mut s = arena_state();
-        s.apply_ragnarok_event(RagnarokEvent::Roster(vec![
-            ragnarok_card(0, "Opus"),
-            ragnarok_card(1, "GPT-5.5"),
-        ]));
-        s.apply_ragnarok_event(RagnarokEvent::FighterWorktree {
-            id: 0,
-            name: "ragnarok-opus".into(),
-            path: PathBuf::from("/tmp/ragnarok-opus"),
-            base_sha: "base-opus".into(),
-        });
-        s.apply_ragnarok_event(RagnarokEvent::Verdict(Box::new(Verdict {
-            clear_winner: Some(0),
-            finalists: None,
-            ranking: vec![0, 1],
-            review_verdicts: Vec::new(),
-            reasoning: "flawless".into(),
-            thor_fallback: false,
-        })));
-        s.apply_ragnarok_event(RagnarokEvent::DraftPrPublished {
-            winner: 0,
-            url: "https://github.com/example/repo/pull/123".into(),
-        });
-        s.close_ragnarok();
-        assert!(s.ragnarok.is_none());
-        let Some(Entry::System(summary)) = s.transcript.last() else {
-            panic!("expected a system summary entry");
-        };
-        assert!(summary.contains("winner"), "summary: {summary}");
-        assert!(summary.contains("Opus"), "summary: {summary}");
-        assert!(summary.contains("ragnarok-opus"), "summary: {summary}");
-        assert!(summary.contains("mj --worktree"), "summary: {summary}");
-        assert!(
-            summary.contains("https://github.com/example/repo/pull/123"),
-            "summary: {summary}"
-        );
-        // Closing twice is harmless.
-        s.close_ragnarok();
-    }
-
-    #[test]
-    fn ragnarok_split_summary_marks_the_users_pick() {
-        use crate::ragnarok::{RagnarokEvent, Verdict};
-        let mut s = arena_state();
-        s.apply_ragnarok_event(RagnarokEvent::Roster(vec![
-            ragnarok_card(0, "Opus"),
-            ragnarok_card(1, "GPT-5.5"),
-        ]));
-        s.apply_ragnarok_event(RagnarokEvent::Verdict(Box::new(Verdict {
-            clear_winner: None,
-            finalists: Some((0, 1)),
-            ranking: vec![0, 1],
-            review_verdicts: Vec::new(),
-            reasoning: "dead heat".into(),
-            thor_fallback: false,
-        })));
-        if let Some(arena) = s.ragnarok.as_mut() {
-            arena.chosen_finalist = Some(1);
-        }
-        s.close_ragnarok();
-        let Some(Entry::System(summary)) = s.transcript.last() else {
-            panic!("expected a system summary entry");
-        };
-        assert!(summary.contains("split decision"), "summary: {summary}");
-        let pick_line = summary
-            .lines()
-            .find(|l| l.contains("← your pick"))
-            .expect("pick marker");
-        assert!(pick_line.contains("GPT-5.5"), "line: {pick_line}");
-    }
-
-    #[test]
-    fn ragnarok_approval_gate_unleashes_via_watch() {
-        let mut s = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, proceed_rx) = tokio::sync::watch::channel(false);
-        s.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        s.apply_ragnarok_event(crate::ragnarok::RagnarokEvent::Phase(
-            crate::ragnarok::Phase::Approval,
-        ));
-        let arena = s.ragnarok.as_ref().expect("arena");
-        assert!(arena.awaiting_approval());
-        assert!(!*proceed_rx.borrow());
-        arena.unleash();
-        assert!(*proceed_rx.borrow());
-        // Once combat starts the gate is no longer pending.
-        s.apply_ragnarok_event(crate::ragnarok::RagnarokEvent::Phase(
-            crate::ragnarok::Phase::Combat,
-        ));
-        assert!(!s.ragnarok.as_ref().unwrap().awaiting_approval());
-    }
-
-    #[test]
-    fn push_capped_trims_front_at_char_boundary() {
-        let mut buf = String::new();
-        push_capped(&mut buf, "hello", 1000);
-        assert_eq!(buf, "hello");
-        let mut buf = "⚔".repeat(100);
-        push_capped(&mut buf, &"x".repeat(400), 300);
-        assert!(buf.len() <= 300 + 4, "len {}", buf.len());
-        assert!(buf.starts_with('…'));
-        assert!(buf.ends_with('x'));
-    }
-
-    #[test]
-    fn ragnarok_cycle_fighter_wraps() {
-        let mut s = arena_state();
-        s.apply_ragnarok_event(crate::ragnarok::RagnarokEvent::Roster(vec![
-            ragnarok_card(0, "A"),
-            ragnarok_card(1, "B"),
-            ragnarok_card(2, "C"),
-        ]));
-        let arena = s.ragnarok.as_mut().expect("arena");
-        arena.cycle_fighter(-1);
-        assert_eq!(arena.selected_fighter, 2);
-        arena.cycle_fighter(1);
-        assert_eq!(arena.selected_fighter, 0);
-    }
-
-    #[test]
-    fn ragnarok_feed_scroll_preserves_scrolled_view() {
-        let mut s = arena_state();
-        for line in ["one", "two", "three", "four"] {
-            s.apply_ragnarok_event(crate::ragnarok::RagnarokEvent::Log {
-                fighter: None,
-                text: line.to_string(),
-            });
-        }
-        let arena = s.ragnarok.as_mut().expect("arena");
-
-        assert_eq!(arena.feed_scroll_for_rows(2), 0);
-        arena.scroll_feed(1);
-        assert_eq!(arena.feed_scroll_for_rows(2), 1);
-        arena.scroll_feed(99);
-        assert_eq!(arena.feed_scroll_for_rows(2), 2);
-
-        arena.push_feed(None, "five".to_string());
-        assert_eq!(arena.feed_scroll_for_rows(2), 3);
-
-        arena.scroll_feed(-2);
-        assert_eq!(arena.feed_scroll_for_rows(2), 2);
-        arena.scroll_feed(-99);
-        assert_eq!(arena.feed_scroll_for_rows(2), 0);
-    }
-
     fn feature_capabilities() -> FeatureHintCapabilities {
         FeatureHintCapabilities {
             subagents: true,
-            ragnarok: true,
             voice: true,
             fork: true,
             side: true,
@@ -12145,7 +11246,6 @@ mod tests {
     ) -> FeatureHintCapabilities {
         let mut caps = FeatureHintCapabilities {
             subagents: false,
-            ragnarok: false,
             voice: false,
             fork: false,
             side: false,
@@ -12159,7 +11259,6 @@ mod tests {
             // test binary, so the hint behaves like Always here.
             FeatureHintRequirement::TeamChoice => {}
             FeatureHintRequirement::Subagents => caps.subagents = enabled,
-            FeatureHintRequirement::Ragnarok => caps.ragnarok = enabled,
             FeatureHintRequirement::Voice => caps.voice = enabled,
             FeatureHintRequirement::Fork => caps.fork = enabled,
             FeatureHintRequirement::Side => caps.side = enabled,
@@ -12226,7 +11325,6 @@ mod tests {
                 "F8 opens the nested-agent viewer",
                 FeatureHintRequirement::Subagents,
             ),
-            ("/ragnarok", FeatureHintRequirement::Ragnarok),
             ("dictate", FeatureHintRequirement::Voice),
             ("/fork", FeatureHintRequirement::Fork),
             ("/side", FeatureHintRequirement::Side),
@@ -12333,7 +11431,6 @@ mod tests {
 
         assert!(state.maybe_record_feature_hint(FeatureHintCapabilities {
             subagents: false,
-            ragnarok: false,
             voice: false,
             fork: false,
             side: false,
@@ -12344,7 +11441,6 @@ mod tests {
             panic!("expected feature hint");
         };
         assert!(!text.contains("subagent"));
-        assert!(!text.contains("ragnarok"));
         assert!(!text.contains("Ctrl+R"));
         assert!(!text.contains("/fork"));
         assert!(!text.contains("/side"));

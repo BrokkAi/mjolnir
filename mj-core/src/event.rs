@@ -208,6 +208,12 @@ pub enum UiEvent {
     /// The prompt request failed before returning a stop reason. UI can
     /// re-enable the input prompt and surface the error.
     PromptFailed { message: String },
+    /// A `_session/steering` request confirmed delivery (`injected`), so this
+    /// user message became part of the running turn. Adapters do not reliably
+    /// echo steered text back as a `UserMessageChunk`, so this event is the
+    /// authoritative signal that keeps the orchestrator's user-message history
+    /// — and therefore discrete review's intent evidence — complete.
+    SteeredPromptDelivered { text: String },
     /// `session/fork` failed before switching to the forked session. UI can
     /// leave the forking state and surface the error.
     SessionForkFailed { message: String },
@@ -508,5 +514,61 @@ pub fn content_block_text(block: &ContentBlock) -> String {
         ContentBlock::ResourceLink(link) => format!("[link {}]", link.uri),
         ContentBlock::Resource(_) => "[resource]".to_string(),
         _ => "[unknown content]".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        AudioContent, EmbeddedResource, EmbeddedResourceResource, ImageContent, ResourceLink,
+        TextContent, TextResourceContents,
+    };
+
+    #[test]
+    fn subagent_outcome_labels_are_stable() {
+        assert_eq!(SubagentOutcome::Completed.label(), "completed");
+        assert_eq!(SubagentOutcome::Cancelled.label(), "cancelled");
+        assert_eq!(
+            SubagentOutcome::Failed("nope".to_string()).label(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn manual_compact_trigger_has_a_stable_label() {
+        assert_eq!(CompactTrigger::Manual.label(), "manual");
+    }
+
+    #[test]
+    fn content_blocks_have_visible_text_representations() {
+        let blocks = [
+            (ContentBlock::Text(TextContent::new("hello")), "hello"),
+            (
+                ContentBlock::Image(ImageContent::new("data", "image/png")),
+                "[image]",
+            ),
+            (
+                ContentBlock::Audio(AudioContent::new("data", "audio/wav")),
+                "[audio]",
+            ),
+            (
+                ContentBlock::ResourceLink(ResourceLink::new("readme", "file:///README.md")),
+                "[link file:///README.md]",
+            ),
+            (
+                ContentBlock::Resource(EmbeddedResource::new(
+                    EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                        "excerpt",
+                        "file:///README.md",
+                    )),
+                )),
+                "[resource]",
+            ),
+        ];
+
+        for (block, expected) in blocks {
+            assert_eq!(content_block_text(&block), expected);
+        }
     }
 }

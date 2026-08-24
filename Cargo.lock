@@ -510,7 +510,6 @@ dependencies = [
  "async-trait",
  "brokk-mj-core",
  "futures",
- "getrandom 0.3.4",
  "rmcp",
  "schemars 1.2.1",
  "serde",

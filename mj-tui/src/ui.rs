@@ -34,7 +34,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::backend::{Backend, ClearType};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect, Size};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -44,14 +44,13 @@ use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AppState, ArenaPane, AutocompleteKind, ConfigValueChoice, ConnectionState,
-    CurrentBranchPullRequest, ElicitationFormFieldKind, ElicitationView, Entry, FileAttachment,
-    PastedAttachment, PastedImageAttachment, PendingElicitation, PendingPermission,
-    QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus, RagnarokFighterUi,
-    RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus, TeamPickerStep,
-    ToolCallOutput, TranscriptSearch, TranscriptSelection, UiExitReason, WorkspaceFile,
-    classify_elicitation, config_option_choices, config_option_current_value_label,
-    file_mention_text, workspace_file_candidates,
+    AppState, AutocompleteKind, ConfigValueChoice, ConnectionState, CurrentBranchPullRequest,
+    ElicitationFormFieldKind, ElicitationView, Entry, FileAttachment, PastedAttachment,
+    PastedImageAttachment, PendingElicitation, PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH,
+    QueuedPrompt, StatusKind, StatusMessage, SubagentStatus, TeamPickerStep, ToolCallOutput,
+    TranscriptSearch, TranscriptSelection, UiExitReason, WorkspaceFile, classify_elicitation,
+    config_option_choices, config_option_current_value_label, file_mention_text,
+    workspace_file_candidates,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -67,8 +66,6 @@ use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
 #[cfg(test)]
 use crate::palette::TerminalThemeKindExt;
-use crate::ragnarok;
-use crate::ragnarok_sprites::{self, SpriteKind};
 use crate::settings::{SettingsAction, draw_settings_panel};
 use crate::speech::{
     DictationFinish, DictationResult, dictation_error_message, run_dictation, voice_input_supported,
@@ -535,6 +532,29 @@ struct TranscriptScrollState {
     /// expanded, so it cannot share `cache` with the collapsed chat pane even
     /// though both are keyed the same way.
     viewer_cache: Option<TranscriptCache>,
+    /// Rendered lines for the settled transcript prefix, kept across
+    /// transcript revisions. While a turn streams, every reveal tick bumps
+    /// the revision; without this cache each bump re-rendered and re-measured
+    /// the whole session, which made long fullscreen sessions crawl on the
+    /// single UI thread. Only the entries past `settled_entry_boundary` are
+    /// rebuilt per revision.
+    prefix: Option<SettledPrefixCache>,
+}
+
+/// Immutable rendered prefix of the transcript. Valid while the settled
+/// render epoch and width both match; extended (never edited) as more
+/// entries settle.
+#[derive(Debug)]
+struct SettledPrefixCache {
+    epoch: u64,
+    width: u16,
+    /// Transcript entries `0..entries` are rendered into `lines`.
+    entries: usize,
+    lines: Vec<Line<'static>>,
+    /// Absolute wrapped row offset of each line (first line starts at 0).
+    row_starts: Vec<usize>,
+    /// Total wrapped rows of the prefix.
+    rows: usize,
 }
 
 #[derive(Debug)]
@@ -542,13 +562,18 @@ struct TranscriptCache {
     revision: u64,
     width: u16,
     search_query: Option<String>,
+    /// Rendered lines for entries past the settled prefix (the whole
+    /// transcript when `prefix_rows == 0`).
     lines: Vec<Line<'static>>,
     line_count: usize,
     entry_row_starts: Vec<Option<usize>>,
-    /// Wrapped row offset of each entry in `lines`. Lets a frame slice out
-    /// just the visible window instead of handing the whole transcript to
-    /// `Paragraph`, whose wrapping cost is O(total lines) per render.
+    /// Wrapped row offset of each entry in `lines`, absolute (offset by
+    /// `prefix_rows`). Lets a frame slice out just the visible window
+    /// instead of handing the whole transcript to `Paragraph`, whose
+    /// wrapping cost is O(total lines) per render.
     row_starts: Vec<usize>,
+    /// Wrapped rows contributed by the settled prefix cache ahead of `lines`.
+    prefix_rows: usize,
 }
 
 #[derive(Debug, Default)]
@@ -704,6 +729,7 @@ fn transcript_entry_matches(state: &AppState, entry: &Entry, query: &str) -> boo
         | Entry::AgentMessage(text)
         | Entry::SubagentMessage(text)
         | Entry::System(text)
+        | Entry::CommandOutput(text)
         | Entry::FeatureHint(text)
         | Entry::SessionBoundary(text) => search_text_contains(text, query),
         Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
@@ -949,6 +975,11 @@ struct TranscriptTurn {
     prompt_index: usize,
     end: usize,
     is_compactable: bool,
+    /// Every entry in the turn is stable. Distinct from `is_compactable`,
+    /// which also requires a completed local lifecycle: the settled-prefix
+    /// boundary needs to know whether the turn's *render* can still change,
+    /// which it can while any entry is unstable.
+    entries_stable: bool,
     elapsed: Option<Duration>,
     tool_summary: Option<TurnToolSummary>,
     final_response_index: Option<usize>,
@@ -997,6 +1028,7 @@ fn transcript_turns(state: &AppState) -> Vec<TranscriptTurn> {
                 prompt_index,
                 end,
                 is_compactable,
+                entries_stable,
                 elapsed: state.prompt_turn_elapsed(prompt_index),
                 tool_summary,
                 final_response_index,
@@ -1057,9 +1089,21 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
     if idx < state.committed_transcript_entries() {
         return true;
     }
+    transcript_entry_settles_naturally(state, idx, entry)
+}
+
+/// Stability on the entry's own terms, ignoring the committed-by-fiat
+/// shortcut above. The settled-prefix boundary must use this: an entry
+/// force-committed by the inline overflow valve counts as stable for
+/// scrollback purposes while its backing state (a still-running terminal,
+/// an open message) can still change how it renders — freezing that render
+/// would keep e.g. a `running · /terminals to view` reference line on
+/// screen after the terminal exits.
+fn transcript_entry_settles_naturally(state: &AppState, idx: usize, entry: &Entry) -> bool {
     match entry {
         Entry::UserPrompt(_)
         | Entry::System(_)
+        | Entry::CommandOutput(_)
         | Entry::FeatureHint(_)
         | Entry::ReviewLedger(_)
         | Entry::SessionBoundary(_)
@@ -1082,22 +1126,10 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         // A tool call with no backing view renders nothing that could change,
         // so it must not hold the boundary (`is_none_or`, not `is_some_and`:
         // a missing record can never settle any other way).
-        Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
-            state.tool_calls.get(id).is_none_or(|view| {
-                matches!(
-                    view.status,
-                    ToolCallStatus::Completed | ToolCallStatus::Failed
-                ) && view.body.iter().all(|output| {
-                    !matches!(
-                        output,
-                        ToolCallOutput::Terminal {
-                            exit_status: None,
-                            ..
-                        }
-                    )
-                })
-            })
-        }
+        Entry::ToolCall(id) | Entry::SubagentToolCall(id) => state
+            .tool_calls
+            .get(id)
+            .is_none_or(crate::app::ToolCallView::render_settled),
     }
 }
 
@@ -1147,9 +1179,8 @@ pub struct UiRunOptions<'a> {
     pub voice_auto_send: config::VoiceAutoSend,
     pub feature_hints_enabled: bool,
     pub keep_awake_enabled: bool,
-    pub active_agent_launch: Option<ragnarok::Launch>,
     pub session_boundary: Option<String>,
-    /// The ACP session cwd; `/ragnarok` battles are rooted here.
+    /// The ACP session working directory.
     pub session_cwd: PathBuf,
     /// Additional directories registered with the ACP session.
     pub additional_workspace_roots: Vec<PathBuf>,
@@ -1160,8 +1191,6 @@ pub struct UiRunOptions<'a> {
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
     pub correction_threshold: crate::config::ReviewCorrectionThreshold,
-    pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
-    pub ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
     pub primary_acp_name: String,
     pub primary_reasoning_effort: Option<String>,
     pub termination: CancellationToken,
@@ -1179,7 +1208,6 @@ struct UiInitialState {
     header_labels: HeaderLabels,
     agent_label: Option<String>,
     agent_source_id: Option<String>,
-    active_agent_launch: Option<ragnarok::Launch>,
     history: Vec<String>,
     transcript_export_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
@@ -1199,8 +1227,6 @@ struct UiInitialState {
     review_enabled: bool,
     review_tier: crate::config::ReviewTier,
     correction_threshold: crate::config::ReviewCorrectionThreshold,
-    ragnarok_models: Vec<crate::roster::ResolvedAgent>,
-    ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
     primary_acp_name: String,
     primary_reasoning_effort: Option<String>,
 }
@@ -1260,7 +1286,6 @@ pub async fn run(
             header_labels,
             agent_label: initial_agent_label,
             agent_source_id: initial_agent_source_id,
-            active_agent_launch: options.active_agent_launch.clone(),
             history: initial_history,
             transcript_export_dir: options
                 .persistence
@@ -1283,8 +1308,6 @@ pub async fn run(
             review_enabled: options.review_enabled,
             review_tier: options.review_tier,
             correction_threshold: options.correction_threshold,
-            ragnarok_models: options.ragnarok_models,
-            ragnarok_observer: options.ragnarok_observer,
             primary_acp_name: options.primary_acp_name,
             primary_reasoning_effort: options.primary_reasoning_effort,
         },
@@ -1429,6 +1452,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::AgentUsage(_)
         | UiEvent::SubagentPoolModelChanged { .. }
         | UiEvent::PromptFailed { .. }
+        | UiEvent::SteeredPromptDelivered { .. }
         | UiEvent::SessionForkFailed { .. }
         | UiEvent::RemotePermissionDecision { .. }
         | UiEvent::Warning(_)
@@ -1526,7 +1550,6 @@ async fn ui_loop(
     if let Some(source_id) = initial.agent_source_id {
         state.agent_source_id = source_id;
     }
-    state.active_agent_launch = initial.active_agent_launch;
     state.session_cwd = initial.session_cwd;
     state.additional_workspace_roots = initial.additional_workspace_roots;
     state.model_choices = initial.model_choices;
@@ -1536,9 +1559,6 @@ async fn ui_loop(
     state.review_enabled = initial.review_enabled;
     state.review_tier = initial.review_tier;
     state.correction_threshold = initial.correction_threshold;
-    state.ragnarok_models = initial.ragnarok_models;
-    let ragnarok_observer = initial.ragnarok_observer;
-    let mut last_ragnarok_observation = None;
     state.set_primary_acp_name(initial.primary_acp_name);
     state.primary_reasoning_effort = initial.primary_reasoning_effort;
     state.transcript_export_dir = initial.transcript_export_dir;
@@ -1566,9 +1586,6 @@ async fn ui_loop(
     let (current_pr_tx, mut current_pr_rx) = mpsc::unbounded_channel::<CurrentBranchPrProbe>();
     let mut current_pr_probe_in_flight = false;
     let (file_scan_tx, mut file_scan_rx) = mpsc::unbounded_channel::<FileAutocompleteScan>();
-    // Ragnarok battles report through their own channel (the sender stays
-    // alive here for the whole loop, so `recv` pends rather than closing).
-    let (ragnarok_tx, mut ragnarok_rx) = mpsc::unbounded_channel::<ragnarok::RagnarokEvent>();
     let mut inline_height = INLINE_CHAT_HEIGHT;
     // Wake-up timers so queued input can render at the interactive cadence
     // while spinner-only animation advances at a calmer progress cadence.
@@ -1606,7 +1623,6 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
-                        let ragnarok_was_active = state.ragnarok.is_some();
                         if mode == UiMode::InlineChat
                             && let CtEvent::Resize(width, height) = &ev
                         {
@@ -1652,18 +1668,6 @@ async fn ui_loop(
                             mode,
                         )
                         .await?;
-                        if let Some(task) = state.take_ragnarok_launch() {
-                            start_ragnarok(&mut state, task, ragnarok_tx.clone());
-                            force_soft_inline_repair = mode == UiMode::InlineChat;
-                        }
-                        drain_ragnarok_draft_pr_publish(&mut state, &ragnarok_tx);
-                        if ragnarok_was_active || state.ragnarok.is_some() {
-                            publish_ragnarok_observation(
-                                &state,
-                                ragnarok_observer.as_ref(),
-                                &mut last_ragnarok_observation,
-                            );
-                        }
                     }
                     Some(Err(e)) => {
                         state.record_status_message(
@@ -1695,26 +1699,6 @@ async fn ui_loop(
                         pending_redraw.mark_interactive();
                     }
                     None => {}
-                }
-            }
-            maybe_rag = ragnarok_rx.recv() => {
-                if let Some(ev) = maybe_rag {
-                    let cause = match &ev {
-                        ragnarok::RagnarokEvent::FighterText { .. }
-                        | ragnarok::RagnarokEvent::FighterAction { .. }
-                        | ragnarok::RagnarokEvent::ThorAction(_)
-                        | ragnarok::RagnarokEvent::ThorSpeaks(_)
-                        | ragnarok::RagnarokEvent::Log { .. } => RedrawCause::Stream,
-                        _ => RedrawCause::Interactive,
-                    };
-                    state.apply_ragnarok_event(ev);
-                    drain_ragnarok_draft_pr_publish(&mut state, &ragnarok_tx);
-                    publish_ragnarok_observation(
-                        &state,
-                        ragnarok_observer.as_ref(),
-                        &mut last_ragnarok_observation,
-                    );
-                    pending_redraw.mark(cause);
                 }
             }
             maybe_probe = current_pr_rx.recv() => {
@@ -1832,7 +1816,6 @@ async fn ui_loop(
                             state.maybe_record_feature_hint(crate::app::FeatureHintCapabilities {
                                 subagents: state.active_models.subagent
                                     != crate::config::DISABLED_MODEL,
-                                ragnarok: state.ragnarok_models.len() >= 2,
                                 voice: voice_input_supported(),
                                 fork: state.session_fork_supported,
                                 side: state.side_session_supported,
@@ -2026,7 +2009,6 @@ async fn ui_loop(
             && !state.nested_agent_viewer
             && !state.workspace_diff_viewer
             && !state.terminals_viewer
-            && state.ragnarok.is_none()
             && !inline_resize_reflow.is_pending()
         {
             flush_transcript_to_scrollback(
@@ -2354,11 +2336,6 @@ fn repair_inline_viewport(
 }
 
 fn timer_driven_live_redraw(mode: UiMode, state: &AppState) -> bool {
-    // The arena animates (poses, banners, elapsed time) as long as it is on
-    // screen, in both UI modes.
-    if state.ragnarok.is_some() {
-        return true;
-    }
     if mode == UiMode::InlineChat && state.is_busy() {
         // Workflow progress animates on wall-clock time, so it needs the timer
         // even in the inline mode that otherwise suppresses it.
@@ -2899,15 +2876,6 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
             .saturating_sub(1)
             .max(INLINE_CHAT_HEIGHT);
     }
-    // The Ragnarok arena also takes the whole terminal; battles deserve a
-    // stage. Pending permission/elicitation prompts still win (above rule
-    // does not apply — they render inside the arena-sized viewport fine).
-    if state.ragnarok.is_some() {
-        return terminal_size
-            .height
-            .saturating_sub(1)
-            .max(INLINE_CHAT_HEIGHT);
-    }
     let max_height = terminal_size
         .height
         .saturating_sub(1)
@@ -2975,7 +2943,6 @@ fn handle_crossterm(
                 && state.team_picker.is_none()
                 && state.review_picker.is_none()
                 && state.config_picker.is_none()
-                && state.ragnarok.is_none()
                 && !state.review_issue_viewer
                 && !state.nested_agent_viewer
                 && !state.workspace_diff_viewer
@@ -3008,7 +2975,6 @@ fn handle_crossterm(
                 || state.team_picker.is_some()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
-                || state.ragnarok.is_some()
                 || state.transcript_viewer
                 || state.nested_agent_viewer
                 || state.workspace_diff_viewer
@@ -3083,7 +3049,6 @@ fn handle_crossterm(
 
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
-        && state.ragnarok.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
@@ -3099,7 +3064,6 @@ fn handle_crossterm(
 
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
-        && state.ragnarok.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
@@ -3115,7 +3079,6 @@ fn handle_crossterm(
 
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
-        && state.ragnarok.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers == KeyModifiers::CONTROL
@@ -3272,12 +3235,6 @@ fn handle_crossterm(
     // and wins if both are somehow pending (its check runs first above).
     if state.has_pending_elicitation() {
         return handle_elicitation_key(state, key.code, mode);
-    }
-
-    // The Ragnarok arena owns the keyboard while a battle is on screen. It
-    // yields only to the safety-critical modals above.
-    if state.ragnarok.is_some() {
-        return handle_ragnarok_key(state, key.modifiers, key.code, mode);
     }
 
     if state.team_picker.is_some() {
@@ -5406,7 +5363,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         clear_attachments(state);
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
-        state.push_system_message(active_models_and_usage_report(state));
+        state.push_command_output(active_models_and_usage_report(state));
         return;
     }
 
@@ -5591,31 +5548,6 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if plain_text_only
-        && let Some(rest) = text.strip_prefix("/ragnarok")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
-        let task = rest.trim().to_string();
-        state.record_prompt_history(text.clone());
-        state.input.clear();
-        clear_attachments(state);
-        state.input_cursor = 0;
-        state.scroll_input_to_bottom();
-        if state.ragnarok.is_some() {
-            state.record_status_message(
-                StatusKind::Warning,
-                "a Ragnarok is already raging (press q twice in the arena to quit)",
-            );
-        } else if task.is_empty() {
-            state
-                .record_status_message(StatusKind::Warning, "usage: /ragnarok <task to implement>");
-        } else {
-            state.push_system_message(format!("⚡ Ragnarok summoned — task: {task}"));
-            state.request_ragnarok(task);
-        }
-        return;
-    }
-
     if plain_text_only && let Some(rest) = text.strip_prefix("/mj:") {
         let other = rest.trim();
         state.record_status_message(
@@ -5750,7 +5682,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
         "" => {
             let memory_config = memory_config_from_disk(state);
             let listing = crate::memory::render_list(&store, &project, &memory_config);
-            state.push_system_message(listing);
+            state.push_command_output(listing);
         }
         "add" => {
             let (global, text) = match rest.strip_prefix("--global") {
@@ -5787,10 +5719,11 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 state.record_status_message(StatusKind::Warning, "usage: /memory forget <id>");
             }
             Ok(id) => match crate::memory::forget(&store, id) {
-                Ok(Some(entry)) => state.record_status_message(
-                    StatusKind::Info,
-                    format!("forgot memory m{}: {}", entry.id, entry.text),
-                ),
+                // The confirmation echoes the stored text, which can be
+                // arbitrarily long — record it as uncollapsible command
+                // output so the forgotten memory stays fully readable.
+                Ok(Some(entry)) => state
+                    .record_command_output(format!("forgot memory m{}: {}", entry.id, entry.text)),
                 Ok(None) => state
                     .record_status_message(StatusKind::Warning, format!("no memory with id m{id}")),
                 Err(error) => state.record_status_message(
@@ -6217,7 +6150,9 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                 };
                 push_export_text(out, &heading, &message.text);
             }
-            Entry::System(text) => push_export_text(out, "System", text),
+            Entry::System(text) | Entry::CommandOutput(text) => {
+                push_export_text(out, "System", text)
+            }
             Entry::ReviewLedger(lines) => {
                 let text = lines
                     .iter()
@@ -7186,32 +7121,6 @@ fn draw(
         return;
     }
 
-    // The Ragnarok arena replaces the whole chat surface while a battle is on
-    // screen. The safety-critical permission/elicitation modals still render
-    // on top of it.
-    if state.ragnarok.is_some() {
-        draw_ragnarok(f, f.area(), state);
-        if let Some(pending) = state.pending_permission() {
-            draw_permission_modal(
-                f,
-                f.area(),
-                pending,
-                state.pending_permission_count(),
-                state.theme,
-            );
-        } else if let Some(pending) = state.pending_elicitation() {
-            draw_elicitation_modal(
-                f,
-                f.area(),
-                pending,
-                state.pending_elicitation_count(),
-                state.theme,
-            );
-        }
-        capture_fullscreen_selection_surface(f, state);
-        return;
-    }
-
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
@@ -7415,11 +7324,6 @@ fn draw_inline_chat(
             state.pending_elicitation_count(),
             state.theme,
         );
-        return;
-    }
-
-    if state.ragnarok.is_some() {
-        draw_ragnarok(f, f.area(), state);
         return;
     }
 
@@ -8105,7 +8009,7 @@ fn nested_actor_state_label(actor: &SubagentStatus) -> String {
         }
         Some(WorkflowActorLifecycle::Completed) => "completed".to_string(),
         Some(WorkflowActorLifecycle::Failed(message)) => {
-            format!("failed: {}", ragnarok::first_line(message, 80))
+            format!("failed: {}", crate::text::first_line(message, 80))
         }
         Some(WorkflowActorLifecycle::Cancelled) => "cancelled".to_string(),
         None => actor
@@ -8139,7 +8043,7 @@ fn nested_agent_roster_line(
         actor.label,
         nested_actor_backend(actor),
         nested_actor_state_label(actor),
-        ragnarok::first_line(&actor.activity, 80),
+        crate::text::first_line(&actor.activity, 80),
         format_duration(actor.elapsed_at(now)),
     );
     Line::from(Span::styled(
@@ -8305,7 +8209,7 @@ fn render_nested_agent_lines(
                     }
                 }
             }
-            Entry::System(text) => {
+            Entry::System(text) | Entry::CommandOutput(text) => {
                 push_styled_message(&mut out, text, state.theme.accent, false, state.theme);
             }
             Entry::ReviewLedger(lines) => {
@@ -8883,16 +8787,17 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     } else {
         state.agent_label.trim()
     };
-    let source = state
-        .active_models
-        .primary_source
-        .as_deref()
-        .filter(|source| !source.is_empty())
-        .unwrap_or(state.agent_source_id.as_str());
-    let model_with_source = if source.is_empty() {
-        model_name.to_string()
+    // The adapter is visible in /model; the status line shows only the model
+    // name, using the adapter solely as a stand-in until a model is known.
+    let model_name = if model_name.is_empty() {
+        state
+            .active_models
+            .primary_source
+            .as_deref()
+            .filter(|source| !source.is_empty())
+            .unwrap_or(state.agent_source_id.as_str())
     } else {
-        format!("{model_name} via {source}")
+        model_name
     };
     let effort = state
         .primary_reasoning_effort
@@ -8904,7 +8809,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     let primary_field = format!("primary: {primary}");
     let review_field = format!("review: {review}");
     let mut full_fields = vec![
-        (model_with_source.clone(), state.theme.primary),
+        (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
         (project.to_string(), state.theme.secondary),
         (primary_field.clone(), state.theme.success),
@@ -8917,8 +8822,8 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         return status_line_from_fields(full_fields, state.theme.muted);
     }
 
-    // Preserve every requested field at common terminal widths by dropping
-    // the adapter suffix and assigning the remaining space to the path.
+    // Preserve every requested field at common terminal widths by assigning
+    // the remaining space to the path.
     let mut medium_fields = vec![
         (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
@@ -9182,13 +9087,14 @@ fn draw_transcript(
                 && c.search_query == search_query
     );
     if !cache_hit {
-        transcript_scroll.cache = Some(build_transcript_cache(
+        let cache = build_chat_transcript_cache(
             state,
             inner.width,
             revision,
             search_query.clone(),
-            false,
-        ));
+            &mut transcript_scroll.prefix,
+        );
+        transcript_scroll.cache = Some(cache);
     }
     let total = transcript_scroll
         .cache
@@ -9235,7 +9141,7 @@ fn draw_transcript(
         .as_ref()
         .expect("cache populated above");
     let (window, inner_scroll) =
-        wrapped_visible_window(&cache.lines, &cache.row_starts, top, inner.height);
+        stitched_visible_window(transcript_scroll.prefix.as_ref(), cache, top, inner.height);
     let paragraph = Paragraph::new(window)
         .wrap(Wrap { trim: false })
         .scroll((inner_scroll, 0));
@@ -9277,7 +9183,183 @@ fn build_transcript_cache(
         line_count,
         entry_row_starts,
         row_starts,
+        prefix_rows: 0,
     }
+}
+
+/// Number of leading transcript entries whose rendered lines can no longer
+/// change, making them safe to freeze in [`SettledPrefixCache`]. The rules
+/// mirror `AppState`'s mutation surface:
+/// - the trailing entry can always grow (`append_or_start` extends the last
+///   entry in place for streamed message and replayed user-prompt chunks)
+/// - the newest Plan / SubagentPlan entries are replaced in place by later
+///   plan updates even though the stability predicate classes them stable
+/// - entries at or past the lowest reveal prefix render a growing text slice
+/// - a turn whose compact context is not final re-renders as a whole when
+///   `transcript_turns` reclassifies it: any turn with unstable entries, any
+///   turn whose local lifecycle has not completed (a mid-turn steer splits
+///   the running turn into a non-last one), and the in-flight last turn that
+///   has not become compactable yet
+/// - every frozen entry must settle naturally: the committed-by-fiat
+///   shortcut is ignored, because a force-committed entry's render still
+///   changes (a running terminal's reference line resolves when it exits)
+fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
+    let len = state.transcript.len();
+    if len == 0 {
+        return 0;
+    }
+    let mut boundary = len - 1;
+    for (index, entry) in state.transcript.iter().enumerate().rev() {
+        if matches!(entry, Entry::Plan(_)) {
+            boundary = boundary.min(index);
+            break;
+        }
+    }
+    for (index, entry) in state.transcript.iter().enumerate().rev() {
+        if matches!(entry, Entry::SubagentPlan(_)) {
+            boundary = boundary.min(index);
+            break;
+        }
+    }
+    if let Some(index) = state.min_stream_visible_entry() {
+        boundary = boundary.min(index);
+    }
+    for (position, turn) in turns.iter().enumerate() {
+        if turn.prompt_index >= boundary {
+            break;
+        }
+        let last_turn = position + 1 == turns.len();
+        // A mid-turn steer pushes a later `UserPrompt` without a lifecycle,
+        // so the running turn is no longer the last one; it still completes
+        // (and compacts, and gains its elapsed label) on `PromptDone`.
+        let lifecycle_open = state.has_prompt_turn(turn.prompt_index)
+            && !state.prompt_turn_completed(turn.prompt_index);
+        if !turn.entries_stable || lifecycle_open || (last_turn && !turn.is_compactable) {
+            boundary = turn.prompt_index;
+            break;
+        }
+    }
+    state.transcript[..boundary]
+        .iter()
+        .enumerate()
+        .find(|&(index, entry)| !transcript_entry_settles_naturally(state, index, entry))
+        .map_or(boundary, |(index, _)| index)
+}
+
+/// Build the chat pane's transcript cache, reusing and extending the settled
+/// prefix so a rebuild only renders the entries that can still change. The
+/// search path renders the full transcript (matches need every entry) and
+/// leaves the prefix untouched for when the search clears.
+fn build_chat_transcript_cache(
+    state: &AppState,
+    width: u16,
+    revision: u64,
+    search_query: Option<String>,
+    prefix: &mut Option<SettledPrefixCache>,
+) -> TranscriptCache {
+    if search_query.is_some() {
+        return build_transcript_cache(state, width, revision, search_query, false);
+    }
+    let turns = transcript_turns(state);
+    let boundary = settled_entry_boundary(state, &turns);
+    let epoch = state.settled_render_epoch();
+    if prefix
+        .as_ref()
+        .is_some_and(|p| p.epoch != epoch || p.width != width || p.entries > boundary)
+    {
+        *prefix = None;
+    }
+    let rendered_entries = prefix.as_ref().map_or(0, |p| p.entries);
+    if rendered_entries < boundary {
+        let new_lines = render_transcript_entry_range_with_turns(
+            state,
+            width,
+            rendered_entries..boundary,
+            transcript_collapse_limit(state),
+            state.theme,
+            true,
+            &turns,
+        );
+        let p = prefix.get_or_insert_with(|| SettledPrefixCache {
+            epoch,
+            width,
+            entries: 0,
+            lines: Vec::new(),
+            row_starts: Vec::new(),
+            rows: 0,
+        });
+        for line in new_lines {
+            p.row_starts.push(p.rows);
+            p.rows += wrapped_line_height(&line, width);
+            p.lines.push(line);
+        }
+        p.entries = boundary;
+    }
+    let prefix_rows = prefix.as_ref().map_or(0, |p| p.rows);
+    let lines = render_transcript_entry_range_with_turns(
+        state,
+        width,
+        boundary..state.transcript.len(),
+        transcript_collapse_limit(state),
+        state.theme,
+        true,
+        &turns,
+    );
+    let (mut row_starts, tail_rows) = wrapped_row_starts(&lines, width);
+    for start in &mut row_starts {
+        *start += prefix_rows;
+    }
+    TranscriptCache {
+        revision,
+        width,
+        search_query: None,
+        lines,
+        line_count: prefix_rows + tail_rows,
+        entry_row_starts: Vec::new(),
+        row_starts,
+        prefix_rows,
+    }
+}
+
+/// Lines covering wrapped rows `top .. top + height` across the settled
+/// prefix and the cache's tail, plus the scroll offset inside the first
+/// returned line. Splitting at the seam keeps the frame O(visible rows).
+fn stitched_visible_window(
+    prefix: Option<&SettledPrefixCache>,
+    cache: &TranscriptCache,
+    top: usize,
+    height: u16,
+) -> (Vec<Line<'static>>, u16) {
+    let Some(prefix) = prefix.filter(|_| cache.prefix_rows > 0) else {
+        return wrapped_visible_window(&cache.lines, &cache.row_starts, top, height);
+    };
+    if top >= cache.prefix_rows {
+        return tail_visible_window(cache, top, height);
+    }
+    let (mut window, inner_scroll) =
+        wrapped_visible_window(&prefix.lines, &prefix.row_starts, top, height);
+    let end_row = top.saturating_add(usize::from(height));
+    if end_row > cache.prefix_rows {
+        let remaining = (end_row - cache.prefix_rows).min(usize::from(height)) as u16;
+        let (tail, _) = tail_visible_window(cache, cache.prefix_rows, remaining);
+        window.extend(tail);
+    }
+    (window, inner_scroll)
+}
+
+/// Window over the cache's tail lines, whose `row_starts` are absolute
+/// (offset by `prefix_rows`); `top` is absolute as well.
+fn tail_visible_window(
+    cache: &TranscriptCache,
+    top: usize,
+    height: u16,
+) -> (Vec<Line<'static>>, u16) {
+    wrapped_visible_window(
+        &cache.lines,
+        &cache.row_starts,
+        top.max(cache.prefix_rows),
+        height,
+    )
 }
 
 /// Block title for the transcript pane. Adds a scroll indicator when
@@ -9834,6 +9916,11 @@ fn render_transcript_entry_range_with_turns(
             }
             Entry::System(text) => {
                 push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
+            }
+            Entry::CommandOutput(text) => {
+                // The user typed the command; its result is the answer they
+                // asked for and stays fully readable, like their own prompt.
+                push_styled_message(&mut out, text, theme.accent, false, theme);
             }
             Entry::ReviewLedger(lines) => {
                 push_review_ledger_record(&mut out, lines, theme);
@@ -12864,7 +12951,7 @@ fn workflow_progress_line(
                 Some(remaining) => format!("waiting for {remaining} automatic results"),
                 None => format!(
                     "waiting · {}",
-                    crate::ragnarok::first_line(&waiting.dependency, 48)
+                    crate::text::first_line(&waiting.dependency, 48)
                 ),
             });
         }
@@ -14941,1367 +15028,14 @@ fn model_choice_score(
     None
 }
 
-// ===========================================================================
-// Ragnarok arena: launch, keys, and the gloriously silly battle scenes
-// ===========================================================================
-
-/// How long an action flourish keeps driving a fighter's pose.
-const RAGNAROK_ACTION_TTL: Duration = Duration::from_secs(12);
-/// Animation frame cadence (shares the spinner heartbeat).
-const RAGNAROK_FRAME_MS: u128 = 250;
-const RAGNAROK_CARD_MIN_WIDTH: u16 = 24;
-// Borders (2) + agent/pass_at_1 line + 7 half-block sprite rows + vigor bar +
-// action caption.
-const RAGNAROK_CARD_HEIGHT: u16 = 12;
-const RAGNAROK_THOR_STRIP_HEIGHT: u16 = 3;
-const RAGNAROK_FEED_MIN_HEIGHT: u16 = 3;
-
-/// Arena-local convenience over [`truncate_text_to_width`], which takes an
-/// owned `String` and a `u16` width.
+/// Convenience over [`truncate_text_to_width`] for callers with `usize`
+/// layout widths.
 fn fit_width(text: impl Into<String>, width: usize) -> String {
     truncate_text_to_width(text.into(), width.min(u16::MAX as usize) as u16)
 }
 
-fn publish_ragnarok_observation(
-    state: &AppState,
-    observer: Option<&mpsc::UnboundedSender<Option<RagnarokObservation>>>,
-    last_observation: &mut Option<Option<RagnarokObservation>>,
-) {
-    let Some(observer) = observer else {
-        return;
-    };
-    let observation = state.ragnarok.as_ref().map(RagnarokUi::observation);
-    if last_observation.as_ref() == Some(&observation) {
-        return;
-    }
-    if observer.send(observation.clone()).is_ok() {
-        *last_observation = Some(observation);
-    }
-}
-
-/// Spawn the battle task for a validated `/ragnarok` request.
-fn start_ragnarok(
-    state: &mut AppState,
-    task: String,
-    tx: mpsc::UnboundedSender<ragnarok::RagnarokEvent>,
-) {
-    let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-    let (proceed_tx, proceed_rx) = tokio::sync::watch::channel(false);
-    let cfg = ragnarok::BattleConfig {
-        task: task.clone(),
-        cwd: state.session_cwd.clone(),
-        available_models: state.ragnarok_models.clone(),
-        thor_host: active_thor_host(state),
-    };
-    state.ragnarok = Some(RagnarokUi::new(task, abort_tx, proceed_tx));
-    tokio::spawn(ragnarok::run_battle(cfg, tx, abort_rx, proceed_rx));
-}
-
-fn drain_ragnarok_draft_pr_publish(
-    state: &mut AppState,
-    tx: &mpsc::UnboundedSender<ragnarok::RagnarokEvent>,
-) {
-    while let Some(req) = state.take_ragnarok_draft_pr_publish_request() {
-        spawn_ragnarok_draft_pr_publish(req, tx.clone());
-    }
-}
-
-fn spawn_ragnarok_draft_pr_publish(
-    req: ragnarok::DraftPrRequest,
-    tx: mpsc::UnboundedSender<ragnarok::RagnarokEvent>,
-) {
-    let winner = req.winner;
-    let _ = tx.send(ragnarok::RagnarokEvent::DraftPrPublishing { winner });
-    tokio::spawn(async move {
-        let ev = match ragnarok::publish_draft_pr(req).await {
-            Ok(url) => ragnarok::RagnarokEvent::DraftPrPublished { winner, url },
-            Err(e) => ragnarok::RagnarokEvent::DraftPrFailed {
-                winner,
-                message: format!("{e:#}"),
-            },
-        };
-        let _ = tx.send(ev);
-    });
-}
-
-fn active_thor_host(state: &AppState) -> Option<ragnarok::ThorHost> {
-    let launch = state.active_agent_launch.clone()?;
-    let model = active_model_config(state);
-    Some(ragnarok::ThorHost {
-        agent_source_id: state.agent_source_id.clone(),
-        launch,
-        model_value: model.as_ref().map(|(value, _)| value.clone()),
-        model_name: model.map(|(_, name)| name),
-    })
-}
-
-fn active_model_config(state: &AppState) -> Option<(String, String)> {
-    state
-        .session_config_options
-        .iter()
-        .find(|option| crate::app::is_model_config_option(option))
-        .and_then(|option| {
-            let value = crate::app::config_option_current_value_id(option)?.to_string();
-            let name = crate::app::config_option_current_value_label(option);
-            Some((value, name))
-        })
-}
-
-fn handle_ragnarok_key(
-    state: &mut AppState,
-    modifiers: KeyModifiers,
-    code: KeyCode,
-    mode: UiMode,
-) -> TerminalRequest {
-    let Some(arena) = state.ragnarok.as_mut() else {
-        return TerminalRequest::None;
-    };
-    let over = arena.battle_over();
-
-    // Ctrl-C always aborts, raging battle or not.
-    if modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('c')) {
-        state.close_ragnarok();
-        return inline_repair_request(mode);
-    }
-
-    let disarm_quit = !matches!(code, KeyCode::Char('q') | KeyCode::Char('Q'));
-    match code {
-        KeyCode::Esc => {
-            arena.quit_armed = false;
-            if arena.pane == ArenaPane::Transcript {
-                arena.pane = ArenaPane::Arena;
-                return inline_repair_request(mode);
-            }
-            if over {
-                state.close_ragnarok();
-                return inline_repair_request(mode);
-            }
-        }
-        KeyCode::Char('q') | KeyCode::Char('Q') if over => {
-            state.close_ragnarok();
-            return inline_repair_request(mode);
-        }
-        KeyCode::Char('q') | KeyCode::Char('Q') => {
-            if arena.quit_armed {
-                arena.abort();
-                arena.quit_armed = false;
-            } else {
-                arena.quit_armed = true;
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') => arena.scroll_feed(1),
-        KeyCode::Down | KeyCode::Char('j') => arena.scroll_feed(-1),
-        KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('[') => arena.cycle_fighter(-1),
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(']') => arena.cycle_fighter(1),
-        KeyCode::Char('r') => arena.show_review_lane = !arena.show_review_lane,
-        KeyCode::Char(c @ '1'..='9') => {
-            let picked = (c as u8 - b'1') as usize;
-            if over {
-                if arena.chosen_finalist.is_none()
-                    && let Some(verdict) = &arena.verdict
-                    && let Some((a, b)) = verdict.finalists
-                {
-                    match picked {
-                        0 => {
-                            arena.chosen_finalist = Some(a);
-                            arena.queue_draft_pr_publish(a);
-                        }
-                        1 => {
-                            arena.chosen_finalist = Some(b);
-                            arena.queue_draft_pr_publish(b);
-                        }
-                        _ => {}
-                    }
-                }
-            } else if picked < arena.fighters.len() {
-                arena.selected_fighter = picked;
-            }
-        }
-        KeyCode::Enter if over => {
-            state.close_ragnarok();
-            return inline_repair_request(mode);
-        }
-        KeyCode::Enter if arena.awaiting_approval() => {
-            arena.unleash();
-        }
-        KeyCode::Enter | KeyCode::Tab | KeyCode::Char('t') | KeyCode::Char('T') => {
-            arena.quit_armed = false;
-            toggle_ragnarok_pane(arena);
-            return inline_repair_request(mode);
-        }
-        _ => {}
-    }
-    if disarm_quit && let Some(arena) = state.ragnarok.as_mut() {
-        arena.quit_armed = false;
-    }
-    TerminalRequest::None
-}
-
-fn toggle_ragnarok_pane(arena: &mut RagnarokUi) {
-    arena.pane = match arena.pane {
-        ArenaPane::Arena => ArenaPane::Transcript,
-        ArenaPane::Transcript => ArenaPane::Arena,
-    };
-}
-
-/// Wall-clock animation frame, shared by every arena element.
-fn arena_frame() -> usize {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| (elapsed.as_millis() / RAGNAROK_FRAME_MS) as usize)
-        .unwrap_or(0)
-}
-
-fn battle_clock(arena: &RagnarokUi) -> String {
-    let secs = arena.started_at.elapsed().as_secs();
-    if secs >= 3600 {
-        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else {
-        format!("{:02}:{:02}", secs / 60, secs % 60)
-    }
-}
-
-/// A stable, distinct-ish color per fighter.
-fn fighter_ink(theme: TerminalTheme, id: ragnarok::FighterId) -> Ink {
-    let cycle = [
-        theme.primary,
-        theme.secondary,
-        theme.success,
-        theme.warning,
-        theme.tool,
-        theme.accent,
-        theme.user,
-        theme.terminal,
-        theme.error,
-        theme.quote,
-    ];
-    cycle[id % cycle.len()]
-}
-
-fn draw_ragnarok(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
-    let Some(arena) = state.ragnarok.as_ref() else {
-        return;
-    };
-    let theme = state.theme;
-    f.render_widget(Clear, area);
-    if area.width < 10 || area.height < 4 {
-        let line = Line::from(Span::styled(
-            "⚡ RAGNAROK rages (terminal too small for the arena)",
-            Style::default().ink(theme.warning),
-        ));
-        f.render_widget(Paragraph::new(line), area);
-        return;
-    }
-    match arena.pane {
-        ArenaPane::Arena => draw_ragnarok_arena_pane(f, area, arena, theme),
-        ArenaPane::Transcript => draw_ragnarok_transcript_pane(f, area, arena, theme),
-    }
-}
-
-fn ragnarok_banner_line(arena: &RagnarokUi, theme: TerminalTheme, width: u16) -> Line<'static> {
-    let frame = arena_frame();
-    let bolts = ["⚡", "🔥", "⚡", "☄"];
-    let bolt = bolts[frame % bolts.len()];
-    let phase = if arena.failed.is_some() {
-        "THE BATTLE IS LOST".to_string()
-    } else {
-        arena.phase.banner().to_string()
-    };
-    let text = format!(
-        "{bolt} RAGNAROK ━ {} ━ {} {bolt}",
-        phase,
-        battle_clock(arena)
-    );
-    let text = fit_width(&text, width as usize);
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .ink(if arena.failed.is_some() {
-                theme.error
-            } else {
-                theme.warning
-            })
-            .add_modifier(Modifier::BOLD),
-    ))
-    .centered()
-}
-
-fn ragnarok_footer_line(arena: &RagnarokUi, theme: TerminalTheme, width: u16) -> Line<'static> {
-    let over = arena.battle_over();
-    let hints = if arena.quit_armed {
-        "⚠ q again to quit Ragnarok (Esc cancels) ⚠".to_string()
-    } else if over {
-        match arena.verdict.as_ref().and_then(|v| v.finalists) {
-            Some(_) if arena.chosen_finalist.is_none() => {
-                "1/2 choose finalist · Enter accept & close · t transcripts · q close".to_string()
-            }
-            None => {
-                "Enter/q close · t transcripts · ↑/↓ feed · ←/→ fighter · r review lane".to_string()
-            }
-            Some(_) => {
-                "Enter/q close · t transcripts · ↑/↓ feed · ←/→ fighter · r review lane".to_string()
-            }
-        }
-    } else if arena.awaiting_approval() {
-        "⚔ Enter to UNLEASH RAGNAROK (no combat spend yet) · ↑/↓ feed · q quit".to_string()
-    } else {
-        match arena.pane {
-            ArenaPane::Arena => {
-                "Enter transcript · ↑/↓ feed · ←/→ fighter · 1-9 select · q quit".to_string()
-            }
-            ArenaPane::Transcript => {
-                "Esc arena · Enter arena · ←/→ fighter · r review lane · q quit".to_string()
-            }
-        }
-    };
-    if arena.awaiting_approval() && !arena.quit_armed {
-        let style = Style::default()
-            .ink(theme.warning)
-            .add_modifier(Modifier::BOLD);
-        return Line::from(Span::styled(fit_width(&hints, width as usize), style)).centered();
-    }
-    let style = if arena.quit_armed {
-        Style::default()
-            .ink(theme.error)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().ink(theme.muted)
-    };
-    Line::from(Span::styled(fit_width(&hints, width as usize), style)).centered()
-}
-
-fn ragnarok_stage_height(arena: &RagnarokUi, width: u16, max_height: u16) -> u16 {
-    if max_height == 0 {
-        return 0;
-    }
-
-    match arena.phase {
-        ragnarok::Phase::Judgment | ragnarok::Phase::Verdict => return max_height,
-        ragnarok::Phase::Mustering | ragnarok::Phase::Routing if arena.fighters.is_empty() => {
-            return max_height.clamp(1, 10);
-        }
-        _ => {}
-    }
-
-    if arena.fighters.is_empty() {
-        return max_height.clamp(1, 8);
-    }
-
-    let n = arena.fighters.len() as u16;
-    let cols = (width / RAGNAROK_CARD_MIN_WIDTH).clamp(1, n);
-    let rows = n.div_ceil(cols);
-    let thor_height = if arena.thor_action.is_some() {
-        RAGNAROK_THOR_STRIP_HEIGHT
-    } else {
-        0
-    };
-    rows.saturating_mul(RAGNAROK_CARD_HEIGHT)
-        .saturating_add(thor_height)
-        .min(max_height)
-        .max(1)
-}
-
-fn draw_ragnarok_arena_pane(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    // Banner / task / stage / feed / footer.
-    let middle_height = area.height.saturating_sub(3);
-    let feed_min = if middle_height > RAGNAROK_FEED_MIN_HEIGHT {
-        RAGNAROK_FEED_MIN_HEIGHT
-    } else {
-        middle_height.saturating_sub(1)
-    };
-    let stage_max = middle_height.saturating_sub(feed_min);
-    let stage_height = ragnarok_stage_height(arena, area.width, stage_max);
-    let feed_height = middle_height.saturating_sub(stage_height);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(stage_height),
-            Constraint::Length(feed_height),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    f.render_widget(
-        Paragraph::new(ragnarok_banner_line(arena, theme, chunks[0].width)),
-        chunks[0],
-    );
-    let task_line = Line::from(vec![
-        Span::styled("quest: ", Style::default().ink(theme.muted)),
-        Span::styled(
-            fit_width(
-                arena.task.replace('\n', " "),
-                chunks[1].width.saturating_sub(7) as usize,
-            ),
-            Style::default().ink(theme.text),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(task_line), chunks[1]);
-
-    match arena.phase {
-        ragnarok::Phase::Verdict => draw_ragnarok_verdict(f, chunks[2], arena, theme),
-        ragnarok::Phase::Judgment => draw_ragnarok_judgment(f, chunks[2], arena, theme),
-        ragnarok::Phase::Mustering | ragnarok::Phase::Routing if arena.fighters.is_empty() => {
-            draw_ragnarok_summoning(f, chunks[2], arena, theme)
-        }
-        _ => draw_ragnarok_fighters(f, chunks[2], arena, theme),
-    }
-
-    draw_ragnarok_feed(f, chunks[3], arena, theme);
-    f.render_widget(
-        Paragraph::new(ragnarok_footer_line(arena, theme, chunks[4].width)),
-        chunks[4],
-    );
-}
-
-fn current_thor_action(arena: &RagnarokUi) -> ragnarok::ThorAction {
-    arena.thor_action.unwrap_or(match arena.phase {
-        ragnarok::Phase::Routing => ragnarok::ThorAction::Deciding,
-        ragnarok::Phase::Review => ragnarok::ThorAction::Assigning,
-        ragnarok::Phase::Judgment | ragnarok::Phase::Verdict => ragnarok::ThorAction::Judging,
-        _ => ragnarok::ThorAction::Descending,
-    })
-}
-
-fn thor_action_lines(arena: &RagnarokUi, theme: TerminalTheme, width: u16) -> Vec<Line<'static>> {
-    let frame = arena_frame();
-    let action = current_thor_action(arena);
-    let pulse = ["·", "✦", "✶", "✦"][frame % 4];
-    let drift = ["  ", " ", "", " "][frame % 4];
-    let (title, art): (&str, [&str; 2]) = match action {
-        ragnarok::ThorAction::Descending => (
-            "THOR DESCENDS",
-            [
-                "      storm splits open     ",
-                "        helm first           ",
-            ],
-        ),
-        ragnarok::ThorAction::Deciding => (
-            "THOR DECIDES",
-            ["   [ task ] <=?=> [ field ]", "       runes turn in place "],
-        ),
-        ragnarok::ThorAction::Assigning => (
-            "THOR ASSIGNS RIVALS",
-            [
-                "   champion -> rival -> champion",
-                "       blades cross on command ",
-            ],
-        ),
-        ragnarok::ThorAction::Judging => (
-            "THOR JUDGES",
-            [
-                "          verdict scales       ",
-                "       hammer over the record  ",
-            ],
-        ),
-        ragnarok::ThorAction::Mercy => (
-            "THOR WEIGHS MERCY",
-            [
-                "      hourglass against hammer ",
-                "        spare or strike now    ",
-            ],
-        ),
-    };
-    let age = arena.thor_action_at.elapsed().as_millis() / RAGNAROK_FRAME_MS;
-    let intensity = match age {
-        0..=3 => "!!!",
-        4..=10 => "!! ",
-        _ => "!  ",
-    };
-    [
-        format!("{pulse} {title} {intensity} {pulse}"),
-        format!("{drift}{}", art[0]),
-        format!("{}{}", " ".repeat(frame % 3), art[1]),
-    ]
-    .into_iter()
-    .map(|line| {
-        Line::from(Span::styled(
-            fit_width(line, width as usize),
-            Style::default()
-                .ink(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .centered()
-    })
-    .collect()
-}
-
-fn draw_thor_action_strip(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let lines: Vec<Line> = thor_action_lines(arena, theme, area.width)
-        .into_iter()
-        .take(area.height as usize)
-        .collect();
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-fn thor_descending_scene_rows(frame: usize) -> Vec<String> {
-    let drop = ["      ", "    ", "  ", " "][frame % 4];
-    let cape = [" /|\\ ", " \\|/ ", " /|\\ ", "\\ | /"][frame % 4];
-    let sparks = ["  \\ | /", "-- ᚦ --", "  / | \\", "-- ⚡ --"][frame % 4];
-    vec![
-        format!("{drop}{sparks}"),
-        format!("{drop}        _/\\_        "),
-        format!("{drop}      _/ᛏ  ᛏ\\_      "),
-        format!("{drop}     /_( ᚨ ᚨ )_\\     "),
-        format!("{drop}       \\_===_/   __==#"),
-        format!("{drop}       {cape}   /"),
-        format!("{drop}      /_| ᛉ  |_\\/ "),
-        format!("{drop}        /_/ \\_\\     "),
-    ]
-}
-
-fn thor_summoning_scene_rows(arena: &RagnarokUi, frame: usize) -> Vec<String> {
-    match current_thor_action(arena) {
-        ragnarok::ThorAction::Descending => thor_descending_scene_rows(frame),
-        ragnarok::ThorAction::Deciding => {
-            let glow = ["✦", "✧", "✶", "✧"][frame % 4];
-            vec![
-                format!("        {glow} ᚱ  ᚢ  ᚾ  ᛖ {glow}        "),
-                "      .-----------------.     ".to_string(),
-                "      | task | field | cost | ".to_string(),
-                "      '-----------------'     ".to_string(),
-                "          \\  judgment  /      ".to_string(),
-                "           \\_  ___  _/        ".to_string(),
-                "             /_/ \\_\\          ".to_string(),
-            ]
-        }
-        _ => {
-            let spark = ["✦", "✧", "✶", "✧"][frame % 4];
-            vec![
-                format!("          {spark} THOR STANDS READY {spark}"),
-                "              _/\\_              ".to_string(),
-                "            _/ᛏ  ᛏ\\_            ".to_string(),
-                "            (  ᚨ ᚨ  )     __==# ".to_string(),
-                "             \\_===_/     /      ".to_string(),
-                "             /| ᛉ |\\   /       ".to_string(),
-                "            /_|___|_\\          ".to_string(),
-            ]
-        }
-    }
-}
-
-/// Pre-roster splash: Thor descends and the route visibly changes state.
-fn draw_ragnarok_summoning(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let frame = arena_frame();
-    let mut lines = thor_action_lines(arena, theme, area.width);
-    lines.push(Line::default());
-    let art = thor_summoning_scene_rows(arena, frame);
-    lines.extend(
-        art.into_iter()
-            .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.accent))).centered()),
-    );
-    lines.push(
-        Line::from(Span::styled(
-            match arena.phase {
-                ragnarok::Phase::Mustering => "« the war horn calls champions to the arena »",
-                _ => "« Thor weighs the quest upon his scales »",
-            },
-            Style::default().ink(theme.muted),
-        ))
-        .centered(),
-    );
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-/// The main combat grid: one animated card per champion.
-fn draw_ragnarok_fighters(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    if arena.fighters.is_empty() {
-        return;
-    }
-    let cards_area = if arena.thor_action.is_some() && area.height > RAGNAROK_THOR_STRIP_HEIGHT {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(RAGNAROK_THOR_STRIP_HEIGHT),
-                Constraint::Min(0),
-            ])
-            .split(area);
-        draw_thor_action_strip(f, chunks[0], arena, theme);
-        chunks[1]
-    } else {
-        area
-    };
-    if cards_area.height == 0 {
-        return;
-    }
-
-    let n = arena.fighters.len() as u16;
-    let cols = (cards_area.width / RAGNAROK_CARD_MIN_WIDTH).clamp(1, n);
-    let rows = n.div_ceil(cols);
-
-    // Not enough vertical room for cards: compact one-line-per-fighter view.
-    if cards_area.height < rows * RAGNAROK_CARD_HEIGHT {
-        let lines: Vec<Line> = arena
-            .fighters
-            .iter()
-            .enumerate()
-            .take(cards_area.height as usize)
-            .map(|(i, fighter)| compact_fighter_line(arena, fighter, i, theme, cards_area.width))
-            .collect();
-        f.render_widget(Paragraph::new(lines), cards_area);
-        return;
-    }
-
-    let row_rects = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            std::iter::repeat_n(Constraint::Length(RAGNAROK_CARD_HEIGHT), rows as usize)
-                .chain(std::iter::once(Constraint::Min(0)))
-                .collect::<Vec<_>>(),
-        )
-        .split(cards_area);
-    for row in 0..rows {
-        let start = (row * cols) as usize;
-        let in_row = arena
-            .fighters
-            .len()
-            .saturating_sub(start)
-            .min(cols as usize);
-        if in_row == 0 {
-            break;
-        }
-        let col_rects = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Ratio(1, in_row as u32); in_row])
-            .split(row_rects[row as usize]);
-        for col in 0..in_row {
-            let idx = start + col;
-            draw_fighter_card(f, col_rects[col], arena, &arena.fighters[idx], idx, theme);
-        }
-    }
-}
-
-fn compact_fighter_line(
-    arena: &RagnarokUi,
-    fighter: &RagnarokFighterUi,
-    index: usize,
-    theme: TerminalTheme,
-    width: u16,
-) -> Line<'static> {
-    let selected = index == arena.selected_fighter;
-    let marker = if selected { "▶" } else { " " };
-    let (state_word, state_color) = fighter_state_label(&fighter.state, theme);
-    let action = fighter
-        .action
-        .as_ref()
-        .filter(|(_, _, at)| at.elapsed() < RAGNAROK_ACTION_TTL)
-        .map(|(kind, detail, _)| format!(" {} {detail}", action_glyph(*kind)))
-        .or_else(|| ambient_combat_caption(fighter).map(|caption| format!(" {caption}")))
-        .unwrap_or_default();
-    let text = format!(
-        "{marker}{} {} — {state_word}{action}",
-        pose_for(fighter)[1].trim(),
-        fighter.card.tag(),
-    );
-    Line::from(Span::styled(
-        fit_width(&text, width as usize),
-        Style::default().ink(state_color),
-    ))
-}
-
-fn fighter_state_label(state: &ragnarok::FighterState, theme: TerminalTheme) -> (String, Ink) {
-    match state {
-        ragnarok::FighterState::Summoned => ("SUMMONED".to_string(), theme.muted),
-        ragnarok::FighterState::Forging => ("FORGING CAMP".to_string(), theme.accent),
-        ragnarok::FighterState::Connecting => ("APPROACHING".to_string(), theme.accent),
-        ragnarok::FighterState::Fighting => ("FIGHTING".to_string(), theme.warning),
-        ragnarok::FighterState::Capturing => ("TALLYING".to_string(), theme.secondary),
-        ragnarok::FighterState::Standing => ("STANDING".to_string(), theme.success),
-        ragnarok::FighterState::Slain(_) => ("SLAIN".to_string(), theme.error),
-    }
-}
-
-fn action_glyph(kind: ragnarok::ActionKind) -> &'static str {
-    match kind {
-        ragnarok::ActionKind::Forge => "🔨",
-        ragnarok::ActionKind::Strike => "⚡",
-        ragnarok::ActionKind::Scry => "🔮",
-        ragnarok::ActionKind::Chant => "🎵",
-        ragnarok::ActionKind::Ponder => "💭",
-        ragnarok::ActionKind::Wound => "🩸",
-        ragnarok::ActionKind::Guard => "🛡",
-    }
-}
-
-fn live_action_kind(fighter: &RagnarokFighterUi) -> Option<ragnarok::ActionKind> {
-    fighter
-        .action
-        .as_ref()
-        .filter(|(_, _, at)| at.elapsed() < RAGNAROK_ACTION_TTL)
-        .map(|(kind, _, _)| *kind)
-}
-
-fn ambient_combat_action(fighter: &RagnarokFighterUi) -> Option<ragnarok::ActionKind> {
-    if !matches!(
-        fighter.state,
-        ragnarok::FighterState::Fighting | ragnarok::FighterState::Capturing
-    ) || live_action_kind(fighter).is_some()
-    {
-        return None;
-    }
-    let beat = (arena_frame() / 2)
-        .wrapping_add(fighter.card.id * 2)
-        .wrapping_add(fighter.actions_seen as usize);
-    Some(match beat % 6 {
-        0 | 3 => ragnarok::ActionKind::Strike,
-        1 | 4 => ragnarok::ActionKind::Forge,
-        2 => ragnarok::ActionKind::Scry,
-        _ => ragnarok::ActionKind::Chant,
-    })
-}
-
-fn animated_action_kind(fighter: &RagnarokFighterUi) -> Option<ragnarok::ActionKind> {
-    live_action_kind(fighter).or_else(|| ambient_combat_action(fighter))
-}
-
-fn ambient_combat_caption(fighter: &RagnarokFighterUi) -> Option<&'static str> {
-    let action = ambient_combat_action(fighter)?;
-    Some(match action {
-        ragnarok::ActionKind::Strike => "⚡ leaping strike",
-        ragnarok::ActionKind::Forge => "🔨 hammer feint",
-        ragnarok::ActionKind::Scry => "🔮 reading the field",
-        ragnarok::ActionKind::Chant => "🎵 rallying cry",
-        _ => "⚔ pressing the attack",
-    })
-}
-
-fn fighter_bounce_offset(fighter: &RagnarokFighterUi) -> usize {
-    if !matches!(
-        fighter.state,
-        ragnarok::FighterState::Fighting | ragnarok::FighterState::Capturing
-    ) {
-        return 0;
-    }
-    let beat = arena_frame()
-        .wrapping_add(fighter.card.id)
-        .wrapping_add(fighter.actions_seen as usize);
-    usize::from(beat % 4 == 1)
-}
-
-/// Which pixel-art animation a fighter plays right now, plus the accent color
-/// for its `M` pixels (sparks, lightning, orb, notes, blood).
-///
-/// The accents are ANSI rather than the RGB they used to be: they are sprite
-/// *foregrounds*, and a hardcoded gold is exactly what stops reading as gold on
-/// a terminal theme we never saw. The sprite body keeps its RGB texture (see
-/// [`crate::ragnarok_sprites`]); only these highlights follow the palette.
-fn sprite_for(fighter: &RagnarokFighterUi, theme: TerminalTheme) -> (SpriteKind, Ink) {
-    const GOLD: Ink = Ink::ansi(Color::Yellow);
-    const BLOOD: Ink = Ink::ansi(Color::Red);
-    match &fighter.state {
-        ragnarok::FighterState::Slain(_) => (SpriteKind::Slain, BLOOD),
-        ragnarok::FighterState::Standing => (SpriteKind::Victor, GOLD),
-        ragnarok::FighterState::Summoned
-        | ragnarok::FighterState::Forging
-        | ragnarok::FighterState::Connecting => (SpriteKind::March, theme.muted),
-        _ => match animated_action_kind(fighter) {
-            Some(ragnarok::ActionKind::Forge) => (SpriteKind::Swing, GOLD),
-            // Lightning reads as the brighter of the two yellows so a strike
-            // stays distinguishable from a hammer blow.
-            Some(ragnarok::ActionKind::Strike) => {
-                (SpriteKind::Swing, Ink::ansi(Color::LightYellow))
-            }
-            Some(ragnarok::ActionKind::Scry) => (SpriteKind::Cast, Ink::ansi(Color::Magenta)),
-            Some(ragnarok::ActionKind::Ponder) => (SpriteKind::Cast, Ink::dim()),
-            Some(ragnarok::ActionKind::Chant) => (SpriteKind::Cast, GOLD),
-            Some(ragnarok::ActionKind::Wound) => (SpriteKind::Wound, BLOOD),
-            Some(ragnarok::ActionKind::Guard) | None => (SpriteKind::Idle, theme.accent),
-        },
-    }
-}
-
-/// The 3-line ASCII pose for a fighter, chosen by state + recent action and
-/// animated by the shared wall-clock frame.
-fn pose_for(fighter: &RagnarokFighterUi) -> [&'static str; 3] {
-    type Pose = [&'static str; 3];
-    const IDLE: [Pose; 2] = [[" o ", "/|\\", "/ \\"], [" o ", "\\|/", "/ \\"]];
-    const MARCH: [Pose; 2] = [[" o ", "/|\\", "/< "], [" o ", "/|\\", " >\\"]];
-    const FORGE: [Pose; 4] = [
-        [" o_T", "/| ", "/ \\"],
-        [" oT ", "/|\\", "/ \\"],
-        ["_o  ", "T|\\", "/ \\"],
-        [" o__", "/|T", "/ \\"],
-    ];
-    const STRIKE: [Pose; 4] = [
-        ["\\o~z", " |  ", "/ \\"],
-        [" o~z", "/|  ", "/ \\"],
-        [" o  ", "/|~z", "/ \\"],
-        ["\\o/ ", " |z ", "/ \\"],
-    ];
-    const SCRY: [Pose; 2] = [[" o ", "/|(@)", "/ \\"], [" o ", "/|(o)", "/ \\"]];
-    const CHANT: [Pose; 2] = [["\\o/", " | d", "/ \\"], [" o/", "/| b", "/ \\"]];
-    const PONDER: [Pose; 2] = [[".oO", " |\\", "/ \\"], ["oO°", " |\\", "/ \\"]];
-    const WOUND: [Pose; 2] = [[" o ", "x|/", "/ \\"], ["\\o ", "x| ", "_/\\"]];
-    const VICTOR: [Pose; 2] = [["\\o/", " | ", "/ \\"], [" o ", "\\|/", "/ \\"]];
-    const SLAIN: [Pose; 1] = [["   ", "x_x", "_/\\"]];
-
-    let frame = arena_frame();
-    let pick = |poses: &'static [Pose]| poses[frame % poses.len()];
-    match &fighter.state {
-        ragnarok::FighterState::Slain(_) => pick(&SLAIN),
-        ragnarok::FighterState::Standing => pick(&VICTOR),
-        ragnarok::FighterState::Summoned
-        | ragnarok::FighterState::Forging
-        | ragnarok::FighterState::Connecting => pick(&MARCH),
-        _ => match animated_action_kind(fighter) {
-            Some(ragnarok::ActionKind::Forge) => pick(&FORGE),
-            Some(ragnarok::ActionKind::Strike) => pick(&STRIKE),
-            Some(ragnarok::ActionKind::Scry) => pick(&SCRY),
-            Some(ragnarok::ActionKind::Chant) => pick(&CHANT),
-            Some(ragnarok::ActionKind::Ponder) => pick(&PONDER),
-            Some(ragnarok::ActionKind::Wound) => pick(&WOUND),
-            Some(ragnarok::ActionKind::Guard) => pick(&IDLE),
-            None => pick(&IDLE),
-        },
-    }
-}
-
-/// Animated "vigor" bar: marching while fighting, full when standing,
-/// skulls when slain.
-fn vigor_bar(fighter: &RagnarokFighterUi, width: usize) -> String {
-    let width = width.max(4);
-    match &fighter.state {
-        ragnarok::FighterState::Slain(_) => "☠ ".repeat(width / 2),
-        ragnarok::FighterState::Standing => "▓".repeat(width),
-        ragnarok::FighterState::Fighting | ragnarok::FighterState::Capturing => {
-            let frame = arena_frame().wrapping_add(fighter.card.id * 3);
-            (0..width)
-                .map(|i| {
-                    if (i + frame).is_multiple_of(4) {
-                        '░'
-                    } else {
-                        '▓'
-                    }
-                })
-                .collect()
-        }
-        _ => "░".repeat(width),
-    }
-}
-
-fn draw_fighter_card(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    fighter: &RagnarokFighterUi,
-    index: usize,
-    theme: TerminalTheme,
-) {
-    if area.width < 6 || area.height < 3 {
-        return;
-    }
-    let selected = index == arena.selected_fighter;
-    let color = fighter_ink(theme, fighter.card.id);
-    let (state_word, state_color) = fighter_state_label(&fighter.state, theme);
-    let border_style = if selected {
-        Style::default().ink(color).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().ink(theme.muted)
-    };
-    let title = format!(
-        " {}{} ",
-        if selected { "▶ " } else { "" },
-        fighter.card.model_name
-    );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(
-            fit_width(&title, area.width.saturating_sub(2) as usize),
-            Style::default().ink(color).add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let inner_width = inner.width as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        fit_width(
-            format!(
-                "{} ⚡{:.1}% · ${:.2}",
-                fighter.card.agent_source_id,
-                fighter.card.pass_at_1_bps as f64 / 100.0,
-                fighter.card.mean_cost_usd
-            ),
-            inner_width,
-        ),
-        Style::default().ink(theme.muted),
-    )));
-
-    let (sprite_kind, accent) = sprite_for(fighter, theme);
-    let frame_set = ragnarok_sprites::frames(sprite_kind);
-    // Offset each viking's animation by their id so the shield wall doesn't
-    // march in eerie unison.
-    let frame = &frame_set[arena_frame().wrapping_add(fighter.card.id) % frame_set.len()];
-    let pad = " ".repeat(inner_width.saturating_sub(ragnarok_sprites::SPRITE_W) / 2);
-    // The sprite renderer paints raw pixels, so inks are resolved to concrete
-    // colors at this boundary rather than carried into the artwork.
-    let sprite_lines = ragnarok_sprites::render(frame, color.color(), accent.color());
-    let bounce = fighter_bounce_offset(fighter);
-    let sprite_rows = sprite_lines.len();
-    if bounce > 0 {
-        lines.push(Line::default());
-    }
-    for sprite_line in sprite_lines
-        .into_iter()
-        .take(sprite_rows.saturating_sub(bounce))
-    {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(sprite_line.spans.len() + 1);
-        spans.push(Span::raw(pad.clone()));
-        spans.extend(sprite_line.spans);
-        lines.push(Line::from(spans));
-    }
-
-    let bar_width = inner_width.saturating_sub(state_word.len() + 2).max(4);
-    lines.push(Line::from(vec![
-        Span::styled(
-            vigor_bar(fighter, bar_width),
-            Style::default().ink(state_color),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            state_word,
-            Style::default()
-                .ink(state_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    let caption = match &fighter.state {
-        ragnarok::FighterState::Slain(reason) => format!("☠ {reason}"),
-        _ => fighter
-            .action
-            .as_ref()
-            .filter(|(_, _, at)| at.elapsed() < RAGNAROK_ACTION_TTL)
-            .map(|(kind, detail, _)| format!("{} {detail}", action_glyph(*kind)))
-            .or_else(|| {
-                fighter.review_progress.map(|p| {
-                    match p {
-                        ragnarok::ReviewProgress::Connecting => "🗡 sharpening the quill…",
-                        ragnarok::ReviewProgress::Reviewing => "🗡 dissecting a rival…",
-                        ragnarok::ReviewProgress::Done => "🗡 review delivered",
-                        ragnarok::ReviewProgress::Failed => "🗡 review lost",
-                    }
-                    .to_string()
-                })
-            })
-            .or_else(|| ambient_combat_caption(fighter).map(str::to_string))
-            .unwrap_or_default(),
-    };
-    lines.push(Line::from(Span::styled(
-        fit_width(&caption, inner_width),
-        Style::default().ink(theme.subtle),
-    )));
-
-    lines.truncate(inner.height as usize);
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The scrolling battle feed, colored per fighter.
-fn draw_ragnarok_feed(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let visible_rows = area.height.saturating_sub(1) as usize;
-    let scroll = arena.feed_scroll_for_rows(visible_rows);
-    let max_scroll = arena.feed_max_scroll_for_rows(visible_rows);
-    let title = if max_scroll == 0 {
-        " ⚔ battle feed ".to_string()
-    } else if scroll == 0 {
-        format!(" ⚔ battle feed · live · ↑ {max_scroll} ")
-    } else {
-        format!(" ⚔ battle feed · {scroll}/{max_scroll} older · ↓ live ")
-    };
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().ink(theme.muted))
-        .title(Span::styled(
-            fit_width(title, area.width as usize),
-            Style::default().ink(theme.muted),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height == 0 {
-        return;
-    }
-    let take = inner.height as usize;
-    let scroll = arena.feed_scroll_for_rows(take);
-    let end = arena.feed.len().saturating_sub(scroll);
-    let start = end.saturating_sub(take);
-    let lines: Vec<Line> = arena
-        .feed
-        .iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .map(|(fighter, text)| {
-            let color = match fighter {
-                Some(id) => fighter_ink(theme, *id),
-                None => theme.text,
-            };
-            Line::from(Span::styled(
-                fit_width(text, inner.width as usize),
-                Style::default().ink(color),
-            ))
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Judgment scene: Mjölnir hovers while Thor's verdict streams in.
-fn draw_ragnarok_judgment(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let frame = arena_frame();
-    let aura = ["✦", "✧", "✶", "✧"][frame % 4];
-    let art = [
-        format!("{aura}  ______  {aura}"),
-        " [______]___".to_string(),
-        "    ||      ".to_string(),
-        format!("    ||   « THOR SITS IN JUDGMENT {aura} »"),
-    ];
-    let mut lines: Vec<Line> = art
-        .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.warning))).centered())
-        .collect();
-    lines.push(Line::default());
-    let remaining = (area.height as usize).saturating_sub(lines.len());
-    if remaining > 0 {
-        let width = area.width.saturating_sub(2) as usize;
-        for l in wrap_tail_lines(&arena.thor_text, width.max(8), remaining) {
-            lines.push(Line::from(Span::styled(
-                l,
-                Style::default().ink(theme.thought),
-            )));
-        }
-    }
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-/// Verdict scene: crown the winner, or stage the finalists for the user.
-fn draw_ragnarok_verdict(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let Some(verdict) = arena.verdict.as_ref() else {
-        return;
-    };
-    let width = area.width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-
-    match (verdict.clear_winner, verdict.finalists) {
-        (Some(id), _) => {
-            let tag = arena
-                .fighter(id)
-                .map(|f| f.card.tag())
-                .unwrap_or_else(|| format!("champion {id}"));
-            let crown = ["👑", "✨👑✨", "👑"][arena_frame() % 3];
-            lines.push(
-                Line::from(Span::styled(
-                    format!("{crown} VICTOR: {tag} {crown}"),
-                    Style::default()
-                        .ink(theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .centered(),
-            );
-            if let Some(name) = arena.fighter(id).and_then(|f| f.worktree_name.clone()) {
-                lines.push(
-                    Line::from(Span::styled(
-                        format!("Thor recommends this work — adopt it: mj --worktree {name}"),
-                        Style::default().ink(theme.accent),
-                    ))
-                    .centered(),
-                );
-            }
-        }
-        (None, Some((a, b))) => {
-            lines.push(
-                Line::from(Span::styled(
-                    "⚖ SPLIT DECISION — choose your champion ⚖",
-                    Style::default()
-                        .ink(theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .centered(),
-            );
-            for (n, id) in [a, b].into_iter().enumerate() {
-                let chosen = arena.chosen_finalist == Some(id);
-                let tag = arena
-                    .fighter(id)
-                    .map(|f| f.card.tag())
-                    .unwrap_or_else(|| format!("champion {id}"));
-                let wt = arena
-                    .fighter(id)
-                    .and_then(|f| f.worktree_name.clone())
-                    .unwrap_or_default();
-                let marker = if chosen { " ← your pick" } else { "" };
-                lines.push(Line::from(Span::styled(
-                    fit_width(
-                        format!("  [{}] {tag} — worktree {wt}{marker}", n + 1),
-                        width,
-                    ),
-                    if chosen {
-                        Style::default()
-                            .ink(theme.success)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().ink(fighter_ink(theme, id))
-                    },
-                )));
-            }
-        }
-        (None, None) => {}
-    }
-
-    if let Some(line) = ragnarok_draft_pr_status_line(arena, width) {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().ink(theme.accent),
-        )));
-    }
-
-    if verdict.thor_fallback {
-        lines.push(Line::from(Span::styled(
-            fit_width(
-                "(Thor's judgment was garbled; finalists stand in Pass@1 order)",
-                width,
-            ),
-            Style::default().ink(theme.muted),
-        )));
-    }
-
-    if !verdict.ranking.is_empty() {
-        let names: Vec<String> = verdict
-            .ranking
-            .iter()
-            .map(|id| arena.fighter_name(*id))
-            .collect();
-        lines.push(Line::from(Span::styled(
-            fit_width(format!("ranking: {}", names.join(" > ")), width),
-            Style::default().ink(theme.subtle),
-        )));
-    }
-    for rv in &verdict.review_verdicts {
-        lines.push(Line::from(Span::styled(
-            fit_width(
-                format!(
-                    "🔍 {} on {} — honesty {}/10, validity {}/10: {}",
-                    arena.fighter_name(rv.reviewer),
-                    arena.fighter_name(rv.defender),
-                    rv.honesty,
-                    rv.validity,
-                    rv.notes
-                ),
-                width,
-            ),
-            Style::default().ink(theme.thought),
-        )));
-    }
-
-    lines.push(Line::default());
-    let used = lines.len();
-    let remaining = (area.height as usize).saturating_sub(used);
-    if remaining > 0 {
-        for l in wrap_tail_lines(&verdict.reasoning, width.max(8), remaining) {
-            lines.push(Line::from(Span::styled(
-                l,
-                Style::default().ink(theme.text),
-            )));
-        }
-    }
-    lines.truncate(area.height as usize);
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-fn ragnarok_draft_pr_status_line(arena: &RagnarokUi, width: usize) -> Option<String> {
-    let status = arena.draft_pr_status.as_ref()?;
-    let line = match status {
-        RagnarokDraftPrStatus::Publishing { winner } => {
-            format!("Draft PR: publishing {}...", arena.fighter_name(*winner))
-        }
-        RagnarokDraftPrStatus::Published { winner, url } => {
-            format!("Draft PR for {}: {url}", arena.fighter_name(*winner))
-        }
-        RagnarokDraftPrStatus::Failed { winner, message } => format!(
-            "Draft PR for {} failed: {message}",
-            arena.fighter_name(*winner)
-        ),
-    };
-    Some(fit_width(line, width))
-}
-
-/// Transcript pane: live per-fighter output (combat work or their review).
-fn draw_ragnarok_transcript_pane(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    f.render_widget(
-        Paragraph::new(ragnarok_banner_line(arena, theme, chunks[0].width)),
-        chunks[0],
-    );
-
-    if arena.fighters.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "no champions yet — the muster is still on",
-                Style::default().ink(theme.muted),
-            ))),
-            chunks[2],
-        );
-        f.render_widget(
-            Paragraph::new(ragnarok_footer_line(arena, theme, chunks[3].width)),
-            chunks[3],
-        );
-        return;
-    }
-
-    let idx = arena.selected_fighter.min(arena.fighters.len() - 1);
-    let fighter = &arena.fighters[idx];
-    let lane = if arena.show_review_lane {
-        "review"
-    } else {
-        "combat"
-    };
-    let header = format!(
-        "◀ {} ▶  ({}/{})  lane: {lane} (r toggles)",
-        fighter.card.tag(),
-        idx + 1,
-        arena.fighters.len()
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            fit_width(&header, chunks[1].width as usize),
-            Style::default()
-                .ink(fighter_ink(theme, fighter.card.id))
-                .add_modifier(Modifier::BOLD),
-        ))),
-        chunks[1],
-    );
-
-    let body = if arena.show_review_lane {
-        &fighter.review_transcript
-    } else {
-        &fighter.transcript
-    };
-    let width = chunks[2].width.saturating_sub(1) as usize;
-    let lines: Vec<Line> = if body.is_empty() {
-        vec![Line::from(Span::styled(
-            match (arena.show_review_lane, &fighter.state) {
-                (true, _) => "…no review words yet (their quill is dry)",
-                (false, ragnarok::FighterState::Summoned) => "…awaiting the horn",
-                _ => "…silence on the battlefield",
-            },
-            Style::default().ink(theme.muted),
-        ))]
-    } else {
-        wrap_tail_lines(body, width.max(8), chunks[2].height as usize)
-            .into_iter()
-            .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.text))))
-            .collect()
-    };
-    f.render_widget(Paragraph::new(lines), chunks[2]);
-    f.render_widget(
-        Paragraph::new(ragnarok_footer_line(arena, theme, chunks[3].width)),
-        chunks[3],
-    );
-}
-
-/// Wrap `text` to `width` display columns and keep only the last `max_lines`
-/// lines. Works on a bounded tail slice so huge buffers stay cheap.
-fn wrap_tail_lines(text: &str, width: usize, max_lines: usize) -> Vec<String> {
-    if width == 0 || max_lines == 0 {
-        return Vec::new();
-    }
-    // Only the tail can be visible; keep a generous margin for wrapping.
-    let budget = width.saturating_mul(max_lines).saturating_mul(4).max(256);
-    let mut start = text.len().saturating_sub(budget);
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    let tail = &text[start..];
-
-    let mut lines: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    let push_line = |lines: &mut std::collections::VecDeque<String>, line: String| {
-        lines.push_back(line);
-        while lines.len() > max_lines {
-            lines.pop_front();
-        }
-    };
-    for ch in tail.chars() {
-        if ch == '\n' {
-            push_line(&mut lines, std::mem::take(&mut current));
-            current_width = 0;
-            continue;
-        }
-        if ch == '\r' {
-            continue;
-        }
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + w > width && !current.is_empty() {
-            push_line(&mut lines, std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push(ch);
-        current_width += w;
-    }
-    if !current.is_empty() {
-        push_line(&mut lines, current);
-    }
-    lines.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::app::StatusKind;
     use crate::claude_usage::{ClaudeUsageReport, ClaudeUsageStatus};
     use crate::event::{
@@ -16763,10 +15497,9 @@ mod tests {
         AvailableCommand, ContentBlock, ContentChunk, ElicitationFormMode, ElicitationId,
         ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,
         EnumOption, PermissionOption, PermissionOptionKind, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, SessionConfigOption, SessionConfigOptionCategory,
-        SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
-        StringPropertySchema, TerminalExitStatus, TextContent, ToolCall, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        PlanEntryStatus, SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId,
+        SessionUpdate, StopReason, StringPropertySchema, TerminalExitStatus, TextContent, ToolCall,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -17335,7 +16068,7 @@ mod tests {
         let line = status_line(&state, 200);
         assert_eq!(
             line_text(&line),
-            "gpt-5-6-terra via codex-acp · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
+            "gpt-5-6-terra · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
         );
         assert!(!line_text(&line).contains("github.com"));
         // Compare whole styles rather than bare colors: hierarchy now lives
@@ -18250,7 +16983,7 @@ mod tests {
             WorkflowKind::Review,
             WorkflowPhase::SpecialistReview,
         );
-        for (id, lane) in [(11, "Týr"), (12, "Heimdall"), (13, "Freya")] {
+        for (id, lane) in [(11, "Error handling"), (12, "Tests"), (13, "General")] {
             apply_workflow(
                 &mut state,
                 workflow_id,
@@ -18635,11 +17368,16 @@ mod tests {
             WorkflowTransition::ActorStarted {
                 actor_id: WorkflowActorId::Subagent(2),
                 role: WorkflowActorRole::SpecialistReviewer {
-                    lane: "Týr".to_string(),
+                    lane: "Error handling".to_string(),
                 },
             },
         )));
-        start_subagent(&mut state, 2, "review · Týr", "inspect correctness");
+        start_subagent(
+            &mut state,
+            2,
+            "review · Error handling",
+            "inspect correctness",
+        );
         state.apply_event(UiEvent::Subagent(SubagentEvent::SessionUpdate {
             subagent_id: 2,
             update: SessionUpdate::AgentThoughtChunk(text_chunk("REVIEW_ONLY")),
@@ -18657,7 +17395,7 @@ mod tests {
             .draw(|frame| draw_nested_agent_viewer(frame, frame.area(), &mut state, false))
             .expect("draw reviewer");
         let reviewer = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(reviewer.contains("reviewer Týr"), "{reviewer}");
+        assert!(reviewer.contains("reviewer Error handling"), "{reviewer}");
         assert!(reviewer.contains("REVIEW_ONLY"), "{reviewer}");
         assert!(!reviewer.contains("IMPLEMENTATION_ONLY"), "{reviewer}");
 
@@ -19883,6 +18621,21 @@ mod tests {
     }
 
     #[test]
+    fn removed_ragnarok_command_is_forwarded_as_an_ordinary_prompt() {
+        let mut state = AppState::new();
+        state.input = "/ragnarok inspect this".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, images, .. })
+                if text == "/ragnarok inspect this" && images.is_empty()
+        ));
+    }
+
+    #[test]
     fn slash_agents_adds_active_models_system_entry() {
         let mut state = AppState::new();
         state.active_models = crate::config::ModelsConfig {
@@ -19911,7 +18664,7 @@ mod tests {
         assert_eq!(state.input_cursor, 0);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text))
+            Some(Entry::CommandOutput(text))
                 if text
                     == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via opencode\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
@@ -19951,6 +18704,12 @@ mod tests {
         let remaining = crate::memory::entries(&state.memory_store_path).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, 2);
+        // The confirmation echoes the stored text, so it must land as
+        // uncollapsible command output rather than a collapsible system note.
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::CommandOutput(text)) if text == "forgot memory m1: uses pnpm"
+        ));
 
         // Clearing needs an explicit confirm round trip.
         state.input = "/memory clear".to_string();
@@ -19977,7 +18736,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_memory_lists_memories_as_a_system_entry() {
+    fn slash_memory_lists_memories_as_a_command_output_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = AppState::new();
         state.memory_store_path = dir.path().join("memories.json");
@@ -19991,7 +18750,7 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("[m1] global fact")
+            Some(Entry::CommandOutput(text)) if text.contains("[m1] global fact")
         ));
     }
 
@@ -20007,7 +18766,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("Memories")
+            Some(Entry::CommandOutput(text)) if text.contains("Memories")
         ));
 
         state.agent_source_id = "codex-acp".to_string();
@@ -20015,7 +18774,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("Memories")
+            Some(Entry::CommandOutput(text)) if text.contains("Memories")
         ));
     }
 
@@ -23265,13 +22024,6 @@ mod tests {
         });
         handle_crossterm(&mut state, &cmd_tx, ctrl_g());
         assert!(!state.workspace_diff_viewer);
-
-        state.team_picker = None;
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        handle_crossterm(&mut state, &cmd_tx, ctrl_g());
-        assert!(!state.workspace_diff_viewer);
     }
 
     #[test]
@@ -24028,6 +22780,329 @@ mod tests {
         );
     }
 
+    /// Turns completed through the real prompt lifecycle, so every entry is
+    /// stable and every turn is compactable — the settled-prefix happy path.
+    fn settled_turns_state(turns: usize) -> AppState {
+        let mut state = AppState::new();
+        for index in 0..turns {
+            state.record_user_prompt(format!("prompt {index}"));
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                text_chunk(&format!(
+                    "answer {index}: {}",
+                    "prose that wraps across several rendered rows ".repeat(4)
+                )),
+            )));
+            state.apply_event(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn settled_boundary_excludes_live_turns_reveals_plans_and_the_tail() {
+        let mut state = settled_turns_state(3);
+        let turns = transcript_turns(&state);
+        // Only the trailing entry stays live once every turn has settled.
+        assert_eq!(
+            settled_entry_boundary(&state, &turns),
+            state.transcript.len() - 1
+        );
+
+        // An in-flight turn keeps every entry from its prompt onward live.
+        state.record_user_prompt("active".to_string());
+        let active_prompt = state.transcript.len() - 1;
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("streaming answer"),
+        )));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), active_prompt);
+
+        // An entry paced by the reveal controller renders a growing slice.
+        assert!(state.set_stream_visible_bytes(1, 4));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), 1);
+        assert!(state.clear_stream_visible_bytes(1));
+
+        // The newest Plan entry is replaced in place by later plan updates,
+        // so it must stay live even with settled turns behind and after it.
+        let mut state = settled_turns_state(1);
+        let plan_index = state.transcript.len();
+        state.transcript.push(Entry::Plan(Vec::new()));
+        state.record_user_prompt("after the plan".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("done"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), plan_index);
+    }
+
+    #[test]
+    fn chat_cache_with_settled_prefix_matches_the_full_render() {
+        let mut state = settled_turns_state(4);
+        state.record_user_prompt("active".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("streaming thought that is still growing"),
+        )));
+
+        let (width, height) = (40u16, 10u16);
+        let mut prefix = None;
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        assert!(
+            cache.prefix_rows > 0,
+            "settled turns must land in the prefix"
+        );
+        let full = render_transcript_lines(&state, width);
+        let (full_starts, full_total) = wrapped_row_starts(&full, width);
+        assert_eq!(cache.line_count, full_total);
+
+        let render = |lines: Vec<Line<'static>>, scroll: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((scroll, 0)),
+                        frame.area(),
+                    )
+                })
+                .expect("draw");
+            buffer_lines(terminal.backend().buffer())
+        };
+
+        let seam = cache.prefix_rows;
+        for top in [
+            0usize,
+            1,
+            seam.saturating_sub(1),
+            seam,
+            seam + 1,
+            full_total.saturating_sub(usize::from(height)),
+            full_total + 3,
+        ] {
+            let (window, inner_scroll) =
+                stitched_visible_window(prefix.as_ref(), &cache, top, height);
+            let (full_window, full_scroll) =
+                wrapped_visible_window(&full, &full_starts, top, height);
+            assert_eq!(
+                render(window, inner_scroll),
+                render(full_window, full_scroll),
+                "stitched window differs from the full render at row {top}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_cache_reuses_the_settled_prefix_across_stream_revisions() {
+        let mut state = settled_turns_state(4);
+        state.record_user_prompt("active".to_string());
+
+        let width = 40u16;
+        let mut prefix = None;
+        build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let frozen = prefix.as_ref().expect("prefix populated").entries;
+        assert!(frozen > 0);
+
+        // Tamper with a cached line: streaming revisions must reuse the
+        // frozen render verbatim, so the marker survives the rebuild.
+        prefix.as_mut().expect("prefix").lines[0] = Line::from("TAMPERED-PREFIX-MARKER");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("more streamed prose"),
+        )));
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let (window, _) = stitched_visible_window(prefix.as_ref(), &cache, 0, 4);
+        assert_eq!(line_text(&window[0]), "TAMPERED-PREFIX-MARKER");
+        assert_eq!(prefix.as_ref().expect("prefix").entries, frozen);
+
+        // A settled-render epoch bump (Ctrl-T changes every collapse budget)
+        // must drop the frozen prefix and rebuild it from live state.
+        state.toggle_expand_transcript_details();
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let (window, _) = stitched_visible_window(prefix.as_ref(), &cache, 0, 4);
+        assert_ne!(line_text(&window[0]), "TAMPERED-PREFIX-MARKER");
+    }
+
+    #[test]
+    fn fullscreen_transcript_draw_extends_the_prefix_like_a_fresh_render() {
+        let mut state = settled_turns_state(3);
+        state.record_user_prompt("active".to_string());
+        let mut scroll = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert!(
+            scroll.prefix.as_ref().is_some_and(|p| p.entries > 0),
+            "fullscreen draw must populate the settled prefix"
+        );
+
+        // Stream more prose and complete the turn: the incremental rebuild
+        // must render exactly what a from-scratch render of the same state
+        // produces.
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("streamed body of the active turn"),
+        )));
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+
+        let mut fresh_scroll = TranscriptScrollState::default();
+        let mut fresh_terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+        fresh_terminal
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(
+            buffer_lines(terminal.backend().buffer()),
+            buffer_lines(fresh_terminal.backend().buffer()),
+        );
+    }
+
+    #[test]
+    fn settled_boundary_holds_a_running_turn_split_by_a_mid_turn_steer() {
+        let mut state = settled_turns_state(1);
+        state.record_user_prompt("ready the v1 release".to_string());
+        let running_prompt = state.transcript.len() - 1;
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("working on v1"),
+        )));
+        // A steer lands as a later `UserPrompt` without its own lifecycle, so
+        // the running turn is no longer the last turn. Its entries are all
+        // stable (the steer closed the open message) but `PromptDone` still
+        // has to complete it, which compacts its render and adds its elapsed
+        // time to the turn header.
+        state.record_steered_prompt("sorry, make it v2".to_string(), Vec::new());
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), running_prompt);
+
+        let (width, height) = (60u16, 16u16);
+        let mut scroll = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("switching to v2"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+
+        let mut fresh_scroll = TranscriptScrollState::default();
+        let mut fresh_terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        fresh_terminal
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(
+            buffer_lines(terminal.backend().buffer()),
+            buffer_lines(fresh_terminal.backend().buffer()),
+            "the completed turn must re-render compacted, not stay frozen in its streaming form"
+        );
+    }
+
+    #[test]
+    fn settled_boundary_ignores_force_committed_running_tools() {
+        let mut state = settled_turns_state(1);
+        insert_running_terminal_tool_call(&mut state, "stuck-build", "cargo build --watch");
+        let tool_index = state.transcript.len() - 1;
+        state.record_user_prompt("carry on".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("done"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        // The inline overflow valve committed the running tool to scrollback:
+        // stable by fiat, but its render still resolves once the terminal
+        // exits, so the settled prefix must not freeze it.
+        assert!(state.force_commit_transcript_entries(tool_index + 1));
+        assert!(transcript_entry_is_stable(
+            &state,
+            tool_index,
+            &state.transcript[tool_index]
+        ));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), tool_index);
+    }
+
+    #[test]
+    fn late_update_to_a_settled_tool_bumps_the_settled_render_epoch() {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+
+        let mut state = settled_turns_state(1);
+        state.record_user_prompt("run the tool".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("tool-1", "run a check"),
+        )));
+        let mut fail = ToolCallUpdateFields::default();
+        fail.status = Some(ToolCallStatus::Failed);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", fail),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let epoch = state.settled_render_epoch();
+
+        // A no-op update leaves the settled render, and so the epoch, alone.
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", ToolCallUpdateFields::default()),
+        )));
+        assert_eq!(state.settled_render_epoch(), epoch);
+
+        // A late update that rewrites the failed tool changes a render the
+        // settled prefix may have frozen.
+        let mut retitle = ToolCallUpdateFields::default();
+        retitle.title = Some("rewritten after failure".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", retitle),
+        )));
+        assert_ne!(state.settled_render_epoch(), epoch);
+    }
+
     #[test]
     fn transcript_search_highlights_visible_matches() {
         let mut state = AppState::new();
@@ -24309,6 +23384,31 @@ mod tests {
                 .count(),
             3,
             "user prompt, primary, and subagent answer tails must remain visible: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn command_output_never_collapses() {
+        let mut state = AppState::new();
+        let listing = format!(
+            "Memories — store\n{}  [m99] LAST_MEMORY_LINE (today)",
+            "  [m1] a durable fact worth keeping around (2d ago)\n".repeat(30)
+        );
+        state.transcript.push(Entry::CommandOutput(listing));
+
+        let rendered = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("LAST_MEMORY_LINE")),
+            "command output must stay fully readable: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("details hidden")),
+            "command output must never collapse: {rendered:?}"
         );
     }
 
@@ -28578,461 +27678,6 @@ mod tests {
         assert!(state.runtime_closed);
         assert_eq!(state.connection_state(), ConnectionState::Fatal);
         assert!(cmd_rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn ragnarok_command_without_task_warns_usage() {
-        let mut state = AppState::new();
-        state.input = "/ragnarok".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        assert!(cmd_rx.try_recv().is_err(), "nothing goes to the agent");
-        assert!(state.take_ragnarok_launch().is_none());
-        assert_eq!(state.prompt_history(), vec!["/ragnarok".to_string()]);
-        let status = state.status_line.clone().expect("status");
-        assert_eq!(status.kind, StatusKind::Warning);
-        assert!(status.text.contains("usage: /ragnarok"));
-    }
-
-    #[test]
-    fn ragnarok_command_requests_launch_without_touching_the_agent() {
-        let mut state = AppState::new();
-        // No session, runtime not even connected: /ragnarok must still work —
-        // battles run on their own ACP connections.
-        state.input = "/ragnarok forge me a hammer".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        assert!(cmd_rx.try_recv().is_err(), "nothing goes to the agent");
-        assert_eq!(
-            state.take_ragnarok_launch().as_deref(),
-            Some("forge me a hammer")
-        );
-        assert_eq!(
-            state.prompt_history(),
-            vec!["/ragnarok forge me a hammer".to_string()]
-        );
-        assert!(state.input.is_empty());
-        assert!(state.prompt_history_previous());
-        assert_eq!(state.input, "/ragnarok forge me a hammer");
-        assert!(matches!(
-            state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("Ragnarok summoned")
-        ));
-    }
-
-    #[test]
-    fn ragnarok_observer_tracks_arena_open_and_close() {
-        let mut state = AppState::new();
-        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
-        let mut last_observation = None;
-
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new(
-            "forge me a hammer".into(),
-            abort_tx,
-            proceed_tx,
-        ));
-        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
-        let open = observer_rx
-            .try_recv()
-            .expect("open observation")
-            .expect("active arena");
-        assert_eq!(open.task, "forge me a hammer");
-        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
-        assert!(
-            observer_rx.try_recv().is_err(),
-            "unchanged arena snapshots must be coalesced"
-        );
-
-        state.ragnarok = None;
-        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
-        assert_eq!(observer_rx.try_recv(), Ok(None));
-    }
-
-    #[test]
-    fn active_thor_host_uses_current_agent_and_model_config() {
-        let mut state = AppState::new();
-        state.agent_source_id = "custom:bridge".to_string();
-        state.active_agent_launch = Some(ragnarok::Launch {
-            source_id: "custom:bridge".to_string(),
-            program: PathBuf::from("bridge"),
-            args: vec!["--max-turns".to_string(), "7".to_string()],
-            env: HashMap::from([("BRIDGE_TEST".to_string(), "1".to_string())]),
-        });
-        state.session_config_options = vec![
-            SessionConfigOption::select(
-                "mode",
-                "Mode",
-                "code",
-                vec![SessionConfigSelectOption::new("code", "Code")],
-            )
-            .category(Some(SessionConfigOptionCategory::Mode)),
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "codex::gpt-5-codex",
-                vec![
-                    SessionConfigSelectOption::new("codex::gpt-5-codex", "GPT-5 Codex"),
-                    SessionConfigSelectOption::new("bedrock::us.anthropic.claude-opus-4-8", "Opus"),
-                ],
-            )
-            .category(Some(SessionConfigOptionCategory::Model)),
-        ];
-
-        let host = active_thor_host(&state).expect("host");
-
-        assert_eq!(host.agent_source_id, "custom:bridge");
-        assert_eq!(host.launch.program, PathBuf::from("bridge"));
-        assert_eq!(host.launch.args, vec!["--max-turns", "7"]);
-        assert_eq!(
-            host.launch.env.get("BRIDGE_TEST").map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(host.model_value.as_deref(), Some("codex::gpt-5-codex"));
-        assert_eq!(host.model_name.as_deref(), Some("GPT-5 Codex"));
-    }
-
-    #[test]
-    fn ragnarok_command_warns_when_battle_already_raging() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("first".into(), abort_tx, proceed_tx));
-        state.input = "/ragnarok second task".to_string();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        assert!(state.take_ragnarok_launch().is_none());
-        assert_eq!(
-            state.prompt_history(),
-            vec!["/ragnarok second task".to_string()]
-        );
-        let status = state.status_line.clone().expect("status");
-        assert_eq!(status.kind, StatusKind::Warning);
-        assert!(status.text.contains("already raging"));
-    }
-
-    #[test]
-    fn ragnarok_prefix_must_be_word_aligned() {
-        let mut state = AppState::new();
-        state.session_id = Some("s-1".to_string());
-        state.input = "/ragnarokish".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        // Not our command: falls through to a normal prompt send.
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(UiCommand::SendPrompt { text, .. }) if text == "/ragnarokish"
-        ));
-        assert!(state.take_ragnarok_launch().is_none());
-    }
-
-    #[test]
-    fn ragnarok_keys_drive_the_arena() {
-        let mut state = AppState::new();
-        let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-            crate::ragnarok::FighterCard {
-                id: 1,
-                agent_source_id: "b".into(),
-                model_value: "m1".into(),
-                model_name: "M1".into(),
-                pass_at_1_bps: 1500,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-
-        // Enter opens the selected fighter transcript during active combat.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Transcript);
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Arena);
-        // Tab remains as a compatibility alias, and t is the mnemonic fallback
-        // when Enter is reserved for approval or closing.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('t'),
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Transcript);
-        state.ragnarok.as_mut().unwrap().quit_armed = true;
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Tab,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Arena);
-        assert!(
-            !state.ragnarok.as_ref().unwrap().quit_armed,
-            "pane toggles disarm the quit confirmation"
-        );
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Transcript);
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Esc,
-            UiMode::InlineChat,
-        );
-        assert_eq!(
-            state.ragnarok.as_ref().unwrap().pane,
-            ArenaPane::Arena,
-            "Esc exits the transcript pane"
-        );
-        // Arrows cycle fighters.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Right,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().selected_fighter, 1);
-        for line in ["one", "two", "three"] {
-            state.apply_ragnarok_event(ragnarok::RagnarokEvent::Log {
-                fighter: None,
-                text: line.to_string(),
-            });
-        }
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Up,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().feed_scroll, 1);
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Down,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().feed_scroll, 0);
-
-        // Enter at the approval gate unleashes combat without closing.
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Phase(ragnarok::Phase::Approval));
-        assert!(!*proceed_rx.borrow());
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert!(state.ragnarok.is_some(), "gate Enter must not close");
-        assert!(*proceed_rx.borrow(), "gate Enter fires the proceed watch");
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Phase(ragnarok::Phase::Combat));
-
-        // q arms, second q fires the abort watch.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('q'),
-            UiMode::InlineChat,
-        );
-        assert!(state.ragnarok.as_ref().unwrap().quit_armed);
-        assert!(!*abort_rx.borrow());
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Esc,
-            UiMode::InlineChat,
-        );
-        assert!(
-            !state.ragnarok.as_ref().unwrap().quit_armed,
-            "Esc cancels quit confirmation"
-        );
-        assert!(!*abort_rx.borrow());
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('q'),
-            UiMode::InlineChat,
-        );
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('q'),
-            UiMode::InlineChat,
-        );
-        assert!(*abort_rx.borrow(), "second q quits the battle");
-        // The arena stays up until the battle task reports Failed/Done.
-        assert!(state.ragnarok.is_some());
-    }
-
-    #[test]
-    fn ragnarok_stage_height_uses_card_rows_instead_of_dead_air() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-            crate::ragnarok::FighterCard {
-                id: 1,
-                agent_source_id: "b".into(),
-                model_value: "m1".into(),
-                model_name: "M1".into(),
-                pass_at_1_bps: 1500,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::ThorAction(
-            ragnarok::ThorAction::Deciding,
-        ));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Phase(ragnarok::Phase::Combat));
-        let arena = state.ragnarok.as_ref().unwrap();
-
-        assert_eq!(
-            ragnarok_stage_height(arena, 200, 54),
-            RAGNAROK_THOR_STRIP_HEIGHT + RAGNAROK_CARD_HEIGHT
-        );
-    }
-
-    #[test]
-    fn thor_descending_scene_uses_viking_figure() {
-        let scene = thor_descending_scene_rows(0).join("\n");
-
-        assert!(scene.contains("_/\\_"), "scene:\n{scene}");
-        assert!(scene.contains("ᛏ"), "scene:\n{scene}");
-        assert!(scene.contains("__==#"), "scene:\n{scene}");
-        assert!(!scene.contains("MJÖLNIR"), "scene:\n{scene}");
-    }
-
-    #[test]
-    fn ragnarok_fighters_use_ambient_combat_animation_without_events() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::FighterState {
-            id: 0,
-            state: ragnarok::FighterState::Fighting,
-        });
-        let arena = state.ragnarok.as_ref().unwrap();
-        let fighter = &arena.fighters[0];
-
-        let (sprite, _) = sprite_for(fighter, state.theme);
-        assert!(matches!(sprite, SpriteKind::Swing | SpriteKind::Cast));
-        assert!(ambient_combat_caption(fighter).is_some());
-    }
-
-    #[test]
-    fn ragnarok_finalist_pick_and_close_after_verdict() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-            crate::ragnarok::FighterCard {
-                id: 1,
-                agent_source_id: "b".into(),
-                model_value: "m1".into(),
-                model_name: "M1".into(),
-                pass_at_1_bps: 1500,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Verdict(Box::new(
-            crate::ragnarok::Verdict {
-                clear_winner: None,
-                finalists: Some((0, 1)),
-                ranking: vec![0, 1],
-                review_verdicts: Vec::new(),
-                reasoning: "close".into(),
-                thor_fallback: false,
-            },
-        )));
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('2'),
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().chosen_finalist, Some(1));
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert!(state.ragnarok.is_none(), "Enter closes after the verdict");
-        assert!(matches!(
-            state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("your pick")
-        ));
-    }
-
-    #[test]
-    fn wrap_tail_lines_wraps_and_keeps_only_the_tail() {
-        let text = "alpha\nbeta gamma delta\nepsilon";
-        let lines = wrap_tail_lines(text, 6, 10);
-        assert_eq!(
-            lines,
-            vec!["alpha", "beta g", "amma d", "elta", "epsilo", "n"]
-        );
-        // Only the last N lines are kept.
-        let lines = wrap_tail_lines(text, 6, 2);
-        assert_eq!(lines, vec!["epsilo", "n"]);
-        // Wide glyphs never split mid-cell.
-        let wide = "⚔⚔⚔⚔";
-        let lines = wrap_tail_lines(wide, 3, 10);
-        assert!(
-            lines
-                .iter()
-                .all(|l| UnicodeWidthStr::width(l.as_str()) <= 3)
-        );
-        assert!(wrap_tail_lines("", 10, 5).is_empty());
     }
 
     #[test]

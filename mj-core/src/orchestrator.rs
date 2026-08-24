@@ -44,7 +44,7 @@ struct ActiveTurn {
 
 #[derive(Default)]
 struct UserMessageHistory {
-    messages: Vec<String>,
+    messages: Vec<UserMessage>,
     pending_replay: String,
 }
 
@@ -70,10 +70,26 @@ impl UserMessageHistory {
 
     fn record_prompt(&mut self, text: String) {
         self.finish_pending();
-        self.push_deduplicated(text);
+        self.push_deduplicated(text, false);
     }
 
-    fn snapshot(&mut self) -> Vec<String> {
+    /// Record a user message that `_session/steering` confirmed was delivered
+    /// into the running turn. It never passes through `begin_turn`, and
+    /// adapters do not reliably echo it as a `UserMessageChunk`, so this is
+    /// the only path that keeps mid-turn corrections visible to review.
+    fn record_steer(&mut self, text: String) {
+        // An adapter may echo the steer as a `UserMessageChunk` before the
+        // steering request's `injected` outcome arrives. That echo must not be
+        // flushed as a separate, unflagged copy ahead of the record that
+        // carries the mid-turn identity.
+        if self.pending_replay.trim() == text.trim() {
+            self.pending_replay.clear();
+        }
+        self.finish_pending();
+        self.push_deduplicated(text, true);
+    }
+
+    fn snapshot(&mut self) -> Vec<UserMessage> {
         self.finish_pending();
         self.messages.clone()
     }
@@ -81,13 +97,20 @@ impl UserMessageHistory {
     fn finish_pending(&mut self) {
         if !self.pending_replay.is_empty() {
             let message = std::mem::take(&mut self.pending_replay);
-            self.push_deduplicated(message);
+            self.push_deduplicated(message, false);
         }
     }
 
-    fn push_deduplicated(&mut self, text: String) {
-        if !text.trim().is_empty() && self.messages.last() != Some(&text) {
-            self.messages.push(text);
+    fn push_deduplicated(&mut self, text: String, steered: bool) {
+        if text.trim().is_empty() {
+            return;
+        }
+        // Text-only comparison: an adapter that echoes a recorded steer back
+        // as a `UserMessageChunk` must not append a second, unflagged copy,
+        // and an echo that landed first must not strip the steer's identity.
+        match self.messages.last_mut() {
+            Some(last) if last.text == text => last.steered |= steered,
+            _ => self.messages.push(UserMessage { text, steered }),
         }
     }
 }
@@ -595,6 +618,14 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     }
                     if let UiEvent::SessionUpdate(update) = &event {
                         user_messages.lock().await.observe(update);
+                    }
+                    // A steered message is a user prompt of the running turn
+                    // that never passes through `begin_turn`, and adapters do
+                    // not reliably echo it as a `UserMessageChunk`; without
+                    // this record the review lanes would audit against a
+                    // superseded request.
+                    if let UiEvent::SteeredPromptDelivered { text } = &event {
+                        user_messages.lock().await.record_steer(text.clone());
                     }
                     let active = turn.lock().await.clone();
                     if matches!(event, UiEvent::ContextCompacted) {
@@ -2731,7 +2762,10 @@ mod tests {
 
         assert_eq!(
             history.snapshot(),
-            vec!["older request".to_string(), "current request".to_string()]
+            vec![
+                UserMessage::prompt("older request"),
+                UserMessage::prompt("current request")
+            ]
         );
 
         // A same-session load emits SessionStarted and then replays the full
@@ -2748,7 +2782,111 @@ mod tests {
         history.observe(&SessionUpdate::AgentThoughtChunk(text_chunk("working")));
         assert_eq!(
             history.snapshot(),
-            vec!["older request".to_string(), "current request".to_string()]
+            vec![
+                UserMessage::prompt("older request"),
+                UserMessage::prompt("current request")
+            ]
+        );
+    }
+
+    #[test]
+    fn user_message_history_records_steers_and_deduplicates_their_echoes() {
+        let mut history = UserMessageHistory::default();
+        history.record_prompt("ready the v1 release".to_string());
+        // A confirmed `_session/steering` delivery keeps its user-authored,
+        // mid-turn identity in the history.
+        history.record_steer("sorry, make it v2".to_string());
+        // An adapter that does echo the steer as a user chunk must not
+        // append a second, unflagged copy.
+        history.observe(&SessionUpdate::UserMessageChunk(text_chunk(
+            "sorry, make it v2",
+        )));
+        history.observe(&SessionUpdate::AgentMessageChunk(text_chunk("done")));
+        assert_eq!(
+            history.snapshot(),
+            vec![
+                UserMessage::prompt("ready the v1 release"),
+                UserMessage::steer("sorry, make it v2")
+            ]
+        );
+    }
+
+    #[test]
+    fn user_message_history_keeps_the_steer_flag_when_the_echo_lands_first() {
+        let mut history = UserMessageHistory::default();
+        history.record_prompt("ready the v1 release".to_string());
+        // The adapter echoes the steered text before the steering request's
+        // `injected` outcome is confirmed; the record must not end up as an
+        // unflagged echo followed by a dropped duplicate.
+        history.observe(&SessionUpdate::UserMessageChunk(text_chunk(
+            "sorry, make it v2",
+        )));
+        history.record_steer("sorry, make it v2".to_string());
+        history.observe(&SessionUpdate::AgentMessageChunk(text_chunk("done")));
+        assert_eq!(
+            history.snapshot(),
+            vec![
+                UserMessage::prompt("ready the v1 release"),
+                UserMessage::steer("sorry, make it v2")
+            ]
+        );
+
+        // An echo already flushed by an agent chunk is upgraded in place.
+        let mut history = UserMessageHistory::default();
+        history.record_prompt("ready the v1 release".to_string());
+        history.observe(&SessionUpdate::UserMessageChunk(text_chunk(
+            "sorry, make it v2",
+        )));
+        history.observe(&SessionUpdate::AgentThoughtChunk(text_chunk("hm")));
+        history.record_steer("sorry, make it v2".to_string());
+        assert_eq!(
+            history.snapshot(),
+            vec![
+                UserMessage::prompt("ready the v1 release"),
+                UserMessage::steer("sorry, make it v2")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn steered_prompts_reach_the_review_job_as_user_messages() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel();
+        let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
+            let _ = jobs_tx.send(job.user_messages.clone());
+            let _ = outcomes.send(ReviewOutcome {
+                epoch: job.epoch,
+                verdict: ReviewVerdict::Clean,
+            });
+        });
+        let mut config = fanout_config(command_tx, spawner);
+        config.review_root = temp.path().to_path_buf();
+        let running = spawn(runtime_rx, config);
+        running
+            .handle
+            .begin_turn(1, "ready the v1 release".to_string(), Vec::new(), snapshot)
+            .await;
+        runtime_tx
+            .send(UiEvent::SteeredPromptDelivered {
+                text: "sorry, make it v2".to_string(),
+            })
+            .expect("deliver the steer");
+        runtime_tx.send(completion()).expect("complete the turn");
+
+        let user_messages = tokio::time::timeout(Duration::from_secs(5), jobs_rx.recv())
+            .await
+            .expect("review job dispatched")
+            .expect("jobs channel open");
+        assert_eq!(
+            user_messages,
+            vec![
+                UserMessage::prompt("ready the v1 release"),
+                UserMessage::steer("sorry, make it v2")
+            ],
+            "a delivered steer must reach review as a user message of the turn"
         );
     }
 
@@ -3648,8 +3786,8 @@ mod tests {
                     );
                     ReviewVerdict::Findings {
                         synthesis: "[P1] tracked.txt:1 -- second finding".to_string(),
-                        // `run_async` merges the inherited Mímir outcome with
-                        // the newly selected Týr outcome before returning.
+                        // `run_async` merges the inherited control-flow outcome with
+                        // the newly selected error-handling outcome before returning.
                         evidence: ReviewPassEvidence {
                             intent_brief: prior.evidence.intent_brief.clone(),
                             intent_available: true,

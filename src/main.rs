@@ -26,13 +26,11 @@ mod onboarding;
 mod orchestrator;
 mod palette;
 mod quota;
-mod ragnarok;
 mod remote;
 mod remote_host;
 mod roster;
 mod self_update;
 mod session;
-mod session_state;
 mod side;
 mod spinner;
 mod subagent;
@@ -2385,15 +2383,6 @@ async fn run_session(
         Some(ui_event_tx.clone()),
         true,
     );
-    let (ragnarok_observer_tx, mut ragnarok_observer_rx) =
-        mpsc::unbounded_channel::<Option<crate::session_state::RagnarokObservation>>();
-    let ragnarok_tracker = remote_tracker.clone();
-    let ragnarok_observer_task = tokio::spawn(async move {
-        while let Some(observation) = ragnarok_observer_rx.recv().await {
-            ragnarok_tracker
-                .observe_ragnarok(observation.map(remote::ragnarok_record_from_observation));
-        }
-    });
     let orchestrated = orchestrator::spawn(
         runtime_event_rx,
         orchestrator::Config {
@@ -2648,12 +2637,6 @@ async fn run_session(
                 voice_auto_send: ui_config.voice_auto_send,
                 feature_hints_enabled: ui_config.feature_hints,
                 keep_awake_enabled: ui_config.keep_awake,
-                active_agent_launch: Some(ragnarok::Launch {
-                    source_id: agent.source_id.clone(),
-                    program: agent.program.clone(),
-                    args: agent.args.clone(),
-                    env: agent.env.clone(),
-                }),
                 session_boundary: session_boundary.take(),
                 session_cwd: cwd.clone(),
                 additional_workspace_roots: runtime_options.additional_directories.clone(),
@@ -2685,8 +2668,6 @@ async fn run_session(
                 review_enabled: agent_config.discrete_review,
                 review_tier: agent_config.review_tier,
                 correction_threshold: agent_config.correction_threshold,
-                ragnarok_models: roster.available.clone(),
-                ragnarok_observer: Some(ragnarok_observer_tx.clone()),
                 primary_acp_name: roster.primary.launch.kind.display_name().to_string(),
                 primary_reasoning_effort: roster.primary.reasoning_effort.clone(),
                 termination: termination.clone(),
@@ -2837,8 +2818,6 @@ async fn run_session(
     //    open): the 2s `timeout` below trips and we `abort()` the
     //    task. `kill_on_drop(true)` on the `Command` then signals the
     //    child when the `Child` value is dropped during unwind.
-    drop(ragnarok_observer_tx);
-    wait_for_task("ragnarok observer", ragnarok_observer_task).await;
     remote_tracker.shutdown().await;
 
     let abort_handle = acp_handle.abort_handle();

@@ -858,8 +858,8 @@ fn permission_decision(
     choose_allow_option(options)
 }
 
-/// First `AllowAlways` option, else first `AllowOnce`. Shared with Ragnarok's
-/// unattended fighters, which bypass permissions inside their own worktrees.
+/// First `AllowAlways` option, else first `AllowOnce`. Shared with unattended
+/// sessions that bypass permissions inside their own worktrees.
 pub fn choose_allow_option(
     options: &[agent_client_protocol::schema::v1::PermissionOption],
 ) -> Option<String> {
@@ -1384,14 +1384,14 @@ mod tests {
     #[test]
     fn subagent_stream_actors_distinguish_interleaved_updates_and_permissions() {
         let mimir = nested_actor(4, None);
-        let heimdall = nested_actor(7, None);
+        let tests_reviewer = nested_actor(7, None);
         let records = [
             record_json(&StreamRecord::AgentMessage {
                 actor: &mimir,
                 text: "first report",
             }),
             record_json(&StreamRecord::AgentThought {
-                actor: &heimdall,
+                actor: &tests_reviewer,
                 text: "checking boundary",
             }),
             record_json(&StreamRecord::Permission {
@@ -1931,7 +1931,7 @@ mod tests {
                 &mut state,
                 &mut collecting,
                 InternalMessage {
-                    source: "Týr".to_string(),
+                    source: "Error handling".to_string(),
                     target: "Supervisor".to_string(),
                     kind,
                     text: "evidence".to_string(),

@@ -1220,7 +1220,7 @@ mod tests {
                 WorkflowTransition::ActorStarted {
                     actor_id: reviewer.clone(),
                     role: WorkflowActorRole::SpecialistReviewer {
-                        lane: "heimdall".to_string(),
+                        lane: "tests".to_string(),
                     },
                 },
             ))

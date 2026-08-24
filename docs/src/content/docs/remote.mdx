@@ -9,7 +9,6 @@ import shotNewSession from '../../assets/remote/new-session-worktree.png';
 import shotFolderSearch from '../../assets/remote/folder-search.png';
 import shotMobileSessions from '../../assets/remote/mobile-sessions.png';
 import shotSubagentApproval from '../../assets/remote/subagent-approval.png';
-import shotSubagentsReview from '../../assets/remote/subagents-review.png';
 import shotCommandPalette from '../../assets/remote/command-palette.png';
 import shotSideConversation from '../../assets/remote/side-conversation.png';
 import shotSidePalette from '../../assets/remote/side-palette.png';
@@ -161,13 +160,6 @@ running rows first in spawn order, each showing its id, label, latest activity,
 and elapsed time, and finished rows marked `✔`, `✘`, or `⊘`. This is more
 granular than the terminal's aggregate workflow progress rows.
 
-<figure class="shot">
-  <a class="shot__zoom" href={shotSubagentsReview.src} aria-label="Open the full-size screenshot: subagent work under review">
-    <Image src={shotSubagentsReview} alt="Mjolnir Web transcript showing a SUBAGENT-1 entry, a REVIEW entry raising a P1 finding that README.md documents a helper weather.py does not define, and a review supervisor starting a validator pass." />
-  </a>
-  <figcaption>Delegated work and the review that challenges it, in one browser transcript: subagent output, a P1 finding against it, and the supervisor opening a validator pass.</figcaption>
-</figure>
-
 ## Side conversations
 
 A side conversation is a throwaway fork of the primary session: ask a question,
@@ -263,17 +255,6 @@ the turn already running.
   </a>
   <figcaption>The configuration editor in the browser, with the connected adapter’s own session options underneath Mjolnir’s.</figcaption>
 </figure>
-
-## Ragnarok, read-only
-
-`/ragnarok <task>` is Mjolnir's model-vs-model arena: several champion models
-implement the same task in parallel worktrees, each adversarially reviews a
-rival's implementation, and a router agent judges the results and crowns a
-winner. While a local `/ragnarok` arena is active, the browser shows its task and
-phase, each fighter's model source, status, and vigor, plus the final verdict and
-adoption guidance when available. This view is read-only: summoning the arena,
-approving `UNLEASH`, choosing between finalists, and publishing a draft pull
-request remain local TUI actions.
 
 ## Reach it from another device
 

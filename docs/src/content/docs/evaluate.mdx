@@ -5,8 +5,6 @@ description: Watch an isolated worktree session delegate a change, a cross-provi
 
 import { Image } from 'astro:assets';
 import shotDelegating from '../../assets/evaluate/worktree-delegating.png';
-import shotSubagentDetail from '../../assets/evaluate/subagent-detail.png';
-import shotReportReview from '../../assets/evaluate/report-and-review.png';
 import shotDiscreteVerdict from '../../assets/evaluate/discrete-verdict.png';
 import shotPermissionCard from '../../assets/evaluate/permission-card.png';
 import shotConfigReviewer from '../../assets/evaluate/mjconfig-reviewer.png';
@@ -208,29 +206,15 @@ Expected observations:
    implementation subagent, and any review agents from earlier turns, each
    with its adapter and model.
 
-<figure class="shot">
-  <a class="shot__zoom" href={shotSubagentDetail.src} aria-label="Open the full-size screenshot: the /subagents detail view">
-    <Image src={shotSubagentDetail} alt="The /subagents overlay: a list of retained nested agents with the implementation subagent running on codex-acp, and its live transcript showing the new status() implementation and the tests it added." />
-  </a>
-  <figcaption><code>/subagents</code> shows every nested agent the session has run — here the implementation subagent, live, on the other provider's model — with its full transcript.</figcaption>
-</figure>
-
 4. Any permission request the subagent raises is fully readable before you
    decide and is labelled with the subagent's id.
 5. When the subagent finishes, its report is injected as a new user turn and
    the primary responds to it — verify the claims, then summarize.
 6. Because that turn changed the workspace, a discrete review starts
-   automatically: an independent reviewer session (a Norse-named specialist
-   such as `vor`, on the reviewer seat's provider) challenges the diff, a
+   automatically: an independent general reviewer session (visible as
+   `review · General`, on the reviewer seat's provider) challenges the diff, a
    validator checks each finding, and the verdict is rendered before the turn
    is released.
-
-<figure class="shot">
-  <a class="shot__zoom" href={shotReportReview.src} aria-label="Open the full-size screenshot: the subagent report and the review that follows">
-    <Image src={shotReportReview} alt="The subagent's pushed-back report summarized by the primary, a completed Subagents workflow row, and a live Review workflow row in its specialist-review phase." />
-  </a>
-  <figcaption>The pushed-back report becomes a user turn; the <strong>Subagents</strong> row completes and a <strong>Review</strong> row takes over as the independent reviewer starts.</figcaption>
-</figure>
 
 <figure class="shot">
   <a class="shot__zoom" href={shotDiscreteVerdict.src} aria-label="Open the full-size screenshot: the discrete review verdict">
@@ -288,7 +272,7 @@ that every workspace-changing turn gets this challenge before it is released.
 
 Now raise the depth. Open `/mjconfig`, go to the **Reviewer** tab, and set
 **Review depth** to **Extended** — the adversarial supervisor with on-demand
-Norse specialist lanes. It costs far more tokens and applies from the next
+specialist lanes. It costs far more tokens and applies from the next
 dispatch:
 
 <figure class="shot">

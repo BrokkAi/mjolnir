@@ -41,10 +41,6 @@
       "minimum": 59.5,
       "reason": "Remaining branches depend on live provider-specific quota responses."
     },
-    "mj-agents/src/ragnarok.rs": {
-      "minimum": 62.5,
-      "reason": "Full battle paths require multiple real ACP runtimes, git worktrees, timers, and GitHub or git subprocesses."
-    },
     "src/remote_host.rs": {
       "minimum": 0.0,
       "reason": "This host adapter launches real ACP, subagent, review, side-session, and worktree runtimes; its behavior is covered through remote API tests while a hermetic multi-runtime harness remains future work."

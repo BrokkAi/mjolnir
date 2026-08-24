@@ -959,7 +959,7 @@ impl SessionMemory {
     }
 
     /// Native-memory synchronization for worker lanes (subagents, review
-    /// lanes, ragnarok combatants, fresh side sessions). The save tools stay
+    /// lanes and fresh side sessions). The save tools stay
     /// with primary sessions so workers cannot write to the common store.
     pub fn inject_only(
         config: &crate::config::MemoryConfig,

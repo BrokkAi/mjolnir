@@ -9,8 +9,8 @@ tabs. Team and adapter changes apply to a new session. Credentials and adapter
 capabilities are probed whenever a new session roster is resolved;
 `mj models refresh` runs that probe as a standalone diagnostic.
 
-The config schema is versioned. The current schema is `version = 5`; versions 2,
-3, and 4 files are migrated in memory on load and reach disk in the current schema
+The config schema is versioned. The current schema is `version = 6`; versions 3,
+4, and 5 files are migrated in memory on load and reach disk in the current schema
 the next time settings are saved — merely reading the file never rewrites it,
 so older and newer mj builds can share one config until someone actually saves.
 A file written by a *newer* build loads best-effort and is read-only: its
@@ -29,7 +29,7 @@ canceling fresh setup leaves onboarding incomplete.
 What the **Codex coder + Claude reviewer** team writes:
 
 ```toml
-version = 5
+version = 6
 team = "codex_claude"
 
 [agent]
@@ -75,7 +75,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.session_defaults` | Per-ACP saved session-option defaults for new primary sessions |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
-| `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand Norse specialist lanes and spends far more tokens |
+| `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand specialist lanes and spends far more tokens |
 | `agent.correction_threshold` | Automatically correct validated findings through `p0`, `p1`, `p2`, or `p3` (default). Findings below the selected threshold remain tracked as deferred, and the Review Board records that policy reason. |
 | `agent.max_correction_rounds` | Optional override for review passes over findings-driven corrections; omitted defaults to `0` for Quick and `1` for Extended |
 | `review.model` | Review supervisor model, or `auto` |
@@ -134,25 +134,13 @@ Sources absent from a saved list are appended in discovery order.
 
 ## Migrating older configs
 
-A `version = 2` file (`[thor]`, `[eitri]`, `[loki]`, `[council]`) is mapped onto
-the current schema every time this build loads it:
+Versions 3 through 5 migrate in memory. The file on disk keeps its old schema
+until settings are next saved, so other installed mj builds can still read it
+in the meantime. Version 3's generated `max_correction_rounds = 1` value is
+treated as unset so review depth can supply the current tier default; explicit
+non-default values such as `0` or `3` are preserved.
 
-| v2 | v5 |
-| --- | --- |
-| `thor.model`, `thor.reasoning_effort`, `thor.discrete_review`, `thor.max_correction_rounds` | `agent.*` |
-| `eitri.model`, `eitri.reasoning_effort` | `subagents.*` |
-| `eitri.max_parallel_explores` | `subagents.max_parallel` |
-| `council.auto_failover` | `subagents.auto_failover` |
-| `[loki]`, `council.permission_mode` | dropped |
-
-`theme`, `spinner`, `[acp]`, and `[ragnarok]` carry over unchanged. The file on
-disk keeps its old schema until settings are next saved, so other installed mj
-builds can still read it in the meantime.
-
-Versions 2 and 3 wrote the former global `max_correction_rounds = 1` default
-into saved files. Their migrations remove that generated value so review depth
-can supply the new tier default. Explicit non-default values such as `0` or
-`3` are preserved.
+Version 2 and earlier are no longer supported and start from fresh defaults.
 
 ## ACP policy
 

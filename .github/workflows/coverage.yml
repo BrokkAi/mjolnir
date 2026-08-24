@@ -31,13 +31,12 @@ jobs:
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
 
-    - name: Cache cargo registry and coverage build
+    - name: Cache cargo registry
       uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          target/llvm-cov-target
         key: coverage-cargo-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
           coverage-cargo-${{ steps.toolchain.outputs.cachekey }}-

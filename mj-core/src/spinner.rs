@@ -174,7 +174,11 @@ impl SpinnerStyle {
         frames[current_frame_index(frames.len(), SPINNER_FRAME_INTERVAL_MS)]
     }
 
-    fn frame_interval_ms(self) -> u128 {
+    /// Wall-clock dwell for this style's full-width animation frames.
+    ///
+    /// Remote viewers receive the same frames as the TUI and use this value to
+    /// keep the animation cadence in sync as well.
+    pub fn frame_interval_ms(self) -> u128 {
         match self {
             Self::Scan => SCAN_FRAME_INTERVAL_MS,
             _ => SPINNER_FRAME_INTERVAL_MS,

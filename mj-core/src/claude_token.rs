@@ -32,7 +32,7 @@ const REFRESH_WINDOW_MS: i64 = 4 * 60 * 1000;
 
 /// Whether a to-be-spawned agent invocation is Claude Code. The roster
 /// adapter id is authoritative when the caller has one; several spawn
-/// paths (side sessions, ragnarok, probes) only know the command line,
+/// paths (side sessions and probes) only know the command line,
 /// where the bundled adapter package name identifies the vendor.
 pub fn is_claude_invocation(adapter_source_id: Option<&str>, args: &[String]) -> bool {
     if adapter_source_id.is_some_and(|id| id == "claude-acp") {

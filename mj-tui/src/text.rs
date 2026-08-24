@@ -1,5 +1,16 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// First line of `text`, hard-capped at `max` characters with an ellipsis.
+pub(crate) fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= max {
+        line.to_string()
+    } else {
+        let cut: String = line.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
 pub(crate) fn truncate_text_to_width(line: String, width: u16) -> String {
     let cap = width as usize;
     if line.width() <= cap {
@@ -37,7 +48,7 @@ pub(crate) fn truncate_text_to_width(line: String, width: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_text_to_width;
+    use super::{first_line, truncate_text_to_width};
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -66,5 +77,12 @@ mod tests {
 
         assert_eq!(truncated, "e\u{301}...");
         assert_eq!(truncated.width(), 4);
+    }
+
+    #[test]
+    fn first_line_truncates_at_character_boundaries() {
+        assert_eq!(first_line("hello\nworld", 60), "hello");
+        assert_eq!(first_line("", 60), "");
+        assert_eq!(first_line("éééé", 3), "éé…");
     }
 }

@@ -80,7 +80,7 @@ filesystem and terminal capabilities stay read-only for review sessions.
 
 ### Quick tier (default)
 
-One general reviewer (Vör, visible as `review · vor`) works the
+One general reviewer (visible as `review · General`) works the
 cumulative turn patch directly with Bifrost navigation tools, prioritizing
 correctness against the user's stated intent. No intent-extraction model call
 is made and no specialist lanes exist in this tier. Every finding it reports
@@ -96,6 +96,9 @@ thorough than Quick and spends far more tokens:
 1. A single self-contained user prompt goes directly to review without another
    model call. For multi-message histories, an intent analyst extracts
    the governing contract and reconciles earlier corrections or requirements.
+   Messages steered into a running turn are captured on confirmed delivery and
+   marked as mid-turn user corrections, so a steer that supersedes the turn's
+   opening prompt governs the review instead of the stale request.
 2. A first-class internal review supervisor on the configured review model receives
    Bifrost core navigation tools and an immutable change packet. It runs in a
    detached session but is not a subagent. Changes under 200 lines
@@ -103,10 +106,9 @@ thorough than Quick and spends far more tokens:
    semantic file totals and `patch_symbols` from `analyze_diff` for the
    captured base and target trees.
 3. The supervisor forms a risk map from the change packet and targeted source
-   inspection. It launches a Norse reviewer only for a concrete
-   unresolved hypothesis that the lane can investigate: Mímir (complexity),
-   Völundr (duplication), Týr (error handling), Hel (dead code), Heimdall
-   (tests), and Bragi (comments and contracts). Zero reviewers is a normal
+   inspection. It launches a specialist reviewer only for a concrete
+   unresolved hypothesis that the lane can investigate: Control flow,
+   Duplication, Error handling, Dead code, Tests, and Contracts. Zero reviewers is a normal
    outcome; patch size does not determine the roster, while several independent
    risks can justify several lanes even in a small patch. Reports arrive as
    later turns in the same supervisor session, where the supervisor verifies
@@ -124,7 +126,7 @@ reviewer. Set `max_correction_rounds` under `[agent]` to override either tier's
 default.
 
 Reviewers have no model-turn deadline. The extended supervisor is reported as
-an internal `review_session`, while dispatched reviewers — Vör on the quick
+an internal `review_session`, while dispatched reviewers — General on the quick
 tier, selected specialists on the extended tier — remain visible as
 `review · {name}` subagent rows. The normal Stop action cancels the active
 review pass and all of its reviewers and reaps their processes. Reviewers

@@ -58,8 +58,7 @@ its reviewer while leaving model selection on Auto.
   subagent seats apply their independent ACP priority lists. All lists default
   to Codex, then Claude.
 - Adapter-advertised models without a leaderboard row (for example Claude's
-  `haiku`) are selectable explicitly but do not participate in Auto or
-  Ragnarok (the `/ragnarok` model-vs-model arena).
+  `haiku`) are selectable explicitly but do not participate in Auto.
 
 Availability, credentials, advertised capabilities, and the current ranking
 can change the result. Auto chooses across launchable ranked models; adapter

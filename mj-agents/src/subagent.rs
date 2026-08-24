@@ -32,7 +32,6 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::ragnarok::PromptToolLifecycle;
 use mj_core::acp::{self, AcpRuntimeConfig, RuntimeAccessMode};
 use mj_core::agent_usage::{Record, Seat};
 use mj_core::event::{
@@ -50,6 +49,46 @@ pub const DEFAULT_MAX_PARALLEL: usize = 6;
 pub const MAX_PARALLEL_CAP: usize = 16;
 
 const SERVER_DELEGATION_GUIDANCE: &str = "SUBAGENT POLICY: create_subagent launches one background subagent on a fresh ACP session with no memory of this conversation, and returns immediately. Reports are delivered only between your turns: ending your turn while subagents run is how you wait, and you are woken with each finished subagent's full report plus progress on everything still running. Never poll. Several subagents run concurrently and all of them can write to the workspace, so give each one non-overlapping work. subagent_cancel stops or releases a subagent and returns its full report; use it to abandon or conclude work, not to collect results. You keep planning, coordination, review, verification, and the final answer.";
+
+/// Per-prompt ACP tool lifecycle state.
+///
+/// Some adapters return `PromptDone` while asynchronous tools are still
+/// running. A tool remains active until its latest explicit status is
+/// `Completed` or `Failed`; metadata-only updates for an unseen id create a
+/// conservative pending entry.
+#[derive(Debug, Default)]
+struct PromptToolLifecycle {
+    statuses: HashMap<String, ToolCallStatus>,
+}
+
+impl PromptToolLifecycle {
+    fn observe(&mut self, update: &SessionUpdate) {
+        match update {
+            SessionUpdate::ToolCall(call) => {
+                self.statuses
+                    .insert(call.tool_call_id.to_string(), call.status);
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                let status = update.fields.status;
+                self.statuses
+                    .entry(update.tool_call_id.to_string())
+                    .and_modify(|current| {
+                        if let Some(status) = status {
+                            *current = status;
+                        }
+                    })
+                    .or_insert_with(|| status.unwrap_or(ToolCallStatus::Pending));
+            }
+            _ => {}
+        }
+    }
+
+    fn has_active_tools(&self) -> bool {
+        self.statuses
+            .values()
+            .any(|status| !matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed))
+    }
+}
 
 pub const PRIMARY_SESSION_DIRECTIVE: &str = r#"<mj-subagent-policy>
 You are the primary agent and the owner of the user's outcome. You understand the request, gather the context you need, form the plan, decide what to delegate, review what comes back, verify it, and deliver the final answer. This policy applies to every subsequent user request in this ACP session.
@@ -2690,7 +2729,10 @@ async fn run(
                         | UiEvent::SessionConfigOptions { .. }
                         | UiEvent::Workflow(_)
                         | UiEvent::WorkspaceDiff(_)
-                        | UiEvent::WorkspaceHeadDiff(_) => {}
+                        | UiEvent::WorkspaceHeadDiff(_)
+                        // Steering is a primary-session feature; a subagent
+                        // lane never sends `_session/steering` requests.
+                        | UiEvent::SteeredPromptDelivered { .. } => {}
                         UiEvent::SessionUpdate(update) => {
                             tool_lifecycle.observe(&update);
                             if let SessionUpdate::UsageUpdate(value) = &update {
@@ -4449,8 +4491,8 @@ mod tests {
         assert!(SUBAGENT_PREAMBLE.contains("not ground truth"));
         assert!(SUBAGENT_PREAMBLE.contains("targeted checks"));
         assert!(SUBAGENT_PREAMBLE.contains("Your final message is the report"));
-        assert!(!SUBAGENT_PREAMBLE.contains("Eitri"));
-        assert!(!PRIMARY_SESSION_DIRECTIVE.contains("Thor"));
+        assert!(!SUBAGENT_PREAMBLE.contains("persona"));
+        assert!(!PRIMARY_SESSION_DIRECTIVE.contains("persona"));
         assert!(PRIMARY_SESSION_DIRECTIVE.contains("Never poll"));
         assert!(PRIMARY_SESSION_DIRECTIVE.contains("end your turn"));
         assert!(PRIMARY_SESSION_DIRECTIVE.contains("files owned by finished subagents"));

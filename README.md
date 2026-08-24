@@ -6,19 +6,23 @@
   </a>
 </p>
 
-Mjolnir (`mj`) is a full-featured frontend for **Codex and Claude**. It gives
+Mjolnir (`mj`) is a full-featured frontend ([ACP client](https://agentclientprotocol.com/get-started/introduction))
+for **Codex and Claude**. It gives
 both agents the same terminal workflow, team configuration, review pipeline,
-and remote-control surface.
+and remote-control surface, without taking them out of the harness they were trained to use.
 
 ## Features
 
-- **Codex and Claude teams:** use either agent for coding and review, or split
+- **Codex and Claude teams:** use either agent in its native harness for coding and review, or split
   the roles between them without changing tools or workflows.
+- **[Integrated adversarial review](https://blog.brokk.ai/mjolnir-automated-cross-vendor-adversarial-review/):**
+  automatically challenge changes
+  with an independent, cross-provider reviewer with access to [specialized static analysis tooling](https://slopcop.brokk.ai/).
+- **[Remote control]:** run the workspace and control plane on your machine while
+  driving the session from another browser or device.
 - **Parallel subagents:** delegate to as many as 16 write-capable agents in
   fresh sessions, with live progress and completed reports returned to the
   primary agent.
-- **Integrated adversarial review:** automatically challenge changed turns
-  with an independent reviewer and targeted specialist checks.
 - **Mid-turn steering:** queue a correction while a supported agent is working,
   then use Cancel to apply the oldest queued correction to the running turn.
 - **Worktree sessions:** start work in a linked Git worktree and keep agent
@@ -26,14 +30,8 @@ and remote-control surface.
 - **Shared project knowledge:** carry verified discoveries across Claude and
   Codex sessions through one local, inspectable memory interface synchronized
   into each provider's native memory files.
-- **Remote control:** run the workspace and control plane on your machine while
-  driving the session from another browser or device.
 - **Local voice input:** dictate prompts on macOS, Linux, and Windows with
   cross-platform, on-device speech recognition.
-
-### Terminal
-
-![Mjolnir review session showing the primary agent, reviewer progress, and usage](docs/readme-images/default-ui.png)
 
 ### Web interface
 
