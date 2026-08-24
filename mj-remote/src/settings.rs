@@ -158,6 +158,11 @@ impl SettingsEditor {
     /// Discovered ACP inventory backing the editor's server and session rows.
     /// The remote-control server projects it into the web `/mjconfig` panel so
     /// both UIs describe the same servers with the same status strings.
+    /// Whether the catalog holds any model this machine can actually launch.
+    pub fn any_model_launchable(&self) -> bool {
+        self.choices.iter().any(|choice| choice.available)
+    }
+
     pub fn inventory(&self) -> &AcpInventory {
         &self.inventory
     }

@@ -205,6 +205,11 @@ pub struct SessionRecord {
     pub agent: String,
     #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
+    /// Structured review workflows, including every issue's finding,
+    /// resolution, and correction evidence. Kept apart from the transcript so
+    /// the web viewer can present the same ledger and full reader as the TUI.
+    #[serde(default)]
+    pub review_workflows: Vec<ReviewWorkflowRecord>,
     #[serde(default)]
     pub queued_prompt_count: u64,
     /// True while this session has an ACP prompt turn in flight.
@@ -250,6 +255,34 @@ pub struct SessionRecord {
     /// and the current branch's open pull request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SessionStatusRecord>,
+}
+
+/// A review workflow projected for the remote viewer. The runtime owns the
+/// authoritative reducer; this record is the durable display projection it
+/// publishes to the browser and session archive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewWorkflowRecord {
+    pub turn_id: u64,
+    pub operation: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub issues: Vec<ReviewIssueRecord>,
+}
+
+/// Complete display data for one review finding. Status values use the
+/// canonical `ReviewIssueStatus::as_str` labels so the TUI and web wording
+/// remains aligned without making the remote API depend on core's enum serde.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewIssueRecord {
+    pub id: usize,
+    pub pass: u32,
+    pub summary: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_details: Option<String>,
 }
 
 /// A live session plus viewer-only ownership metadata. Ownership is derived
@@ -2081,10 +2114,9 @@ impl TrackerState {
     /// Mirror one workflow lifecycle transition.
     ///
     /// Reduce it into the tracker's own `WorkflowStore` first, exactly as
-    /// `AppState` does, then render the same notices the TUI writes to its
-    /// transcript. Review workflows are the longest-running thing a session
-    /// does, so without this a remote watcher sees a silent gap where the
-    /// terminal shows the review starting, waiting and finishing.
+    /// `AppState` does. The snapshot publishes that store's review ledger
+    /// separately from the generic lifecycle notices, so the browser has the
+    /// same issue evidence and verification state as the TUI.
     fn observe_workflow_event(&mut self, event: &mj_core::workflow::WorkflowEvent) {
         use mj_core::workflow::{ApplyOutcome, WorkflowActorId, WorkflowState, WorkflowTransition};
 
@@ -2132,8 +2164,9 @@ impl TrackerState {
             // Listed rather than caught by `_` on purpose: a new transition
             // variant should make whoever adds it decide whether the remote
             // transcript wants it, instead of silently defaulting to "no".
-            // Per-actor transitions drive the subagent status rows, and the
-            // issue transitions are status-line only in the TUI too.
+            // Per-actor transitions drive the subagent status rows. Issue
+            // transitions are represented by the snapshot's structured review
+            // ledger rather than duplicated as generic transcript notices.
             WorkflowTransition::PhaseChanged { .. }
             | WorkflowTransition::CoverageChanged { .. }
             | WorkflowTransition::ActorStarted { .. }
@@ -2729,6 +2762,7 @@ impl TrackerState {
             worktree: self.worktree.clone(),
             agent: self.agent.clone(),
             transcript: self.published_transcript(),
+            review_workflows: self.review_workflows(),
             queued_prompt_count: 0,
             prompt_in_flight: if self.side_state == RemoteSideState::Inactive {
                 self.prompt_in_flight && self.prompt_turn_started_at.is_some()
@@ -2746,6 +2780,33 @@ impl TrackerState {
             workspace_head_diff: self.workspace_head_diff.clone(),
             status: Some(self.status_record()),
         })
+    }
+
+    fn review_workflows(&self) -> Vec<ReviewWorkflowRecord> {
+        let mut workflows = self
+            .workflows
+            .iter()
+            .filter(|workflow| workflow.kind == mj_core::workflow::WorkflowKind::Review)
+            .map(|workflow| ReviewWorkflowRecord {
+                turn_id: workflow.id.turn_id,
+                operation: workflow.id.operation,
+                outcome: workflow.outcome.map(|outcome| outcome.as_str().to_string()),
+                issues: workflow
+                    .issues
+                    .iter()
+                    .map(|issue| ReviewIssueRecord {
+                        id: issue.id,
+                        pass: issue.pass,
+                        summary: issue.summary.clone(),
+                        status: issue.status.as_str().to_string(),
+                        resolution_reason: issue.resolution_reason.clone(),
+                        resolution_details: issue.resolution_details.clone(),
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        workflows.sort_by_key(|workflow| (workflow.turn_id, workflow.operation));
+        workflows
     }
 
     fn status_record(&self) -> SessionStatusRecord {
@@ -3948,10 +4009,17 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
+/// The server started without a launchable model; the payload is the roster
+/// resolution message. The server serves the viewer anyway so the user can
+/// finish setup there, and the session manager keeps re-resolving until a
+/// roster binds.
+#[derive(Debug, Clone)]
+pub struct SetupPending(pub String);
+
 /// Options for [`run_server`], mirroring the `mj server` CLI surface.
 pub struct RuntimeServerOptions {
     pub config: config::Config,
-    pub roster: roster::Roster,
+    pub roster: std::result::Result<roster::Roster, SetupPending>,
     pub hostname: Option<String>,
     /// Probe this machine for a certificate-capable tailscale node at
     /// startup and, when one is found, serve its `ts.net` certificate.
@@ -4013,12 +4081,23 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     };
     let workspace_roots =
         mj_core::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
-    let mjconfig = Arc::new(MjConfigRuntime::new(
-        config_path.clone(),
-        resolved.choices.clone(),
-        Some(models_config_from_roster(&resolved)),
-        resolved.inventory.clone(),
-    ));
+    let mjconfig = Arc::new(match &resolved {
+        Ok(resolved) => MjConfigRuntime::new(
+            config_path.clone(),
+            resolved.choices.clone(),
+            Some(models_config_from_roster(resolved)),
+            resolved.inventory.clone(),
+        ),
+        // Setup pending: no roster to seed from. Detection-only inventory
+        // keeps the ACP servers panel truthful until the first discovery
+        // pass replaces it.
+        Err(SetupPending(_)) => MjConfigRuntime::new(
+            config_path.clone(),
+            Vec::new(),
+            None,
+            roster::discover_inventory(&cfg),
+        ),
+    });
     let session_ttl = session_ttl_from_days(session_ttl_days);
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, listen.port, &token);
@@ -4098,6 +4177,10 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         println!("session lifetime: ephemeral (signs out when the browser/PWA closes)");
     } else {
         println!("session lifetime: {session_ttl_days} days");
+    }
+    if let Err(SetupPending(reason)) = &resolved {
+        println!("setup needed: {reason}");
+        println!("open the viewer above to finish setup: sign in to an agent and choose a team.");
     }
 
     serve_listeners_until_terminated(listeners, tls_config, app, termination, session_manager)
@@ -4808,6 +4891,20 @@ struct MjConfigSnapshot {
     discovery_revision: u64,
     /// One-shot message produced while applying an edit.
     notice: Option<String>,
+    /// What still blocks this server from launching sessions. `None` once a
+    /// team is configured and a launchable model exists.
+    setup: Option<MjSetupPanel>,
+}
+
+/// First-run state driving the viewer's setup prompt.
+#[derive(Debug, Serialize)]
+struct MjSetupPanel {
+    /// No team is configured and none is adoptable from local credentials.
+    team_selection_required: bool,
+    /// Discovery has not found a launchable model.
+    no_launchable_models: bool,
+    /// One-line instruction naming the next step.
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -4932,6 +5029,7 @@ struct MjAppearancePanel {
 struct MjSpinnerEntry {
     name: String,
     frames: Vec<String>,
+    frame_interval_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -5234,6 +5332,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     .iter()
                     .map(|frame| frame.text().to_string())
                     .collect(),
+                frame_interval_ms: style.frame_interval_ms(),
             })
             .collect(),
         thought_output: config.thought_output.to_string(),
@@ -5250,6 +5349,14 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         (Some(warning), None) => Some(warning),
         (None, notice) => notice,
     };
+
+    let team_selection_required = !config::has_valid_team(config);
+    let no_launchable_models = !editor.any_model_launchable();
+    let setup = (team_selection_required || no_launchable_models).then(|| MjSetupPanel {
+        team_selection_required,
+        no_launchable_models,
+        message: mjconfig_setup_message(team_selection_required, no_launchable_models),
+    });
 
     // A registered platform adapter (e.g. Anvil on Android) is the only
     // team: show it as the fixed selection instead of offering built-in
@@ -5313,6 +5420,22 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         probing,
         discovery_revision,
         notice,
+        setup,
+    }
+}
+
+/// The next setup step, named concretely. Sign-in is listed before install
+/// because the ACP adapters launch through npx: a machine that can run this
+/// server can download them, so missing credentials are the usual blocker.
+fn mjconfig_setup_message(team_selection_required: bool, no_launchable_models: bool) -> String {
+    match (no_launchable_models, team_selection_required) {
+        (true, true) => {
+            "Sign in to Codex or Claude Code under ACP Servers, then choose a team.".to_string()
+        }
+        (true, false) => {
+            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers.".to_string()
+        }
+        _ => "Choose a team to finish setup.".to_string(),
     }
 }
 
@@ -5510,14 +5633,15 @@ async fn mjconfig_apply(
     if let Some(warning) = config.newer_build_notice() {
         return Err((StatusCode::CONFLICT, warning));
     }
-    let discovery = state
-        .mjconfig
-        .discovery
-        .lock()
-        .expect("mjconfig discovery lock");
-    let inventory = discovery.inventory.clone();
-    let choices = discovery.choices.clone();
-    drop(discovery);
+    // Scoped so the guard is provably dead before the refresh await below.
+    let (inventory, choices) = {
+        let discovery = state
+            .mjconfig
+            .discovery
+            .lock()
+            .expect("mjconfig discovery lock");
+        (discovery.inventory.clone(), discovery.choices.clone())
+    };
     mjconfig_apply_edits(&mut config, request, &inventory)?;
     // Same guard as the TUI's save: a policy edit that strands a pinned seat
     // model flips that seat to auto, with a notice instead of a later failure.
@@ -5529,6 +5653,20 @@ async fn mjconfig_apply(
     } else {
         format!("Saved. {}", reroute_notices.join("; "))
     };
+    // Rebind the roster now instead of on the next session launch, so a
+    // first-run team save turns the server launchable while the user is
+    // still looking at the panel. A config that still cannot bind (no
+    // credentials yet) is not a save failure; the returned snapshot's setup
+    // panel carries the remaining step.
+    match state
+        .session_manager
+        .refresh_for_config(&state.mjconfig.config_path)
+        .await
+    {
+        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
+        Ok(None) => {}
+        Err(error) => warn!("saved configuration does not bind a roster yet: {error}"),
+    }
     Ok(Json(mjconfig_snapshot_response(&state, Some(notice))))
 }
 
@@ -7847,6 +7985,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
+    ensure_sessions_column(&conn, "review_workflows_json", "text not null default '[]'")?;
     ensure_table_column(
         &conn,
         "queued_prompts",
@@ -7923,6 +8062,8 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
         .map(serde_json::to_string)
         .transpose()
         .context("serialize remote-control workspace diff")?;
+    let review_workflows_json = serde_json::to_string(&session.review_workflows)
+        .context("serialize remote-control review workflows")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     let prompt_images_supported = if session.prompt_images_supported {
@@ -7958,9 +8099,10 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             subagents_json,
             status_json,
             workspace_diff_json,
+            review_workflows_json,
             lease_id,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -7985,6 +8127,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             subagents_json = excluded.subagents_json,
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
+            review_workflows_json = excluded.review_workflows_json,
             lease_id = excluded.lease_id,
             connected = 1
         where excluded.last_update >= sessions.last_update
@@ -8019,6 +8162,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             subagents_json,
             status_json,
             workspace_diff_json,
+            review_workflows_json,
             session.lease_id,
         ],
     )
@@ -8256,7 +8400,8 @@ const SESSION_RECORD_SELECT: &str = "select
     worktree,
     subagents_json,
     status_json,
-    workspace_diff_json
+    workspace_diff_json,
+    review_workflows_json
 from sessions";
 
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
@@ -8408,7 +8553,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 worktree,
                 subagents_json,
                 status_json,
-                workspace_diff_json
+                workspace_diff_json,
+                review_workflows_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -8438,12 +8584,14 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let subagents_json: String = row.get(17)?;
     let status_json: Option<String> = row.get(18)?;
     let workspace_diff_json: Option<String> = row.get(19)?;
+    let review_workflows_json: String = row.get(20)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
     let session_config = serde_json::from_str(&session_config_json).unwrap_or_default();
     let available_commands = serde_json::from_str(&available_commands_json).unwrap_or_default();
     let subagents = serde_json::from_str(&subagents_json).unwrap_or_default();
+    let review_workflows = serde_json::from_str(&review_workflows_json).unwrap_or_default();
     let last_prompt_at: Option<String> = row
         .get::<_, Option<String>>(4)?
         .filter(|value| !value.is_empty())
@@ -8460,6 +8608,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         worktree: row.get::<_, Option<String>>(16)?,
         agent: row.get(7)?,
         transcript,
+        review_workflows,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
         prompt_in_flight: prompt_in_flight != 0,
         prompt_images_supported: prompt_images_supported != 0,
@@ -9600,6 +9749,9 @@ mod tests {
         next_launch: AtomicU64,
         sessions: Mutex<Vec<TestAgentSession>>,
         resolve_cwd: Option<PathBuf>,
+        /// Returned (once) by the next `refresh_for_config` call, standing in
+        /// for a re-resolve that succeeded.
+        refresh_roster: Mutex<Option<roster::Roster>>,
     }
 
     #[async_trait::async_trait]
@@ -9650,7 +9802,7 @@ mod tests {
             &self,
             _config_path: &Path,
         ) -> std::result::Result<Option<roster::Roster>, String> {
-            Ok(None)
+            Ok(self.refresh_roster.lock().expect("refresh roster").take())
         }
     }
 
@@ -9798,6 +9950,14 @@ mod tests {
     }
 
     fn mjconfig_test_router(mjconfig: Arc<MjConfigRuntime>, token: &str) -> Router {
+        mjconfig_test_router_with_manager(mjconfig, token, test_session_manager())
+    }
+
+    fn mjconfig_test_router_with_manager(
+        mjconfig: Arc<MjConfigRuntime>,
+        token: &str,
+        session_manager: Arc<TestServerSessionManager>,
+    ) -> Router {
         let dir = tempfile::tempdir().expect("tempdir");
         build_router(RouterConfig {
             db_path: dir.path().join("sessions.sqlite3"),
@@ -9806,7 +9966,7 @@ mod tests {
             cookie_key: "test-cookie-key".to_string(),
             session_ttl: DEFAULT_SESSION_TTL,
             workspace_roots: test_workspace_roots(dir.path()),
-            session_manager: test_session_manager(),
+            session_manager,
             mjconfig,
         })
     }
@@ -10023,8 +10183,13 @@ mod tests {
             .as_array()
             .expect("spinners");
         assert_eq!(spinners.len(), mj_core::spinner::SpinnerStyle::ALL.len());
-        for spinner in spinners {
+        for (spinner, style) in spinners.iter().zip(mj_core::spinner::SpinnerStyle::ALL) {
+            assert_eq!(spinner["name"].as_str(), Some(style.as_str()));
             assert!(!spinner["frames"].as_array().expect("frames").is_empty());
+            assert_eq!(
+                spinner["frame_interval_ms"].as_u64(),
+                Some(style.frame_interval_ms() as u64)
+            );
         }
         assert_eq!(snapshot["appearance"]["thought_output"], "default");
         assert_eq!(
@@ -10096,6 +10261,98 @@ mod tests {
         let snapshot = json_body(response).await;
         assert_eq!(snapshot["probing"], true);
         assert_eq!(snapshot["discovery_revision"], 3);
+    }
+
+    #[tokio::test]
+    async fn mjconfig_snapshot_reports_setup_while_nothing_is_launchable() {
+        let runtime = test_mjconfig_runtime();
+        // A saved team isolates the check from the host's credentials: only
+        // the empty model catalog keeps setup pending.
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&runtime.config_path).expect("seed config");
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        assert_eq!(snapshot["setup"]["no_launchable_models"], true);
+        assert_eq!(snapshot["setup"]["team_selection_required"], false);
+        assert_eq!(
+            snapshot["setup"]["message"],
+            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers."
+        );
+    }
+
+    /// `team_selection_required` cannot be pinned through the saved config:
+    /// runtime route hints are `#[serde(skip)]` and `normalize` clears team
+    /// ids this build cannot map, so after a load the flag is purely "does
+    /// this host have credentials to adopt a default team" — exactly the
+    /// fresh-machine state, and host-dependent in a test. The wire coverage
+    /// above exercises the setup panel; this covers the message mapping.
+    #[test]
+    fn mjconfig_setup_message_names_the_blocking_step() {
+        assert_eq!(
+            mjconfig_setup_message(true, true),
+            "Sign in to Codex or Claude Code under ACP Servers, then choose a team."
+        );
+        assert_eq!(
+            mjconfig_setup_message(false, true),
+            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers."
+        );
+        assert_eq!(
+            mjconfig_setup_message(true, false),
+            "Choose a team to finish setup."
+        );
+    }
+
+    #[tokio::test]
+    async fn mjconfig_snapshot_omits_setup_when_teamed_and_launchable() {
+        let runtime = test_mjconfig_runtime();
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&runtime.config_path).expect("seed config");
+        runtime.update_from_roster(&test_roster("test-model"));
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        let snapshot = json_body(response).await;
+        assert!(snapshot["setup"].is_null(), "{}", snapshot["setup"]);
+    }
+
+    #[tokio::test]
+    async fn mjconfig_apply_rebinds_the_roster_with_the_save() {
+        let runtime = test_mjconfig_runtime();
+        let manager = test_session_manager();
+        *manager.refresh_roster.lock().expect("refresh roster") = Some(test_roster("test-model"));
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router_with_manager(Arc::clone(&runtime), token, manager);
+
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({ "team": "codex" })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        // The re-resolve ran with the save: the returned snapshot already
+        // shows the launchable catalog, so setup is done — no restart, no
+        // extra session launch needed to bind the roster.
+        assert_eq!(snapshot["team"]["selected"], "codex");
+        assert!(snapshot["setup"].is_null(), "{}", snapshot["setup"]);
+        let discovery = runtime.discovery.lock().expect("discovery lock");
+        assert_eq!(discovery.choices.len(), 1);
     }
 
     #[tokio::test]
@@ -10623,6 +10880,136 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_renders_the_review_ledger_and_full_evidence_reader() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"review-board\""));
+        assert!(viewer.contains("id=\"review-issues-modal\""));
+
+        let review_start = viewer
+            .find("      const REVIEW_STATUS = {")
+            .expect("embedded viewer review ledger");
+        let review_end = viewer
+            .find("      function appendToolDiffs")
+            .expect("review ledger boundary");
+        let review_source = &viewer[review_start..review_end];
+
+        // Execute the exact browser rendering functions with a deliberately
+        // small DOM shim. This verifies the visible board and the evidence
+        // reader instead of merely checking that their source text exists.
+        let mut script = String::from(
+            r##"
+class FixtureNode {
+  constructor(tag = "div") {
+    this.tagName = tag;
+    this.children = [];
+    this.className = "";
+    this.dataset = {};
+    this.hidden = false;
+    this.textContent = "";
+    this.title = "";
+    this.type = "";
+    this.attributes = {};
+    this.listeners = {};
+  }
+  append(...nodes) { this.children.push(...nodes); }
+  appendChild(node) { this.children.push(node); return node; }
+  replaceChildren(...nodes) { this.children = [...nodes]; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+  click() { this.listeners.click?.({ target: this }); }
+  focus() {}
+  get innerText() {
+    return `${this.textContent}${this.children.map((child) => child.innerText ?? child.textContent ?? "").join("")}`;
+  }
+}
+
+globalThis.document = {
+  createElement(tag) { return new FixtureNode(tag); },
+  createDocumentFragment() { return new FixtureNode("#fragment"); },
+};
+
+const reviewBoardEl = new FixtureNode("section");
+const reviewIssuesBodyEl = new FixtureNode("div");
+const reviewIssuesModalEl = new FixtureNode("section");
+reviewIssuesModalEl.hidden = true;
+const reviewIssuesCloseEl = new FixtureNode("button");
+const fixtureSession = {
+  review_workflows: [{
+    turn_id: 7,
+    operation: 1,
+    outcome: "completed",
+    issues: [{
+      id: 1,
+      pass: 0,
+      summary: "P1 mj-remote/src/remote.rs: browser must expose this finding",
+      status: "corrected; verification pending",
+      resolution_reason: "the correction changed the workspace",
+      resolution_details: "cargo test -p brokk-mj-remote\n\ndiff --git a/mj-remote/src/remote.rs",
+    }],
+  }],
+};
+function selectedSession() { return fixtureSession; }
+function emptyNote(text) {
+  const note = new FixtureNode("p");
+  note.textContent = text;
+  return note;
+}
+function renderRichText(text) {
+  const rendered = new FixtureNode("div");
+  rendered.textContent = text;
+  return rendered;
+}
+"##,
+        );
+        script.push_str(review_source);
+        script.push_str(
+            r##"
+renderReviewBoard(fixtureSession);
+if (!reviewBoardEl.innerText.includes("Review · completed")) {
+  throw new Error(`review board did not render completed workflow: ${reviewBoardEl.innerText}`);
+}
+if (!reviewBoardEl.innerText.includes("#1 P1 mj-remote/src/remote.rs")) {
+  throw new Error(`review board did not render finding summary: ${reviewBoardEl.innerText}`);
+}
+if (!reviewBoardEl.innerText.includes("verification pending")) {
+  throw new Error(`review board did not render finding status: ${reviewBoardEl.innerText}`);
+}
+const fullEvidence = reviewBoardEl.children[0].children.find((child) => child.textContent === "Full evidence");
+if (!fullEvidence) {
+  throw new Error("review board did not render full evidence action");
+}
+fullEvidence.click();
+if (reviewIssuesModalEl.hidden) {
+  throw new Error("full evidence action did not open the evidence reader");
+}
+const evidence = reviewIssuesBodyEl.innerText;
+for (const expected of [
+  "Finding — validated review evidence",
+  "browser must expose this finding",
+  "Correction evidence",
+  "diff --git a/mj-remote/src/remote.rs",
+]) {
+  if (!evidence.includes(expected)) {
+    throw new Error(`evidence reader omitted ${expected}: ${evidence}`);
+  }
+}
+"##,
+        );
+
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer review behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
     fn embedded_viewer_keeps_session_actions_in_wrapping_mobile_header() {
         let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
         assert!(viewer.contains("id=\"mobile-new-session-button\""));
@@ -10728,7 +11115,7 @@ mod tests {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("mjRow(\"Thought output\")"));
         assert!(viewer.contains("mjcfg.edits.thought_output = next"));
-        assert!(viewer.contains("function refreshThoughtOutput()"));
+        assert!(viewer.contains("function refreshServerSnapshot()"));
         assert!(viewer.contains("function thoughtSummary(text)"));
         assert!(viewer.contains("function activeThoughtTail(text)"));
         assert!(viewer.contains("function nestedThoughtFinished(actor, laterEntries, session)"));
@@ -10737,6 +11124,39 @@ mod tests {
         assert!(viewer.contains("actorPrefix === \"subagent\" ? \"subagent\" : \"review\""));
         assert!(viewer.contains("entry._thoughtCompleted"));
         assert!(viewer.contains("thoughtOutput === \"default\""));
+    }
+
+    #[test]
+    fn embedded_viewer_prompts_first_run_setup() {
+        let viewer = include_str!("remote_viewer.html");
+        // Boot captures the server's setup state and opens the Team tab once.
+        assert!(viewer.contains("function maybePromptSetup()"));
+        assert!(viewer.contains("setupPromptShown = true;"));
+        assert!(viewer.contains("void openMjConfig(\"team\");"));
+        // The sidebar carries the setup card while sessions cannot launch.
+        assert!(viewer.contains("function setupRequiredCard()"));
+        assert!(viewer.contains("querySelector(\".empty, .setup-card\")"));
+        // The dialog banner falls back to the blocking step, and a save that
+        // leaves setup unfinished keeps the editor open on it.
+        assert!(viewer.contains("mjcfg.snapshot?.setup?.message"));
+        assert!(viewer.contains("if (mjcfg.snapshot?.setup) {"));
+    }
+
+    #[test]
+    fn embedded_viewer_shares_the_tui_spinner_and_exposes_its_choice() {
+        let viewer = include_str!("remote_viewer.html");
+
+        assert!(viewer.contains("id=\"working-spinner\""));
+        assert!(viewer.contains("function applyAppearanceSnapshot"));
+        assert!(viewer.contains("function syncWorkingSpinner"));
+        assert!(viewer.contains("spinner.frame_interval_ms"));
+        assert!(viewer.contains("function spinnerFrameIndex"));
+        assert!(viewer.contains("reducedMotion.matches"));
+        assert!(viewer.contains("reducedMotion.addEventListener(\"change\""));
+        assert!(viewer.contains("mjRow(\"Spinner\")"));
+        assert!(viewer.contains("mjcfg.edits.spinner = next"));
+        assert!(viewer.contains("matches the terminal prompt-working spinner"));
+        assert!(!viewer.contains("cursor-blink"));
     }
 
     #[test]
@@ -12092,6 +12512,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tracker_publishes_full_review_issue_evidence() {
+        use mj_core::workflow::{
+            ReviewIssueStatus, WorkflowCoverage, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = started_session_tracker();
+        let workflow_id = WorkflowId::review(7);
+        for transition in [
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec!["P1 src/lib.rs: stale state escapes the correction".to_string()],
+            },
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: None,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some("updated the transition and added a focused test".to_string()),
+                details: Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string()),
+            },
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Completed,
+                coverage: WorkflowCoverage::Complete,
+            },
+        ] {
+            state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+                workflow_id,
+                transition,
+            )));
+        }
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.review_workflows.len(), 1);
+        let workflow = &snapshot.review_workflows[0];
+        assert_eq!(workflow.turn_id, 7);
+        assert_eq!(workflow.outcome.as_deref(), Some("completed"));
+        assert_eq!(workflow.issues.len(), 1);
+        assert_eq!(
+            workflow.issues[0].summary,
+            "P1 src/lib.rs: stale state escapes the correction"
+        );
+        assert_eq!(workflow.issues[0].status, "corrected; verification pending");
+        assert_eq!(
+            workflow.issues[0].resolution_reason.as_deref(),
+            Some("updated the transition and added a focused test")
+        );
+        assert_eq!(
+            workflow.issues[0].resolution_details.as_deref(),
+            Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs")
+        );
+    }
+
     /// The upsert route refuses to move `last_update` backwards, so a fold
     /// that mutates state without touching the timestamp produces a snapshot
     /// the server rejects. Workflow transitions used to do exactly that.
@@ -12859,6 +13336,19 @@ mod tests {
                     tool_diffs: Vec::new(),
                 },
             ],
+            review_workflows: vec![ReviewWorkflowRecord {
+                turn_id: 4,
+                operation: 1,
+                outcome: Some("completed".to_string()),
+                issues: vec![ReviewIssueRecord {
+                    id: 1,
+                    pass: 0,
+                    summary: "P1 src/lib.rs: stale state escapes the correction".to_string(),
+                    status: "verified fixed".to_string(),
+                    resolution_reason: Some("verified by a later clean review".to_string()),
+                    resolution_details: Some("cargo test -p mj-core".to_string()),
+                }],
+            }],
             queued_prompt_count: 0,
             prompt_in_flight: true,
             prompt_images_supported: true,
@@ -12902,6 +13392,21 @@ mod tests {
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
+        let updated_review_workflows = vec![ReviewWorkflowRecord {
+            turn_id: 4,
+            operation: 1,
+            outcome: Some("completed".to_string()),
+            issues: vec![ReviewIssueRecord {
+                id: 1,
+                pass: 1,
+                summary: "P1 src/lib.rs: stale state escapes the correction".to_string(),
+                status: "corrected; verification pending".to_string(),
+                resolution_reason: Some("the correction changed the workspace".to_string()),
+                resolution_details: Some(
+                    "cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string(),
+                ),
+            }],
+        }];
         upsert_session_record(
             &db_path,
             &SessionRecord {
@@ -12929,6 +13434,7 @@ mod tests {
                         tool_diffs: Vec::new(),
                     },
                 ],
+                review_workflows: updated_review_workflows.clone(),
                 ..session.clone()
             },
         )
@@ -12948,6 +13454,8 @@ mod tests {
             Some("2026-06-03T10:00:05Z")
         );
         assert_eq!(sessions[0].transcript.len(), 2);
+        assert_eq!(sessions[0].review_workflows, updated_review_workflows);
+        assert_ne!(sessions[0].review_workflows, session.review_workflows);
         assert_eq!(sessions[0].transcript[0].kind, "user");
         assert_eq!(sessions[0].transcript[0].text, "hello");
         assert_eq!(sessions[0].transcript[1].kind, "agent");
@@ -13404,6 +13912,7 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
@@ -14406,6 +14915,7 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
@@ -15510,6 +16020,7 @@ mod tests {
             worktree: None,
             agent: "opencode".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
@@ -16862,6 +17373,7 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
