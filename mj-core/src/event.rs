@@ -453,6 +453,10 @@ pub enum UiCommand {
         tier: crate::config::ReviewTier,
         correction_threshold: crate::config::ReviewCorrectionThreshold,
     },
+    /// Re-resolve and replace the reviewer and subagent seats while retaining
+    /// the active primary ACP session. The command is accepted only when the
+    /// resolved primary still matches that session.
+    ReloadAuxiliaryAgents,
     /// Run one Mjolnir-owned discrete review while the primary is idle.
     RunReview { request: ReviewRequest },
     /// Recompute the worktree-versus-`HEAD` diff for the Ctrl-G reader. Sent

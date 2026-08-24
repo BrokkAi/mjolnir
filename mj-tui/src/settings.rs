@@ -774,8 +774,7 @@ impl SettingsEditor {
         let next = (current as i32 + delta).rem_euclid(TeamPreset::ALL.len() as i32) as usize;
         TeamPreset::ALL[next].apply(&mut self.config);
         self.refresh_inventory();
-        self.notice =
-            Some("Team updated; start a new session or restart Mjolnir to apply it.".to_string());
+        self.notice = Some("Team updated; save to apply it.".to_string());
     }
 
     pub(crate) fn model_choices(&self, role: usize) -> Vec<String> {
@@ -2612,7 +2611,7 @@ mod tests {
         );
         assert_eq!(
             editor.notice.as_deref(),
-            Some("Team updated; start a new session or restart Mjolnir to apply it.")
+            Some("Team updated; save to apply it.")
         );
     }
 

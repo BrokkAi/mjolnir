@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
+    Arc, RwLock,
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Duration;
@@ -134,6 +134,9 @@ pub struct Handle {
     /// Live automatic-correction threshold, read after a finding survives
     /// validation and before it is handed to the primary.
     correction_threshold: Arc<AtomicU8>,
+    /// The reviewer and worker launch plan. Unlike the primary ACP session,
+    /// these agents are created per review and can be replaced live.
+    review_fanout: Arc<RwLock<Option<ReviewSpawner>>>,
     runtime_commands: mpsc::UnboundedSender<UiCommand>,
     events: mpsc::UnboundedSender<UiEvent>,
     review_requests: mpsc::UnboundedSender<ReviewRequest>,
@@ -175,6 +178,15 @@ impl Handle {
     pub fn set_correction_threshold(&self, threshold: ReviewCorrectionThreshold) {
         self.correction_threshold
             .store(threshold.as_index(), Ordering::Release);
+    }
+
+    /// Apply a newly resolved reviewer/subagent route to reviews that start
+    /// after this call. An already-running review retains its own snapshot.
+    pub fn set_review_fanout(&self, review_fanout: Option<ReviewSpawner>) {
+        *self
+            .review_fanout
+            .write()
+            .expect("review fanout lock poisoned") = review_fanout;
     }
 
     pub fn request_review(&self, request: ReviewRequest) {
@@ -468,12 +480,14 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
     let review_enabled = Arc::new(AtomicBool::new(config.discrete_review));
     let review_tier = Arc::new(AtomicU8::new(config.review_tier.as_index()));
     let correction_threshold = Arc::new(AtomicU8::new(config.correction_threshold.as_index()));
+    let review_fanout = Arc::new(RwLock::new(config.review_fanout.take()));
     let handle = Handle {
         turn: turn.clone(),
         user_messages: user_messages.clone(),
         review_enabled: review_enabled.clone(),
         review_tier: review_tier.clone(),
         correction_threshold: correction_threshold.clone(),
+        review_fanout: review_fanout.clone(),
         runtime_commands: config.runtime_commands.clone(),
         events: events_tx.clone(),
         review_requests,
@@ -1464,7 +1478,13 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         ));
                         continue;
                     }
-                    let Some(spawner) = config.review_fanout.as_ref() else {
+                    let spawner = {
+                        review_fanout
+                            .read()
+                            .expect("review fanout lock poisoned")
+                            .clone()
+                    };
+                    let Some(spawner) = spawner else {
                         let _ = events_tx.send(UiEvent::Warning(
                             "the configured discrete reviewer is unavailable".to_string(),
                         ));
@@ -1797,7 +1817,13 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 original_review_result.get_or_insert_with(|| initial_result.clone());
                 let review_trajectory = trajectory.review_trajectory();
                 let context = discrete_review_context(delta.as_ref(), review_trajectory.clone());
-                if let Some(spawner) = config.review_fanout.as_ref() {
+                let spawner = {
+                    review_fanout
+                        .read()
+                        .expect("review fanout lock poisoned")
+                        .clone()
+                };
+                if let Some(spawner) = spawner {
                     let completion = held_completion.take().expect("completion held");
                     discrete_review_started = true;
                     let diff = review_diff(delta.as_ref());

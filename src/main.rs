@@ -1375,6 +1375,58 @@ struct RuntimeOptions {
     termination: CancellationToken,
 }
 
+/// Inputs shared by the primary session's long-lived subagent MCP endpoint.
+/// The endpoint can replace its launch configuration without replacing the
+/// primary ACP session.
+#[derive(Clone)]
+struct LiveSubagentOptions {
+    agent_stderr: Option<PathBuf>,
+    snapshot_exclusions: Vec<PathBuf>,
+    cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
+    fs_max_text_bytes: u64,
+    session_tag: String,
+    handoff_counter: Arc<AtomicUsize>,
+    id_allocator: subagent::SubagentIdAllocator,
+    active_workers: subagent::ActiveSubagentWorkers,
+    reports: subagent::SubagentReportBus,
+    runs: subagent::SubagentRegistry,
+}
+
+fn configured_subagent_service(
+    pool: quota::RolePool,
+    options: &LiveSubagentOptions,
+    config: &config::SubagentsConfig,
+) -> subagent::Config {
+    let mut service = subagent::Config::new(pool, options.agent_stderr.clone());
+    if let Some(role) = service.role_config.as_mut() {
+        role.session_tag = Some(options.session_tag.clone());
+    }
+    service
+        .with_subagent_handoff_counter(options.handoff_counter.clone())
+        .with_id_allocator(options.id_allocator.clone())
+        .with_active_implementation_workers(options.active_workers.clone())
+        .with_max_parallel(config.max_parallel)
+        .with_debrief(config.debrief)
+        .with_permission_mode(config.permission)
+        .with_reports(options.reports.clone())
+        .with_run_registry(options.runs.clone())
+        .with_prewarm(subagent::RunContext {
+            cwd: options.cwd.clone(),
+            additional_directories: options.additional_directories.clone(),
+            snapshot_exclusions: options.snapshot_exclusions.clone(),
+            fs_max_text_bytes: options.fs_max_text_bytes,
+            access_mode: acp::RuntimeAccessMode::Full,
+        })
+}
+
+fn primary_source_matches(
+    active: &roster::ResolvedAgent,
+    candidate: &roster::ResolvedAgent,
+) -> bool {
+    active.launch.source_id == candidate.launch.source_id
+}
+
 struct RunSessionResult {
     reason: UiExitReason,
     session_id: Option<String>,
@@ -2090,7 +2142,7 @@ async fn run_session(
             .unwrap_or_default()
             .as_millis()
     );
-    let (subagent_roles, _subagent_codex_home) =
+    let (subagent_roles, subagent_codex_home) =
         isolated_subagent_roles(crate::roster::subagent_failover_roles(&roster), "subagent")?;
 
     let (event_tx, runtime_event_rx) = mpsc::unbounded_channel();
@@ -2116,6 +2168,19 @@ async fn run_session(
     // Shared with the orchestrator so every wake can ask the still-running
     // subagents for progress.
     let subagent_runs = subagent::SubagentRegistry::default();
+    let live_subagent_options = LiveSubagentOptions {
+        agent_stderr: runtime_options.agent_stderr.clone(),
+        snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
+        cwd: cwd.clone(),
+        additional_directories: runtime_options.additional_directories.clone(),
+        fs_max_text_bytes: runtime_options.fs_max_text_bytes,
+        session_tag: session_tag.clone(),
+        handoff_counter: subagent_handoffs_this_turn.clone(),
+        id_allocator: subagent_ids.clone(),
+        active_workers: active_implementation_workers.clone(),
+        reports: subagent_reports.clone(),
+        runs: subagent_runs.clone(),
+    };
     tracing::info!(
         event = "roster_setup",
         session_tag = %session_tag,
@@ -2270,6 +2335,19 @@ async fn run_session(
     // The discrete review's specialist lanes run on the subagent seat, so they
     // need the pool that is about to move into the subagent config.
     let review_workers = subagent_pool.clone();
+    // Always advertise the auxiliary MCP endpoint. A same-primary team change
+    // can then add reviewers or subagents to a session that originally had
+    // neither, without replacing the primary ACP process.
+    let live_subagent_service = match subagent_pool.clone() {
+        Some(pool) => subagent::LiveRuntimeService::new(configured_subagent_service(
+            pool,
+            &live_subagent_options,
+            &subagents_config,
+        )),
+        None => subagent::LiveRuntimeService::unconfigured(),
+    };
+    let runtime_subagents =
+        Some(Arc::new(live_subagent_service.clone()) as Arc<dyn acp::RuntimeService>);
 
     let mut primary_env = agent.env.clone();
     let primary_permission = runtime_options.permission_mode.and_then(|mode| {
@@ -2307,31 +2385,7 @@ async fn run_session(
             session_tag: Some(session_tag.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),
         }),
-        subagents: subagent_pool
-            .map(|subagent_pool| {
-                let mut config =
-                    subagent::Config::new(subagent_pool, runtime_options.agent_stderr.clone());
-                if let Some(role) = config.role_config.as_mut() {
-                    role.session_tag = Some(session_tag.clone());
-                }
-                config
-                    .with_subagent_handoff_counter(subagent_handoffs_this_turn.clone())
-                    .with_id_allocator(subagent_ids.clone())
-                    .with_active_implementation_workers(active_implementation_workers.clone())
-                    .with_max_parallel(subagents_config.max_parallel)
-                    .with_debrief(subagents_config.debrief)
-                    .with_permission_mode(subagents_config.permission)
-                    .with_reports(subagent_reports.clone())
-                    .with_run_registry(subagent_runs.clone())
-                    .with_prewarm(subagent::RunContext {
-                        cwd: cwd.clone(),
-                        additional_directories: runtime_options.additional_directories.clone(),
-                        snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
-                        fs_max_text_bytes: runtime_options.fs_max_text_bytes,
-                        access_mode: acp::RuntimeAccessMode::Full,
-                    })
-            })
-            .map(subagent::runtime_service),
+        subagents: runtime_subagents,
         memory: memory::SessionMemory::from_config(
             &memory_config,
             &cwd,
@@ -2487,6 +2541,12 @@ async fn run_session(
     let side_additional_directories = runtime_options.additional_directories.clone();
     let side_agent_stderr = runtime_options.agent_stderr.clone();
     let side_fs_max_text_bytes = runtime_options.fs_max_text_bytes;
+    let command_primary = roster.primary.clone();
+    let command_config_path = config_path.clone();
+    let command_quota_gate = quota_gate.clone();
+    let command_live_subagent_service = live_subagent_service.clone();
+    let command_live_subagent_options = live_subagent_options.clone();
+    let mut command_subagent_codex_homes = subagent_codex_home.into_iter().collect::<Vec<_>>();
     let cmd_proxy = tokio::spawn(async move {
         let mut side_runtime: Option<side::Runtime> = None;
         let mut local_epoch = 0_u64;
@@ -2546,6 +2606,7 @@ async fn run_session(
             }
             let (command, force_main) = match command {
                 UiCommand::Main(command) => (*command, true),
+                command @ UiCommand::ReloadAuxiliaryAgents => (command, true),
                 command => (command, false),
             };
             if !force_main && side_runtime.is_some() {
@@ -2563,6 +2624,120 @@ async fn run_session(
                 }
             }
             cmd_tracker.observe_command(&command);
+            if matches!(command, UiCommand::ReloadAuxiliaryAgents) {
+                let updated_config = match Config::load(&command_config_path) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        let _ = side_ui_event_tx.send(UiEvent::Warning(format!(
+                            "could not apply the saved reviewer configuration: {error:#}"
+                        )));
+                        continue;
+                    }
+                };
+                let updated_roster = match roster::resolve(&updated_config, &side_cwd).await {
+                    Ok(roster) => roster,
+                    Err(error) => {
+                        let _ = side_ui_event_tx.send(UiEvent::Warning(format!(
+                            "the primary session kept its current reviewer configuration because the saved configuration could not be resolved: {error:#}"
+                        )));
+                        continue;
+                    }
+                };
+                if !primary_source_matches(&command_primary, &updated_roster.primary) {
+                    let _ = side_ui_event_tx.send(UiEvent::Info(
+                        "primary agent changed; start /new or /clear to apply that route"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+                let (roles, codex_home) = match isolated_subagent_roles(
+                    roster::subagent_failover_roles(&updated_roster),
+                    "subagent",
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let _ = side_ui_event_tx.send(UiEvent::Warning(format!(
+                            "could not prepare the saved subagent configuration: {error:#}"
+                        )));
+                        continue;
+                    }
+                };
+                let pool = (!roles.is_empty()).then(|| {
+                    quota::RolePool::new(
+                        roles,
+                        command_quota_gate.clone(),
+                        updated_config.subagents.auto_failover,
+                        "subagents",
+                        side_ui_event_tx.clone(),
+                    )
+                });
+                let initial_role = pool.as_ref().map(quota::RolePool::current);
+                tracing::info!(
+                    event = "auxiliary_agents_reconfigured",
+                    session_tag = %command_live_subagent_options.session_tag,
+                    review_adapter = updated_roster
+                        .review_supervisor
+                        .as_ref()
+                        .map(|role| role.launch.source_id.as_str())
+                        .unwrap_or("off"),
+                    review_model = updated_roster
+                        .review_supervisor
+                        .as_ref()
+                        .map(|role| role.model.model.as_str())
+                        .unwrap_or("off"),
+                    subagent_adapter = initial_role
+                        .as_ref()
+                        .map(|role| role.launch.source_id.as_str())
+                        .unwrap_or("off"),
+                    subagent_model = initial_role
+                        .as_ref()
+                        .map(|role| role.model.model.as_str())
+                        .unwrap_or("off"),
+                    "applied reviewer and subagent configuration without replacing primary"
+                );
+                if let Some(pool) = pool.as_ref() {
+                    command_live_subagent_service
+                        .replace(configured_subagent_service(
+                            pool.clone(),
+                            &command_live_subagent_options,
+                            &updated_config.subagents,
+                        ))
+                        .await;
+                } else {
+                    command_live_subagent_service.clear();
+                }
+                if let Some(home) = codex_home {
+                    command_subagent_codex_homes.push(home);
+                }
+                let review_fanout = pool.zip(updated_roster.review_supervisor.clone()).map(
+                    |(workers, supervisor)| {
+                        discrete_review::live_spawner(discrete_review::FanoutConfig {
+                            workers,
+                            supervisor,
+                            cwd: side_cwd.clone(),
+                            additional_directories: side_additional_directories.clone(),
+                            session_tag: Some(command_live_subagent_options.session_tag.clone()),
+                            agent_stderr: side_agent_stderr.clone(),
+                            snapshot_exclusions: command_live_subagent_options
+                                .snapshot_exclusions
+                                .clone(),
+                            fs_max_text_bytes: side_fs_max_text_bytes,
+                            permission: updated_config.review.permission,
+                            id_allocator: command_live_subagent_options.id_allocator.clone(),
+                        })
+                    },
+                );
+                cmd_orchestrator.set_review_fanout(review_fanout);
+                cmd_orchestrator.set_review_enabled(updated_config.agent.discrete_review);
+                cmd_orchestrator.set_review_tier(updated_config.agent.review_tier);
+                cmd_orchestrator
+                    .set_correction_threshold(updated_config.agent.correction_threshold);
+                let _ = side_ui_event_tx.send(UiEvent::Info(
+                    "reviewer and subagent configuration is active for the current primary session"
+                        .to_string(),
+                ));
+                continue;
+            }
             if let UiCommand::SetReviewPolicy {
                 enabled,
                 tier,

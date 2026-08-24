@@ -2971,6 +2971,7 @@ async fn drive_session(
                 }
             }
             UiCommand::SetReviewPolicy { .. }
+            | UiCommand::ReloadAuxiliaryAgents
             | UiCommand::RunReview { .. }
             | UiCommand::RefreshWorkspaceDiff => {}
             UiCommand::CompactPrimary => {
@@ -3407,6 +3408,7 @@ async fn drive_fork_session(
                     Some(UiCommand::CancelPrompt) => {}
                     Some(
                         UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
                         | UiCommand::RefreshWorkspaceDiff,
                     ) => {}
@@ -5649,6 +5651,7 @@ async fn drive_config_update(
                     Some(UiCommand::CancelPrompt) => {}
                     Some(
                         UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
                         | UiCommand::RefreshWorkspaceDiff,
                     ) => {}
@@ -6173,6 +6176,7 @@ async fn drive_prompt_turn(
                     }
                     Some(
                         UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
                         | UiCommand::RefreshWorkspaceDiff,
                     ) => {}
