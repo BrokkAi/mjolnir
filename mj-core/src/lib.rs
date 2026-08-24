@@ -28,6 +28,7 @@ mod roster_types;
 pub mod session;
 pub mod session_provenance;
 pub mod session_state;
+pub mod settings;
 pub mod side;
 pub mod spinner;
 pub mod subscription;

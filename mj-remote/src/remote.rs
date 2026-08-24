@@ -4900,6 +4900,9 @@ fn new_mjconfig_login_output() -> Arc<Mutex<mj_core::terminal_output::TerminalTe
 
 #[derive(Debug, Serialize)]
 struct MjConfigSnapshot {
+    /// Panel catalog supplied by mj-core so the web cannot silently lose a
+    /// panel added to the terminal `/mjconfig`.
+    tabs: Vec<MjSettingsTab>,
     team: MjTeamPanel,
     agents: MjAgentsPanel,
     acp_servers: MjServersPanel,
@@ -4910,6 +4913,7 @@ struct MjConfigSnapshot {
     review_options: Option<MjSessionOptionsGroup>,
     /// Session options for the subagent seat, mirroring the Subagents panel.
     subagent_options: Option<MjSessionOptionsGroup>,
+    input: MjInputPanel,
     appearance: MjAppearancePanel,
     login: Option<MjLoginStatus>,
     /// True while adapters are still being probed for model and session-option
@@ -4922,6 +4926,12 @@ struct MjConfigSnapshot {
     /// What still blocks this server from launching sessions. `None` once the
     /// required providers are authenticated and a team and model are ready.
     setup: Option<MjSetupPanel>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjSettingsTab {
+    id: String,
+    label: String,
 }
 
 /// First-run state driving the viewer's setup prompt.
@@ -4975,12 +4985,27 @@ struct MjRoleEntry {
     active_model: Option<String>,
     active_detail: String,
     choices: Vec<MjModelChoiceEntry>,
+    /// Review and subagent seats own a provider-native permission preset.
+    permission: Option<MjPermissionPanel>,
 }
 
 #[derive(Debug, Serialize)]
 struct MjModelChoiceEntry {
     model: String,
     detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MjPermissionPanel {
+    value: String,
+    choices: Vec<MjPermissionChoice>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjPermissionChoice {
+    value: String,
+    label: String,
+    description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -5061,6 +5086,28 @@ struct MjAppearancePanel {
     thought_outputs: Vec<String>,
     feature_hints: bool,
     keep_awake: bool,
+    interface: String,
+    interfaces: Vec<MjInterfaceEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjInterfaceEntry {
+    value: String,
+    label: String,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MjInputPanel {
+    voice_auto_send: String,
+    voice_auto_sends: Vec<MjVoiceAutoSendEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjVoiceAutoSendEntry {
+    value: String,
+    label: String,
+    description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -5089,6 +5136,8 @@ struct MjConfigApplyRequest {
     primary_model: Option<String>,
     review_model: Option<String>,
     subagents_model: Option<String>,
+    review_permission: Option<String>,
+    subagents_permission: Option<String>,
     discrete_review: Option<bool>,
     /// `quick` | `extended`.
     review_tier: Option<String>,
@@ -5101,6 +5150,8 @@ struct MjConfigApplyRequest {
     thought_output: Option<String>,
     feature_hints: Option<bool>,
     keep_awake: Option<bool>,
+    interface: Option<String>,
+    voice_auto_send: Option<String>,
     /// Server id → `auto` | `enabled` | `disabled`.
     server_policies: Option<BTreeMap<String, String>>,
     /// Server id → option key → value written to the primary seat's
@@ -5134,10 +5185,10 @@ fn mjconfig_load(state: &ServerState) -> config::Config {
     config
 }
 
-fn mjconfig_editor(
+fn mjconfig_catalog(
     state: &ServerState,
     config: config::Config,
-) -> (crate::settings::SettingsEditor, bool, u64) {
+) -> (crate::settings::MjConfigCatalog, bool, u64) {
     let discovery = state
         .mjconfig
         .discovery
@@ -5147,16 +5198,16 @@ fn mjconfig_editor(
     // re-derive from the *current* config (a just-saved policy shows
     // immediately) while probe-only fields like session options survive.
     let inventory = roster::rediscover_inventory(&config, &discovery.inventory);
-    let mut editor = crate::settings::SettingsEditor::new(config, discovery.choices.clone(), None)
+    let mut catalog = crate::settings::MjConfigCatalog::new(config, discovery.choices.clone())
         .with_inventory(inventory);
     let probing = discovery.probing;
     let discovery_revision = discovery.revision;
     let active_models = discovery.active_models.clone();
     drop(discovery);
     if let Some(models) = active_models {
-        editor = editor.with_active_models(models);
+        catalog = catalog.with_active_models(models);
     }
-    (editor, probing, discovery_revision)
+    (catalog, probing, discovery_revision)
 }
 
 /// Mirror of the TUI's server-row status line in `settings::draw_servers`.
@@ -5209,6 +5260,20 @@ fn policy_from_wire(name: &str) -> Option<config::AcpServerPolicy> {
     }
 }
 
+fn mjconfig_permission_panel(permission: config::PermissionPreset) -> MjPermissionPanel {
+    MjPermissionPanel {
+        value: permission.as_str().to_string(),
+        choices: config::PermissionPreset::ALL
+            .into_iter()
+            .map(|candidate| MjPermissionChoice {
+                value: candidate.as_str().to_string(),
+                label: candidate.to_string(),
+                description: candidate.description().to_string(),
+            })
+            .collect(),
+    }
+}
+
 const MJ_SEAT_IDS: [&str; 3] = ["primary", "review", "subagents"];
 
 fn mjconfig_login_status(state: &ServerState) -> Option<MjLoginStatus> {
@@ -5242,9 +5307,9 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let login = mjconfig_login_status(state);
     refresh_mjconfig_discovery_if_needed(state);
     let config = mjconfig_load(state);
-    let (editor, probing, discovery_revision) = mjconfig_editor(state, config);
-    let config = &editor.config;
-    let inventory = editor.inventory();
+    let (catalog, probing, discovery_revision) = mjconfig_catalog(state, config);
+    let config = &catalog.config;
+    let inventory = catalog.inventory();
 
     // Mirrors the TUI's seat labels; settings.rs no longer exports them
     // since #590 split settings into role-scoped panels.
@@ -5267,18 +5332,23 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 model: model.clone(),
-                saved_detail: editor.staged_model_detail(model),
-                model_warning: editor.staged_model_warning(model),
-                active_model: editor.active_model(index).map(str::to_string),
-                active_detail: editor.active_model_detail(index),
-                choices: editor
+                saved_detail: catalog.staged_model_detail(model),
+                model_warning: catalog.staged_model_warning(model),
+                active_model: catalog.active_model(index).map(str::to_string),
+                active_detail: catalog.active_model_detail(index),
+                choices: catalog
                     .model_choices(index)
                     .into_iter()
                     .map(|choice| MjModelChoiceEntry {
-                        detail: editor.staged_model_detail(&choice),
+                        detail: catalog.staged_model_detail(&choice),
                         model: choice,
                     })
                     .collect(),
+                permission: match index {
+                    1 => Some(mjconfig_permission_panel(config.review.permission)),
+                    2 => Some(mjconfig_permission_panel(config.subagents.permission)),
+                    _ => None,
+                },
             }
         })
         .collect();
@@ -5342,7 +5412,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         .collect();
 
     let seat_options = |seat: crate::settings::SessionDefaultsSeat| {
-        let rows = editor.session_option_rows(seat);
+        let rows = catalog.session_option_rows(seat);
         let (server_index, _) = *rows.first()?;
         let server = inventory.servers.get(server_index)?;
         let options = rows
@@ -5351,7 +5421,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             .map(|option| MjSessionOptionEntry {
                 key: acp::session_config_option_key(&option.id),
                 name: option.name.clone(),
-                value: editor.saved_session_value(seat, &server.id, option),
+                value: catalog.saved_session_value(seat, &server.id, option),
                 choices: crate::settings::session_option_choices(option)
                     .into_iter()
                     .map(|(value, label)| MjSessionOptionChoice { value, label })
@@ -5396,6 +5466,26 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             .collect(),
         feature_hints: config.feature_hints,
         keep_awake: config.keep_awake,
+        interface: config.interface.to_string(),
+        interfaces: config::InterfaceMode::ALL
+            .into_iter()
+            .map(|interface| MjInterfaceEntry {
+                value: interface.as_str().to_string(),
+                label: interface.to_string(),
+                description: interface.description().to_string(),
+            })
+            .collect(),
+    };
+    let input = MjInputPanel {
+        voice_auto_send: config.voice_auto_send.as_str().to_string(),
+        voice_auto_sends: config::VoiceAutoSend::ALL
+            .into_iter()
+            .map(|setting| MjVoiceAutoSendEntry {
+                value: setting.as_str().to_string(),
+                label: setting.to_string(),
+                description: setting.description().to_string(),
+            })
+            .collect(),
     };
 
     let notice = match (config.newer_build_notice(), notice) {
@@ -5405,7 +5495,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     };
 
     let team_selection_required = !config::has_valid_team(config);
-    let no_launchable_models = !editor.any_model_launchable();
+    let no_launchable_models = !catalog.any_model_launchable();
     let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
     let setup = mjconfig_setup_panel(
         team_selection_required,
@@ -5440,6 +5530,13 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     };
 
     MjConfigSnapshot {
+        tabs: mj_core::settings::SettingsTab::ALL
+            .into_iter()
+            .map(|tab| MjSettingsTab {
+                id: tab.id().to_string(),
+                label: tab.label().to_string(),
+            })
+            .collect(),
         team,
         agents: MjAgentsPanel {
             roles,
@@ -5470,6 +5567,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         primary_options,
         review_options,
         subagent_options,
+        input,
         appearance,
         login,
         probing,
@@ -5562,12 +5660,12 @@ fn mjconfig_setup_message(
 
 fn current_mjconfig_setup(state: &ServerState) -> Option<MjSetupPanel> {
     let config = mjconfig_load(state);
-    let (editor, _, _) = mjconfig_editor(state, config);
-    let config = &editor.config;
+    let (catalog, _, _) = mjconfig_catalog(state, config);
+    let config = &catalog.config;
     let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
     mjconfig_setup_panel(
         !config::has_valid_team(config),
-        !editor.any_model_launchable(),
+        !catalog.any_model_launchable(),
         &missing_authentication,
     )
 }
@@ -5628,6 +5726,16 @@ fn mjconfig_apply_edits(
     if let Some(model) = request.subagents_model {
         config.subagents.model = model;
     }
+    if let Some(permission) = request.review_permission {
+        config.review.permission = permission
+            .parse()
+            .map_err(|error| bad_request(format!("invalid review permission: {error}")))?;
+    }
+    if let Some(permission) = request.subagents_permission {
+        config.subagents.permission = permission
+            .parse()
+            .map_err(|error| bad_request(format!("invalid subagent permission: {error}")))?;
+    }
     if let Some(enabled) = request.discrete_review {
         config.agent.discrete_review = enabled;
     }
@@ -5672,6 +5780,16 @@ fn mjconfig_apply_edits(
     }
     if let Some(enabled) = request.keep_awake {
         config.keep_awake = enabled;
+    }
+    if let Some(interface) = request.interface {
+        config.interface = interface
+            .parse()
+            .map_err(|error| bad_request(format!("invalid interface: {error}")))?;
+    }
+    if let Some(voice_auto_send) = request.voice_auto_send {
+        config.voice_auto_send = voice_auto_send
+            .parse()
+            .map_err(|error| bad_request(format!("invalid voice auto-send setting: {error}")))?;
     }
     if let Some(policies) = request.server_policies {
         for (id, policy) in policies {
@@ -10515,7 +10633,32 @@ mod tests {
         assert_eq!(roles.len(), 3);
         assert_eq!(roles[0]["role"], "primary");
         assert!(!roles[0]["choices"].as_array().expect("choices").is_empty());
+        assert!(roles[0]["permission"].is_null());
+        assert_eq!(roles[1]["permission"]["value"], "auto");
+        assert_eq!(
+            roles[1]["permission"]["choices"]
+                .as_array()
+                .expect("review permission choices")
+                .len(),
+            config::PermissionPreset::ALL.len()
+        );
+        assert_eq!(
+            roles[1]["permission"]["choices"][1]["description"],
+            config::PermissionPreset::Auto.description()
+        );
+        assert_eq!(roles[2]["permission"]["value"], "auto");
         assert_eq!(snapshot["agents"]["max_parallel_limit"], 16);
+
+        let tabs = snapshot["tabs"].as_array().expect("settings tabs");
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab["id"].as_str().expect("tab id"))
+                .collect::<Vec<_>>(),
+            mj_core::settings::SettingsTab::ALL
+                .into_iter()
+                .map(mj_core::settings::SettingsTab::id)
+                .collect::<Vec<_>>(),
+        );
 
         let presets = snapshot["team"]["presets"]
             .as_array()
@@ -10551,12 +10694,28 @@ mod tests {
             );
         }
         assert_eq!(snapshot["appearance"]["thought_output"], "default");
+        assert_eq!(snapshot["appearance"]["interface"], "inline");
+        assert_eq!(
+            snapshot["appearance"]["interfaces"]
+                .as_array()
+                .expect("interface choices")
+                .len(),
+            config::InterfaceMode::ALL.len()
+        );
         assert_eq!(
             snapshot["appearance"]["thought_outputs"]
                 .as_array()
                 .expect("thought outputs")
                 .len(),
             config::ThoughtOutput::ALL.len()
+        );
+        assert_eq!(snapshot["input"]["voice_auto_send"], "off");
+        assert_eq!(
+            snapshot["input"]["voice_auto_sends"]
+                .as_array()
+                .expect("voice auto-send choices")
+                .len(),
+            config::VoiceAutoSend::ALL.len()
         );
 
         assert!(
@@ -10772,15 +10931,23 @@ mod tests {
         let mut inventory = roster::discover_inventory(&config);
         let server = inventory.servers.first_mut().expect("visible ACP server");
         let server_id = server.id.clone();
-        server.session_config = vec![SessionConfigOption::select(
-            "service_tier",
-            "Service tier",
-            "default",
-            vec![
-                SessionConfigSelectOption::new("default", "Default"),
-                SessionConfigSelectOption::new("flex", "Flex"),
-            ],
-        )];
+        server.session_config = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "agent",
+                vec![SessionConfigSelectOption::new("agent", "Agent")],
+            ),
+            SessionConfigOption::select(
+                "service_tier",
+                "Service tier",
+                "default",
+                vec![
+                    SessionConfigSelectOption::new("default", "Default"),
+                    SessionConfigSelectOption::new("flex", "Flex"),
+                ],
+            ),
+        ];
         runtime.discovery.lock().expect("discovery lock").inventory = inventory;
 
         let token = "mjconfig-token";
@@ -10792,15 +10959,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
         // With the default "auto" models, every seat falls back to the first
-        // priority source advertising options — the server we seeded.
+        // priority source advertising options — the server we seeded. The
+        // delegated Codex permission control owns `mode`, so it cannot become
+        // a competing reviewer/subagent session-default override.
         for seat in ["primary_options", "review_options", "subagent_options"] {
             let group = &snapshot[seat];
             assert_eq!(group["server_id"], server_id.as_str(), "{seat} server");
-            let option = &group["options"][0];
+            let options = group["options"].as_array().expect("options");
+            let option = options
+                .iter()
+                .find(|option| option["key"] == "config:service_tier")
+                .expect("service tier option");
             assert_eq!(option["key"], "config:service_tier");
             assert_eq!(option["name"], "Service tier");
             assert_eq!(option["value"], "default");
             assert_eq!(option["choices"].as_array().expect("choices").len(), 2);
+            assert_eq!(
+                options
+                    .iter()
+                    .filter(|option| option["key"] == "config:mode")
+                    .count(),
+                usize::from(seat == "primary_options"),
+                "{seat} mode visibility"
+            );
         }
     }
 
@@ -10875,6 +11056,8 @@ mod tests {
                 Some(serde_json::json!({
                     "team": "claude_codex",
                     "primary_model": "gpt-5-6-terra",
+                    "review_permission": "manual",
+                    "subagents_permission": "yolo",
                     "discrete_review": false,
                     "review_tier": "extended",
                     "correction_threshold": "p1",
@@ -10883,6 +11066,9 @@ mod tests {
                     "spinner": "wave",
                     "thought_output": "full",
                     "feature_hints": false,
+                    "keep_awake": false,
+                    "interface": "fullscreen",
+                    "voice_auto_send": "four_seconds",
                     "primary_session_defaults": {
                         "codex-acp": { "config:collaboration_mode": "yolo" }
                     },
@@ -10920,6 +11106,17 @@ mod tests {
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
         assert_eq!(snapshot["appearance"]["thought_output"], "full");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
+        assert_eq!(snapshot["appearance"]["keep_awake"], false);
+        assert_eq!(snapshot["appearance"]["interface"], "fullscreen");
+        assert_eq!(snapshot["input"]["voice_auto_send"], "four_seconds");
+        assert_eq!(
+            snapshot["agents"]["roles"][1]["permission"]["value"],
+            "manual"
+        );
+        assert_eq!(
+            snapshot["agents"]["roles"][2]["permission"]["value"],
+            "yolo"
+        );
         assert_eq!(snapshot["team"]["selected"], "claude_codex");
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
@@ -10935,6 +11132,11 @@ mod tests {
         assert_eq!(saved.spinner, mj_core::spinner::SpinnerStyle::Wave);
         assert_eq!(saved.thought_output, config::ThoughtOutput::Full);
         assert!(!saved.feature_hints);
+        assert!(!saved.keep_awake);
+        assert_eq!(saved.interface, config::InterfaceMode::Fullscreen);
+        assert_eq!(saved.voice_auto_send, config::VoiceAutoSend::FourSeconds);
+        assert_eq!(saved.review.permission, config::PermissionPreset::Manual);
+        assert_eq!(saved.subagents.permission, config::PermissionPreset::Yolo);
         assert_eq!(
             saved
                 .agent
@@ -11062,6 +11264,10 @@ mod tests {
             serde_json::json!({ "thought_output": "summary" }),
             serde_json::json!({ "review_tier": "thorough" }),
             serde_json::json!({ "correction_threshold": "p4" }),
+            serde_json::json!({ "review_permission": "always" }),
+            serde_json::json!({ "subagents_permission": "ask" }),
+            serde_json::json!({ "interface": "windowed" }),
+            serde_json::json!({ "voice_auto_send": "one_second" }),
             serde_json::json!({ "team": "sidekick" }),
             serde_json::json!({ "priority": { "sidekick": { "source": "x" } } }),
             serde_json::json!({ "server_policies": { "custom:company": "enabled" } }),
@@ -11583,10 +11789,8 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
     #[test]
     fn embedded_viewer_contains_role_scoped_acp_session_controls() {
         let viewer = include_str!("remote_viewer.html");
-        assert!(viewer.contains("[\"team\", \"Team\"]"));
-        assert!(viewer.contains("[\"agents\", \"Agent\"]"));
-        assert!(viewer.contains("[\"reviewer\", \"Reviewer\"]"));
-        assert!(viewer.contains("[\"subagents\", \"Subagents\"]"));
+        assert!(viewer.contains("mjcfg.snapshot?.tabs || []"));
+        assert!(viewer.contains("case \"input\":"));
         assert!(viewer.contains("snapshot.primary_options"));
         assert!(viewer.contains("snapshot.review_options"));
         assert!(viewer.contains("snapshot.subagent_options"));
@@ -11604,6 +11808,13 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(viewer.contains("Discovering ACP session options"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));
         assert!(viewer.contains("function renderMjTeam()"));
+        assert!(viewer.contains("function renderMjInput()"));
+        assert!(viewer.contains("function mjRolePermissionRow(role, field)"));
+        assert!(viewer.contains("review_permission"));
+        assert!(viewer.contains("subagents_permission"));
+        assert!(viewer.contains("voice_auto_send"));
+        assert!(viewer.contains("Terminal theme"));
+        assert!(viewer.contains("Terminal interface"));
         assert!(!viewer.contains("ACP Priority"));
         assert!(!viewer.contains("renderMjPriority"));
     }

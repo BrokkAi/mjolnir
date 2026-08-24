@@ -21,53 +21,13 @@ use crate::palette::TerminalThemeKindExt;
 use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
+pub(crate) use mj_core::settings::{SessionDefaultsSeat, SettingsTab, session_option_is_editable};
 
 const ACCOUNT_COUNT: usize = crate::auth::AuthVendor::ALL.len();
 pub(crate) const SETTINGS_PANEL_MIN_WIDTH: u16 = 28;
 pub(crate) const SETTINGS_PANEL_MIN_HEIGHT: u16 = 12;
 pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT;
-pub(crate) const CONFIGURABLE_ACP_SERVERS: [&str; 2] = ["codex-acp", "claude-acp"];
-
-pub(crate) fn is_configurable_acp_server(id: &str) -> bool {
-    // The platform adapter (e.g. Anvil on Android) is deliberately absent:
-    // it is the only route on its build, so disabling it can never be valid.
-    CONFIGURABLE_ACP_SERVERS.contains(&id)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsTab {
-    Team,
-    Agents,
-    Reviewer,
-    Subagents,
-    AcpServers,
-    Input,
-    Appearance,
-}
-
-impl SettingsTab {
-    const ALL: [Self; 7] = [
-        Self::Team,
-        Self::Agents,
-        Self::Reviewer,
-        Self::Subagents,
-        Self::AcpServers,
-        Self::Input,
-        Self::Appearance,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Team => "Team",
-            Self::Agents => "Agent",
-            Self::Reviewer => "Reviewer",
-            Self::Subagents => "Subagents",
-            Self::AcpServers => "ACP Servers",
-            Self::Input => "Input",
-            Self::Appearance => "Appearance",
-        }
-    }
-}
+pub(crate) use mj_core::settings::is_configurable_acp_server;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsAction {
@@ -76,13 +36,6 @@ pub enum SettingsAction {
     Authenticate(crate::auth::AuthVendor),
     Save,
     Cancel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionDefaultsSeat {
-    Primary,
-    Review,
-    Subagents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,25 +525,11 @@ impl SettingsEditor {
         else {
             return Vec::new();
         };
-        let permissions_own_mode = matches!(
-            seat,
-            SessionDefaultsSeat::Review | SessionDefaultsSeat::Subagents
-        ) && matches!(
-            server.launch.kind,
-            crate::roster::AdapterKind::Codex | crate::roster::AdapterKind::Claude
-        );
         server
             .session_config
             .iter()
             .enumerate()
-            .filter(|(_, option)| {
-                matches!(option.kind, SessionConfigKind::Select(_))
-                    && !matches!(
-                        option.category,
-                        Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Model)
-                    )
-                    && !(permissions_own_mode && option.id.to_string() == "mode")
-            })
+            .filter(|(_, option)| session_option_is_editable(seat, server.launch.kind, option))
             .map(|(option_index, _)| (server_index, option_index))
             .collect()
     }
@@ -1132,14 +1071,12 @@ fn permission_lines(
     permission: PermissionPreset,
     theme: TerminalTheme,
 ) -> Vec<Line<'static>> {
-    let detail = match permission {
-        PermissionPreset::Manual => "Provider uses its restrictive policy.",
-        PermissionPreset::Auto => "Codex: Approve for me; Claude Code: Auto.",
-        PermissionPreset::Yolo => "Provider grants full access.",
-    };
     vec![
         selected_line(selected, format!("Permissions < {permission} >"), theme),
-        Line::styled(format!("  {detail}"), Style::default().ink(theme.muted)),
+        Line::styled(
+            format!("  {}", permission.description()),
+            Style::default().ink(theme.muted),
+        ),
     ]
 }
 
