@@ -11577,7 +11577,16 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(viewer.contains("mjcfg.snapshot?.setup?.message"));
         assert!(viewer.contains("if (mjcfg.snapshot?.setup) {"));
         assert!(viewer.contains("newSessionButtonEl.disabled = Boolean(setupState);"));
-        assert!(viewer.contains("if (setupState) {\n          void openMjConfig(setupStep());"));
+        let picker_start = viewer
+            .find("      function openNewSessionPicker()")
+            .expect("new-session picker");
+        let picker_end = viewer[picker_start..]
+            .find("      function closeNewSessionPicker()")
+            .map(|offset| picker_start + offset)
+            .expect("new-session picker boundary");
+        let picker = &viewer[picker_start..picker_end];
+        assert!(picker.contains("if (setupState)"));
+        assert!(picker.contains("void openMjConfig(setupStep());"));
     }
 
     #[test]
