@@ -11670,7 +11670,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
 
     #[test]
     fn embedded_viewer_places_tui_activity_surfaces_around_the_composer() {
-        let viewer = include_str!("remote_viewer.html");
+        let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
         let composer = viewer.find("<section id=\"composer\"").expect("composer");
         let status = viewer.find("<div id=\"status-line\"").expect("status line");
         let console = viewer.find("<div class=\"console\">").expect("console");
