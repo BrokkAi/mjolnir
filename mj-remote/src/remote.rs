@@ -4884,10 +4884,18 @@ fn inventory_discovery_inputs_equal(
 #[derive(Debug)]
 struct MjLoginJob {
     vendor: mj_core::auth::AuthVendor,
-    output: Arc<Mutex<String>>,
+    output: Arc<Mutex<mj_core::terminal_output::TerminalText>>,
     result: Arc<Mutex<Option<std::result::Result<String, String>>>>,
     input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     abort: tokio::task::AbortHandle,
+}
+
+const MJ_LOGIN_OUTPUT_LIMIT: usize = 64 * 1024;
+
+fn new_mjconfig_login_output() -> Arc<Mutex<mj_core::terminal_output::TerminalText>> {
+    Arc::new(Mutex::new(mj_core::terminal_output::TerminalText::new(
+        MJ_LOGIN_OUTPUT_LIMIT,
+    )))
 }
 
 #[derive(Debug, Serialize)]
@@ -5206,7 +5214,7 @@ const MJ_SEAT_IDS: [&str; 3] = ["primary", "review", "subagents"];
 fn mjconfig_login_status(state: &ServerState) -> Option<MjLoginStatus> {
     let mut guard = state.mjconfig.login.lock().expect("mjconfig login lock");
     let job = guard.as_ref()?;
-    let output = job.output.lock().expect("login output").clone();
+    let output = job.output.lock().expect("login output").render();
     let result = job.result.lock().expect("login result").clone();
     let status = MjLoginStatus {
         vendor: job.vendor.id().to_string(),
@@ -5826,7 +5834,7 @@ async fn mjconfig_login_start(
             ));
         }
     }
-    let output = Arc::new(Mutex::new(String::new()));
+    let output = new_mjconfig_login_output();
     let result: Arc<Mutex<Option<std::result::Result<String, String>>>> =
         Arc::new(Mutex::new(None));
     let task_output = Arc::clone(&output);
@@ -5873,7 +5881,7 @@ fn complete_mjconfig_login(
 async fn mjconfig_run_login(
     vendor: mj_core::auth::AuthVendor,
     mode: mj_core::auth::WebLoginMode,
-    output: Arc<Mutex<String>>,
+    output: Arc<Mutex<mj_core::terminal_output::TerminalText>>,
     mut input: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -5912,7 +5920,7 @@ async fn mjconfig_run_login(
                 break;
             }
             if let Ok(mut sink) = stdout_sink.lock() {
-                sink.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                sink.push(&buffer[..read]);
             }
         }
     });
@@ -5924,7 +5932,7 @@ async fn mjconfig_run_login(
                 break;
             }
             if let Ok(mut sink) = stderr_sink.lock() {
-                sink.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                sink.push(&buffer[..read]);
             }
         }
     });
@@ -5934,6 +5942,9 @@ async fn mjconfig_run_login(
     }
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    if let Ok(mut sink) = output.lock() {
+        sink.finish();
+    }
     if !status.success() {
         anyhow::bail!("{} login exited with {status}", vendor.label());
     }
@@ -10371,7 +10382,7 @@ mod tests {
         let login_task = tokio::spawn(std::future::pending::<()>());
         *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
             vendor: mj_core::auth::AuthVendor::OpenAi,
-            output: Arc::new(Mutex::new(String::new())),
+            output: new_mjconfig_login_output(),
             result: Arc::new(Mutex::new(Some(Ok("Signed in".to_string())))),
             input: None,
             abort: login_task.abort_handle(),
@@ -10397,9 +10408,14 @@ mod tests {
         let runtime = test_mjconfig_runtime();
         let login_task = tokio::spawn(std::future::pending::<()>());
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let output = new_mjconfig_login_output();
+        output
+            .lock()
+            .expect("login output")
+            .push(b"Open the authorization URL");
         *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
             vendor: mj_core::auth::AuthVendor::Anthropic,
-            output: Arc::new(Mutex::new("Open the authorization URL".to_string())),
+            output,
             result: Arc::new(Mutex::new(None)),
             input: Some(sender),
             abort: login_task.abort_handle(),
@@ -10419,6 +10435,36 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(receiver.recv().await.as_deref(), Some("claude-auth-code"));
+        login_task.abort();
+    }
+
+    #[tokio::test]
+    async fn web_login_snapshot_removes_split_ansi_from_device_code() {
+        let runtime = test_mjconfig_runtime();
+        let login_task = tokio::spawn(std::future::pending::<()>());
+        let output = new_mjconfig_login_output();
+        {
+            let mut output = output.lock().expect("login output");
+            output.push(b"Enter code \x1b[9");
+            output.push(b"4m9VFA-AFFFH\x1b[");
+            output.push(b"0m to continue");
+        }
+        *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
+            vendor: mj_core::auth::AuthVendor::OpenAi,
+            output,
+            result: Arc::new(Mutex::new(None)),
+            input: None,
+            abort: login_task.abort_handle(),
+        });
+        let mut state = test_state();
+        state.mjconfig = runtime;
+
+        let login = mjconfig_login_status(&state).expect("running login status");
+
+        assert_eq!(login.output, "Enter code 9VFA-AFFFH to continue");
+        assert!(!login.output.contains("[94m"));
+        assert!(!login.output.contains("[0m"));
+        assert!(!login.output.contains('\u{1b}'));
         login_task.abort();
     }
 
