@@ -1423,14 +1423,13 @@
         font: 700 10px/1 var(--font-mono);
         letter-spacing: 0.12em;
         text-transform: uppercase;
+      }
 
-        &::after {
-          content: "";
-          width: 6px;
-          height: 11px;
-          background: currentColor;
-          animation: cursor-blink 1.05s steps(2, start) infinite;
-        }
+      .working-spinner {
+        font: 700 11px/1 var(--font-mono);
+        letter-spacing: 0;
+        text-transform: none;
+        white-space: pre;
       }
 
       .approval-badge {
@@ -1554,12 +1553,6 @@
       @keyframes attention-fade {
         50% {
           opacity: 0.55;
-        }
-      }
-
-      @keyframes cursor-blink {
-        50% {
-          opacity: 0;
         }
       }
 
@@ -3133,7 +3126,6 @@
 
       @media (prefers-reduced-motion: reduce) {
         .entry,
-        .working-badge::after,
         .approval-badge,
         .connection-badge,
         .session-approval,
@@ -3202,7 +3194,10 @@
           <span id="archive-badge" class="archive-badge" hidden>archived</span>
           <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
-          <span id="working-badge" class="working-badge" hidden>working</span>
+          <span id="working-badge" class="working-badge" hidden>
+            <span id="working-spinner" class="working-spinner" aria-hidden="true"></span>
+            <span>working</span>
+          </span>
           <div class="mobile-chat-actions">
             <button id="mobile-new-session-button" class="primary sidebar-new-button" type="button">New</button>
             <button id="mobile-logout-button" class="ghost-danger" type="button">Log out</button>
@@ -3459,6 +3454,7 @@
       const statusFieldsEl = $("status-fields");
       const statusQuotasEl = $("status-quotas");
       const workingBadgeEl = $("working-badge");
+      const workingSpinnerEl = $("working-spinner");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
       const archiveBadgeEl = $("archive-badge");
@@ -3542,6 +3538,8 @@
       let commandSelected = 0;
       let showTranscriptDiffs = true;
       let thoughtOutput = "default";
+      let activeSpinner = null;
+      let workingSpinnerTimer = null;
       const draftBySessionId = new Map();
       const attachmentsBySessionId = new Map();
       const activityBySessionId = new Map();
@@ -3635,23 +3633,66 @@
         renderChat();
       }
 
-      function applyThoughtOutputSnapshot(snapshot, render = false) {
+      function spinnerEntry(snapshot, name = snapshot?.appearance?.spinner) {
+        return snapshot?.appearance?.spinners?.find(
+          (spinner) => spinner.name === name && Array.isArray(spinner.frames) && spinner.frames.length,
+        ) || null;
+      }
+
+      function spinnerFrameIndex(spinner) {
+        if (reducedMotion.matches) {
+          return 0;
+        }
+        return Math.floor(Date.now() / spinner.frame_interval_ms) % spinner.frames.length;
+      }
+
+      function renderWorkingSpinner() {
+        const spinner = activeSpinner;
+        if (!spinner || workingBadgeEl.hidden) {
+          workingSpinnerEl.textContent = "";
+          return;
+        }
+        workingSpinnerEl.textContent = spinner.frames[spinnerFrameIndex(spinner)];
+      }
+
+      function syncWorkingSpinner() {
+        if (workingSpinnerTimer) {
+          clearInterval(workingSpinnerTimer);
+          workingSpinnerTimer = null;
+        }
+        renderWorkingSpinner();
+        if (!activeSpinner || workingBadgeEl.hidden || reducedMotion.matches) {
+          return;
+        }
+        workingSpinnerTimer = setInterval(renderWorkingSpinner, activeSpinner.frame_interval_ms);
+      }
+
+      function setActiveSpinner(spinner) {
+        const interval = Number(spinner?.frame_interval_ms);
+        activeSpinner = spinner && Number.isFinite(interval) && interval > 0
+          ? { frames: spinner.frames, frame_interval_ms: interval }
+          : null;
+        syncWorkingSpinner();
+      }
+
+      function applyAppearanceSnapshot(snapshot, render = false) {
         const next = snapshot?.appearance?.thought_output === "full" ? "full" : "default";
         const changed = thoughtOutput !== next;
         thoughtOutput = next;
+        setActiveSpinner(spinnerEntry(snapshot));
         if (render && changed) {
           renderChat();
         }
       }
 
-      async function refreshThoughtOutput() {
+      async function refreshAppearance() {
         try {
           const response = await apiFetch("/api/mjconfig", { cache: "no-store" });
           if (response.ok) {
-            applyThoughtOutputSnapshot(await response.json());
+            applyAppearanceSnapshot(await response.json());
           }
         } catch {
-          // Keep the compatibility default when configuration is unavailable.
+          // Keep the existing appearance when configuration is unavailable.
         }
       }
 
@@ -3721,7 +3762,7 @@
             throw new Error(`HTTP ${response.status}`);
           }
           mjcfg.snapshot = await response.json();
-          applyThoughtOutputSnapshot(mjcfg.snapshot, true);
+          applyAppearanceSnapshot(mjcfg.snapshot, true);
           mjSetStatus("");
           renderMjConfig();
           mjSchedulePoll();
@@ -3735,6 +3776,9 @@
       }
 
       function closeMjConfig() {
+        if (mjcfg.snapshot) {
+          applyAppearanceSnapshot(mjcfg.snapshot);
+        }
         mjconfigModalEl.hidden = true;
         mjcfg.edits = {};
         mjcfg.snapshot = null;
@@ -4251,7 +4295,7 @@
       function renderMjAppearance() {
         const panel = mjcfg.snapshot.appearance;
         mjconfigBodyEl.appendChild(
-          mjNote("The web theme is local to this browser. Thought output applies to web and terminal transcripts."),
+          mjNote("The web theme is local to this browser. Spinner and thought output apply to web and terminal transcripts."),
         );
         const themeRow = mjRow("Theme");
         const current = themePreference();
@@ -4269,6 +4313,40 @@
           themeRow.appendChild(button);
         }
         mjconfigBodyEl.appendChild(themeRow);
+
+        const spinnerRow = mjRow("Spinner");
+        const currentSpinner = mjEditedValue("spinner", panel.spinner);
+        spinnerRow.appendChild(
+          mjCombo(
+            panel.spinners.map((spinner) => ({
+              value: spinner.name,
+              label: spinner.name.charAt(0).toUpperCase() + spinner.name.slice(1),
+            })),
+            currentSpinner,
+            (next) => {
+              mjcfg.edits.spinner = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const spinnerPreview = document.createElement("span");
+        spinnerPreview.className = "mjconfig-spinner-preview";
+        spinnerPreview.setAttribute("aria-label", `${currentSpinner} spinner preview`);
+        spinnerRow.appendChild(spinnerPreview);
+        spinnerRow.appendChild(mjDetail("matches the terminal prompt-working spinner"));
+        mjconfigBodyEl.appendChild(spinnerRow);
+
+        const previewSpinner = spinnerEntry(mjcfg.snapshot, currentSpinner);
+        setActiveSpinner(previewSpinner);
+        if (previewSpinner) {
+          const renderPreview = () => {
+            spinnerPreview.textContent = previewSpinner.frames[spinnerFrameIndex(previewSpinner)];
+          };
+          renderPreview();
+          if (!reducedMotion.matches) {
+            mjcfg.spinnerTimer = setInterval(renderPreview, previewSpinner.frame_interval_ms);
+          }
+        }
 
         const thoughtRow = mjRow("Thought output");
         const currentThoughtOutput = mjEditedValue("thought_output", panel.thought_output);
@@ -4318,7 +4396,7 @@
             return;
           }
           mjcfg.snapshot = await response.json();
-          applyThoughtOutputSnapshot(mjcfg.snapshot, true);
+          applyAppearanceSnapshot(mjcfg.snapshot, true);
           // Parity with the TUI: saved primary session-option defaults also
           // update the selected live session where it exposes the same option.
           const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
@@ -7094,6 +7172,7 @@
           transcriptTitleEl.textContent = "Transcript";
           transcriptMetaEl.textContent = "Select a session to inspect its history.";
           workingBadgeEl.hidden = true;
+          syncWorkingSpinner();
           renderWorkspaceDiff(null);
           stopTurnEl.hidden = true;
           stopTurnEl.disabled = true;
@@ -7114,6 +7193,7 @@
           : "";
         transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
         workingBadgeEl.hidden = archived || !sessionIsWorking(session);
+        syncWorkingSpinner();
         renderWorkspaceDiff(session.workspace_diff);
         renderWorkspaceHeadDiff(session.workspace_head_diff);
         const activeTurn = !archived && sessionHasActiveTurn(session);
@@ -7838,6 +7918,7 @@
         approvalBadgeEl.hidden = !pending.length;
         if (pending.length) {
           workingBadgeEl.hidden = true;
+          syncWorkingSpinner();
         }
         for (const request of pending) {
           const card = cloneTemplate(permissionTpl);
@@ -8534,7 +8615,7 @@
       async function tryResumeViewerSession() {
         if (viewerToken) {
           showApp();
-          await refreshThoughtOutput();
+          await refreshAppearance();
           await refreshSessions();
           applyRoute();
           return;
@@ -8557,7 +8638,7 @@
           syncPendingStopState();
           noteSessionActivity();
           showApp();
-          await refreshThoughtOutput();
+          await refreshAppearance();
           const routed = routeSessionId();
           if (routed && !sessions.some((session) => session.session_id === routed)) {
             await refreshHistory(false);
@@ -8804,7 +8885,7 @@
           }
           authTokenEl.value = "";
           showApp();
-          await refreshThoughtOutput();
+          await refreshAppearance();
           await refreshSessions();
           applyRoute();
         } catch (error) {
@@ -8924,6 +9005,12 @@
       narrowScreen.addEventListener("change", () => {
         if (authenticated) {
           renderAll();
+        }
+      });
+      reducedMotion.addEventListener("change", () => {
+        syncWorkingSpinner();
+        if (!mjconfigModalEl.hidden && mjcfg.tab === "appearance") {
+          renderMjConfig();
         }
       });
       window.addEventListener("resize", syncKeyboardInset);

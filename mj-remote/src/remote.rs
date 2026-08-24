@@ -4932,6 +4932,7 @@ struct MjAppearancePanel {
 struct MjSpinnerEntry {
     name: String,
     frames: Vec<String>,
+    frame_interval_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -5234,6 +5235,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     .iter()
                     .map(|frame| frame.text().to_string())
                     .collect(),
+                frame_interval_ms: style.frame_interval_ms(),
             })
             .collect(),
         thought_output: config.thought_output.to_string(),
@@ -10023,8 +10025,13 @@ mod tests {
             .as_array()
             .expect("spinners");
         assert_eq!(spinners.len(), mj_core::spinner::SpinnerStyle::ALL.len());
-        for spinner in spinners {
+        for (spinner, style) in spinners.iter().zip(mj_core::spinner::SpinnerStyle::ALL) {
+            assert_eq!(spinner["name"].as_str(), Some(style.as_str()));
             assert!(!spinner["frames"].as_array().expect("frames").is_empty());
+            assert_eq!(
+                spinner["frame_interval_ms"].as_u64(),
+                Some(style.frame_interval_ms() as u64)
+            );
         }
         assert_eq!(snapshot["appearance"]["thought_output"], "default");
         assert_eq!(
@@ -10728,7 +10735,7 @@ mod tests {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("mjRow(\"Thought output\")"));
         assert!(viewer.contains("mjcfg.edits.thought_output = next"));
-        assert!(viewer.contains("function refreshThoughtOutput()"));
+        assert!(viewer.contains("function refreshAppearance()"));
         assert!(viewer.contains("function thoughtSummary(text)"));
         assert!(viewer.contains("function activeThoughtTail(text)"));
         assert!(viewer.contains("function nestedThoughtFinished(actor, laterEntries, session)"));
@@ -10737,6 +10744,23 @@ mod tests {
         assert!(viewer.contains("actorPrefix === \"subagent\" ? \"subagent\" : \"review\""));
         assert!(viewer.contains("entry._thoughtCompleted"));
         assert!(viewer.contains("thoughtOutput === \"default\""));
+    }
+
+    #[test]
+    fn embedded_viewer_shares_the_tui_spinner_and_exposes_its_choice() {
+        let viewer = include_str!("remote_viewer.html");
+
+        assert!(viewer.contains("id=\"working-spinner\""));
+        assert!(viewer.contains("function applyAppearanceSnapshot"));
+        assert!(viewer.contains("function syncWorkingSpinner"));
+        assert!(viewer.contains("spinner.frame_interval_ms"));
+        assert!(viewer.contains("function spinnerFrameIndex"));
+        assert!(viewer.contains("reducedMotion.matches"));
+        assert!(viewer.contains("reducedMotion.addEventListener(\"change\""));
+        assert!(viewer.contains("mjRow(\"Spinner\")"));
+        assert!(viewer.contains("mjcfg.edits.spinner = next"));
+        assert!(viewer.contains("matches the terminal prompt-working spinner"));
+        assert!(!viewer.contains("cursor-blink"));
     }
 
     #[test]
