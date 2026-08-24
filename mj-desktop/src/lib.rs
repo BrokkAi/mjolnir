@@ -27,6 +27,11 @@ pub struct DesktopShellOptions {
     pub origin: Url,
     /// DER encoding of the private certificate/CA trusted for this invocation.
     pub certificate_der: Vec<u8>,
+    /// Name of the pre-authenticated viewer session cookie.
+    pub bootstrap_cookie_name: &'static str,
+    /// Signed session cookie value installed into the WebView's in-memory
+    /// cookie store before it loads the viewer origin.
+    pub bootstrap_cookie_value: String,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -38,7 +43,27 @@ pub enum DesktopShellExit {
 #[cfg(not(target_os = "android"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellEvent {
+    CookieInstalled,
+    Close,
     Fatal(String),
+}
+
+/// Handle used by the CLI lifecycle to close the window when its listener
+/// stops, or surface the listener's failure in the native shell.
+#[cfg(not(target_os = "android"))]
+pub struct DesktopShellRemote {
+    proxy: EventLoopProxy<ShellEvent>,
+}
+
+#[cfg(not(target_os = "android"))]
+impl DesktopShellRemote {
+    pub fn fail(&self, message: String) {
+        let _ = self.proxy.send_event(ShellEvent::Fatal(message));
+    }
+
+    pub fn close(&self) {
+        let _ = self.proxy.send_event(ShellEvent::Close);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,12 +172,18 @@ fn verify_pinned_tls(options: &DesktopShellOptions) -> Result<()> {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
+pub fn run(
+    options: DesktopShellOptions,
+    on_ready: impl FnOnce(DesktopShellRemote),
+) -> Result<DesktopShellExit> {
     let policy = OriginPolicy::new(&options.origin)?;
     verify_pinned_tls(&options)?;
 
     let mut event_loop = EventLoopBuilder::<ShellEvent>::with_user_event().build();
     let event_proxy = event_loop.create_proxy();
+    on_ready(DesktopShellRemote {
+        proxy: event_loop.create_proxy(),
+    });
     let window = WindowBuilder::new()
         .with_title("Mjolnir")
         .with_window_icon(Some(application_icon()?))
@@ -205,9 +236,7 @@ pub fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
         &options.certificate_der,
         event_proxy.clone(),
     )?;
-    webview
-        .load_url(options.origin.as_str())
-        .context("load Mjolnir desktop viewer")?;
+    install_bootstrap_cookie(&webview, &policy, &options, event_proxy.clone())?;
 
     let mut result = Ok(DesktopShellExit::WindowClosed);
     let _exit_code = event_loop.run_return(|event, _, control_flow| {
@@ -217,6 +246,13 @@ pub fn run(options: DesktopShellOptions) -> Result<DesktopShellExit> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(ShellEvent::CookieInstalled) => {
+                if let Err(error) = webview.load_url(options.origin.as_str()) {
+                    result = Err(anyhow!(error).context("load Mjolnir desktop viewer"));
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            Event::UserEvent(ShellEvent::Close) => *control_flow = ControlFlow::Exit,
             Event::UserEvent(ShellEvent::Fatal(message)) => {
                 result = Err(anyhow!(message));
                 *control_flow = ControlFlow::Exit;
@@ -541,6 +577,148 @@ fn install_platform_certificate_pin(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn install_bootstrap_cookie(
+    webview: &WebView,
+    policy: &OriginPolicy,
+    options: &DesktopShellOptions,
+    event_proxy: EventLoopProxy<ShellEvent>,
+) -> Result<()> {
+    use objc2::Message;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{
+        NSDictionary, NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieName, NSHTTPCookiePath,
+        NSHTTPCookieSameSitePolicy, NSHTTPCookieSameSiteStrict, NSHTTPCookieSecure,
+        NSHTTPCookieValue, NSString,
+    };
+    use wry::WebViewExtMacOS;
+
+    let keys = unsafe {
+        [
+            NSHTTPCookieName,
+            NSHTTPCookieValue,
+            NSHTTPCookieDomain,
+            NSHTTPCookiePath,
+            NSHTTPCookieSecure,
+            NSHTTPCookieSameSitePolicy,
+        ]
+    };
+    let values: [Retained<AnyObject>; 6] = [
+        NSString::from_str(options.bootstrap_cookie_name),
+        NSString::from_str(&options.bootstrap_cookie_value),
+        NSString::from_str(&policy.host),
+        NSString::from_str("/"),
+        NSString::from_str("TRUE"),
+        unsafe { NSHTTPCookieSameSiteStrict }.retain(),
+    ]
+    .map(|value| value.into_super().into_super());
+    let properties: Retained<NSDictionary<NSString, AnyObject>> =
+        NSDictionary::from_retained_objects(&keys, &values);
+    let cookie = unsafe { NSHTTPCookie::cookieWithProperties(&properties) }
+        .context("construct desktop viewer session cookie")?;
+    let completion = block2::RcBlock::new(move || {
+        let _ = event_proxy.send_event(ShellEvent::CookieInstalled);
+    });
+    unsafe {
+        webview
+            .webview()
+            .configuration()
+            .websiteDataStore()
+            .httpCookieStore()
+            .setCookie_completionHandler(&cookie, Some(&*completion));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn install_bootstrap_cookie(
+    webview: &WebView,
+    policy: &OriginPolicy,
+    options: &DesktopShellOptions,
+    event_proxy: EventLoopProxy<ShellEvent>,
+) -> Result<()> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT, ICoreWebView2_13, ICoreWebView2Profile5,
+    };
+    use windows_core::{HSTRING, Interface};
+    use wry::WebViewExtWindows;
+
+    let webview: ICoreWebView2_13 = webview
+        .webview()
+        .cast()
+        .context("WebView2 runtime does not expose a profile")?;
+    unsafe {
+        let profile: ICoreWebView2Profile5 = webview
+            .Profile()
+            .context("open WebView2 profile")?
+            .cast()
+            .context("WebView2 runtime does not support profile cookie management")?;
+        let manager = profile
+            .CookieManager()
+            .context("open WebView2 cookie manager")?;
+        let cookie = manager
+            .CreateCookie(
+                &HSTRING::from(options.bootstrap_cookie_name),
+                &HSTRING::from(options.bootstrap_cookie_value.as_str()),
+                &HSTRING::from(policy.host.as_str()),
+                &HSTRING::from("/"),
+            )
+            .context("construct desktop viewer session cookie")?;
+        cookie
+            .SetIsSecure(true)
+            .context("mark desktop viewer session cookie secure")?;
+        cookie
+            .SetIsHttpOnly(true)
+            .context("mark desktop viewer session cookie HTTP-only")?;
+        cookie
+            .SetSameSite(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT)
+            .context("restrict desktop viewer session cookie site")?;
+        manager
+            .AddOrUpdateCookie(&cookie)
+            .context("store desktop viewer session cookie")?;
+    }
+    let _ = event_proxy.send_event(ShellEvent::CookieInstalled);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_bootstrap_cookie(
+    webview: &WebView,
+    policy: &OriginPolicy,
+    options: &DesktopShellOptions,
+    event_proxy: EventLoopProxy<ShellEvent>,
+) -> Result<()> {
+    use webkit2gtk::{CookieManagerExt, WebViewExt, WebsiteDataManagerExt};
+    use wry::WebViewExtUnix;
+
+    let manager = webview
+        .webview()
+        .website_data_manager()
+        .and_then(|data| data.cookie_manager())
+        .context("desktop webview exposes no cookie manager")?;
+    let mut cookie = soup::Cookie::new(
+        options.bootstrap_cookie_name,
+        &options.bootstrap_cookie_value,
+        &policy.host,
+        "/",
+        -1,
+    );
+    cookie.set_secure(true);
+    cookie.set_http_only(true);
+    cookie.set_same_site_policy(soup::SameSitePolicy::Strict);
+    manager.add_cookie(&mut cookie, gio::Cancellable::NONE, move |result| {
+        let event = match result {
+            Ok(()) => ShellEvent::CookieInstalled,
+            Err(error) => {
+                ShellEvent::Fatal(format!("install desktop viewer session cookie: {error}"))
+            }
+        };
+        let _ = event_proxy.send_event(event);
+    });
+    Ok(())
+}
+
 #[cfg(any(test, target_os = "windows"))]
 fn decode_certificate_pem(pem: &str) -> Option<Vec<u8>> {
     use base64::Engine;
@@ -611,6 +789,8 @@ mod tests {
         verify_pinned_tls(&DesktopShellOptions {
             origin,
             certificate_der: expected_der,
+            bootstrap_cookie_name: "mj_desktop_session",
+            bootstrap_cookie_value: "test-cookie".to_string(),
         })
         .expect("expected certificate must pass");
         server.join().expect("server thread");
@@ -623,6 +803,8 @@ mod tests {
         let error = verify_pinned_tls(&DesktopShellOptions {
             origin,
             certificate_der: unexpected.cert.der().to_vec(),
+            bootstrap_cookie_name: "mj_desktop_session",
+            bootstrap_cookie_value: "test-cookie".to_string(),
         })
         .expect_err("different certificate must fail");
         assert!(format!("{error:#}").contains("verify desktop TLS certificate"));

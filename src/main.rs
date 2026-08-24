@@ -16,6 +16,8 @@ mod config;
 #[cfg(test)]
 mod deepswe;
 mod discrete_review;
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+use mj_desktop as desktop;
 mod event;
 mod headless;
 mod keep_awake;
@@ -184,6 +186,9 @@ struct Cli {
 enum Commands {
     /// Install repository guidance for coding agents.
     Agents(AgentsArgs),
+    /// Open the remote viewer in a native desktop window.
+    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    App(AppArgs),
     /// Pipe stdin/stdout to an in-process MCP tool server of a parent mj
     /// process. Spawned by ACP agents as an advertised stdio MCP server;
     /// not for interactive use.
@@ -203,6 +208,15 @@ enum Commands {
     Resume(ResumeArgs),
     /// Start the local remote-control server.
     Server(ServerArgs),
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[derive(Debug, clap::Args)]
+struct AppArgs {
+    /// Days of disconnected-session history to keep. Pass 0 to retain it
+    /// forever.
+    #[arg(long, default_value_t = 30)]
+    history_days: u32,
 }
 
 #[derive(Debug, clap::Args)]
@@ -529,6 +543,8 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Agents(_)) => false,
+        #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+        Some(Commands::App(_)) => false,
         Some(Commands::McpBridge(_)) => false,
         Some(Commands::Memory(_)) => false,
         Some(Commands::Models(_)) => false,
@@ -634,6 +650,18 @@ async fn main() -> Result<()> {
             Commands::Agents(args) => match args.command {
                 AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
             },
+            #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+            Commands::App(args) => {
+                run_desktop_app(
+                    args,
+                    cwd,
+                    top_level_additional_directories,
+                    snapshot_exclusions,
+                    fs_max_text_bytes,
+                    termination.token(),
+                )
+                .await
+            }
             // Dispatched before the termination coordinator installs; kept
             // here only for match exhaustiveness.
             Commands::McpBridge(args) => mj_core::mcp_bridge::run_bridge(&args.addr).await,
@@ -956,6 +984,120 @@ fn role_for_session_entry<'a>(
                 .iter()
                 .find(|role| role.launch.source_id == adapter && role.ranked)
         })
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+async fn run_desktop_app(
+    args: AppArgs,
+    cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
+    snapshot_exclusions: Vec<PathBuf>,
+    fs_max_text_bytes: u64,
+    termination: CancellationToken,
+) -> Result<()> {
+    let workspace_roots = validate_workspace_roots(&cwd, &additional_directories)?;
+    let config_path = config::default_config_path();
+    let mut cfg =
+        Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
+    cfg.apply_default_team();
+    let resolved = match roster::resolve(&cfg, &cwd).await {
+        Ok(roster) => Ok(roster),
+        Err(error) => match error.downcast_ref::<mj_core::roster::NothingLaunchable>() {
+            Some(nothing) => Err(remote::SetupPending(nothing.message.clone())),
+            None => return Err(error),
+        },
+    };
+    let config_hash = remote_host::config_file_hash(&config_path);
+    let session_manager: Arc<remote_host::RootServerSessionManager> = Arc::new(match &resolved {
+        Ok(roster) => remote_host::RootServerSessionManager::new_roster(
+            roster.clone(),
+            config_hash,
+            cwd.clone(),
+            workspace_roots.additional_directories().to_vec(),
+            snapshot_exclusions.clone(),
+            fs_max_text_bytes,
+        ),
+        Err(remote::SetupPending(reason)) => remote_host::RootServerSessionManager::new_unresolved(
+            reason.clone(),
+            config_hash,
+            cwd.clone(),
+            workspace_roots.additional_directories().to_vec(),
+            snapshot_exclusions.clone(),
+            fs_max_text_bytes,
+        ),
+    });
+
+    let server_stop = termination.child_token();
+    let (handle, serve) = remote::prepare_desktop_server(remote::DesktopServerOptions {
+        config: cfg,
+        roster: resolved,
+        history_days: args.history_days,
+        cwd,
+        additional_directories: workspace_roots.additional_directories().to_vec(),
+        snapshot_exclusions,
+        fs_max_text_bytes,
+        session_manager,
+        termination: server_stop.clone(),
+    })
+    .await?;
+
+    let (failure_tx, failure_rx) = tokio::sync::oneshot::channel::<String>();
+    let server_task = tokio::spawn({
+        let server_stop = server_stop.clone();
+        async move {
+            let result = serve.await;
+            if !server_stop.is_cancelled() {
+                let message = match &result {
+                    Ok(()) => "desktop server exited unexpectedly".to_string(),
+                    Err(error) => format!("desktop server failed: {error:#}"),
+                };
+                let _ = failure_tx.send(message);
+            }
+            result
+        }
+    });
+    let (shell_tx, shell_rx) = tokio::sync::oneshot::channel::<desktop::DesktopShellRemote>();
+    let watchdog = tokio::spawn({
+        let termination = termination.clone();
+        async move {
+            let failure = tokio::select! {
+                _ = termination.cancelled() => None,
+                failure = failure_rx => match failure {
+                    Ok(message) => Some(message),
+                    Err(_) => return,
+                },
+            };
+            let Ok(shell) = shell_rx.await else {
+                return;
+            };
+            match failure {
+                Some(message) => shell.fail(message),
+                None => shell.close(),
+            }
+        }
+    });
+
+    println!("Opening the Mjolnir desktop viewer at {}", handle.origin);
+    let shell_result = desktop::run(
+        desktop::DesktopShellOptions {
+            origin: handle.origin,
+            certificate_der: handle.certificate_der,
+            bootstrap_cookie_name: handle.bootstrap_cookie_name,
+            bootstrap_cookie_value: handle.bootstrap_cookie_value,
+        },
+        move |shell| {
+            let _ = shell_tx.send(shell);
+        },
+    );
+
+    server_stop.cancel();
+    let serve_result = server_task.await.context("join desktop server")?;
+    watchdog.abort();
+    match (shell_result, serve_result) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(shell_error), _) => Err(shell_error),
+        (Ok(_), Err(serve_error)) => Err(serve_error),
+    }
 }
 
 /// Handle the `mj resume` subcommand: pick the agent to resume from, list
@@ -4544,6 +4686,22 @@ mod tests {
             }
             _ => panic!("expected Server subcommand"),
         }
+    }
+
+    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    #[test]
+    fn parse_app_subcommand() {
+        let cli = try_parse_hermetic(&["mj", "app"]).expect("parse app");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::App(AppArgs { history_days: 30 }))
+        ));
+        let cli =
+            try_parse_hermetic(&["mj", "app", "--history-days", "0"]).expect("parse app history");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::App(AppArgs { history_days: 0 }))
+        ));
     }
 
     #[test]
