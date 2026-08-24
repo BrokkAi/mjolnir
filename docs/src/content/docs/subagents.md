@@ -150,6 +150,10 @@ Subagents run on the model selected by Mjolnir's `[subagents]` configuration.
 When `subagents.auto_failover` is on, Mjolnir can move the configured pool to
 another launchable route as provider quota changes. The primary agent cannot
 override the model or ACP adapter on an individual `create_subagent` call.
+`subagents.permission` controls the provider-native permission policy for the
+whole pool; its default `auto` selects Codex's **Approve for me** policy or
+Claude Code's Auto policy. The **Permissions** setting owns the provider's
+**Mode** option, so a saved subagent Mode value is ignored.
 
 ## Workflow progress
 
@@ -184,7 +188,7 @@ releasing the turn — delegation is not required for the gate. On the default Q
 investigates the change and a validation pass re-verifies its findings; on the
 Extended tier a visible supervisor on the configured review model investigates
 the immutable change packet and asynchronously launches only the useful
-read-only Norse reviewers, vetting their reports in its own session. Either
+read-only specialist reviewers, vetting their reports in its own session. Either
 way, surviving findings come back as a corrective turn. Reviewers use the same
 workflow progress and nested transcript machinery as ordinary subagents but do
 not receive implementation write access or recursive delegation tools. See

@@ -6,36 +6,35 @@
   </a>
 </p>
 
-Mjolnir (`mj`) is a full-featured frontend for **Codex and Claude**. It gives
+Mjolnir (`mj`) is a full-featured frontend ([ACP client](https://agentclientprotocol.com/get-started/introduction))
+for **Codex and Claude**. It gives
 both agents the same terminal workflow, team configuration, review pipeline,
-and remote-control surface.
+and remote-control surface, without taking them out of the harness they were trained to use.
 
 ## Features
 
-- **Codex and Claude teams:** use either agent for coding and review, or split
+- **Codex and Claude teams:** use either agent in its native harness for coding and review, or split
   the roles between them without changing tools or workflows.
+- **[Integrated adversarial review](https://blog.brokk.ai/mjolnir-automated-cross-vendor-adversarial-review/):**
+  automatically challenge changes
+  with an independent, cross-provider reviewer with access to [specialized static analysis tooling](https://slopcop.brokk.ai/).
+- **[Remote control]:** run the workspace and control plane on your machine while
+  driving the session from another browser or device.
 - **Parallel subagents:** delegate to as many as 16 write-capable agents in
   fresh sessions, with live progress and completed reports returned to the
   primary agent.
-- **Integrated adversarial review:** automatically challenge changed turns
-  with an independent reviewer and targeted specialist checks.
+- **Mid-turn steering:** queue a correction while a supported agent is working,
+  then use Cancel to apply the oldest queued correction to the running turn.
 - **Worktree sessions:** start work in a linked Git worktree and keep agent
   changes separate from the current checkout, whichever coder you choose.
 - **Shared project knowledge:** carry verified discoveries across Claude and
-  Codex sessions through one local, inspectable memory interface. Claude's
-  native project memory is also available to Codex without duplicate injection
-  back into Claude.
-- **Remote control:** run the workspace and control plane on your machine while
-  driving the session from another browser or device.
+  Codex sessions through one local, inspectable memory interface synchronized
+  into each provider's native memory files.
 - **Local voice input:** dictate prompts on macOS, Linux, and Windows with
   cross-platform, on-device speech recognition.
 - **Mac computer control:** optionally give one primary macOS session fresh,
   screenshot-grounded pointer, keyboard, and scroll control through a separate
   Mjolnir Computer app—not through the terminal running `mj`.
-
-### Terminal
-
-![Mjolnir review session showing the primary agent, reviewer progress, and usage](docs/readme-images/default-ui.png)
 
 ### Web interface
 
@@ -64,8 +63,8 @@ under its terms and data boundaries.
 
 Claude and Codex should not have to rediscover the same build requirement,
 architecture constraint, or debugging conclusion in separate sessions.
-Mjolnir gives both agents one local project-knowledge layer and refreshes active
-primary sessions when that knowledge changes.
+Mjolnir gives both agents one local project-knowledge layer and synchronizes it
+into their native memory files before sessions start.
 
 Agents can save verified discoveries as they work, or you can manage them
 directly:
@@ -79,12 +78,13 @@ mj memory forget m7
 
 Use `/memory` for the same workflow inside an interactive session. Knowledge
 can be project-scoped or global, remains readable in Mjolnir's local
-`memories.json`, and is bounded before it enters an agent's context.
+`memories.json`, and is synchronized into provider-native memory rather than
+being added to a user prompt.
 
-When Codex is the primary agent, Mjolnir also makes Claude Code's native
-project `MEMORY.md` available to it. Claude continues to manage that file and
-receive it natively; Mjolnir does not inject a second copy into Claude. This
-lets a discovery made in one agent remain useful when you switch teams.
+Mjolnir imports Claude Code's native project `MEMORY.md` into its shared store,
+then writes a managed section to Claude and Codex native memory files. This
+lets a discovery made in one agent remain useful when you switch teams without
+altering either provider's user messages.
 
 See [Shared project knowledge](https://mjolnir.brokk.ai/configuration/#shared-project-knowledge)
 for behavior, controls, and source ownership.
@@ -225,6 +225,7 @@ release-profile pair instead.
 - [Start with Claude](https://mjolnir.brokk.ai/claude/)
 - [10-minute evaluation](https://mjolnir.brokk.ai/evaluate/)
 - [Remote control](https://mjolnir.brokk.ai/remote/)
+- [Mid-turn steering and terminal controls](https://mjolnir.brokk.ai/cli-reference/#mid-turn-steering)
 - [Voice dictation](https://mjolnir.brokk.ai/voice/)
 - [Subagents](https://mjolnir.brokk.ai/subagents/)
 - [Shared project knowledge](https://mjolnir.brokk.ai/configuration/#shared-project-knowledge)

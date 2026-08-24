@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
@@ -32,7 +32,6 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::ragnarok::PromptToolLifecycle;
 use mj_core::acp::{self, AcpRuntimeConfig, RuntimeAccessMode};
 use mj_core::agent_usage::{Record, Seat};
 use mj_core::event::{
@@ -50,6 +49,46 @@ pub const DEFAULT_MAX_PARALLEL: usize = 6;
 pub const MAX_PARALLEL_CAP: usize = 16;
 
 const SERVER_DELEGATION_GUIDANCE: &str = "SUBAGENT POLICY: create_subagent launches one background subagent on a fresh ACP session with no memory of this conversation, and returns immediately. Reports are delivered only between your turns: ending your turn while subagents run is how you wait, and you are woken with each finished subagent's full report plus progress on everything still running. Never poll. Several subagents run concurrently and all of them can write to the workspace, so give each one non-overlapping work. subagent_cancel stops or releases a subagent and returns its full report; use it to abandon or conclude work, not to collect results. You keep planning, coordination, review, verification, and the final answer.";
+
+/// Per-prompt ACP tool lifecycle state.
+///
+/// Some adapters return `PromptDone` while asynchronous tools are still
+/// running. A tool remains active until its latest explicit status is
+/// `Completed` or `Failed`; metadata-only updates for an unseen id create a
+/// conservative pending entry.
+#[derive(Debug, Default)]
+struct PromptToolLifecycle {
+    statuses: HashMap<String, ToolCallStatus>,
+}
+
+impl PromptToolLifecycle {
+    fn observe(&mut self, update: &SessionUpdate) {
+        match update {
+            SessionUpdate::ToolCall(call) => {
+                self.statuses
+                    .insert(call.tool_call_id.to_string(), call.status);
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                let status = update.fields.status;
+                self.statuses
+                    .entry(update.tool_call_id.to_string())
+                    .and_modify(|current| {
+                        if let Some(status) = status {
+                            *current = status;
+                        }
+                    })
+                    .or_insert_with(|| status.unwrap_or(ToolCallStatus::Pending));
+            }
+            _ => {}
+        }
+    }
+
+    fn has_active_tools(&self) -> bool {
+        self.statuses
+            .values()
+            .any(|status| !matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed))
+    }
+}
 
 pub const PRIMARY_SESSION_DIRECTIVE: &str = r#"<mj-subagent-policy>
 You are the primary agent and the owner of the user's outcome. You understand the request, gather the context you need, form the plan, decide what to delegate, review what comes back, verify it, and deliver the final answer. This policy applies to every subsequent user request in this ACP session.
@@ -128,7 +167,10 @@ pub struct Config {
     /// Id source installed on the controller when the MCP server starts, so
     /// discrete-review lanes can draw from the same sequence.
     pub id_allocator: SubagentIdAllocator,
+    permission_mode: Option<mj_core::config::PermissionPreset>,
     headless_permission_mode: Option<mj_core::config::PermissionPreset>,
+    is_headless: bool,
+    is_enabled: bool,
     role_pool: Option<crate::quota::RolePool>,
     reports: Option<SubagentReportBus>,
     /// Live runs, shared with the orchestrator so every wake can ask the
@@ -198,7 +240,6 @@ impl Config {
                 model_id: role.model.model,
                 model_value: role.model_value,
                 adapter_source_id: role.launch.source_id,
-                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort,
@@ -208,7 +249,10 @@ impl Config {
             max_parallel: DEFAULT_MAX_PARALLEL,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
+            permission_mode: None,
             headless_permission_mode: None,
+            is_headless: false,
+            is_enabled: true,
             role_pool,
             reports: None,
             runs: SubagentRegistry::default(),
@@ -244,11 +288,29 @@ impl Config {
         self
     }
 
+    /// Marks this configuration as a non-interactive run. Its autonomy
+    /// guidance applies even when the native policy comes from saved settings.
+    pub fn with_headless(mut self) -> Self {
+        self.is_headless = true;
+        self
+    }
+
+    /// Apply an explicit headless command-line policy. It takes precedence
+    /// over the saved seat policy for this invocation.
     pub fn with_headless_permission_mode(
         mut self,
         mode: mj_core::config::PermissionPreset,
     ) -> Self {
         self.headless_permission_mode = Some(mode);
+        self.is_headless = true;
+        self
+    }
+
+    /// Apply the saved provider-native permission policy to interactive
+    /// subagent or review lanes. The headless command-line policy wins when
+    /// both are present.
+    pub fn with_permission_mode(mut self, mode: mj_core::config::PermissionPreset) -> Self {
+        self.permission_mode = Some(mode);
         self
     }
 
@@ -348,7 +410,9 @@ impl Config {
             .map(|role| {
                 format!(
                     "{}\0{}\0{:?}",
-                    role.adapter_source_id, role.model_id, self.headless_permission_mode
+                    role.adapter_source_id,
+                    role.model_id,
+                    self.headless_permission_mode.or(self.permission_mode)
                 )
             })
             .unwrap_or_else(|| self.display_label.clone())
@@ -363,17 +427,12 @@ impl Config {
             .role_config
             .as_ref()
             .and_then(|config| config.session_tag.clone());
-        let require_native_read_only = self
-            .role_config
-            .as_ref()
-            .is_some_and(|config| config.require_native_read_only);
         let reasoning_effort = role.reasoning_effort.clone();
         self.role_config = Some(acp::RuntimeRoleConfig {
             label: LABEL.to_string(),
             model_id: role.model.model,
             model_value: role.model_value,
             adapter_source_id: role.launch.source_id,
-            require_native_read_only,
             permission: None,
             session_tag,
             reasoning_effort,
@@ -518,7 +577,11 @@ pub struct SubagentCancelArgs {
 
 #[derive(Clone)]
 struct McpHandler {
-    config: Config,
+    // The MCP endpoint is present for the lifetime of a primary session, even
+    // when its team starts with no launchable subagent route. A later
+    // same-primary team change can then install a route without restarting the
+    // primary ACP session.
+    config: Arc<StdRwLock<Option<Config>>>,
     context: RunContext,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     controller: Controller,
@@ -528,20 +591,45 @@ struct McpHandler {
 
 #[tool_router(router = tool_router)]
 impl McpHandler {
+    #[cfg(test)]
     fn new(
         config: Config,
         context: RunContext,
         ui_tx: mpsc::UnboundedSender<UiEvent>,
         controller: Controller,
     ) -> Self {
+        let runs = config.runs.clone();
+        Self::new_live(
+            Arc::new(StdRwLock::new(Some(config))),
+            context,
+            ui_tx,
+            controller,
+            runs,
+        )
+    }
+
+    fn new_live(
+        config: Arc<StdRwLock<Option<Config>>>,
+        context: RunContext,
+        ui_tx: mpsc::UnboundedSender<UiEvent>,
+        controller: Controller,
+        runs: SubagentRegistry,
+    ) -> Self {
         Self {
-            runs: config.runs.clone(),
+            runs,
             config,
             context,
             ui_tx,
             controller,
             tool_router: Self::tool_router(),
         }
+    }
+
+    fn config(&self) -> Option<Config> {
+        self.config
+            .read()
+            .expect("subagent config lock poisoned")
+            .clone()
     }
 
     #[tool(
@@ -555,8 +643,13 @@ impl McpHandler {
         if args.prompt.trim().is_empty() {
             return Err(McpError::invalid_params("prompt must not be empty", None));
         }
+        let Some(config) = self.config().filter(|config| config.is_enabled) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "subagents are not configured for this session. Save a same-primary team with a launchable reviewer or subagent route to enable them immediately.",
+            )]));
+        };
         let context = resolve_subagent_context(&self.context, args.cwd.as_deref()).await?;
-        let spec = self.config.configured_session();
+        let spec = config.configured_session();
         let label = args
             .label
             .as_deref()
@@ -574,13 +667,13 @@ impl McpHandler {
         let subagent_id = match admit_and_launch_run(
             &self.controller,
             &self.runs,
-            &self.config,
+            &config,
             context,
             args.prompt,
             Vec::new(),
             label.clone(),
             spec.clone(),
-            RunPolicy::configured(&self.config),
+            RunPolicy::configured(&config),
             &self.ui_tx,
         )
         .await
@@ -606,14 +699,13 @@ impl McpHandler {
         label: &str,
         spec: &SessionSpec,
     ) -> std::result::Result<CallToolResult, McpError> {
-        if let Err(failure) = resume_retained_run(
-            &self.controller,
-            &self.runs,
-            &self.config,
-            subagent_id,
-            prompt,
-        )
-        .await
+        let Some(config) = self.config().filter(|config| config.is_enabled) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "subagents are not configured for this session. Save a same-primary team with a launchable reviewer or subagent route to enable them immediately.",
+            )]));
+        };
+        if let Err(failure) =
+            resume_retained_run(&self.controller, &self.runs, &config, subagent_id, prompt).await
         {
             if failure == ResumeFailure::Unknown {
                 return Err(McpError::invalid_params(failure.message(subagent_id), None));
@@ -635,7 +727,11 @@ impl McpHandler {
     /// including a `resume` that re-admits a retained session, because the
     /// discrete-review gate asks "did this turn delegate at all".
     fn note_handoff(&self) {
-        if let Some(counter) = self.config.subagent_handoff_counter.as_ref() {
+        if let Some(counter) = self
+            .config()
+            .as_ref()
+            .and_then(|config| config.subagent_handoff_counter.as_ref())
+        {
             counter.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -668,7 +764,10 @@ impl McpHandler {
                 // instead of injecting the same content twice.
                 if !result.cancelled_while_running
                     && result.report.is_some()
-                    && let Some(reports) = self.config.reports.as_ref()
+                    && let Some(reports) = self
+                        .config()
+                        .as_ref()
+                        .and_then(|config| config.reports.as_ref())
                 {
                     reports.claim(args.subagent_id);
                 }
@@ -820,7 +919,7 @@ fn spawn_subagent_runtime(
     let cancel = termination.unwrap_or_default();
     let mut env = config.env.clone();
     let mut role_config = config.role_config.clone();
-    if let Some(mode) = config.headless_permission_mode
+    if let Some(mode) = config.headless_permission_mode.or(config.permission_mode)
         && let Some(role) = role_config.as_mut()
         && let Some(kind) = mj_core::roster::AdapterKind::from_source_id(&role.adapter_source_id)
     {
@@ -829,7 +928,7 @@ fn spawn_subagent_runtime(
     let agent_source_id = role_config
         .as_ref()
         .map(|role| role.adapter_source_id.clone());
-    let saved_session_config = role_config
+    let mut saved_session_config = role_config
         .as_ref()
         .map(|role| {
             mj_core::config::load_saved_session_config(
@@ -844,6 +943,7 @@ fn spawn_subagent_runtime(
             )
         })
         .unwrap_or_default();
+    discard_saved_permission_mode(&mut saved_session_config, role_config.as_ref());
     // Shared project knowledge flows into every worker lane; only primary
     // sessions get the memory_save/memory_forget tools.
     let memory = role_config.as_ref().and_then(|role| {
@@ -881,6 +981,18 @@ fn spawn_subagent_runtime(
     }
 }
 
+/// Permissions owns the provider's mode option for delegated seats. Ignore a
+/// stale saved session default so it cannot overwrite the configured preset.
+fn discard_saved_permission_mode(
+    saved_session_config: &mut HashMap<String, String>,
+    role_config: Option<&acp::RuntimeRoleConfig>,
+) {
+    let Some(permission) = role_config.and_then(|role| role.permission.as_ref()) else {
+        return;
+    };
+    saved_session_config.remove(&format!("config:{}", permission.config_id));
+}
+
 /// Appended to the MCP server instructions in non-interactive (headless)
 /// runs only. Interactive sessions have a human present, so deferring to
 /// them on approvals is correct there and this text must not appear.
@@ -890,7 +1002,7 @@ impl McpHandler {
     fn server_info(&self) -> ServerInfo {
         let mut instructions =
             format!("{SERVER_DELEGATION_GUIDANCE}\n\n{PRIMARY_SESSION_DIRECTIVE}");
-        if self.config.headless_permission_mode.is_some() {
+        if self.config().is_some_and(|config| config.is_headless) {
             instructions.push_str("\n\n");
             instructions.push_str(HEADLESS_AUTONOMY_DIRECTIVE);
         }
@@ -947,14 +1059,38 @@ impl McpService {
         ui_tx: mpsc::UnboundedSender<UiEvent>,
         controller: Controller,
     ) -> Result<Self> {
-        controller
-            .configure(
-                config.max_parallel,
-                config.active_implementation_workers.clone(),
-                config.id_allocator.clone(),
-            )
-            .await;
-        let handler = McpHandler::new(config, context, ui_tx, controller);
+        let runs = config.runs.clone();
+        Self::start_live(
+            Arc::new(StdRwLock::new(Some(config))),
+            context,
+            ui_tx,
+            controller,
+            runs,
+        )
+        .await
+    }
+
+    async fn start_live(
+        config: Arc<StdRwLock<Option<Config>>>,
+        context: RunContext,
+        ui_tx: mpsc::UnboundedSender<UiEvent>,
+        controller: Controller,
+        runs: SubagentRegistry,
+    ) -> Result<Self> {
+        let initial = config
+            .read()
+            .expect("subagent config lock poisoned")
+            .clone();
+        if let Some(initial) = initial {
+            controller
+                .configure(
+                    initial.max_parallel,
+                    initial.active_implementation_workers.clone(),
+                    initial.id_allocator.clone(),
+                )
+                .await;
+        }
+        let handler = McpHandler::new_live(config, context, ui_tx, controller, runs);
         let bridge = mj_core::mcp_bridge::BridgeServer::start(MCP_SERVER_NAME, handler)
             .await
             .context("start subagent MCP bridge")?;
@@ -2659,7 +2795,10 @@ async fn run(
                         | UiEvent::SessionConfigOptions { .. }
                         | UiEvent::Workflow(_)
                         | UiEvent::WorkspaceDiff(_)
-                        | UiEvent::WorkspaceHeadDiff(_) => {}
+                        | UiEvent::WorkspaceHeadDiff(_)
+                        // Steering is a primary-session feature; a subagent
+                        // lane never sends `_session/steering` requests.
+                        | UiEvent::SteeredPromptDelivered { .. } => {}
                         UiEvent::SessionUpdate(update) => {
                             tool_lifecycle.observe(&update);
                             if let SessionUpdate::UsageUpdate(value) = &update {
@@ -3376,6 +3515,112 @@ pub fn runtime_service(config: Config) -> Arc<dyn acp::RuntimeService> {
     Arc::new(config)
 }
 
+/// The primary ACP session keeps one MCP endpoint for subagents. Its launch
+/// configuration can change without replacing that primary session, so new
+/// subagents use the saved route immediately while existing runs finish on
+/// their original route.
+#[derive(Clone)]
+pub struct LiveRuntimeService {
+    config: Arc<StdRwLock<Option<Config>>>,
+    controller: Controller,
+    runs: SubagentRegistry,
+}
+
+impl LiveRuntimeService {
+    pub fn new(config: Config) -> Self {
+        let controller = config.controller.clone();
+        let runs = config.runs.clone();
+        Self {
+            config: Arc::new(StdRwLock::new(Some(config))),
+            controller,
+            runs,
+        }
+    }
+
+    /// Keep the MCP endpoint available when a session starts without
+    /// subagents. `replace` can activate it after a same-primary team change.
+    pub fn unconfigured() -> Self {
+        Self {
+            config: Arc::new(StdRwLock::new(None)),
+            controller: Controller::default(),
+            runs: SubagentRegistry::default(),
+        }
+    }
+
+    /// Replace only the configuration used to launch future subagents. The
+    /// controller and run registry stay shared so retained and in-flight
+    /// subagents remain controllable after the route changes.
+    pub async fn replace(&self, mut config: Config) {
+        config.controller = self.controller.clone();
+        config.runs = self.runs.clone();
+        let max_parallel = config.max_parallel;
+        let active_workers = config.active_implementation_workers.clone();
+        let id_allocator = config.id_allocator.clone();
+        *self.config.write().expect("subagent config lock poisoned") = Some(config);
+        self.controller
+            .configure(max_parallel, active_workers, id_allocator)
+            .await;
+    }
+
+    /// Stop accepting new subagent launches while preserving the shared run
+    /// registry and report bus so existing workers remain controllable.
+    pub fn clear(&self) {
+        if let Some(config) = self
+            .config
+            .write()
+            .expect("subagent config lock poisoned")
+            .as_mut()
+        {
+            config.is_enabled = false;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl acp::RuntimeService for LiveRuntimeService {
+    async fn start(
+        &self,
+        context: acp::RuntimeServiceContext,
+        events: mpsc::UnboundedSender<UiEvent>,
+    ) -> Result<Box<dyn acp::RunningRuntimeService>> {
+        let snapshot_exclusions = self
+            .config
+            .read()
+            .expect("subagent config lock poisoned")
+            .as_ref()
+            .map(|config| config.snapshot_exclusions.clone())
+            .unwrap_or_default();
+        let context = RunContext {
+            cwd: context.cwd,
+            additional_directories: context.additional_directories,
+            snapshot_exclusions,
+            fs_max_text_bytes: context.fs_max_text_bytes,
+            access_mode: context.access_mode,
+        };
+        let server = McpService::start_live(
+            self.config.clone(),
+            context,
+            events,
+            self.controller.clone(),
+            self.runs.clone(),
+        )
+        .await?;
+        Ok(Box::new(server))
+    }
+
+    async fn cancel(&self) {
+        self.controller.cancel().await;
+    }
+
+    async fn shutdown(&self) {
+        self.controller.shutdown().await;
+    }
+
+    async fn shutdown_and_wait(&self) {
+        self.controller.shutdown_and_wait().await;
+    }
+}
+
 #[async_trait::async_trait]
 impl acp::RuntimeService for Config {
     async fn start(
@@ -3475,7 +3720,6 @@ mod tests {
                 model_id: "gpt-y".to_string(),
                 model_value: "gpt-y-value".to_string(),
                 adapter_source_id: "codex-acp".to_string(),
-                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort: None,
@@ -3485,7 +3729,10 @@ mod tests {
             max_parallel: 2,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
+            permission_mode: None,
             headless_permission_mode: None,
+            is_headless: false,
+            is_enabled: true,
             role_pool: None,
             reports: None,
             runs: SubagentRegistry::default(),
@@ -3523,6 +3770,91 @@ mod tests {
         assert_eq!(config.usage_seat, Seat::Review);
         assert!(config.retain_after_completion);
         assert!(config.debrief);
+    }
+
+    #[tokio::test]
+    async fn live_runtime_service_replaces_the_next_subagent_route() {
+        let service = LiveRuntimeService::new(test_config());
+        let replacement =
+            Config::for_resolved_agent(role("claude-worker", "claude-acp", true), None);
+
+        service.replace(replacement).await;
+
+        let active = service
+            .config
+            .read()
+            .expect("subagent config lock")
+            .clone()
+            .expect("configured subagent route");
+        assert_eq!(active.current_agent(), "claude-acp");
+        assert_eq!(active.current_model(), "claude-worker");
+    }
+
+    #[tokio::test]
+    async fn unconfigured_live_runtime_service_accepts_a_new_subagent_route() {
+        let service = LiveRuntimeService::unconfigured();
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let endpoint = acp::RuntimeService::start(
+            &service,
+            acp::RuntimeServiceContext {
+                cwd: PathBuf::from("/workspace"),
+                additional_directories: Vec::new(),
+                fs_max_text_bytes: 1,
+                access_mode: RuntimeAccessMode::Full,
+            },
+            ui_tx,
+        )
+        .await
+        .expect("unconfigured session keeps an auxiliary MCP endpoint");
+        assert!(matches!(endpoint.advertised(), McpServer::Stdio(_)));
+        assert!(
+            service
+                .config
+                .read()
+                .expect("subagent config lock")
+                .is_none()
+        );
+
+        service
+            .replace(Config::for_resolved_agent(
+                role("claude-reviewer", "claude-acp", true),
+                None,
+            ))
+            .await;
+
+        let active = service
+            .config
+            .read()
+            .expect("subagent config lock")
+            .clone()
+            .expect("new route is active");
+        assert_eq!(active.current_agent(), "claude-acp");
+        assert_eq!(active.current_model(), "claude-reviewer");
+    }
+
+    #[tokio::test]
+    async fn unconfigured_subagent_endpoint_reports_that_a_route_is_pending() {
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let handler = McpHandler::new_live(
+            Arc::new(StdRwLock::new(None)),
+            test_context(),
+            ui_tx,
+            Controller::default(),
+            SubagentRegistry::default(),
+        );
+
+        let result = handler
+            .create_subagent(Parameters(CreateSubagentArgs {
+                prompt: "review the change".to_string(),
+                label: None,
+                cwd: None,
+                resume: None,
+            }))
+            .await
+            .expect("unconfigured endpoint returns a tool error");
+
+        assert_eq!(result.is_error, Some(true));
+        assert!(tool_result_text(&result).contains("not configured for this session"));
     }
 
     #[test]
@@ -3624,8 +3956,7 @@ mod tests {
     #[test]
     fn headless_runs_get_the_autonomy_directive_and_interactive_runs_do_not() {
         let interactive = test_config();
-        let headless =
-            test_config().with_headless_permission_mode(mj_core::config::PermissionPreset::Yolo);
+        let headless = test_config().with_headless();
         let (ui_tx, _rx) = mpsc::unbounded_channel();
         let a = McpHandler::new(
             interactive,
@@ -3644,6 +3975,35 @@ mod tests {
                 || bi.contains("Never stop to request permission"),
             "{bi}"
         );
+    }
+
+    #[test]
+    fn saved_permission_mode_cannot_replace_the_seat_policy() {
+        let mut saved = HashMap::from([
+            ("config:mode".to_string(), "read-only".to_string()),
+            ("config:service_tier".to_string(), "fast".to_string()),
+        ]);
+        let mut role = test_config().role_config.expect("role config");
+        role.permission = Some(mj_core::config::RuntimePermissionConfig {
+            config_id: "mode".to_string(),
+            value: "agent".to_string(),
+            manual_fallback: Some("read-only".to_string()),
+            mode: mj_core::config::PermissionPreset::Auto,
+        });
+
+        discard_saved_permission_mode(&mut saved, Some(&role));
+
+        assert!(!saved.contains_key("config:mode"));
+        assert_eq!(saved["config:service_tier"], "fast");
+    }
+
+    #[test]
+    fn saved_mode_stays_available_without_a_seat_permission_policy() {
+        let mut saved = HashMap::from([("config:mode".to_string(), "read-only".to_string())]);
+
+        discard_saved_permission_mode(&mut saved, None);
+
+        assert_eq!(saved["config:mode"], "read-only");
     }
 
     fn test_mcp_handler(controller: Controller) -> McpHandler {
@@ -3932,7 +4292,10 @@ mod tests {
             )
             .await;
         let handler = test_mcp_handler(controller);
-        let spec = handler.config.configured_session();
+        let spec = handler
+            .config()
+            .expect("test subagent config")
+            .configured_session();
 
         let unknown = handler
             .resume_subagent(99, "keep going".to_string(), "label", &spec)
@@ -4020,7 +4383,10 @@ mod tests {
         let mut config = test_config();
         config.subagent_handoff_counter = Some(counter.clone());
         let handler = McpHandler::new(config, test_context(), ui_tx, controller.clone());
-        let spec = handler.config.configured_session();
+        let spec = handler
+            .config()
+            .expect("test subagent config")
+            .configured_session();
 
         // Rejected by a full pool: nothing started, so nothing is counted.
         let occupied = controller
@@ -4390,8 +4756,8 @@ mod tests {
         assert!(SUBAGENT_PREAMBLE.contains("not ground truth"));
         assert!(SUBAGENT_PREAMBLE.contains("targeted checks"));
         assert!(SUBAGENT_PREAMBLE.contains("Your final message is the report"));
-        assert!(!SUBAGENT_PREAMBLE.contains("Eitri"));
-        assert!(!PRIMARY_SESSION_DIRECTIVE.contains("Thor"));
+        assert!(!SUBAGENT_PREAMBLE.contains("persona"));
+        assert!(!PRIMARY_SESSION_DIRECTIVE.contains("persona"));
         assert!(PRIMARY_SESSION_DIRECTIVE.contains("Never poll"));
         assert!(PRIMARY_SESSION_DIRECTIVE.contains("end your turn"));
         assert!(PRIMARY_SESSION_DIRECTIVE.contains("files owned by finished subagents"));

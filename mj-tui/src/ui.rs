@@ -34,7 +34,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::backend::{Backend, ClearType};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect, Size};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -44,21 +44,20 @@ use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    AppState, ArenaPane, AutocompleteKind, ConfigValueChoice, ConnectionState,
-    CurrentBranchPullRequest, ElicitationFormFieldKind, ElicitationView, Entry, FileAttachment,
-    PastedAttachment, PastedImageAttachment, PendingElicitation, PendingPermission,
-    QUEUED_PROMPT_PREVIEW_WIDTH, QueuedPrompt, RagnarokDraftPrStatus, RagnarokFighterUi,
-    RagnarokObservation, RagnarokUi, StatusKind, StatusMessage, SubagentStatus, TeamPickerStep,
-    ToolCallOutput, TranscriptSearch, TranscriptSelection, UiExitReason, WorkspaceFile,
-    classify_elicitation, config_option_choices, config_option_current_value_label,
-    file_mention_text, workspace_file_candidates,
+    AppState, AutocompleteKind, ConfigValueChoice, ConnectionState, CurrentBranchPullRequest,
+    ElicitationFormFieldKind, ElicitationView, Entry, FileAttachment, PastedAttachment,
+    PastedImageAttachment, PendingElicitation, PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH,
+    QueuedPrompt, StatusKind, StatusMessage, SubagentStatus, TeamPickerStep, ToolCallOutput,
+    TranscriptSearch, TranscriptSelection, UiExitReason, WorkspaceFile, classify_elicitation,
+    config_option_choices, config_option_current_value_label, file_mention_text,
+    workspace_file_candidates,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
 };
 use crate::config;
 use crate::event::{
-    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, ReviewTarget,
+    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, ReviewRequest, ReviewTarget,
     SessionConfigTarget, SubagentEvent, SubagentOutcome, UiCommand, UiEvent,
     WorkspaceHeadDiffUnavailable,
 };
@@ -67,10 +66,10 @@ use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
 #[cfg(test)]
 use crate::palette::TerminalThemeKindExt;
-use crate::ragnarok;
-use crate::ragnarok_sprites::{self, SpriteKind};
 use crate::settings::{SettingsAction, draw_settings_panel};
-use crate::speech::{dictation_error_message, run_dictation, voice_input_supported};
+use crate::speech::{
+    DictationFinish, DictationResult, dictation_error_message, run_dictation, voice_input_supported,
+};
 use crate::spinner::SpinnerStyle;
 use crate::term::TrackedBackend;
 use crate::text::truncate_text_to_width;
@@ -489,7 +488,7 @@ enum DictationEvent {
     Partial(String),
     Level(f32),
     Status(String),
-    Finished(std::result::Result<String, String>),
+    Finished(std::result::Result<DictationResult, String>),
 }
 
 #[cfg(test)]
@@ -533,6 +532,29 @@ struct TranscriptScrollState {
     /// expanded, so it cannot share `cache` with the collapsed chat pane even
     /// though both are keyed the same way.
     viewer_cache: Option<TranscriptCache>,
+    /// Rendered lines for the settled transcript prefix, kept across
+    /// transcript revisions. While a turn streams, every reveal tick bumps
+    /// the revision; without this cache each bump re-rendered and re-measured
+    /// the whole session, which made long fullscreen sessions crawl on the
+    /// single UI thread. Only the entries past `settled_entry_boundary` are
+    /// rebuilt per revision.
+    prefix: Option<SettledPrefixCache>,
+}
+
+/// Immutable rendered prefix of the transcript. Valid while the settled
+/// render epoch and width both match; extended (never edited) as more
+/// entries settle.
+#[derive(Debug)]
+struct SettledPrefixCache {
+    epoch: u64,
+    width: u16,
+    /// Transcript entries `0..entries` are rendered into `lines`.
+    entries: usize,
+    lines: Vec<Line<'static>>,
+    /// Absolute wrapped row offset of each line (first line starts at 0).
+    row_starts: Vec<usize>,
+    /// Total wrapped rows of the prefix.
+    rows: usize,
 }
 
 #[derive(Debug)]
@@ -540,13 +562,18 @@ struct TranscriptCache {
     revision: u64,
     width: u16,
     search_query: Option<String>,
+    /// Rendered lines for entries past the settled prefix (the whole
+    /// transcript when `prefix_rows == 0`).
     lines: Vec<Line<'static>>,
     line_count: usize,
     entry_row_starts: Vec<Option<usize>>,
-    /// Wrapped row offset of each entry in `lines`. Lets a frame slice out
-    /// just the visible window instead of handing the whole transcript to
-    /// `Paragraph`, whose wrapping cost is O(total lines) per render.
+    /// Wrapped row offset of each entry in `lines`, absolute (offset by
+    /// `prefix_rows`). Lets a frame slice out just the visible window
+    /// instead of handing the whole transcript to `Paragraph`, whose
+    /// wrapping cost is O(total lines) per render.
     row_starts: Vec<usize>,
+    /// Wrapped rows contributed by the settled prefix cache ahead of `lines`.
+    prefix_rows: usize,
 }
 
 #[derive(Debug, Default)]
@@ -702,6 +729,7 @@ fn transcript_entry_matches(state: &AppState, entry: &Entry, query: &str) -> boo
         | Entry::AgentMessage(text)
         | Entry::SubagentMessage(text)
         | Entry::System(text)
+        | Entry::CommandOutput(text)
         | Entry::FeatureHint(text)
         | Entry::SessionBoundary(text) => search_text_contains(text, query),
         Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
@@ -947,6 +975,11 @@ struct TranscriptTurn {
     prompt_index: usize,
     end: usize,
     is_compactable: bool,
+    /// Every entry in the turn is stable. Distinct from `is_compactable`,
+    /// which also requires a completed local lifecycle: the settled-prefix
+    /// boundary needs to know whether the turn's *render* can still change,
+    /// which it can while any entry is unstable.
+    entries_stable: bool,
     elapsed: Option<Duration>,
     tool_summary: Option<TurnToolSummary>,
     final_response_index: Option<usize>,
@@ -995,6 +1028,7 @@ fn transcript_turns(state: &AppState) -> Vec<TranscriptTurn> {
                 prompt_index,
                 end,
                 is_compactable,
+                entries_stable,
                 elapsed: state.prompt_turn_elapsed(prompt_index),
                 tool_summary,
                 final_response_index,
@@ -1055,9 +1089,21 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
     if idx < state.committed_transcript_entries() {
         return true;
     }
+    transcript_entry_settles_naturally(state, idx, entry)
+}
+
+/// Stability on the entry's own terms, ignoring the committed-by-fiat
+/// shortcut above. The settled-prefix boundary must use this: an entry
+/// force-committed by the inline overflow valve counts as stable for
+/// scrollback purposes while its backing state (a still-running terminal,
+/// an open message) can still change how it renders — freezing that render
+/// would keep e.g. a `running · /terminals to view` reference line on
+/// screen after the terminal exits.
+fn transcript_entry_settles_naturally(state: &AppState, idx: usize, entry: &Entry) -> bool {
     match entry {
         Entry::UserPrompt(_)
         | Entry::System(_)
+        | Entry::CommandOutput(_)
         | Entry::FeatureHint(_)
         | Entry::ReviewLedger(_)
         | Entry::SessionBoundary(_)
@@ -1080,22 +1126,10 @@ fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bo
         // A tool call with no backing view renders nothing that could change,
         // so it must not hold the boundary (`is_none_or`, not `is_some_and`:
         // a missing record can never settle any other way).
-        Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
-            state.tool_calls.get(id).is_none_or(|view| {
-                matches!(
-                    view.status,
-                    ToolCallStatus::Completed | ToolCallStatus::Failed
-                ) && view.body.iter().all(|output| {
-                    !matches!(
-                        output,
-                        ToolCallOutput::Terminal {
-                            exit_status: None,
-                            ..
-                        }
-                    )
-                })
-            })
-        }
+        Entry::ToolCall(id) | Entry::SubagentToolCall(id) => state
+            .tool_calls
+            .get(id)
+            .is_none_or(crate::app::ToolCallView::render_settled),
     }
 }
 
@@ -1142,11 +1176,11 @@ pub struct UiRunOptions<'a> {
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub thought_output: config::ThoughtOutput,
+    pub voice_auto_send: config::VoiceAutoSend,
     pub feature_hints_enabled: bool,
     pub keep_awake_enabled: bool,
-    pub active_agent_launch: Option<ragnarok::Launch>,
     pub session_boundary: Option<String>,
-    /// The ACP session cwd; `/ragnarok` battles are rooted here.
+    /// The ACP session working directory.
     pub session_cwd: PathBuf,
     /// Additional directories registered with the ACP session.
     pub additional_workspace_roots: Vec<PathBuf>,
@@ -1156,8 +1190,7 @@ pub struct UiRunOptions<'a> {
     pub active_models: crate::config::ModelsConfig,
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
-    pub ragnarok_models: Vec<crate::roster::ResolvedAgent>,
-    pub ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
+    pub correction_threshold: crate::config::ReviewCorrectionThreshold,
     pub primary_acp_name: String,
     pub primary_reasoning_effort: Option<String>,
     pub termination: CancellationToken,
@@ -1175,13 +1208,13 @@ struct UiInitialState {
     header_labels: HeaderLabels,
     agent_label: Option<String>,
     agent_source_id: Option<String>,
-    active_agent_launch: Option<ragnarok::Launch>,
     history: Vec<String>,
     transcript_export_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
     thought_output: config::ThoughtOutput,
+    voice_auto_send: config::VoiceAutoSend,
     feature_hints_enabled: bool,
     keep_awake_enabled: bool,
     session_boundary: Option<String>,
@@ -1193,8 +1226,7 @@ struct UiInitialState {
     active_models: crate::config::ModelsConfig,
     review_enabled: bool,
     review_tier: crate::config::ReviewTier,
-    ragnarok_models: Vec<crate::roster::ResolvedAgent>,
-    ragnarok_observer: Option<mpsc::UnboundedSender<Option<RagnarokObservation>>>,
+    correction_threshold: crate::config::ReviewCorrectionThreshold,
     primary_acp_name: String,
     primary_reasoning_effort: Option<String>,
 }
@@ -1254,7 +1286,6 @@ pub async fn run(
             header_labels,
             agent_label: initial_agent_label,
             agent_source_id: initial_agent_source_id,
-            active_agent_launch: options.active_agent_launch.clone(),
             history: initial_history,
             transcript_export_dir: options
                 .persistence
@@ -1264,6 +1295,7 @@ pub async fn run(
             theme_kind: options.theme_kind,
             spinner_style: options.spinner_style,
             thought_output: options.thought_output,
+            voice_auto_send: options.voice_auto_send,
             feature_hints_enabled: options.feature_hints_enabled,
             keep_awake_enabled: options.keep_awake_enabled,
             session_boundary: options.session_boundary,
@@ -1275,8 +1307,7 @@ pub async fn run(
             active_models: options.active_models,
             review_enabled: options.review_enabled,
             review_tier: options.review_tier,
-            ragnarok_models: options.ragnarok_models,
-            ragnarok_observer: options.ragnarok_observer,
+            correction_threshold: options.correction_threshold,
             primary_acp_name: options.primary_acp_name,
             primary_reasoning_effort: options.primary_reasoning_effort,
         },
@@ -1422,6 +1453,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::AgentUsage(_)
         | UiEvent::SubagentPoolModelChanged { .. }
         | UiEvent::PromptFailed { .. }
+        | UiEvent::SteeredPromptDelivered { .. }
         | UiEvent::SessionForkFailed { .. }
         | UiEvent::RemotePermissionDecision { .. }
         | UiEvent::Warning(_)
@@ -1519,7 +1551,6 @@ async fn ui_loop(
     if let Some(source_id) = initial.agent_source_id {
         state.agent_source_id = source_id;
     }
-    state.active_agent_launch = initial.active_agent_launch;
     state.session_cwd = initial.session_cwd;
     state.additional_workspace_roots = initial.additional_workspace_roots;
     state.model_choices = initial.model_choices;
@@ -1528,15 +1559,14 @@ async fn ui_loop(
     state.active_models = initial.active_models;
     state.review_enabled = initial.review_enabled;
     state.review_tier = initial.review_tier;
-    state.ragnarok_models = initial.ragnarok_models;
-    let ragnarok_observer = initial.ragnarok_observer;
-    let mut last_ragnarok_observation = None;
+    state.correction_threshold = initial.correction_threshold;
     state.set_primary_acp_name(initial.primary_acp_name);
     state.primary_reasoning_effort = initial.primary_reasoning_effort;
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
     state.set_thought_output(initial.thought_output);
+    state.voice_auto_send = initial.voice_auto_send;
     state.feature_hints_enabled = initial.feature_hints_enabled;
     state.keep_awake.set_enabled(initial.keep_awake_enabled);
     state.config_path = initial.config_path;
@@ -1557,9 +1587,6 @@ async fn ui_loop(
     let (current_pr_tx, mut current_pr_rx) = mpsc::unbounded_channel::<CurrentBranchPrProbe>();
     let mut current_pr_probe_in_flight = false;
     let (file_scan_tx, mut file_scan_rx) = mpsc::unbounded_channel::<FileAutocompleteScan>();
-    // Ragnarok battles report through their own channel (the sender stays
-    // alive here for the whole loop, so `recv` pends rather than closing).
-    let (ragnarok_tx, mut ragnarok_rx) = mpsc::unbounded_channel::<ragnarok::RagnarokEvent>();
     let mut inline_height = INLINE_CHAT_HEIGHT;
     // Wake-up timers so queued input can render at the interactive cadence
     // while spinner-only animation advances at a calmer progress cadence.
@@ -1597,7 +1624,6 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
-                        let ragnarok_was_active = state.ragnarok.is_some();
                         if mode == UiMode::InlineChat
                             && let CtEvent::Resize(width, height) = &ev
                         {
@@ -1643,18 +1669,6 @@ async fn ui_loop(
                             mode,
                         )
                         .await?;
-                        if let Some(task) = state.take_ragnarok_launch() {
-                            start_ragnarok(&mut state, task, ragnarok_tx.clone());
-                            force_soft_inline_repair = mode == UiMode::InlineChat;
-                        }
-                        drain_ragnarok_draft_pr_publish(&mut state, &ragnarok_tx);
-                        if ragnarok_was_active || state.ragnarok.is_some() {
-                            publish_ragnarok_observation(
-                                &state,
-                                ragnarok_observer.as_ref(),
-                                &mut last_ragnarok_observation,
-                            );
-                        }
                     }
                     Some(Err(e)) => {
                         state.record_status_message(
@@ -1682,30 +1696,10 @@ async fn ui_loop(
                     }
                     Some(DictationEvent::Finished(result)) => {
                         dictation_cancel_tx = None;
-                        finish_dictation(&mut state, result);
+                        finish_dictation(&mut state, cmd_tx, result);
                         pending_redraw.mark_interactive();
                     }
                     None => {}
-                }
-            }
-            maybe_rag = ragnarok_rx.recv() => {
-                if let Some(ev) = maybe_rag {
-                    let cause = match &ev {
-                        ragnarok::RagnarokEvent::FighterText { .. }
-                        | ragnarok::RagnarokEvent::FighterAction { .. }
-                        | ragnarok::RagnarokEvent::ThorAction(_)
-                        | ragnarok::RagnarokEvent::ThorSpeaks(_)
-                        | ragnarok::RagnarokEvent::Log { .. } => RedrawCause::Stream,
-                        _ => RedrawCause::Interactive,
-                    };
-                    state.apply_ragnarok_event(ev);
-                    drain_ragnarok_draft_pr_publish(&mut state, &ragnarok_tx);
-                    publish_ragnarok_observation(
-                        &state,
-                        ragnarok_observer.as_ref(),
-                        &mut last_ragnarok_observation,
-                    );
-                    pending_redraw.mark(cause);
                 }
             }
             maybe_probe = current_pr_rx.recv() => {
@@ -1823,7 +1817,6 @@ async fn ui_loop(
                             state.maybe_record_feature_hint(crate::app::FeatureHintCapabilities {
                                 subagents: state.active_models.subagent
                                     != crate::config::DISABLED_MODEL,
-                                ragnarok: state.ragnarok_models.len() >= 2,
                                 voice: voice_input_supported(),
                                 fork: state.session_fork_supported,
                                 side: state.side_session_supported,
@@ -2017,7 +2010,6 @@ async fn ui_loop(
             && !state.nested_agent_viewer
             && !state.workspace_diff_viewer
             && !state.terminals_viewer
-            && state.ragnarok.is_none()
             && !inline_resize_reflow.is_pending()
         {
             flush_transcript_to_scrollback(
@@ -2345,11 +2337,6 @@ fn repair_inline_viewport(
 }
 
 fn timer_driven_live_redraw(mode: UiMode, state: &AppState) -> bool {
-    // The arena animates (poses, banners, elapsed time) as long as it is on
-    // screen, in both UI modes.
-    if state.ragnarok.is_some() {
-        return true;
-    }
     if mode == UiMode::InlineChat && state.is_busy() {
         // Workflow progress animates on wall-clock time, so it needs the timer
         // even in the inline mode that otherwise suppresses it.
@@ -2890,15 +2877,6 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
             .saturating_sub(1)
             .max(INLINE_CHAT_HEIGHT);
     }
-    // The Ragnarok arena also takes the whole terminal; battles deserve a
-    // stage. Pending permission/elicitation prompts still win (above rule
-    // does not apply — they render inside the arena-sized viewport fine).
-    if state.ragnarok.is_some() {
-        return terminal_size
-            .height
-            .saturating_sub(1)
-            .max(INLINE_CHAT_HEIGHT);
-    }
     let max_height = terminal_size
         .height
         .saturating_sub(1)
@@ -2966,7 +2944,6 @@ fn handle_crossterm(
                 && state.team_picker.is_none()
                 && state.review_picker.is_none()
                 && state.config_picker.is_none()
-                && state.ragnarok.is_none()
                 && !state.review_issue_viewer
                 && !state.nested_agent_viewer
                 && !state.workspace_diff_viewer
@@ -2999,7 +2976,6 @@ fn handle_crossterm(
                 || state.team_picker.is_some()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
-                || state.ragnarok.is_some()
                 || state.transcript_viewer
                 || state.nested_agent_viewer
                 || state.workspace_diff_viewer
@@ -3011,15 +2987,7 @@ fn handle_crossterm(
             return TerminalRequest::None;
         }
         CtEvent::Mouse(mouse) => {
-            // The diff reader does not support mouse scrolling yet. In
-            // particular, do not mutate the hidden transcript's offset.
-            if state.workspace_diff_viewer
-                || state.nested_agent_viewer
-                || state.review_issue_viewer
-                || state.terminals_viewer
-            {
-                return TerminalRequest::None;
-            } else if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
+            if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
                 handle_transcript_viewer_mouse(state, mouse);
             } else if mode == UiMode::FullscreenTui {
                 handle_mouse(state, mouse);
@@ -3032,16 +3000,14 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    if mode == UiMode::FullscreenTui
-        && is_text_selection_key(key.modifiers, key.code)
-        && can_toggle_text_selection_mode(state)
-    {
+    if mode == UiMode::FullscreenTui && is_text_selection_key(key.modifiers, key.code) {
         return TerminalRequest::ToggleTextSelectionMode;
     }
 
     if key.modifiers == KeyModifiers::CONTROL
         && matches!(key.code, KeyCode::Char('c'))
         && state.is_side
+        && !state.is_streaming()
         && state.input.is_empty()
         && attachment_count(state) == 0
     {
@@ -3084,7 +3050,6 @@ fn handle_crossterm(
 
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
-        && state.ragnarok.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
@@ -3100,7 +3065,6 @@ fn handle_crossterm(
 
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
-        && state.ragnarok.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers.is_empty()
@@ -3116,7 +3080,6 @@ fn handle_crossterm(
 
     if !state.has_pending_permission()
         && !state.has_pending_elicitation()
-        && state.ragnarok.is_none()
         && state.team_picker.is_none()
         && state.config_picker.is_none()
         && key.modifiers == KeyModifiers::CONTROL
@@ -3275,14 +3238,8 @@ fn handle_crossterm(
         return handle_elicitation_key(state, key.code, mode);
     }
 
-    // The Ragnarok arena owns the keyboard while a battle is on screen. It
-    // yields only to the safety-critical modals above.
-    if state.ragnarok.is_some() {
-        return handle_ragnarok_key(state, key.modifiers, key.code, mode);
-    }
-
     if state.team_picker.is_some() {
-        return handle_team_picker_key(state, key.modifiers, key.code, mode);
+        return handle_team_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
     }
 
     if state.review_picker.is_some() {
@@ -3586,6 +3543,32 @@ fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
     if state.connection_state() != ConnectionState::Streaming {
         return;
     }
+
+    // Enter always queues behind an active turn. Ctrl-C is the explicit
+    // gesture to apply the oldest queued correction now when the runtime can
+    // steer it into that turn.
+    if state.can_steer()
+        && let Some(queued) = state.take_queued_prompt()
+    {
+        let preview = queued_prompt_preview(&queued.display_text);
+        state.record_steered_prompt(queued.display_text, queued.resources.clone());
+        let _ = cmd_tx.send(UiCommand::SteerPrompt {
+            text: queued.text,
+            images: queued.images,
+            resources: queued.resources,
+        });
+        let remaining = state.queued_prompt_count();
+        let suffix = if remaining == 0 {
+            String::new()
+        } else {
+            format!(" ({remaining} still queued)")
+        };
+        state.status_line = Some(StatusMessage::info(format!(
+            "steering queued prompt into the current turn{suffix}: {preview}"
+        )));
+        return;
+    }
+
     let _ = cmd_tx.send(UiCommand::CancelPrompt);
     state.mark_cancelling();
     let queued = state.queued_prompt_count();
@@ -3697,23 +3680,27 @@ fn dictation_request_for_state(state: &AppState, voice_input_supported: bool) ->
 }
 
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
-    if state.text_selection_mode
-        || state.help_overlay
-        || state.has_pending_permission()
-        || state.has_pending_elicitation()
-        || state.team_picker.is_some()
-        || state.config_picker.is_some()
-    {
+    if state.text_selection_mode {
         return;
     }
 
+    let scroll_enabled = !state.help_overlay
+        && !state.has_pending_permission()
+        && !state.has_pending_elicitation()
+        && state.team_picker.is_none()
+        && state.config_picker.is_none()
+        && !state.workspace_diff_viewer
+        && !state.nested_agent_viewer
+        && !state.review_issue_viewer
+        && !state.terminals_viewer;
+
     match mouse.kind {
-        MouseEventKind::ScrollUp => {
+        MouseEventKind::ScrollUp if scroll_enabled => {
             state.scroll_offset = state
                 .scroll_offset
                 .saturating_add(TRANSCRIPT_SCROLL_WHEEL_STEP);
         }
-        MouseEventKind::ScrollDown => {
+        MouseEventKind::ScrollDown if scroll_enabled => {
             state.scroll_offset = state
                 .scroll_offset
                 .saturating_sub(TRANSCRIPT_SCROLL_WHEEL_STEP);
@@ -3744,17 +3731,6 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
             }
         }
         _ => {}
-    }
-}
-
-/// Drop the drag selection and the captured panel geometry whenever another
-/// surface (viewer, arena) replaces the transcript: the previous frame's
-/// coordinates no longer describe what is on screen.
-fn invalidate_transcript_selection(state: &mut AppState) {
-    state.transcript_selection = None;
-    state.transcript_panel_area = None;
-    if !state.transcript_panel_grid.is_empty() {
-        state.transcript_panel_grid = Vec::new();
     }
 }
 
@@ -3881,6 +3857,20 @@ fn apply_selection_highlight(
             Rect::new(from, y, to - from + 1, 1),
             Style::default().add_modifier(Modifier::REVERSED),
         );
+    }
+}
+
+/// Make every visible cell selectable. Fullscreen mouse capture owns drag
+/// events, so selection cannot be limited to the transcript: prompts, paths,
+/// dialogs, and status text need the same copy path.
+fn capture_fullscreen_selection_surface(f: &mut ratatui::Frame, state: &mut AppState) {
+    let area = f.area();
+    state.transcript_panel_area = Some((area.x, area.y, area.width, area.height));
+    if let Some(selection) = state.transcript_selection {
+        state.transcript_panel_grid = capture_transcript_panel_grid(f.buffer_mut(), area);
+        apply_selection_highlight(f.buffer_mut(), area, &selection);
+    } else if !state.transcript_panel_grid.is_empty() {
+        state.transcript_panel_grid = Vec::new();
     }
 }
 
@@ -4675,6 +4665,10 @@ fn start_dictation(
     let (cancel_tx, cancel_rx) = std_mpsc::channel();
     *dictation_cancel_tx = Some(cancel_tx);
     let dictation_tx = dictation_tx.clone();
+    let auto_send_silence = state
+        .voice_auto_send
+        .silence_timeout_secs()
+        .map(Duration::from_secs);
     tokio::task::spawn_blocking(move || {
         let partial_tx = dictation_tx.clone();
         let level_tx = dictation_tx.clone();
@@ -4689,6 +4683,7 @@ fn start_dictation(
             move |message| {
                 let _ = status_tx.send(DictationEvent::Status(message));
             },
+            auto_send_silence,
             cancel_rx,
         )
         .map_err(|e| dictation_error_message(&e));
@@ -4752,22 +4747,34 @@ fn update_dictation_status(state: &mut AppState, message: String) {
     }
 }
 
-fn finish_dictation(state: &mut AppState, result: std::result::Result<String, String>) {
+fn finish_dictation(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    result: std::result::Result<DictationResult, String>,
+) {
     if !state.voice_input_active {
         return;
     }
     state.voice_input_active = false;
     state.voice_input_level = None;
     match result {
-        Ok(text) => {
+        Ok(result) => {
+            let auto_send = result.finish == DictationFinish::Silence
+                && state.voice_auto_send.silence_timeout_secs().is_some()
+                && !result.text.trim().is_empty();
             let range = state
                 .voice_input_range
                 .take()
                 .unwrap_or((state.input_cursor, state.input_cursor));
-            replace_input_range(state, range.0, range.1, &text);
+            replace_input_range(state, range.0, range.1, &result.text);
             state.scroll_input_to_bottom();
             state.update_autocomplete();
-            state.status_line = Some(StatusMessage::info("inserted voice input"));
+            if auto_send {
+                state.status_line = Some(StatusMessage::info("sending voice input..."));
+                submit_prompt(state, cmd_tx);
+            } else {
+                state.status_line = Some(StatusMessage::info("inserted voice input"));
+            }
         }
         Err(message) => {
             state.voice_input_range = None;
@@ -4780,9 +4787,15 @@ fn finish_dictation(state: &mut AppState, result: std::result::Result<String, St
 /// carries no ornament and stays a single unstyled span.
 fn dictation_prompt_title(state: &AppState) -> Line<'static> {
     if let Some(level) = state.voice_input_level {
+        let auto_send_hint = state
+            .voice_auto_send
+            .silence_timeout_secs()
+            .map(|seconds| format!(" · auto-send after {seconds}s quiet"))
+            .unwrap_or_default();
         return Line::raw(format!(
-            " 🎙 {} Ctrl-R stop ",
-            voice_level_meter(Some(level))
+            " 🎙 {}{} Ctrl-R stop ",
+            voice_level_meter(Some(level)),
+            auto_send_hint,
         ));
     }
 
@@ -5166,13 +5179,6 @@ fn is_text_selection_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
     modifiers.is_empty() && matches!(code, KeyCode::F(12))
 }
 
-fn can_toggle_text_selection_mode(state: &AppState) -> bool {
-    !state.help_overlay
-        && !state.has_pending_permission()
-        && !state.has_pending_elicitation()
-        && state.config_picker.is_none()
-}
-
 #[cfg(target_os = "macos")]
 const PROMPT_NEWLINE_HINT: &str = "Ctrl-J";
 
@@ -5284,6 +5290,19 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
 
     // Client-side commands are handled here without forwarding anything
     // to the agent.
+    if plain_text_only && text == "/exit" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        if state.is_side {
+            state.side_exit_requested = true;
+        } else {
+            state.exit_reason = Some(UiExitReason::Quit);
+        }
+        return;
+    }
+
     if plain_text_only && text == "/new" {
         state.input.clear();
         clear_attachments(state);
@@ -5345,7 +5364,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         clear_attachments(state);
         state.input_cursor = 0;
         state.scroll_input_to_bottom();
-        state.push_system_message(active_models_and_usage_report(state));
+        state.push_command_output(active_models_and_usage_report(state));
         return;
     }
 
@@ -5369,10 +5388,19 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if plain_text_only
-        && let Some(rest) = text.strip_prefix("/review")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
+    if plain_text_only && retired_review_command_arguments(&text).is_some() {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        state.record_status_message(
+            StatusKind::Warning,
+            "use /discrete-review or /adversarial-review",
+        );
+        return;
+    }
+
+    if plain_text_only && let Some(rest) = discrete_review_command_arguments(&text) {
         state.input.clear();
         clear_attachments(state);
         state.input_cursor = 0;
@@ -5380,25 +5408,31 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         if state.is_side {
             state.record_status_message(
                 StatusKind::Warning,
-                "manual review is unavailable in side conversations",
+                "discrete review is unavailable in side conversations",
             );
         } else if state.runtime_closed || state.session_id.is_none() {
             state.record_status_message(StatusKind::Warning, "the primary agent is unavailable");
         } else if state.is_busy() {
             state.record_status_message(
                 StatusKind::Warning,
-                "manual review is only available while the primary agent is idle",
+                "discrete review is only available while the primary agent is idle",
             );
-        } else if rest.trim().is_empty() {
-            state.open_review_picker();
-        } else if let Some(target) = parse_review_target(rest.trim()) {
-            state.record_status_message(StatusKind::Info, "preparing manual review…");
-            let _ = cmd_tx.send(UiCommand::RunReview { target });
         } else {
-            state.record_status_message(
-                StatusKind::Warning,
-                "usage: /review [recent|uncommitted|head]",
-            );
+            match parse_discrete_review_args(rest.trim()) {
+                Some(request) => {
+                    state.record_status_message(StatusKind::Info, "preparing discrete review…");
+                    let _ = cmd_tx.send(UiCommand::RunReview { request });
+                }
+                None if rest.trim().is_empty()
+                    || rest.trim().parse::<crate::config::ReviewTier>().is_ok() =>
+                {
+                    state.open_review_picker(rest.trim().parse().ok());
+                }
+                None => state.record_status_message(
+                    StatusKind::Warning,
+                    "usage: /discrete-review [recent|uncommitted|head] [quick|extended]",
+                ),
+            }
         }
         return;
     }
@@ -5515,31 +5549,6 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
-    if plain_text_only
-        && let Some(rest) = text.strip_prefix("/ragnarok")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
-        let task = rest.trim().to_string();
-        state.record_prompt_history(text.clone());
-        state.input.clear();
-        clear_attachments(state);
-        state.input_cursor = 0;
-        state.scroll_input_to_bottom();
-        if state.ragnarok.is_some() {
-            state.record_status_message(
-                StatusKind::Warning,
-                "a Ragnarok is already raging (press q twice in the arena to quit)",
-            );
-        } else if task.is_empty() {
-            state
-                .record_status_message(StatusKind::Warning, "usage: /ragnarok <task to implement>");
-        } else {
-            state.push_system_message(format!("⚡ Ragnarok summoned — task: {task}"));
-            state.request_ragnarok(task);
-        }
-        return;
-    }
-
     if plain_text_only && let Some(rest) = text.strip_prefix("/mj:") {
         let other = rest.trim();
         state.record_status_message(
@@ -5594,18 +5603,6 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     state.scroll_input_to_bottom();
 
     if state.is_busy() {
-        if state.can_steer() {
-            // The agent supports mid-turn steering: inject the message into
-            // the running turn instead of queueing it behind the turn.
-            state.record_steered_prompt(display_text, resources.clone());
-            let _ = cmd_tx.send(UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            });
-            state.status_line = Some(StatusMessage::info("steering into the current turn"));
-            return;
-        }
         // The previous turn is still running. Stash this submission and
         // keep it out of the transcript until it is actually sent.
         let preview = queued_prompt_preview(&display_text);
@@ -5616,14 +5613,7 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             display_text,
         });
         let queued = state.queued_prompt_count();
-        let steering_note = if state.is_streaming() && !state.steering_supported {
-            " (agent cannot steer mid-turn)"
-        } else {
-            ""
-        };
-        state.status_line = Some(StatusMessage::info(format!(
-            "queued {queued}{steering_note}: {preview}"
-        )));
+        state.status_line = Some(StatusMessage::info(format!("queued {queued}: {preview}")));
         return;
     }
 
@@ -5633,6 +5623,39 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         images,
         resources,
     });
+}
+
+fn discrete_review_command_arguments(text: &str) -> Option<&str> {
+    ["/discrete-review", "/adversarial-review"]
+        .into_iter()
+        .find_map(|command| {
+            text.strip_prefix(command)
+                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+}
+
+fn retired_review_command_arguments(text: &str) -> Option<&str> {
+    text.strip_prefix("/review")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn parse_discrete_review_args(value: &str) -> Option<ReviewRequest> {
+    let mut target = None;
+    let mut tier = None;
+    for token in value.split_whitespace() {
+        if let Some(parsed) = parse_review_target(token) {
+            if target.replace(parsed).is_some() {
+                return None;
+            }
+        } else if let Ok(parsed) = token.parse::<crate::config::ReviewTier>() {
+            if tier.replace(parsed).is_some() {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    target.map(|target| ReviewRequest { target, tier })
 }
 
 fn parse_review_target(value: &str) -> Option<ReviewTarget> {
@@ -5659,17 +5682,8 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
     match subcommand {
         "" => {
             let memory_config = memory_config_from_disk(state);
-            let mut listing = crate::memory::render_list(&store, &project, &memory_config);
-            if !state.agent_source_id.is_empty()
-                && crate::roster::AdapterKind::from_source_id(&state.agent_source_id)
-                    != Some(crate::roster::AdapterKind::Codex)
-            {
-                listing.push_str(
-                    "\nNote: memories apply only to Codex primary sessions; the current \
-                     primary agent will not receive them.",
-                );
-            }
-            state.push_system_message(listing);
+            let listing = crate::memory::render_list(&store, &project, &memory_config);
+            state.push_command_output(listing);
         }
         "add" => {
             let (global, text) = match rest.strip_prefix("--global") {
@@ -5690,7 +5704,7 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 Ok(entry) => state.record_status_message(
                     StatusKind::Info,
                     format!(
-                        "saved memory m{} ({}); shared before the next Claude or Codex turn",
+                        "saved memory m{} ({}); synchronized into Claude and Codex native memory when their next sessions start",
                         entry.id,
                         if global { "global" } else { "this project" }
                     ),
@@ -5706,10 +5720,11 @@ fn handle_memory_command(state: &mut AppState, args: &str) {
                 state.record_status_message(StatusKind::Warning, "usage: /memory forget <id>");
             }
             Ok(id) => match crate::memory::forget(&store, id) {
-                Ok(Some(entry)) => state.record_status_message(
-                    StatusKind::Info,
-                    format!("forgot memory m{}: {}", entry.id, entry.text),
-                ),
+                // The confirmation echoes the stored text, which can be
+                // arbitrarily long — record it as uncollapsible command
+                // output so the forgotten memory stays fully readable.
+                Ok(Some(entry)) => state
+                    .record_command_output(format!("forgot memory m{}: {}", entry.id, entry.text)),
                 Ok(None) => state
                     .record_status_message(StatusKind::Warning, format!("no memory with id m{id}")),
                 Err(error) => state.record_status_message(
@@ -5887,16 +5902,19 @@ fn persist_mjconfig_selection(
     let theme = config.theme;
     let style = config.spinner;
     let review_changed = state.review_enabled != config.agent.discrete_review
-        || state.review_tier != config.agent.review_tier;
+        || state.review_tier != config.agent.review_tier
+        || state.correction_threshold != config.agent.correction_threshold;
     let feature_hints_enabled = config.feature_hints;
     let keep_awake_enabled = config.keep_awake;
     let thought_output = config.thought_output;
+    let voice_auto_send = config.voice_auto_send;
     let live_session_updates = live_primary_session_config_updates(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
     // letting the next /new or restart fail to resolve.
     let reroute_notices =
         crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
+    let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
@@ -5905,20 +5923,26 @@ fn persist_mjconfig_selection(
                     crate::roster::rediscover_inventory(&config, &state.acp_inventory);
                 state.review_enabled = config.agent.discrete_review;
                 state.review_tier = config.agent.review_tier;
+                state.correction_threshold = config.agent.correction_threshold;
                 state.feature_hints_enabled = feature_hints_enabled;
                 state.keep_awake.set_enabled(keep_awake_enabled);
                 state.set_thought_output(thought_output);
+                state.voice_auto_send = voice_auto_send;
                 if review_changed {
                     let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
                         enabled: config.agent.discrete_review,
                         tier: config.agent.review_tier,
+                        correction_threshold: config.agent.correction_threshold,
                     });
+                }
+                if auxiliary_agents_update_live {
+                    let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
                 }
                 for (target, value) in live_session_updates {
                     let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
                 }
                 let mut message = format!(
-                    "config saved — theme {theme}, spinner {style}; compatible session options update the active primary, while model and ACP routing changes apply on /new or /clear"
+                    "config saved — theme {theme}, spinner {style}; compatible session options and the reviewer/subagent route update the active primary when its agent is unchanged, while primary model and ACP routing changes apply on /new or /clear"
                 );
                 for notice in &reroute_notices {
                     message.push_str("; ");
@@ -5941,6 +5965,25 @@ fn persist_mjconfig_selection(
     } else {
         state.record_status_message(StatusKind::Info, format!("theme {theme}, spinner {style}"));
     }
+}
+
+fn primary_route_stays_active(state: &AppState, config: &config::Config) -> bool {
+    state.session_id.is_some() && primary_config_matches_active_route(state, config)
+}
+
+fn primary_config_matches_active_route(state: &AppState, config: &config::Config) -> bool {
+    let Some(source) = config.agent.acp_source.as_deref() else {
+        return false;
+    };
+    let selected_model = if config.agent.model == "auto" {
+        crate::roster::auto_primary_model_for_source(&state.model_choices, source)
+    } else {
+        Some(config.agent.model.as_str())
+    };
+
+    state.active_models.primary_source.as_deref() == Some(source)
+        && selected_model == Some(state.active_models.primary.as_str())
+        && state.primary_reasoning_effort == config.agent.reasoning_effort
 }
 
 fn live_primary_session_config_updates(
@@ -6135,7 +6178,9 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                 };
                 push_export_text(out, &heading, &message.text);
             }
-            Entry::System(text) => push_export_text(out, "System", text),
+            Entry::System(text) | Entry::CommandOutput(text) => {
+                push_export_text(out, "System", text)
+            }
             Entry::ReviewLedger(lines) => {
                 let text = lines
                     .iter()
@@ -6669,6 +6714,7 @@ fn picker_key_action(modifiers: KeyModifiers, code: KeyCode) -> PickerKeyAction 
 
 fn handle_team_picker_key(
     state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
     mode: UiMode,
@@ -6699,10 +6745,18 @@ fn handle_team_picker_key(
             match step {
                 TeamPickerStep::Choose => {
                     if let Some(preset) = state.team_picker_selection()
-                        && persist_team_picker_selection(state, preset)
-                        && let Some(picker) = state.team_picker.as_mut()
+                        && let Some(primary_unchanged) =
+                            persist_team_picker_selection(state, preset, cmd_tx)
                     {
-                        picker.step = TeamPickerStep::StartNewSession;
+                        if primary_unchanged {
+                            state.team_picker = None;
+                            state.record_status_message(
+                                StatusKind::Info,
+                                "team saved; reviewer and subagent configuration is updating now",
+                            );
+                        } else if let Some(picker) = state.team_picker.as_mut() {
+                            picker.step = TeamPickerStep::StartNewSession;
+                        }
                     }
                 }
                 TeamPickerStep::StartNewSession => {
@@ -6736,10 +6790,14 @@ fn handle_team_picker_key(
     }
 }
 
-fn persist_team_picker_selection(state: &mut AppState, preset: config::TeamPreset) -> bool {
+fn persist_team_picker_selection(
+    state: &mut AppState,
+    preset: config::TeamPreset,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+) -> Option<bool> {
     let Some(path) = state.config_path.as_deref() else {
         state.record_status_message(StatusKind::Warning, "config path is unavailable");
-        return false;
+        return None;
     };
     let mut config = match config::Config::load(path) {
         Ok(config) => config,
@@ -6748,24 +6806,31 @@ fn persist_team_picker_selection(state: &mut AppState, preset: config::TeamPrese
                 StatusKind::Warning,
                 format!("could not load config: {error:#}"),
             );
-            return false;
+            return None;
         }
     };
     preset.apply(&mut config);
+    // Presets reset the primary selector to `auto`. Reload the reviewer and
+    // subagent routes only when that post-preset route is still the primary
+    // process already running in this session.
+    let apply_auxiliaries_live = primary_config_matches_active_route(state, &config);
     match config::save_user_config_preserving_session_routes(path, &mut config) {
         Ok(()) => {
             state.configured_models = config.model_names();
             state.acp_inventory =
                 crate::roster::rediscover_inventory(&config, &state.acp_inventory);
+            if apply_auxiliaries_live {
+                let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
+            }
             state.record_status_message(StatusKind::Info, format!("{} team saved", preset.label()));
-            true
+            Some(apply_auxiliaries_live)
         }
         Err(error) => {
             state.record_status_message(
                 StatusKind::Warning,
                 format!("team was not saved: {error:#}"),
             );
-            false
+            None
         }
     }
 }
@@ -6844,9 +6909,9 @@ fn handle_review_picker_key(
             inline_repair_request(mode)
         }
         PickerKeyAction::Accept => {
-            if let Some(target) = state.review_picker_accept() {
-                state.record_status_message(StatusKind::Info, "preparing manual review…");
-                let _ = cmd_tx.send(UiCommand::RunReview { target });
+            if let Some(request) = state.review_picker_accept() {
+                state.record_status_message(StatusKind::Info, "preparing discrete review…");
+                let _ = cmd_tx.send(UiCommand::RunReview { request });
                 inline_repair_request(mode)
             } else {
                 TerminalRequest::None
@@ -7104,32 +7169,6 @@ fn draw(
         return;
     }
 
-    // The Ragnarok arena replaces the whole chat surface while a battle is on
-    // screen. The safety-critical permission/elicitation modals still render
-    // on top of it.
-    if state.ragnarok.is_some() {
-        invalidate_transcript_selection(state);
-        draw_ragnarok(f, f.area(), state);
-        if let Some(pending) = state.pending_permission() {
-            draw_permission_modal(
-                f,
-                f.area(),
-                pending,
-                state.pending_permission_count(),
-                state.theme,
-            );
-        } else if let Some(pending) = state.pending_elicitation() {
-            draw_elicitation_modal(
-                f,
-                f.area(),
-                pending,
-                state.pending_elicitation_count(),
-                state.theme,
-            );
-        }
-        return;
-    }
-
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
@@ -7156,16 +7195,12 @@ fn draw(
         .split(f.area());
 
     if state.review_issue_viewer {
-        invalidate_transcript_selection(state);
         draw_review_issue_viewer(f, chunks[0], state);
     } else if state.nested_agent_viewer {
-        invalidate_transcript_selection(state);
         draw_nested_agent_viewer(f, chunks[0], state, false);
     } else if state.workspace_diff_viewer {
-        invalidate_transcript_selection(state);
         draw_workspace_diff_viewer(f, chunks[0], state, false);
     } else if state.terminals_viewer {
-        invalidate_transcript_selection(state);
         draw_terminals_viewer(f, chunks[0], state, false);
     } else {
         // An in-flight review with findings splits the stage: the issues
@@ -7237,6 +7272,7 @@ fn draw(
             state.theme,
         );
     }
+    capture_fullscreen_selection_surface(f, state);
 }
 
 fn inline_transcript_tail_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
@@ -7336,11 +7372,6 @@ fn draw_inline_chat(
             state.pending_elicitation_count(),
             state.theme,
         );
-        return;
-    }
-
-    if state.ragnarok.is_some() {
-        draw_ragnarok(f, f.area(), state);
         return;
     }
 
@@ -7798,7 +7829,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         .split(area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" review issues — session ledger ")
+        .title(" review issues — full evidence ")
         .style(Style::default().ink(state.theme.agent));
     let inner = block.inner(layout[0]);
     f.render_widget(block, layout[0]);
@@ -7828,15 +7859,19 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
             .add_modifier(Modifier::BOLD),
     )];
     for (count, label, ink) in [
-        (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.open, "● {} awaiting correction", theme.warning),
+        (tally.corrected, "◐ {} unverified", theme.accent),
+        (tally.fixed, "✔ {} verified fixed", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
-        head.push(Span::styled("   ", Style::default()));
-        head.push(Span::styled(
-            label.replacen("{}", &count.to_string(), 1),
-            Style::default().ink(ink).add_modifier(Modifier::BOLD),
-        ));
+        if count > 0 {
+            head.push(Span::styled("   ", Style::default()));
+            head.push(Span::styled(
+                label.replacen("{}", &count.to_string(), 1),
+                Style::default().ink(ink).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     let mut lines = vec![Line::from(head)];
     if issues.is_empty() {
@@ -7864,10 +7899,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
                         .add_modifier(Modifier::BOLD),
                 )));
             }
-            lines.push(review_ledger_line(
-                &crate::app::review_issue_row(issue),
-                theme,
-            ));
+            lines.extend(review_issue_detail_lines(issue, theme));
         }
     }
     let total = Paragraph::new(lines.clone())
@@ -7883,10 +7915,116 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         inner,
     );
     f.render_widget(
-        Paragraph::new("F9/Esc close · Up/Down PgUp/PgDn Home/End scroll")
+        Paragraph::new(
+            "F9/Esc close · full finding, correction report, exact diff, and verification state · Up/Down PgUp/PgDn Home/End scroll",
+        )
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
+}
+
+/// Complete evidence for one review issue. The compact board and transcript
+/// deliberately show only the first line; F9 is the durable place where a
+/// user can inspect the reviewer's complete finding, the primary's correction
+/// report, the captured correction diff, and whether a later review verified
+/// that correction.
+fn review_issue_detail_lines(
+    issue: &crate::workflow::ReviewIssue,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    use crate::workflow::ReviewIssueStatus;
+
+    let (status, ink, explanation) = match issue.status {
+        ReviewIssueStatus::Validated => (
+            "validated — awaiting correction",
+            theme.warning,
+            "The review supervisor confirmed this finding. No correction has completed for it.",
+        ),
+        ReviewIssueStatus::Corrected => (
+            "corrected — verification pending",
+            theme.accent,
+            "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean, so this is not presented as fixed.",
+        ),
+        ReviewIssueStatus::Fixed => (
+            "fixed — independently verified",
+            theme.success,
+            "A later verification review returned clean after the correction.",
+        ),
+        ReviewIssueStatus::Deferred => (
+            "deferred by automatic correction threshold",
+            theme.accent,
+            "The review supervisor validated this finding, but its priority is below the configured automatic correction threshold. It remains tracked and was not sent to the primary for a correction turn.",
+        ),
+        ReviewIssueStatus::Uncorrected => (
+            "unresolved",
+            theme.warning,
+            "The primary correction turn completed without changing the workspace. This validated finding is not fixed.",
+        ),
+        ReviewIssueStatus::Invalidated => (
+            "invalidated",
+            theme.error,
+            "The review workflow explicitly invalidated this finding; the recorded reason is below.",
+        ),
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" #{} · {status}", issue.id),
+        Style::default().ink(ink).add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::from(Span::styled(
+        " Finding — validated review evidence",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(issue.summary.lines().map(|line| {
+        Line::from(Span::styled(
+            format!("   {line}"),
+            Style::default().ink(theme.text),
+        ))
+    }));
+    lines.push(Line::from(Span::styled(
+        " Status",
+        Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   {explanation}"),
+        Style::default().ink(theme.text),
+    )));
+    if let Some(reason) = issue.resolution_reason.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Recorded outcome",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(reason.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    if let Some(details) = issue.resolution_details.as_deref() {
+        lines.push(Line::from(Span::styled(
+            " Correction evidence",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(details.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
+    lines.push(Line::from(Span::styled(
+        " ───────────────────────────────────────",
+        Style::default().ink(theme.muted),
+    )));
+    lines
 }
 
 fn nested_actor_backend(actor: &SubagentStatus) -> String {
@@ -7919,7 +8057,7 @@ fn nested_actor_state_label(actor: &SubagentStatus) -> String {
         }
         Some(WorkflowActorLifecycle::Completed) => "completed".to_string(),
         Some(WorkflowActorLifecycle::Failed(message)) => {
-            format!("failed: {}", ragnarok::first_line(message, 80))
+            format!("failed: {}", crate::text::first_line(message, 80))
         }
         Some(WorkflowActorLifecycle::Cancelled) => "cancelled".to_string(),
         None => actor
@@ -7953,7 +8091,7 @@ fn nested_agent_roster_line(
         actor.label,
         nested_actor_backend(actor),
         nested_actor_state_label(actor),
-        ragnarok::first_line(&actor.activity, 80),
+        crate::text::first_line(&actor.activity, 80),
         format_duration(actor.elapsed_at(now)),
     );
     Line::from(Span::styled(
@@ -8119,7 +8257,7 @@ fn render_nested_agent_lines(
                     }
                 }
             }
-            Entry::System(text) => {
+            Entry::System(text) | Entry::CommandOutput(text) => {
                 push_styled_message(&mut out, text, state.theme.accent, false, state.theme);
             }
             Entry::ReviewLedger(lines) => {
@@ -8638,12 +8776,34 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     if let Some(title) = state.session_title.as_deref() {
         let title = title.trim();
         if !title.is_empty() {
-            // The title owns every cell after the version label.
-            let separator_width = 3;
+            // Label the title as session context. The header can sit directly
+            // below live review findings, where unlabelled prose reads like a
+            // continuation of the final issue. On narrow terminals retain the
+            // separator while preserving usable title space.
+            let full_session_prefix = "   │ Session: ";
+            let compact_session_prefix = "   │ ";
+            let narrow_session_prefix = " │ ";
+            const MIN_READABLE_TITLE_WIDTH: usize = 12;
             let used: usize = spans.iter().map(|span| span.content.width()).sum();
-            let max_width = width.saturating_sub(used).saturating_sub(separator_width);
+            let available = width.saturating_sub(used);
+            let session_prefix =
+                if available >= full_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
+                    full_session_prefix
+                } else if available >= compact_session_prefix.width() + MIN_READABLE_TITLE_WIDTH {
+                    compact_session_prefix
+                } else {
+                    narrow_session_prefix
+                };
+            let max_width = width
+                .saturating_sub(used)
+                .saturating_sub(session_prefix.width());
             if max_width > 0 {
-                spans.push(Span::raw("   "));
+                spans.push(Span::styled(
+                    session_prefix,
+                    Style::default()
+                        .ink(state.theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                ));
                 spans.push(Span::styled(
                     compact_middle_display(title, max_width),
                     Style::default()
@@ -8675,16 +8835,17 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     } else {
         state.agent_label.trim()
     };
-    let source = state
-        .active_models
-        .primary_source
-        .as_deref()
-        .filter(|source| !source.is_empty())
-        .unwrap_or(state.agent_source_id.as_str());
-    let model_with_source = if source.is_empty() {
-        model_name.to_string()
+    // The adapter is visible in /model; the status line shows only the model
+    // name, using the adapter solely as a stand-in until a model is known.
+    let model_name = if model_name.is_empty() {
+        state
+            .active_models
+            .primary_source
+            .as_deref()
+            .filter(|source| !source.is_empty())
+            .unwrap_or(state.agent_source_id.as_str())
     } else {
-        format!("{model_name} via {source}")
+        model_name
     };
     let effort = state
         .primary_reasoning_effort
@@ -8696,7 +8857,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     let primary_field = format!("primary: {primary}");
     let review_field = format!("review: {review}");
     let mut full_fields = vec![
-        (model_with_source.clone(), state.theme.primary),
+        (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
         (project.to_string(), state.theme.secondary),
         (primary_field.clone(), state.theme.success),
@@ -8709,8 +8870,8 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         return status_line_from_fields(full_fields, state.theme.muted);
     }
 
-    // Preserve every requested field at common terminal widths by dropping
-    // the adapter suffix and assigning the remaining space to the path.
+    // Preserve every requested field at common terminal widths by assigning
+    // the remaining space to the path.
     let mut medium_fields = vec![
         (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
@@ -8947,13 +9108,13 @@ fn draw_transcript(
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
 ) {
-    let title = transcript_block_title(state);
     // No border glyphs: when the user falls back to native terminal selection
     // (F12 text selection mode), side borders would be captured into every
     // copied line. The title still claims the top row on its own.
-    let block = Block::default().borders(Borders::NONE).title(title);
+    // A placeholder reserves the title row while the actual title waits for
+    // scroll reconciliation below.
+    let block = Block::default().borders(Borders::NONE).title(" ");
     let inner = block.inner(area);
-    f.render_widget(block, area);
 
     // Avoid rebuilding the lines and re-running `Paragraph::line_count`
     // (both O(text) with unicode segmentation) when neither the
@@ -8974,13 +9135,14 @@ fn draw_transcript(
                 && c.search_query == search_query
     );
     if !cache_hit {
-        transcript_scroll.cache = Some(build_transcript_cache(
+        let cache = build_chat_transcript_cache(
             state,
             inner.width,
             revision,
             search_query.clone(),
-            false,
-        ));
+            &mut transcript_scroll.prefix,
+        );
+        transcript_scroll.cache = Some(cache);
     }
     let total = transcript_scroll
         .cache
@@ -9010,6 +9172,12 @@ fn draw_transcript(
             search.jump_pending = false;
         }
     }
+    f.render_widget(
+        Block::default()
+            .borders(Borders::NONE)
+            .title(transcript_block_title(state)),
+        area,
+    );
     let top = total
         .saturating_sub(inner.height as usize)
         .saturating_sub(state.scroll_offset);
@@ -9021,21 +9189,11 @@ fn draw_transcript(
         .as_ref()
         .expect("cache populated above");
     let (window, inner_scroll) =
-        wrapped_visible_window(&cache.lines, &cache.row_starts, top, inner.height);
+        stitched_visible_window(transcript_scroll.prefix.as_ref(), cache, top, inner.height);
     let paragraph = Paragraph::new(window)
         .wrap(Wrap { trim: false })
         .scroll((inner_scroll, 0));
     f.render_widget(paragraph, inner);
-
-    // Geometry lets mouse events hit-test the panel; the grid snapshot is
-    // only needed while a drag selection is active, so skip it otherwise.
-    state.transcript_panel_area = Some((inner.x, inner.y, inner.width, inner.height));
-    if let Some(selection) = state.transcript_selection {
-        state.transcript_panel_grid = capture_transcript_panel_grid(f.buffer_mut(), inner);
-        apply_selection_highlight(f.buffer_mut(), inner, &selection);
-    } else if !state.transcript_panel_grid.is_empty() {
-        state.transcript_panel_grid = Vec::new();
-    }
 }
 
 /// Render the transcript once and measure it, for either the chat pane
@@ -9073,7 +9231,183 @@ fn build_transcript_cache(
         line_count,
         entry_row_starts,
         row_starts,
+        prefix_rows: 0,
     }
+}
+
+/// Number of leading transcript entries whose rendered lines can no longer
+/// change, making them safe to freeze in [`SettledPrefixCache`]. The rules
+/// mirror `AppState`'s mutation surface:
+/// - the trailing entry can always grow (`append_or_start` extends the last
+///   entry in place for streamed message and replayed user-prompt chunks)
+/// - the newest Plan / SubagentPlan entries are replaced in place by later
+///   plan updates even though the stability predicate classes them stable
+/// - entries at or past the lowest reveal prefix render a growing text slice
+/// - a turn whose compact context is not final re-renders as a whole when
+///   `transcript_turns` reclassifies it: any turn with unstable entries, any
+///   turn whose local lifecycle has not completed (a mid-turn steer splits
+///   the running turn into a non-last one), and the in-flight last turn that
+///   has not become compactable yet
+/// - every frozen entry must settle naturally: the committed-by-fiat
+///   shortcut is ignored, because a force-committed entry's render still
+///   changes (a running terminal's reference line resolves when it exits)
+fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
+    let len = state.transcript.len();
+    if len == 0 {
+        return 0;
+    }
+    let mut boundary = len - 1;
+    for (index, entry) in state.transcript.iter().enumerate().rev() {
+        if matches!(entry, Entry::Plan(_)) {
+            boundary = boundary.min(index);
+            break;
+        }
+    }
+    for (index, entry) in state.transcript.iter().enumerate().rev() {
+        if matches!(entry, Entry::SubagentPlan(_)) {
+            boundary = boundary.min(index);
+            break;
+        }
+    }
+    if let Some(index) = state.min_stream_visible_entry() {
+        boundary = boundary.min(index);
+    }
+    for (position, turn) in turns.iter().enumerate() {
+        if turn.prompt_index >= boundary {
+            break;
+        }
+        let last_turn = position + 1 == turns.len();
+        // A mid-turn steer pushes a later `UserPrompt` without a lifecycle,
+        // so the running turn is no longer the last one; it still completes
+        // (and compacts, and gains its elapsed label) on `PromptDone`.
+        let lifecycle_open = state.has_prompt_turn(turn.prompt_index)
+            && !state.prompt_turn_completed(turn.prompt_index);
+        if !turn.entries_stable || lifecycle_open || (last_turn && !turn.is_compactable) {
+            boundary = turn.prompt_index;
+            break;
+        }
+    }
+    state.transcript[..boundary]
+        .iter()
+        .enumerate()
+        .find(|&(index, entry)| !transcript_entry_settles_naturally(state, index, entry))
+        .map_or(boundary, |(index, _)| index)
+}
+
+/// Build the chat pane's transcript cache, reusing and extending the settled
+/// prefix so a rebuild only renders the entries that can still change. The
+/// search path renders the full transcript (matches need every entry) and
+/// leaves the prefix untouched for when the search clears.
+fn build_chat_transcript_cache(
+    state: &AppState,
+    width: u16,
+    revision: u64,
+    search_query: Option<String>,
+    prefix: &mut Option<SettledPrefixCache>,
+) -> TranscriptCache {
+    if search_query.is_some() {
+        return build_transcript_cache(state, width, revision, search_query, false);
+    }
+    let turns = transcript_turns(state);
+    let boundary = settled_entry_boundary(state, &turns);
+    let epoch = state.settled_render_epoch();
+    if prefix
+        .as_ref()
+        .is_some_and(|p| p.epoch != epoch || p.width != width || p.entries > boundary)
+    {
+        *prefix = None;
+    }
+    let rendered_entries = prefix.as_ref().map_or(0, |p| p.entries);
+    if rendered_entries < boundary {
+        let new_lines = render_transcript_entry_range_with_turns(
+            state,
+            width,
+            rendered_entries..boundary,
+            transcript_collapse_limit(state),
+            state.theme,
+            true,
+            &turns,
+        );
+        let p = prefix.get_or_insert_with(|| SettledPrefixCache {
+            epoch,
+            width,
+            entries: 0,
+            lines: Vec::new(),
+            row_starts: Vec::new(),
+            rows: 0,
+        });
+        for line in new_lines {
+            p.row_starts.push(p.rows);
+            p.rows += wrapped_line_height(&line, width);
+            p.lines.push(line);
+        }
+        p.entries = boundary;
+    }
+    let prefix_rows = prefix.as_ref().map_or(0, |p| p.rows);
+    let lines = render_transcript_entry_range_with_turns(
+        state,
+        width,
+        boundary..state.transcript.len(),
+        transcript_collapse_limit(state),
+        state.theme,
+        true,
+        &turns,
+    );
+    let (mut row_starts, tail_rows) = wrapped_row_starts(&lines, width);
+    for start in &mut row_starts {
+        *start += prefix_rows;
+    }
+    TranscriptCache {
+        revision,
+        width,
+        search_query: None,
+        lines,
+        line_count: prefix_rows + tail_rows,
+        entry_row_starts: Vec::new(),
+        row_starts,
+        prefix_rows,
+    }
+}
+
+/// Lines covering wrapped rows `top .. top + height` across the settled
+/// prefix and the cache's tail, plus the scroll offset inside the first
+/// returned line. Splitting at the seam keeps the frame O(visible rows).
+fn stitched_visible_window(
+    prefix: Option<&SettledPrefixCache>,
+    cache: &TranscriptCache,
+    top: usize,
+    height: u16,
+) -> (Vec<Line<'static>>, u16) {
+    let Some(prefix) = prefix.filter(|_| cache.prefix_rows > 0) else {
+        return wrapped_visible_window(&cache.lines, &cache.row_starts, top, height);
+    };
+    if top >= cache.prefix_rows {
+        return tail_visible_window(cache, top, height);
+    }
+    let (mut window, inner_scroll) =
+        wrapped_visible_window(&prefix.lines, &prefix.row_starts, top, height);
+    let end_row = top.saturating_add(usize::from(height));
+    if end_row > cache.prefix_rows {
+        let remaining = (end_row - cache.prefix_rows).min(usize::from(height)) as u16;
+        let (tail, _) = tail_visible_window(cache, cache.prefix_rows, remaining);
+        window.extend(tail);
+    }
+    (window, inner_scroll)
+}
+
+/// Window over the cache's tail lines, whose `row_starts` are absolute
+/// (offset by `prefix_rows`); `top` is absolute as well.
+fn tail_visible_window(
+    cache: &TranscriptCache,
+    top: usize,
+    height: u16,
+) -> (Vec<Line<'static>>, u16) {
+    wrapped_visible_window(
+        &cache.lines,
+        &cache.row_starts,
+        top.max(cache.prefix_rows),
+        height,
+    )
 }
 
 /// Block title for the transcript pane. Adds a scroll indicator when
@@ -9631,6 +9965,11 @@ fn render_transcript_entry_range_with_turns(
             Entry::System(text) => {
                 push_styled_message(&mut out, text, theme.accent, collapse_message, theme);
             }
+            Entry::CommandOutput(text) => {
+                // The user typed the command; its result is the answer they
+                // asked for and stays fully readable, like their own prompt.
+                push_styled_message(&mut out, text, theme.accent, false, theme);
+            }
             Entry::ReviewLedger(lines) => {
                 push_review_ledger_record(&mut out, lines, theme);
             }
@@ -9919,7 +10258,11 @@ fn review_tone_style(tone: crate::app::ReviewTone, theme: TerminalTheme) -> Styl
             .ink(theme.accent)
             .add_modifier(Modifier::BOLD),
         ReviewTone::Open => Style::default().ink(theme.warning),
+        ReviewTone::Corrected => Style::default().ink(theme.accent),
         ReviewTone::Fixed => Style::default().ink(theme.success),
+        ReviewTone::Deferred => Style::default()
+            .ink(theme.accent)
+            .add_modifier(Modifier::BOLD),
         ReviewTone::Invalidated => Style::default()
             .ink(theme.error)
             .add_modifier(Modifier::BOLD),
@@ -12402,15 +12745,19 @@ fn review_board_row_count(state: &AppState) -> u16 {
     (1 + visible + overflow).min(usize::from(u16::MAX)) as u16
 }
 
-/// Order the board so what needs the user's eyes comes first: still-open
-/// findings, then invalidations (loud, never buried), then the fixed tail.
+/// Order the board so what needs the user's eyes comes first: findings still
+/// awaiting correction, then corrections still awaiting verification, then
+/// unresolved/invalidated records, and finally independently verified fixes.
 fn review_board_rank(status: crate::workflow::ReviewIssueStatus) -> u8 {
     use crate::workflow::ReviewIssueStatus;
 
     match status {
         ReviewIssueStatus::Validated => 0,
-        ReviewIssueStatus::Invalidated => 1,
-        ReviewIssueStatus::Fixed => 2,
+        ReviewIssueStatus::Deferred => 1,
+        ReviewIssueStatus::Corrected => 2,
+        ReviewIssueStatus::Uncorrected => 3,
+        ReviewIssueStatus::Invalidated => 4,
+        ReviewIssueStatus::Fixed => 5,
     }
 }
 
@@ -12440,7 +12787,10 @@ fn draw_review_board(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     )];
     for (count, label, ink) in [
         (tally.open, "● {} open", theme.warning),
-        (tally.fixed, "✔ {} fixed", theme.success),
+        (tally.deferred, "⏸ {} deferred by policy", theme.accent),
+        (tally.corrected, "◐ {} unverified", theme.warning),
+        (tally.fixed, "✔ {} verified", theme.success),
+        (tally.uncorrected, "! {} unresolved", theme.warning),
         (tally.invalidated, "✘ {} invalidated", theme.error),
     ] {
         if count > 0 {
@@ -12649,7 +12999,7 @@ fn workflow_progress_line(
                 Some(remaining) => format!("waiting for {remaining} automatic results"),
                 None => format!(
                     "waiting · {}",
-                    crate::ragnarok::first_line(&waiting.dependency, 48)
+                    crate::text::first_line(&waiting.dependency, 48)
                 ),
             });
         }
@@ -12701,9 +13051,11 @@ fn workflow_progress_line(
         let tally = workflow.issue_tally();
         let mut parts = vec![format!("issues {} found", tally.found)];
         for (count, label) in [
-            (tally.fixed, "fixed"),
+            (tally.fixed, "verified fixed"),
+            (tally.corrected, "corrected; unverified"),
+            (tally.uncorrected, "unresolved"),
             (tally.invalidated, "invalidated"),
-            (tally.open, "unresolved"),
+            (tally.open, "awaiting correction"),
         ] {
             if count > 0 {
                 parts.push(format!("{count} {label}"));
@@ -14040,7 +14392,7 @@ fn help_modal_lines(
         lines.extend([
             help_binding_line(
                 "mouse drag",
-                "select transcript text; released selection is copied to the clipboard",
+                "select visible text; released selection is copied to the clipboard",
                 theme,
             ),
             help_binding_line(
@@ -14094,7 +14446,7 @@ fn help_modal_lines(
         help_blank_line(),
         help_command_line(
             "Built-in commands:",
-            "/clear keeps model; /new applies saved models; /load opens session picker; /export full includes nested agents",
+            "/exit quits Mjolnir (or returns from side); /clear keeps model; /new applies saved models; /load opens session picker; /export full includes nested agents",
             theme,
         ),
     ]);
@@ -14292,7 +14644,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Review target ")
+        .title(" Discrete review target ")
         .style(Style::default().ink(state.theme.primary));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -14302,7 +14654,7 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
         .split(inner);
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[0]);
     f.render_widget(
-        Paragraph::new("Up/Down choose | Enter review | Esc cancel")
+        Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
     );
@@ -14323,7 +14675,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
         ])
         .split(content);
     f.render_widget(
-        Paragraph::new("Review target").style(
+        Paragraph::new("Discrete review target").style(
             Style::default()
                 .ink(state.theme.primary)
                 .add_modifier(Modifier::BOLD),
@@ -14332,7 +14684,7 @@ fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppStat
     );
     f.render_widget(Paragraph::new(review_picker_lines(state)), layout[1]);
     f.render_widget(
-        Paragraph::new("Up/Down choose | Enter review | Esc cancel")
+        Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
         layout[2],
     );
@@ -14724,1367 +15076,14 @@ fn model_choice_score(
     None
 }
 
-// ===========================================================================
-// Ragnarok arena: launch, keys, and the gloriously silly battle scenes
-// ===========================================================================
-
-/// How long an action flourish keeps driving a fighter's pose.
-const RAGNAROK_ACTION_TTL: Duration = Duration::from_secs(12);
-/// Animation frame cadence (shares the spinner heartbeat).
-const RAGNAROK_FRAME_MS: u128 = 250;
-const RAGNAROK_CARD_MIN_WIDTH: u16 = 24;
-// Borders (2) + agent/pass_at_1 line + 7 half-block sprite rows + vigor bar +
-// action caption.
-const RAGNAROK_CARD_HEIGHT: u16 = 12;
-const RAGNAROK_THOR_STRIP_HEIGHT: u16 = 3;
-const RAGNAROK_FEED_MIN_HEIGHT: u16 = 3;
-
-/// Arena-local convenience over [`truncate_text_to_width`], which takes an
-/// owned `String` and a `u16` width.
+/// Convenience over [`truncate_text_to_width`] for callers with `usize`
+/// layout widths.
 fn fit_width(text: impl Into<String>, width: usize) -> String {
     truncate_text_to_width(text.into(), width.min(u16::MAX as usize) as u16)
 }
 
-fn publish_ragnarok_observation(
-    state: &AppState,
-    observer: Option<&mpsc::UnboundedSender<Option<RagnarokObservation>>>,
-    last_observation: &mut Option<Option<RagnarokObservation>>,
-) {
-    let Some(observer) = observer else {
-        return;
-    };
-    let observation = state.ragnarok.as_ref().map(RagnarokUi::observation);
-    if last_observation.as_ref() == Some(&observation) {
-        return;
-    }
-    if observer.send(observation.clone()).is_ok() {
-        *last_observation = Some(observation);
-    }
-}
-
-/// Spawn the battle task for a validated `/ragnarok` request.
-fn start_ragnarok(
-    state: &mut AppState,
-    task: String,
-    tx: mpsc::UnboundedSender<ragnarok::RagnarokEvent>,
-) {
-    let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-    let (proceed_tx, proceed_rx) = tokio::sync::watch::channel(false);
-    let cfg = ragnarok::BattleConfig {
-        task: task.clone(),
-        cwd: state.session_cwd.clone(),
-        available_models: state.ragnarok_models.clone(),
-        thor_host: active_thor_host(state),
-    };
-    state.ragnarok = Some(RagnarokUi::new(task, abort_tx, proceed_tx));
-    tokio::spawn(ragnarok::run_battle(cfg, tx, abort_rx, proceed_rx));
-}
-
-fn drain_ragnarok_draft_pr_publish(
-    state: &mut AppState,
-    tx: &mpsc::UnboundedSender<ragnarok::RagnarokEvent>,
-) {
-    while let Some(req) = state.take_ragnarok_draft_pr_publish_request() {
-        spawn_ragnarok_draft_pr_publish(req, tx.clone());
-    }
-}
-
-fn spawn_ragnarok_draft_pr_publish(
-    req: ragnarok::DraftPrRequest,
-    tx: mpsc::UnboundedSender<ragnarok::RagnarokEvent>,
-) {
-    let winner = req.winner;
-    let _ = tx.send(ragnarok::RagnarokEvent::DraftPrPublishing { winner });
-    tokio::spawn(async move {
-        let ev = match ragnarok::publish_draft_pr(req).await {
-            Ok(url) => ragnarok::RagnarokEvent::DraftPrPublished { winner, url },
-            Err(e) => ragnarok::RagnarokEvent::DraftPrFailed {
-                winner,
-                message: format!("{e:#}"),
-            },
-        };
-        let _ = tx.send(ev);
-    });
-}
-
-fn active_thor_host(state: &AppState) -> Option<ragnarok::ThorHost> {
-    let launch = state.active_agent_launch.clone()?;
-    let model = active_model_config(state);
-    Some(ragnarok::ThorHost {
-        agent_source_id: state.agent_source_id.clone(),
-        launch,
-        model_value: model.as_ref().map(|(value, _)| value.clone()),
-        model_name: model.map(|(_, name)| name),
-    })
-}
-
-fn active_model_config(state: &AppState) -> Option<(String, String)> {
-    state
-        .session_config_options
-        .iter()
-        .find(|option| crate::app::is_model_config_option(option))
-        .and_then(|option| {
-            let value = crate::app::config_option_current_value_id(option)?.to_string();
-            let name = crate::app::config_option_current_value_label(option);
-            Some((value, name))
-        })
-}
-
-fn handle_ragnarok_key(
-    state: &mut AppState,
-    modifiers: KeyModifiers,
-    code: KeyCode,
-    mode: UiMode,
-) -> TerminalRequest {
-    let Some(arena) = state.ragnarok.as_mut() else {
-        return TerminalRequest::None;
-    };
-    let over = arena.battle_over();
-
-    // Ctrl-C always aborts, raging battle or not.
-    if modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('c')) {
-        state.close_ragnarok();
-        return inline_repair_request(mode);
-    }
-
-    let disarm_quit = !matches!(code, KeyCode::Char('q') | KeyCode::Char('Q'));
-    match code {
-        KeyCode::Esc => {
-            arena.quit_armed = false;
-            if arena.pane == ArenaPane::Transcript {
-                arena.pane = ArenaPane::Arena;
-                return inline_repair_request(mode);
-            }
-            if over {
-                state.close_ragnarok();
-                return inline_repair_request(mode);
-            }
-        }
-        KeyCode::Char('q') | KeyCode::Char('Q') if over => {
-            state.close_ragnarok();
-            return inline_repair_request(mode);
-        }
-        KeyCode::Char('q') | KeyCode::Char('Q') => {
-            if arena.quit_armed {
-                arena.abort();
-                arena.quit_armed = false;
-            } else {
-                arena.quit_armed = true;
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') => arena.scroll_feed(1),
-        KeyCode::Down | KeyCode::Char('j') => arena.scroll_feed(-1),
-        KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('[') => arena.cycle_fighter(-1),
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(']') => arena.cycle_fighter(1),
-        KeyCode::Char('r') => arena.show_review_lane = !arena.show_review_lane,
-        KeyCode::Char(c @ '1'..='9') => {
-            let picked = (c as u8 - b'1') as usize;
-            if over {
-                if arena.chosen_finalist.is_none()
-                    && let Some(verdict) = &arena.verdict
-                    && let Some((a, b)) = verdict.finalists
-                {
-                    match picked {
-                        0 => {
-                            arena.chosen_finalist = Some(a);
-                            arena.queue_draft_pr_publish(a);
-                        }
-                        1 => {
-                            arena.chosen_finalist = Some(b);
-                            arena.queue_draft_pr_publish(b);
-                        }
-                        _ => {}
-                    }
-                }
-            } else if picked < arena.fighters.len() {
-                arena.selected_fighter = picked;
-            }
-        }
-        KeyCode::Enter if over => {
-            state.close_ragnarok();
-            return inline_repair_request(mode);
-        }
-        KeyCode::Enter if arena.awaiting_approval() => {
-            arena.unleash();
-        }
-        KeyCode::Enter | KeyCode::Tab | KeyCode::Char('t') | KeyCode::Char('T') => {
-            arena.quit_armed = false;
-            toggle_ragnarok_pane(arena);
-            return inline_repair_request(mode);
-        }
-        _ => {}
-    }
-    if disarm_quit && let Some(arena) = state.ragnarok.as_mut() {
-        arena.quit_armed = false;
-    }
-    TerminalRequest::None
-}
-
-fn toggle_ragnarok_pane(arena: &mut RagnarokUi) {
-    arena.pane = match arena.pane {
-        ArenaPane::Arena => ArenaPane::Transcript,
-        ArenaPane::Transcript => ArenaPane::Arena,
-    };
-}
-
-/// Wall-clock animation frame, shared by every arena element.
-fn arena_frame() -> usize {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| (elapsed.as_millis() / RAGNAROK_FRAME_MS) as usize)
-        .unwrap_or(0)
-}
-
-fn battle_clock(arena: &RagnarokUi) -> String {
-    let secs = arena.started_at.elapsed().as_secs();
-    if secs >= 3600 {
-        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else {
-        format!("{:02}:{:02}", secs / 60, secs % 60)
-    }
-}
-
-/// A stable, distinct-ish color per fighter.
-fn fighter_ink(theme: TerminalTheme, id: ragnarok::FighterId) -> Ink {
-    let cycle = [
-        theme.primary,
-        theme.secondary,
-        theme.success,
-        theme.warning,
-        theme.tool,
-        theme.accent,
-        theme.user,
-        theme.terminal,
-        theme.error,
-        theme.quote,
-    ];
-    cycle[id % cycle.len()]
-}
-
-fn draw_ragnarok(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
-    let Some(arena) = state.ragnarok.as_ref() else {
-        return;
-    };
-    let theme = state.theme;
-    f.render_widget(Clear, area);
-    if area.width < 10 || area.height < 4 {
-        let line = Line::from(Span::styled(
-            "⚡ RAGNAROK rages (terminal too small for the arena)",
-            Style::default().ink(theme.warning),
-        ));
-        f.render_widget(Paragraph::new(line), area);
-        return;
-    }
-    match arena.pane {
-        ArenaPane::Arena => draw_ragnarok_arena_pane(f, area, arena, theme),
-        ArenaPane::Transcript => draw_ragnarok_transcript_pane(f, area, arena, theme),
-    }
-}
-
-fn ragnarok_banner_line(arena: &RagnarokUi, theme: TerminalTheme, width: u16) -> Line<'static> {
-    let frame = arena_frame();
-    let bolts = ["⚡", "🔥", "⚡", "☄"];
-    let bolt = bolts[frame % bolts.len()];
-    let phase = if arena.failed.is_some() {
-        "THE BATTLE IS LOST".to_string()
-    } else {
-        arena.phase.banner().to_string()
-    };
-    let text = format!(
-        "{bolt} RAGNAROK ━ {} ━ {} {bolt}",
-        phase,
-        battle_clock(arena)
-    );
-    let text = fit_width(&text, width as usize);
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .ink(if arena.failed.is_some() {
-                theme.error
-            } else {
-                theme.warning
-            })
-            .add_modifier(Modifier::BOLD),
-    ))
-    .centered()
-}
-
-fn ragnarok_footer_line(arena: &RagnarokUi, theme: TerminalTheme, width: u16) -> Line<'static> {
-    let over = arena.battle_over();
-    let hints = if arena.quit_armed {
-        "⚠ q again to quit Ragnarok (Esc cancels) ⚠".to_string()
-    } else if over {
-        match arena.verdict.as_ref().and_then(|v| v.finalists) {
-            Some(_) if arena.chosen_finalist.is_none() => {
-                "1/2 choose finalist · Enter accept & close · t transcripts · q close".to_string()
-            }
-            None => {
-                "Enter/q close · t transcripts · ↑/↓ feed · ←/→ fighter · r review lane".to_string()
-            }
-            Some(_) => {
-                "Enter/q close · t transcripts · ↑/↓ feed · ←/→ fighter · r review lane".to_string()
-            }
-        }
-    } else if arena.awaiting_approval() {
-        "⚔ Enter to UNLEASH RAGNAROK (no combat spend yet) · ↑/↓ feed · q quit".to_string()
-    } else {
-        match arena.pane {
-            ArenaPane::Arena => {
-                "Enter transcript · ↑/↓ feed · ←/→ fighter · 1-9 select · q quit".to_string()
-            }
-            ArenaPane::Transcript => {
-                "Esc arena · Enter arena · ←/→ fighter · r review lane · q quit".to_string()
-            }
-        }
-    };
-    if arena.awaiting_approval() && !arena.quit_armed {
-        let style = Style::default()
-            .ink(theme.warning)
-            .add_modifier(Modifier::BOLD);
-        return Line::from(Span::styled(fit_width(&hints, width as usize), style)).centered();
-    }
-    let style = if arena.quit_armed {
-        Style::default()
-            .ink(theme.error)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().ink(theme.muted)
-    };
-    Line::from(Span::styled(fit_width(&hints, width as usize), style)).centered()
-}
-
-fn ragnarok_stage_height(arena: &RagnarokUi, width: u16, max_height: u16) -> u16 {
-    if max_height == 0 {
-        return 0;
-    }
-
-    match arena.phase {
-        ragnarok::Phase::Judgment | ragnarok::Phase::Verdict => return max_height,
-        ragnarok::Phase::Mustering | ragnarok::Phase::Routing if arena.fighters.is_empty() => {
-            return max_height.clamp(1, 10);
-        }
-        _ => {}
-    }
-
-    if arena.fighters.is_empty() {
-        return max_height.clamp(1, 8);
-    }
-
-    let n = arena.fighters.len() as u16;
-    let cols = (width / RAGNAROK_CARD_MIN_WIDTH).clamp(1, n);
-    let rows = n.div_ceil(cols);
-    let thor_height = if arena.thor_action.is_some() {
-        RAGNAROK_THOR_STRIP_HEIGHT
-    } else {
-        0
-    };
-    rows.saturating_mul(RAGNAROK_CARD_HEIGHT)
-        .saturating_add(thor_height)
-        .min(max_height)
-        .max(1)
-}
-
-fn draw_ragnarok_arena_pane(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    // Banner / task / stage / feed / footer.
-    let middle_height = area.height.saturating_sub(3);
-    let feed_min = if middle_height > RAGNAROK_FEED_MIN_HEIGHT {
-        RAGNAROK_FEED_MIN_HEIGHT
-    } else {
-        middle_height.saturating_sub(1)
-    };
-    let stage_max = middle_height.saturating_sub(feed_min);
-    let stage_height = ragnarok_stage_height(arena, area.width, stage_max);
-    let feed_height = middle_height.saturating_sub(stage_height);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(stage_height),
-            Constraint::Length(feed_height),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    f.render_widget(
-        Paragraph::new(ragnarok_banner_line(arena, theme, chunks[0].width)),
-        chunks[0],
-    );
-    let task_line = Line::from(vec![
-        Span::styled("quest: ", Style::default().ink(theme.muted)),
-        Span::styled(
-            fit_width(
-                arena.task.replace('\n', " "),
-                chunks[1].width.saturating_sub(7) as usize,
-            ),
-            Style::default().ink(theme.text),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(task_line), chunks[1]);
-
-    match arena.phase {
-        ragnarok::Phase::Verdict => draw_ragnarok_verdict(f, chunks[2], arena, theme),
-        ragnarok::Phase::Judgment => draw_ragnarok_judgment(f, chunks[2], arena, theme),
-        ragnarok::Phase::Mustering | ragnarok::Phase::Routing if arena.fighters.is_empty() => {
-            draw_ragnarok_summoning(f, chunks[2], arena, theme)
-        }
-        _ => draw_ragnarok_fighters(f, chunks[2], arena, theme),
-    }
-
-    draw_ragnarok_feed(f, chunks[3], arena, theme);
-    f.render_widget(
-        Paragraph::new(ragnarok_footer_line(arena, theme, chunks[4].width)),
-        chunks[4],
-    );
-}
-
-fn current_thor_action(arena: &RagnarokUi) -> ragnarok::ThorAction {
-    arena.thor_action.unwrap_or(match arena.phase {
-        ragnarok::Phase::Routing => ragnarok::ThorAction::Deciding,
-        ragnarok::Phase::Review => ragnarok::ThorAction::Assigning,
-        ragnarok::Phase::Judgment | ragnarok::Phase::Verdict => ragnarok::ThorAction::Judging,
-        _ => ragnarok::ThorAction::Descending,
-    })
-}
-
-fn thor_action_lines(arena: &RagnarokUi, theme: TerminalTheme, width: u16) -> Vec<Line<'static>> {
-    let frame = arena_frame();
-    let action = current_thor_action(arena);
-    let pulse = ["·", "✦", "✶", "✦"][frame % 4];
-    let drift = ["  ", " ", "", " "][frame % 4];
-    let (title, art): (&str, [&str; 2]) = match action {
-        ragnarok::ThorAction::Descending => (
-            "THOR DESCENDS",
-            [
-                "      storm splits open     ",
-                "        helm first           ",
-            ],
-        ),
-        ragnarok::ThorAction::Deciding => (
-            "THOR DECIDES",
-            ["   [ task ] <=?=> [ field ]", "       runes turn in place "],
-        ),
-        ragnarok::ThorAction::Assigning => (
-            "THOR ASSIGNS RIVALS",
-            [
-                "   champion -> rival -> champion",
-                "       blades cross on command ",
-            ],
-        ),
-        ragnarok::ThorAction::Judging => (
-            "THOR JUDGES",
-            [
-                "          verdict scales       ",
-                "       hammer over the record  ",
-            ],
-        ),
-        ragnarok::ThorAction::Mercy => (
-            "THOR WEIGHS MERCY",
-            [
-                "      hourglass against hammer ",
-                "        spare or strike now    ",
-            ],
-        ),
-    };
-    let age = arena.thor_action_at.elapsed().as_millis() / RAGNAROK_FRAME_MS;
-    let intensity = match age {
-        0..=3 => "!!!",
-        4..=10 => "!! ",
-        _ => "!  ",
-    };
-    [
-        format!("{pulse} {title} {intensity} {pulse}"),
-        format!("{drift}{}", art[0]),
-        format!("{}{}", " ".repeat(frame % 3), art[1]),
-    ]
-    .into_iter()
-    .map(|line| {
-        Line::from(Span::styled(
-            fit_width(line, width as usize),
-            Style::default()
-                .ink(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .centered()
-    })
-    .collect()
-}
-
-fn draw_thor_action_strip(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let lines: Vec<Line> = thor_action_lines(arena, theme, area.width)
-        .into_iter()
-        .take(area.height as usize)
-        .collect();
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-fn thor_descending_scene_rows(frame: usize) -> Vec<String> {
-    let drop = ["      ", "    ", "  ", " "][frame % 4];
-    let cape = [" /|\\ ", " \\|/ ", " /|\\ ", "\\ | /"][frame % 4];
-    let sparks = ["  \\ | /", "-- ᚦ --", "  / | \\", "-- ⚡ --"][frame % 4];
-    vec![
-        format!("{drop}{sparks}"),
-        format!("{drop}        _/\\_        "),
-        format!("{drop}      _/ᛏ  ᛏ\\_      "),
-        format!("{drop}     /_( ᚨ ᚨ )_\\     "),
-        format!("{drop}       \\_===_/   __==#"),
-        format!("{drop}       {cape}   /"),
-        format!("{drop}      /_| ᛉ  |_\\/ "),
-        format!("{drop}        /_/ \\_\\     "),
-    ]
-}
-
-fn thor_summoning_scene_rows(arena: &RagnarokUi, frame: usize) -> Vec<String> {
-    match current_thor_action(arena) {
-        ragnarok::ThorAction::Descending => thor_descending_scene_rows(frame),
-        ragnarok::ThorAction::Deciding => {
-            let glow = ["✦", "✧", "✶", "✧"][frame % 4];
-            vec![
-                format!("        {glow} ᚱ  ᚢ  ᚾ  ᛖ {glow}        "),
-                "      .-----------------.     ".to_string(),
-                "      | task | field | cost | ".to_string(),
-                "      '-----------------'     ".to_string(),
-                "          \\  judgment  /      ".to_string(),
-                "           \\_  ___  _/        ".to_string(),
-                "             /_/ \\_\\          ".to_string(),
-            ]
-        }
-        _ => {
-            let spark = ["✦", "✧", "✶", "✧"][frame % 4];
-            vec![
-                format!("          {spark} THOR STANDS READY {spark}"),
-                "              _/\\_              ".to_string(),
-                "            _/ᛏ  ᛏ\\_            ".to_string(),
-                "            (  ᚨ ᚨ  )     __==# ".to_string(),
-                "             \\_===_/     /      ".to_string(),
-                "             /| ᛉ |\\   /       ".to_string(),
-                "            /_|___|_\\          ".to_string(),
-            ]
-        }
-    }
-}
-
-/// Pre-roster splash: Thor descends and the route visibly changes state.
-fn draw_ragnarok_summoning(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let frame = arena_frame();
-    let mut lines = thor_action_lines(arena, theme, area.width);
-    lines.push(Line::default());
-    let art = thor_summoning_scene_rows(arena, frame);
-    lines.extend(
-        art.into_iter()
-            .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.accent))).centered()),
-    );
-    lines.push(
-        Line::from(Span::styled(
-            match arena.phase {
-                ragnarok::Phase::Mustering => "« the war horn calls champions to the arena »",
-                _ => "« Thor weighs the quest upon his scales »",
-            },
-            Style::default().ink(theme.muted),
-        ))
-        .centered(),
-    );
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-/// The main combat grid: one animated card per champion.
-fn draw_ragnarok_fighters(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    if arena.fighters.is_empty() {
-        return;
-    }
-    let cards_area = if arena.thor_action.is_some() && area.height > RAGNAROK_THOR_STRIP_HEIGHT {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(RAGNAROK_THOR_STRIP_HEIGHT),
-                Constraint::Min(0),
-            ])
-            .split(area);
-        draw_thor_action_strip(f, chunks[0], arena, theme);
-        chunks[1]
-    } else {
-        area
-    };
-    if cards_area.height == 0 {
-        return;
-    }
-
-    let n = arena.fighters.len() as u16;
-    let cols = (cards_area.width / RAGNAROK_CARD_MIN_WIDTH).clamp(1, n);
-    let rows = n.div_ceil(cols);
-
-    // Not enough vertical room for cards: compact one-line-per-fighter view.
-    if cards_area.height < rows * RAGNAROK_CARD_HEIGHT {
-        let lines: Vec<Line> = arena
-            .fighters
-            .iter()
-            .enumerate()
-            .take(cards_area.height as usize)
-            .map(|(i, fighter)| compact_fighter_line(arena, fighter, i, theme, cards_area.width))
-            .collect();
-        f.render_widget(Paragraph::new(lines), cards_area);
-        return;
-    }
-
-    let row_rects = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            std::iter::repeat_n(Constraint::Length(RAGNAROK_CARD_HEIGHT), rows as usize)
-                .chain(std::iter::once(Constraint::Min(0)))
-                .collect::<Vec<_>>(),
-        )
-        .split(cards_area);
-    for row in 0..rows {
-        let start = (row * cols) as usize;
-        let in_row = arena
-            .fighters
-            .len()
-            .saturating_sub(start)
-            .min(cols as usize);
-        if in_row == 0 {
-            break;
-        }
-        let col_rects = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Ratio(1, in_row as u32); in_row])
-            .split(row_rects[row as usize]);
-        for col in 0..in_row {
-            let idx = start + col;
-            draw_fighter_card(f, col_rects[col], arena, &arena.fighters[idx], idx, theme);
-        }
-    }
-}
-
-fn compact_fighter_line(
-    arena: &RagnarokUi,
-    fighter: &RagnarokFighterUi,
-    index: usize,
-    theme: TerminalTheme,
-    width: u16,
-) -> Line<'static> {
-    let selected = index == arena.selected_fighter;
-    let marker = if selected { "▶" } else { " " };
-    let (state_word, state_color) = fighter_state_label(&fighter.state, theme);
-    let action = fighter
-        .action
-        .as_ref()
-        .filter(|(_, _, at)| at.elapsed() < RAGNAROK_ACTION_TTL)
-        .map(|(kind, detail, _)| format!(" {} {detail}", action_glyph(*kind)))
-        .or_else(|| ambient_combat_caption(fighter).map(|caption| format!(" {caption}")))
-        .unwrap_or_default();
-    let text = format!(
-        "{marker}{} {} — {state_word}{action}",
-        pose_for(fighter)[1].trim(),
-        fighter.card.tag(),
-    );
-    Line::from(Span::styled(
-        fit_width(&text, width as usize),
-        Style::default().ink(state_color),
-    ))
-}
-
-fn fighter_state_label(state: &ragnarok::FighterState, theme: TerminalTheme) -> (String, Ink) {
-    match state {
-        ragnarok::FighterState::Summoned => ("SUMMONED".to_string(), theme.muted),
-        ragnarok::FighterState::Forging => ("FORGING CAMP".to_string(), theme.accent),
-        ragnarok::FighterState::Connecting => ("APPROACHING".to_string(), theme.accent),
-        ragnarok::FighterState::Fighting => ("FIGHTING".to_string(), theme.warning),
-        ragnarok::FighterState::Capturing => ("TALLYING".to_string(), theme.secondary),
-        ragnarok::FighterState::Standing => ("STANDING".to_string(), theme.success),
-        ragnarok::FighterState::Slain(_) => ("SLAIN".to_string(), theme.error),
-    }
-}
-
-fn action_glyph(kind: ragnarok::ActionKind) -> &'static str {
-    match kind {
-        ragnarok::ActionKind::Forge => "🔨",
-        ragnarok::ActionKind::Strike => "⚡",
-        ragnarok::ActionKind::Scry => "🔮",
-        ragnarok::ActionKind::Chant => "🎵",
-        ragnarok::ActionKind::Ponder => "💭",
-        ragnarok::ActionKind::Wound => "🩸",
-        ragnarok::ActionKind::Guard => "🛡",
-    }
-}
-
-fn live_action_kind(fighter: &RagnarokFighterUi) -> Option<ragnarok::ActionKind> {
-    fighter
-        .action
-        .as_ref()
-        .filter(|(_, _, at)| at.elapsed() < RAGNAROK_ACTION_TTL)
-        .map(|(kind, _, _)| *kind)
-}
-
-fn ambient_combat_action(fighter: &RagnarokFighterUi) -> Option<ragnarok::ActionKind> {
-    if !matches!(
-        fighter.state,
-        ragnarok::FighterState::Fighting | ragnarok::FighterState::Capturing
-    ) || live_action_kind(fighter).is_some()
-    {
-        return None;
-    }
-    let beat = (arena_frame() / 2)
-        .wrapping_add(fighter.card.id * 2)
-        .wrapping_add(fighter.actions_seen as usize);
-    Some(match beat % 6 {
-        0 | 3 => ragnarok::ActionKind::Strike,
-        1 | 4 => ragnarok::ActionKind::Forge,
-        2 => ragnarok::ActionKind::Scry,
-        _ => ragnarok::ActionKind::Chant,
-    })
-}
-
-fn animated_action_kind(fighter: &RagnarokFighterUi) -> Option<ragnarok::ActionKind> {
-    live_action_kind(fighter).or_else(|| ambient_combat_action(fighter))
-}
-
-fn ambient_combat_caption(fighter: &RagnarokFighterUi) -> Option<&'static str> {
-    let action = ambient_combat_action(fighter)?;
-    Some(match action {
-        ragnarok::ActionKind::Strike => "⚡ leaping strike",
-        ragnarok::ActionKind::Forge => "🔨 hammer feint",
-        ragnarok::ActionKind::Scry => "🔮 reading the field",
-        ragnarok::ActionKind::Chant => "🎵 rallying cry",
-        _ => "⚔ pressing the attack",
-    })
-}
-
-fn fighter_bounce_offset(fighter: &RagnarokFighterUi) -> usize {
-    if !matches!(
-        fighter.state,
-        ragnarok::FighterState::Fighting | ragnarok::FighterState::Capturing
-    ) {
-        return 0;
-    }
-    let beat = arena_frame()
-        .wrapping_add(fighter.card.id)
-        .wrapping_add(fighter.actions_seen as usize);
-    usize::from(beat % 4 == 1)
-}
-
-/// Which pixel-art animation a fighter plays right now, plus the accent color
-/// for its `M` pixels (sparks, lightning, orb, notes, blood).
-///
-/// The accents are ANSI rather than the RGB they used to be: they are sprite
-/// *foregrounds*, and a hardcoded gold is exactly what stops reading as gold on
-/// a terminal theme we never saw. The sprite body keeps its RGB texture (see
-/// [`crate::ragnarok_sprites`]); only these highlights follow the palette.
-fn sprite_for(fighter: &RagnarokFighterUi, theme: TerminalTheme) -> (SpriteKind, Ink) {
-    const GOLD: Ink = Ink::ansi(Color::Yellow);
-    const BLOOD: Ink = Ink::ansi(Color::Red);
-    match &fighter.state {
-        ragnarok::FighterState::Slain(_) => (SpriteKind::Slain, BLOOD),
-        ragnarok::FighterState::Standing => (SpriteKind::Victor, GOLD),
-        ragnarok::FighterState::Summoned
-        | ragnarok::FighterState::Forging
-        | ragnarok::FighterState::Connecting => (SpriteKind::March, theme.muted),
-        _ => match animated_action_kind(fighter) {
-            Some(ragnarok::ActionKind::Forge) => (SpriteKind::Swing, GOLD),
-            // Lightning reads as the brighter of the two yellows so a strike
-            // stays distinguishable from a hammer blow.
-            Some(ragnarok::ActionKind::Strike) => {
-                (SpriteKind::Swing, Ink::ansi(Color::LightYellow))
-            }
-            Some(ragnarok::ActionKind::Scry) => (SpriteKind::Cast, Ink::ansi(Color::Magenta)),
-            Some(ragnarok::ActionKind::Ponder) => (SpriteKind::Cast, Ink::dim()),
-            Some(ragnarok::ActionKind::Chant) => (SpriteKind::Cast, GOLD),
-            Some(ragnarok::ActionKind::Wound) => (SpriteKind::Wound, BLOOD),
-            Some(ragnarok::ActionKind::Guard) | None => (SpriteKind::Idle, theme.accent),
-        },
-    }
-}
-
-/// The 3-line ASCII pose for a fighter, chosen by state + recent action and
-/// animated by the shared wall-clock frame.
-fn pose_for(fighter: &RagnarokFighterUi) -> [&'static str; 3] {
-    type Pose = [&'static str; 3];
-    const IDLE: [Pose; 2] = [[" o ", "/|\\", "/ \\"], [" o ", "\\|/", "/ \\"]];
-    const MARCH: [Pose; 2] = [[" o ", "/|\\", "/< "], [" o ", "/|\\", " >\\"]];
-    const FORGE: [Pose; 4] = [
-        [" o_T", "/| ", "/ \\"],
-        [" oT ", "/|\\", "/ \\"],
-        ["_o  ", "T|\\", "/ \\"],
-        [" o__", "/|T", "/ \\"],
-    ];
-    const STRIKE: [Pose; 4] = [
-        ["\\o~z", " |  ", "/ \\"],
-        [" o~z", "/|  ", "/ \\"],
-        [" o  ", "/|~z", "/ \\"],
-        ["\\o/ ", " |z ", "/ \\"],
-    ];
-    const SCRY: [Pose; 2] = [[" o ", "/|(@)", "/ \\"], [" o ", "/|(o)", "/ \\"]];
-    const CHANT: [Pose; 2] = [["\\o/", " | d", "/ \\"], [" o/", "/| b", "/ \\"]];
-    const PONDER: [Pose; 2] = [[".oO", " |\\", "/ \\"], ["oO°", " |\\", "/ \\"]];
-    const WOUND: [Pose; 2] = [[" o ", "x|/", "/ \\"], ["\\o ", "x| ", "_/\\"]];
-    const VICTOR: [Pose; 2] = [["\\o/", " | ", "/ \\"], [" o ", "\\|/", "/ \\"]];
-    const SLAIN: [Pose; 1] = [["   ", "x_x", "_/\\"]];
-
-    let frame = arena_frame();
-    let pick = |poses: &'static [Pose]| poses[frame % poses.len()];
-    match &fighter.state {
-        ragnarok::FighterState::Slain(_) => pick(&SLAIN),
-        ragnarok::FighterState::Standing => pick(&VICTOR),
-        ragnarok::FighterState::Summoned
-        | ragnarok::FighterState::Forging
-        | ragnarok::FighterState::Connecting => pick(&MARCH),
-        _ => match animated_action_kind(fighter) {
-            Some(ragnarok::ActionKind::Forge) => pick(&FORGE),
-            Some(ragnarok::ActionKind::Strike) => pick(&STRIKE),
-            Some(ragnarok::ActionKind::Scry) => pick(&SCRY),
-            Some(ragnarok::ActionKind::Chant) => pick(&CHANT),
-            Some(ragnarok::ActionKind::Ponder) => pick(&PONDER),
-            Some(ragnarok::ActionKind::Wound) => pick(&WOUND),
-            Some(ragnarok::ActionKind::Guard) => pick(&IDLE),
-            None => pick(&IDLE),
-        },
-    }
-}
-
-/// Animated "vigor" bar: marching while fighting, full when standing,
-/// skulls when slain.
-fn vigor_bar(fighter: &RagnarokFighterUi, width: usize) -> String {
-    let width = width.max(4);
-    match &fighter.state {
-        ragnarok::FighterState::Slain(_) => "☠ ".repeat(width / 2),
-        ragnarok::FighterState::Standing => "▓".repeat(width),
-        ragnarok::FighterState::Fighting | ragnarok::FighterState::Capturing => {
-            let frame = arena_frame().wrapping_add(fighter.card.id * 3);
-            (0..width)
-                .map(|i| {
-                    if (i + frame).is_multiple_of(4) {
-                        '░'
-                    } else {
-                        '▓'
-                    }
-                })
-                .collect()
-        }
-        _ => "░".repeat(width),
-    }
-}
-
-fn draw_fighter_card(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    fighter: &RagnarokFighterUi,
-    index: usize,
-    theme: TerminalTheme,
-) {
-    if area.width < 6 || area.height < 3 {
-        return;
-    }
-    let selected = index == arena.selected_fighter;
-    let color = fighter_ink(theme, fighter.card.id);
-    let (state_word, state_color) = fighter_state_label(&fighter.state, theme);
-    let border_style = if selected {
-        Style::default().ink(color).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().ink(theme.muted)
-    };
-    let title = format!(
-        " {}{} ",
-        if selected { "▶ " } else { "" },
-        fighter.card.model_name
-    );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(
-            fit_width(&title, area.width.saturating_sub(2) as usize),
-            Style::default().ink(color).add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let inner_width = inner.width as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        fit_width(
-            format!(
-                "{} ⚡{:.1}% · ${:.2}",
-                fighter.card.agent_source_id,
-                fighter.card.pass_at_1_bps as f64 / 100.0,
-                fighter.card.mean_cost_usd
-            ),
-            inner_width,
-        ),
-        Style::default().ink(theme.muted),
-    )));
-
-    let (sprite_kind, accent) = sprite_for(fighter, theme);
-    let frame_set = ragnarok_sprites::frames(sprite_kind);
-    // Offset each viking's animation by their id so the shield wall doesn't
-    // march in eerie unison.
-    let frame = &frame_set[arena_frame().wrapping_add(fighter.card.id) % frame_set.len()];
-    let pad = " ".repeat(inner_width.saturating_sub(ragnarok_sprites::SPRITE_W) / 2);
-    // The sprite renderer paints raw pixels, so inks are resolved to concrete
-    // colors at this boundary rather than carried into the artwork.
-    let sprite_lines = ragnarok_sprites::render(frame, color.color(), accent.color());
-    let bounce = fighter_bounce_offset(fighter);
-    let sprite_rows = sprite_lines.len();
-    if bounce > 0 {
-        lines.push(Line::default());
-    }
-    for sprite_line in sprite_lines
-        .into_iter()
-        .take(sprite_rows.saturating_sub(bounce))
-    {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(sprite_line.spans.len() + 1);
-        spans.push(Span::raw(pad.clone()));
-        spans.extend(sprite_line.spans);
-        lines.push(Line::from(spans));
-    }
-
-    let bar_width = inner_width.saturating_sub(state_word.len() + 2).max(4);
-    lines.push(Line::from(vec![
-        Span::styled(
-            vigor_bar(fighter, bar_width),
-            Style::default().ink(state_color),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            state_word,
-            Style::default()
-                .ink(state_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    let caption = match &fighter.state {
-        ragnarok::FighterState::Slain(reason) => format!("☠ {reason}"),
-        _ => fighter
-            .action
-            .as_ref()
-            .filter(|(_, _, at)| at.elapsed() < RAGNAROK_ACTION_TTL)
-            .map(|(kind, detail, _)| format!("{} {detail}", action_glyph(*kind)))
-            .or_else(|| {
-                fighter.review_progress.map(|p| {
-                    match p {
-                        ragnarok::ReviewProgress::Connecting => "🗡 sharpening the quill…",
-                        ragnarok::ReviewProgress::Reviewing => "🗡 dissecting a rival…",
-                        ragnarok::ReviewProgress::Done => "🗡 review delivered",
-                        ragnarok::ReviewProgress::Failed => "🗡 review lost",
-                    }
-                    .to_string()
-                })
-            })
-            .or_else(|| ambient_combat_caption(fighter).map(str::to_string))
-            .unwrap_or_default(),
-    };
-    lines.push(Line::from(Span::styled(
-        fit_width(&caption, inner_width),
-        Style::default().ink(theme.subtle),
-    )));
-
-    lines.truncate(inner.height as usize);
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The scrolling battle feed, colored per fighter.
-fn draw_ragnarok_feed(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let visible_rows = area.height.saturating_sub(1) as usize;
-    let scroll = arena.feed_scroll_for_rows(visible_rows);
-    let max_scroll = arena.feed_max_scroll_for_rows(visible_rows);
-    let title = if max_scroll == 0 {
-        " ⚔ battle feed ".to_string()
-    } else if scroll == 0 {
-        format!(" ⚔ battle feed · live · ↑ {max_scroll} ")
-    } else {
-        format!(" ⚔ battle feed · {scroll}/{max_scroll} older · ↓ live ")
-    };
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().ink(theme.muted))
-        .title(Span::styled(
-            fit_width(title, area.width as usize),
-            Style::default().ink(theme.muted),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height == 0 {
-        return;
-    }
-    let take = inner.height as usize;
-    let scroll = arena.feed_scroll_for_rows(take);
-    let end = arena.feed.len().saturating_sub(scroll);
-    let start = end.saturating_sub(take);
-    let lines: Vec<Line> = arena
-        .feed
-        .iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .map(|(fighter, text)| {
-            let color = match fighter {
-                Some(id) => fighter_ink(theme, *id),
-                None => theme.text,
-            };
-            Line::from(Span::styled(
-                fit_width(text, inner.width as usize),
-                Style::default().ink(color),
-            ))
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Judgment scene: Mjölnir hovers while Thor's verdict streams in.
-fn draw_ragnarok_judgment(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let frame = arena_frame();
-    let aura = ["✦", "✧", "✶", "✧"][frame % 4];
-    let art = [
-        format!("{aura}  ______  {aura}"),
-        " [______]___".to_string(),
-        "    ||      ".to_string(),
-        format!("    ||   « THOR SITS IN JUDGMENT {aura} »"),
-    ];
-    let mut lines: Vec<Line> = art
-        .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.warning))).centered())
-        .collect();
-    lines.push(Line::default());
-    let remaining = (area.height as usize).saturating_sub(lines.len());
-    if remaining > 0 {
-        let width = area.width.saturating_sub(2) as usize;
-        for l in wrap_tail_lines(&arena.thor_text, width.max(8), remaining) {
-            lines.push(Line::from(Span::styled(
-                l,
-                Style::default().ink(theme.thought),
-            )));
-        }
-    }
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-/// Verdict scene: crown the winner, or stage the finalists for the user.
-fn draw_ragnarok_verdict(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let Some(verdict) = arena.verdict.as_ref() else {
-        return;
-    };
-    let width = area.width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-
-    match (verdict.clear_winner, verdict.finalists) {
-        (Some(id), _) => {
-            let tag = arena
-                .fighter(id)
-                .map(|f| f.card.tag())
-                .unwrap_or_else(|| format!("champion {id}"));
-            let crown = ["👑", "✨👑✨", "👑"][arena_frame() % 3];
-            lines.push(
-                Line::from(Span::styled(
-                    format!("{crown} VICTOR: {tag} {crown}"),
-                    Style::default()
-                        .ink(theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .centered(),
-            );
-            if let Some(name) = arena.fighter(id).and_then(|f| f.worktree_name.clone()) {
-                lines.push(
-                    Line::from(Span::styled(
-                        format!("Thor recommends this work — adopt it: mj --worktree {name}"),
-                        Style::default().ink(theme.accent),
-                    ))
-                    .centered(),
-                );
-            }
-        }
-        (None, Some((a, b))) => {
-            lines.push(
-                Line::from(Span::styled(
-                    "⚖ SPLIT DECISION — choose your champion ⚖",
-                    Style::default()
-                        .ink(theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .centered(),
-            );
-            for (n, id) in [a, b].into_iter().enumerate() {
-                let chosen = arena.chosen_finalist == Some(id);
-                let tag = arena
-                    .fighter(id)
-                    .map(|f| f.card.tag())
-                    .unwrap_or_else(|| format!("champion {id}"));
-                let wt = arena
-                    .fighter(id)
-                    .and_then(|f| f.worktree_name.clone())
-                    .unwrap_or_default();
-                let marker = if chosen { " ← your pick" } else { "" };
-                lines.push(Line::from(Span::styled(
-                    fit_width(
-                        format!("  [{}] {tag} — worktree {wt}{marker}", n + 1),
-                        width,
-                    ),
-                    if chosen {
-                        Style::default()
-                            .ink(theme.success)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().ink(fighter_ink(theme, id))
-                    },
-                )));
-            }
-        }
-        (None, None) => {}
-    }
-
-    if let Some(line) = ragnarok_draft_pr_status_line(arena, width) {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().ink(theme.accent),
-        )));
-    }
-
-    if verdict.thor_fallback {
-        lines.push(Line::from(Span::styled(
-            fit_width(
-                "(Thor's judgment was garbled; finalists stand in Pass@1 order)",
-                width,
-            ),
-            Style::default().ink(theme.muted),
-        )));
-    }
-
-    if !verdict.ranking.is_empty() {
-        let names: Vec<String> = verdict
-            .ranking
-            .iter()
-            .map(|id| arena.fighter_name(*id))
-            .collect();
-        lines.push(Line::from(Span::styled(
-            fit_width(format!("ranking: {}", names.join(" > ")), width),
-            Style::default().ink(theme.subtle),
-        )));
-    }
-    for rv in &verdict.review_verdicts {
-        lines.push(Line::from(Span::styled(
-            fit_width(
-                format!(
-                    "🔍 {} on {} — honesty {}/10, validity {}/10: {}",
-                    arena.fighter_name(rv.reviewer),
-                    arena.fighter_name(rv.defender),
-                    rv.honesty,
-                    rv.validity,
-                    rv.notes
-                ),
-                width,
-            ),
-            Style::default().ink(theme.thought),
-        )));
-    }
-
-    lines.push(Line::default());
-    let used = lines.len();
-    let remaining = (area.height as usize).saturating_sub(used);
-    if remaining > 0 {
-        for l in wrap_tail_lines(&verdict.reasoning, width.max(8), remaining) {
-            lines.push(Line::from(Span::styled(
-                l,
-                Style::default().ink(theme.text),
-            )));
-        }
-    }
-    lines.truncate(area.height as usize);
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-fn ragnarok_draft_pr_status_line(arena: &RagnarokUi, width: usize) -> Option<String> {
-    let status = arena.draft_pr_status.as_ref()?;
-    let line = match status {
-        RagnarokDraftPrStatus::Publishing { winner } => {
-            format!("Draft PR: publishing {}...", arena.fighter_name(*winner))
-        }
-        RagnarokDraftPrStatus::Published { winner, url } => {
-            format!("Draft PR for {}: {url}", arena.fighter_name(*winner))
-        }
-        RagnarokDraftPrStatus::Failed { winner, message } => format!(
-            "Draft PR for {} failed: {message}",
-            arena.fighter_name(*winner)
-        ),
-    };
-    Some(fit_width(line, width))
-}
-
-/// Transcript pane: live per-fighter output (combat work or their review).
-fn draw_ragnarok_transcript_pane(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    arena: &RagnarokUi,
-    theme: TerminalTheme,
-) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    f.render_widget(
-        Paragraph::new(ragnarok_banner_line(arena, theme, chunks[0].width)),
-        chunks[0],
-    );
-
-    if arena.fighters.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "no champions yet — the muster is still on",
-                Style::default().ink(theme.muted),
-            ))),
-            chunks[2],
-        );
-        f.render_widget(
-            Paragraph::new(ragnarok_footer_line(arena, theme, chunks[3].width)),
-            chunks[3],
-        );
-        return;
-    }
-
-    let idx = arena.selected_fighter.min(arena.fighters.len() - 1);
-    let fighter = &arena.fighters[idx];
-    let lane = if arena.show_review_lane {
-        "review"
-    } else {
-        "combat"
-    };
-    let header = format!(
-        "◀ {} ▶  ({}/{})  lane: {lane} (r toggles)",
-        fighter.card.tag(),
-        idx + 1,
-        arena.fighters.len()
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            fit_width(&header, chunks[1].width as usize),
-            Style::default()
-                .ink(fighter_ink(theme, fighter.card.id))
-                .add_modifier(Modifier::BOLD),
-        ))),
-        chunks[1],
-    );
-
-    let body = if arena.show_review_lane {
-        &fighter.review_transcript
-    } else {
-        &fighter.transcript
-    };
-    let width = chunks[2].width.saturating_sub(1) as usize;
-    let lines: Vec<Line> = if body.is_empty() {
-        vec![Line::from(Span::styled(
-            match (arena.show_review_lane, &fighter.state) {
-                (true, _) => "…no review words yet (their quill is dry)",
-                (false, ragnarok::FighterState::Summoned) => "…awaiting the horn",
-                _ => "…silence on the battlefield",
-            },
-            Style::default().ink(theme.muted),
-        ))]
-    } else {
-        wrap_tail_lines(body, width.max(8), chunks[2].height as usize)
-            .into_iter()
-            .map(|l| Line::from(Span::styled(l, Style::default().ink(theme.text))))
-            .collect()
-    };
-    f.render_widget(Paragraph::new(lines), chunks[2]);
-    f.render_widget(
-        Paragraph::new(ragnarok_footer_line(arena, theme, chunks[3].width)),
-        chunks[3],
-    );
-}
-
-/// Wrap `text` to `width` display columns and keep only the last `max_lines`
-/// lines. Works on a bounded tail slice so huge buffers stay cheap.
-fn wrap_tail_lines(text: &str, width: usize, max_lines: usize) -> Vec<String> {
-    if width == 0 || max_lines == 0 {
-        return Vec::new();
-    }
-    // Only the tail can be visible; keep a generous margin for wrapping.
-    let budget = width.saturating_mul(max_lines).saturating_mul(4).max(256);
-    let mut start = text.len().saturating_sub(budget);
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    let tail = &text[start..];
-
-    let mut lines: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    let push_line = |lines: &mut std::collections::VecDeque<String>, line: String| {
-        lines.push_back(line);
-        while lines.len() > max_lines {
-            lines.pop_front();
-        }
-    };
-    for ch in tail.chars() {
-        if ch == '\n' {
-            push_line(&mut lines, std::mem::take(&mut current));
-            current_width = 0;
-            continue;
-        }
-        if ch == '\r' {
-            continue;
-        }
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + w > width && !current.is_empty() {
-            push_line(&mut lines, std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push(ch);
-        current_width += w;
-    }
-    if !current.is_empty() {
-        push_line(&mut lines, current);
-    }
-    lines.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::app::StatusKind;
     use crate::claude_usage::{ClaudeUsageReport, ClaudeUsageStatus};
     use crate::event::{
@@ -16110,6 +15109,18 @@ mod tests {
             subagent_id: 1,
             outcome,
         })
+    }
+
+    fn model_choice(model: &str, pass_at_1: f64, source: &str) -> crate::roster::ModelChoice {
+        crate::roster::ModelChoice {
+            model: model.to_string(),
+            pass_at_1,
+            mean_cost_usd: 1.0,
+            available: true,
+            disabled_reason: None,
+            adapter: Some(source.to_string()),
+            ranked: true,
+        }
     }
 
     fn start_subagent(state: &mut AppState, subagent_id: u64, label: &str, objective: &str) {
@@ -16209,8 +15220,32 @@ mod tests {
             workflow_id,
             WorkflowTransition::IssuesResolved {
                 pass: 0,
+                summaries: None,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some(
+                    "the correction changed the workspace; verification is pending".to_string(),
+                ),
+                details: Some("exact correction diff".to_string()),
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_board(frame, frame.area(), &state))
+            .expect("draw board");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("◐ 2 unverified"), "{rendered}");
+        assert!(!rendered.contains("● 2 open"), "{rendered}");
+        assert!(rendered.contains("verification pending"), "{rendered}");
+
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: None,
                 status: ReviewIssueStatus::Invalidated,
                 reason: Some("correction turn changed nothing in the workspace".to_string()),
+                details: None,
             },
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
@@ -16234,6 +15269,112 @@ mod tests {
             "a finished review leaves the board to the verdict banner"
         );
         assert_eq!(inline_chat_layout(&state, area)[3].height, 0);
+    }
+
+    #[test]
+    fn review_issue_viewer_shows_full_finding_fix_evidence_and_verification_state() {
+        use crate::workflow::ReviewIssueStatus;
+
+        let mut state = AppState::new();
+        let workflow_id = WorkflowId::review(7);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec![
+                    "[P1] src/cache.rs:12 -- stale cache entry leaks across sessions\n  The caller reuses this entry after logout."
+                        .to_string(),
+                ],
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: None,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some("the correction changed the workspace; verification is pending".to_string()),
+                details: Some(
+                    "Primary correction report:\ncleared the session cache on logout\n\nExact correction diff:\n+cache.clear();"
+                        .to_string(),
+                ),
+            },
+        );
+        state.open_review_issue_viewer();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| draw_review_issue_viewer(frame, frame.area(), &mut state))
+            .expect("draw issue viewer");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("full evidence"), "{rendered}");
+        assert!(rendered.contains("caller reuses this entry"), "{rendered}");
+        assert!(
+            rendered.contains("corrected — verification pending"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("cleared the session cache on logout"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("+cache.clear();"), "{rendered}");
+    }
+
+    #[test]
+    fn session_header_is_explicit_below_a_live_review_board() {
+        let mut state = AppState::new();
+        state.session_title = Some("Correct review permissions".to_string());
+        let workflow_id = WorkflowId::review(4);
+        start_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowKind::Review,
+            WorkflowPhase::Supervision,
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec!["review setting is ignored".to_string()],
+            },
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut TranscriptScrollState::default(),
+                    UiMode::FullscreenTui,
+                )
+            })
+            .expect("draw");
+        let lines = buffer_lines(terminal.backend().buffer());
+        let issue_row = lines
+            .iter()
+            .rposition(|line| line.contains("#1 review setting is ignored"))
+            .expect("live review issue row");
+        let header_row = lines
+            .iter()
+            .position(|line| line.contains("│ Session: Correct review permissions"))
+            .expect("labelled session header");
+
+        assert_eq!(
+            header_row,
+            issue_row + 1,
+            "the directly adjacent session line must name itself:\n{}",
+            lines.join("\n")
+        );
     }
 
     #[test]
@@ -16416,10 +15557,9 @@ mod tests {
         AvailableCommand, ContentBlock, ContentChunk, ElicitationFormMode, ElicitationId,
         ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,
         EnumOption, PermissionOption, PermissionOptionKind, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, SessionConfigOption, SessionConfigOptionCategory,
-        SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
-        StringPropertySchema, TerminalExitStatus, TextContent, ToolCall, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        PlanEntryStatus, SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId,
+        SessionUpdate, StopReason, StringPropertySchema, TerminalExitStatus, TextContent, ToolCall,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -16988,7 +16128,7 @@ mod tests {
         let line = status_line(&state, 200);
         assert_eq!(
             line_text(&line),
-            "gpt-5-6-terra via codex-acp · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
+            "gpt-5-6-terra · effort: high · ~/code/mjolnir/.mjolnir/worktrees/slim-hawk · primary: 68k · review: 311k · PR #487"
         );
         assert!(!line_text(&line).contains("github.com"));
         // Compare whole styles rather than bare colors: hierarchy now lives
@@ -17089,7 +16229,7 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_only_version_and_session_title() {
+    fn header_labels_the_session_title() {
         let mut state = AppState::new();
         state.agent_label = "uvx".to_string();
         state.project_label = "~/code/mjolnir/.mjolnir/worktrees/bold-willow".to_string();
@@ -17114,8 +16254,56 @@ mod tests {
         assert!(!rendered.contains("session"), "rendered:\n{rendered}");
         assert!(!rendered.contains("48c95a78"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("Review payment flow"),
+            rendered.contains("│ Session: Review payment flow"),
             "rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn header_preserves_title_space_on_narrow_terminals() {
+        let mut state = AppState::new();
+        state.session_title = Some("narrow title".to_string());
+        let version_width = mjolnir_version_label().width();
+        let narrow_width = (version_width + 4) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(narrow_width, 1)).expect("terminal");
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!("{} │ n", mjolnir_version_label())),
+            "narrow headers must retain both the session separator and title text:\n{rendered}"
+        );
+
+        let compact_width = (version_width + "   │ ".width() + "narrow title".width()) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(compact_width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!("{}   │ narrow title", mjolnir_version_label())),
+            "mid-width headers must keep a session divider and a readable title:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Session:"),
+            "the full label belongs to wider headers:\n{rendered}"
+        );
+
+        let full_width = (version_width + "   │ Session: ".width() + "narrow title".width()) as u16;
+        let mut terminal = Terminal::new(TestBackend::new(full_width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains(&format!(
+                "{}   │ Session: narrow title",
+                mjolnir_version_label()
+            )),
+            "standard-width headers must identify the session:\n{rendered}"
         );
     }
 
@@ -17855,7 +17043,7 @@ mod tests {
             WorkflowKind::Review,
             WorkflowPhase::SpecialistReview,
         );
-        for (id, lane) in [(11, "Týr"), (12, "Heimdall"), (13, "Freya")] {
+        for (id, lane) in [(11, "Error handling"), (12, "Tests"), (13, "General")] {
             apply_workflow(
                 &mut state,
                 workflow_id,
@@ -18240,11 +17428,16 @@ mod tests {
             WorkflowTransition::ActorStarted {
                 actor_id: WorkflowActorId::Subagent(2),
                 role: WorkflowActorRole::SpecialistReviewer {
-                    lane: "Týr".to_string(),
+                    lane: "Error handling".to_string(),
                 },
             },
         )));
-        start_subagent(&mut state, 2, "review · Týr", "inspect correctness");
+        start_subagent(
+            &mut state,
+            2,
+            "review · Error handling",
+            "inspect correctness",
+        );
         state.apply_event(UiEvent::Subagent(SubagentEvent::SessionUpdate {
             subagent_id: 2,
             update: SessionUpdate::AgentThoughtChunk(text_chunk("REVIEW_ONLY")),
@@ -18262,7 +17455,7 @@ mod tests {
             .draw(|frame| draw_nested_agent_viewer(frame, frame.area(), &mut state, false))
             .expect("draw reviewer");
         let reviewer = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(reviewer.contains("reviewer Týr"), "{reviewer}");
+        assert!(reviewer.contains("reviewer Error handling"), "{reviewer}");
         assert!(reviewer.contains("REVIEW_ONLY"), "{reviewer}");
         assert!(!reviewer.contains("IMPLEMENTATION_ONLY"), "{reviewer}");
 
@@ -19223,6 +18416,7 @@ mod tests {
         let mut state = AppState::new();
         state.config_path = Some(config_path.clone());
         state.review_enabled = false;
+        state.active_models.primary_source = Some("codex-acp".to_string());
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -19257,6 +18451,113 @@ mod tests {
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
         assert!(state.team_picker.is_none());
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+    }
+
+    #[test]
+    fn team_change_updates_reviewer_without_restarting_the_same_primary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config::TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        config.save(&config_path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(config_path.clone());
+        state.active_models.primary = "gpt-5-6-sol".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.model_choices = vec![model_choice("gpt-5-6-sol", 0.70, "codex-acp")];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 2);
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        assert_eq!(state.team_picker.as_ref().expect("team picker").selected, 0);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, None);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
+        let saved = config::Config::load(&config_path).expect("load config");
+        assert_eq!(
+            config::TeamPreset::from_config(&saved),
+            Some(config::TeamPreset::Codex)
+        );
+    }
+
+    #[test]
+    fn team_change_from_a_pinned_primary_reloads_when_auto_keeps_that_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config::TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        config.agent.model = "gpt-5-6-sol".to_string();
+        config.save(&config_path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(config_path);
+        state.active_models.primary = "gpt-5-6-sol".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.model_choices = vec![model_choice("gpt-5-6-sol", 0.70, "codex-acp")];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, None);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
+    }
+
+    #[test]
+    fn team_change_that_resets_a_pinned_primary_model_keeps_the_new_session_step() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config::TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        config.agent.model = "gpt-5-6-terra".to_string();
+        config.save(&config_path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(config_path);
+        state.active_models.primary = "gpt-5-6-terra".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.model_choices = vec![
+            model_choice("gpt-5-6-terra", 0.65, "codex-acp"),
+            model_choice("gpt-5-6-sol", 0.70, "codex-acp"),
+        ];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(
+            state
+                .team_picker
+                .as_ref()
+                .is_some_and(|picker| { picker.step == TeamPickerStep::StartNewSession })
+        );
+        assert!(cmd_rx.try_recv().is_err(), "no live reload is sent");
     }
 
     #[test]
@@ -19306,6 +18607,36 @@ mod tests {
     }
 
     #[test]
+    fn slash_exit_quits_without_forwarding_to_the_agent() {
+        let mut state = AppState::new();
+        state.session_id = Some("s-1".to_string());
+        state.input = "/exit".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert_eq!(state.exit_reason, Some(UiExitReason::Quit));
+        assert!(state.input.is_empty());
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn slash_exit_returns_from_a_side_conversation() {
+        let mut state = AppState::new();
+        state.is_side = true;
+        state.session_id = Some("side-session".to_string());
+        state.input = "/exit".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.side_exit_requested);
+        assert_eq!(state.exit_reason, None);
+        assert!(state.input.is_empty());
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
     fn slash_load_triggers_load_session_exit_reason() {
         let mut state = AppState::new();
         state.session_id = Some("s-1".to_string());
@@ -19346,9 +18677,9 @@ mod tests {
     }
 
     #[test]
-    fn slash_review_opens_picker_and_direct_target_routes_locally() {
+    fn discrete_review_aliases_open_picker_and_route_tier_overrides_locally() {
         let mut state = ready_state_with_session();
-        state.input = "/review".to_string();
+        state.input = "/discrete-review".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         submit_prompt(&mut state, &cmd_tx);
@@ -19356,21 +18687,47 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
 
         state.review_picker = None;
-        state.input = "/review uncommitted".to_string();
+        state.input = "/adversarial-review uncommitted extended".to_string();
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(UiCommand::RunReview {
-                target: ReviewTarget::Uncommitted
+                request: ReviewRequest {
+                    target: ReviewTarget::Uncommitted,
+                    tier: Some(crate::config::ReviewTier::Extended),
+                }
             })
         ));
     }
 
     #[test]
-    fn slash_review_rejects_busy_turn_without_queueing() {
+    fn retired_review_command_is_not_forwarded_to_the_agent() {
+        let mut state = ready_state_with_session();
+        state.input = "/review".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(state.status_line.as_ref().is_some_and(|status| {
+            status
+                .text
+                .contains("/discrete-review or /adversarial-review")
+        }));
+
+        state.input = "/review-branch main".to_string();
+        submit_prompt(&mut state, &cmd_tx);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, .. }) if text == "/review-branch main"
+        ));
+    }
+
+    #[test]
+    fn discrete_review_rejects_busy_turn_without_queueing() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("active".to_string());
-        state.input = "/review recent".to_string();
+        state.input = "/discrete-review recent".to_string();
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
         submit_prompt(&mut state, &cmd_tx);
@@ -19472,6 +18829,21 @@ mod tests {
     }
 
     #[test]
+    fn removed_ragnarok_command_is_forwarded_as_an_ordinary_prompt() {
+        let mut state = AppState::new();
+        state.input = "/ragnarok inspect this".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, images, .. })
+                if text == "/ragnarok inspect this" && images.is_empty()
+        ));
+    }
+
+    #[test]
     fn slash_agents_adds_active_models_system_entry() {
         let mut state = AppState::new();
         state.active_models = crate::config::ModelsConfig {
@@ -19500,7 +18872,7 @@ mod tests {
         assert_eq!(state.input_cursor, 0);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text))
+            Some(Entry::CommandOutput(text))
                 if text
                     == "Active models\nprimary    claude-opus via claude-acp\nreview     gpt-5.6 via codex-acp\nsubagents  gpt-5.5 via opencode\n\nUsage\nprimary    0 tokens\nsubagents  0 tokens\nreview     0 tokens"
         ));
@@ -19540,6 +18912,12 @@ mod tests {
         let remaining = crate::memory::entries(&state.memory_store_path).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, 2);
+        // The confirmation echoes the stored text, so it must land as
+        // uncollapsible command output rather than a collapsible system note.
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::CommandOutput(text)) if text == "forgot memory m1: uses pnpm"
+        ));
 
         // Clearing needs an explicit confirm round trip.
         state.input = "/memory clear".to_string();
@@ -19566,7 +18944,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_memory_lists_memories_as_a_system_entry() {
+    fn slash_memory_lists_memories_as_a_command_output_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = AppState::new();
         state.memory_store_path = dir.path().join("memories.json");
@@ -19580,12 +18958,12 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("[m1] global fact")
+            Some(Entry::CommandOutput(text)) if text.contains("[m1] global fact")
         ));
     }
 
     #[test]
-    fn slash_memory_notes_when_the_primary_is_not_codex() {
+    fn slash_memory_is_available_to_claude_and_codex_primaries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = AppState::new();
         state.memory_store_path = dir.path().join("memories.json");
@@ -19596,7 +18974,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("apply only to Codex primary sessions")
+            Some(Entry::CommandOutput(text)) if text.contains("Memories")
         ));
 
         state.agent_source_id = "codex-acp".to_string();
@@ -19604,7 +18982,7 @@ mod tests {
         submit_prompt(&mut state, &cmd_tx);
         assert!(matches!(
             state.transcript.last(),
-            Some(Entry::System(text)) if !text.contains("apply only to Codex primary sessions")
+            Some(Entry::CommandOutput(text)) if text.contains("Memories")
         ));
     }
 
@@ -19712,15 +19090,18 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed_thought_output = state.thought_output;
 
-        // Reviewer tab: toggle discrete review, deepen the review tier, and
-        // apply both to the running session.
+        // Reviewer tab: toggle discrete review, deepen the review tier, lower
+        // the automatic correction threshold, and apply the policy live.
         let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
         editor.tab = crate::settings::SettingsTab::Reviewer;
         editor.selected = 0;
         state.mjconfig_menu_key(KeyCode::Down);
+        state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Char(' '));
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
+        state.mjconfig_menu_key(KeyCode::Down);
+        state.mjconfig_menu_key(KeyCode::Left);
 
         handle_mjconfig_menu_key(
             &mut state,
@@ -19741,11 +19122,16 @@ mod tests {
         );
         assert!(!saved.agent.discrete_review);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
+        assert_eq!(
+            saved.agent.correction_threshold,
+            config::ReviewCorrectionThreshold::P2
+        );
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(UiCommand::SetReviewPolicy {
                 enabled: false,
-                tier: config::ReviewTier::Extended
+                tier: config::ReviewTier::Extended,
+                correction_threshold: config::ReviewCorrectionThreshold::P2,
             })
         ));
     }
@@ -19896,7 +19282,7 @@ mod tests {
 
     #[test]
     fn mjconfig_menu_renders_shared_tabbed_settings() {
-        let backend = TestBackend::new(90, 24);
+        let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut state = AppState::new();
         state.open_mjconfig_menu();
@@ -19921,6 +19307,9 @@ mod tests {
         assert!(rendered.contains("Team"), "rendered:\n{rendered}");
         assert!(!rendered.contains("ACP Priority"), "rendered:\n{rendered}");
         assert!(rendered.contains("ACP Servers"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Input"), "rendered:\n{rendered}");
+        #[cfg(target_os = "macos")]
+        assert!(rendered.contains("Computer"), "rendered:\n{rendered}");
         assert!(rendered.contains("Appearance"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("Codex coder + Claude reviewer"),
@@ -20304,6 +19693,33 @@ mod tests {
         tracker.reconcile(&mut offset, 100, 20);
 
         assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn empty_transcript_never_announces_scrollback() {
+        let mut state = AppState::new();
+        let mut tracker = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        // Establish the viewport, then receive a scroll event while there is
+        // still no rendered history to move through.
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
+            .expect("initial draw");
+        handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
+        assert_eq!(state.scroll_offset, TRANSCRIPT_SCROLL_WHEEL_STEP);
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
+            .expect("scroll draw");
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert_eq!(state.scroll_offset, 0);
+        assert!(
+            !rendered.contains("[scrolled +"),
+            "empty transcript claimed a scrollback position:\n{rendered}"
+        );
     }
 
     #[test]
@@ -22253,7 +21669,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_drag_selection_tracks_anchor_and_clamps_head_to_panel() {
+    fn mouse_drag_selection_tracks_anchor_and_clamps_head_to_screen() {
         let mut state = AppState::new();
         state.transcript_panel_area = Some((0, 1, 40, 10));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -22279,12 +21695,12 @@ mod tests {
         assert_eq!(
             state.transcript_selection.expect("selection").head,
             (39, 10),
-            "drag past the panel edge must clamp to the last cell"
+            "drag past the screen edge must clamp to the last cell"
         );
     }
 
     #[test]
-    fn mouse_down_outside_transcript_panel_starts_no_selection() {
+    fn mouse_down_outside_selection_screen_starts_no_selection() {
         let mut state = AppState::new();
         state.transcript_panel_area = Some((0, 1, 40, 10));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
@@ -22448,10 +21864,33 @@ mod tests {
             rendered.contains("hello transcript"),
             "rendered:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn fullscreen_drag_selection_covers_prompt_status_and_overlays() {
+        let mut state = AppState::new();
+        state.help_overlay = true;
+        let mut scroll = TranscriptScrollState::default();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(state.transcript_panel_area, Some((0, 0, 40, 10)));
+
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 0),
+        );
         assert_eq!(
-            state.transcript_panel_area,
-            Some((0, 1, 40, 7)),
-            "title row is reserved, everything else belongs to the panel"
+            state.transcript_selection,
+            Some(TranscriptSelection {
+                anchor: (5, 0),
+                head: (5, 0),
+            })
         );
     }
 
@@ -22796,13 +22235,6 @@ mod tests {
         });
         handle_crossterm(&mut state, &cmd_tx, ctrl_g());
         assert!(!state.workspace_diff_viewer);
-
-        state.team_picker = None;
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        handle_crossterm(&mut state, &cmd_tx, ctrl_g());
-        assert!(!state.workspace_diff_viewer);
     }
 
     #[test]
@@ -23073,14 +22505,14 @@ mod tests {
     }
 
     #[test]
-    fn f12_ignores_text_selection_toggle_while_overlay_owns_input() {
+    fn f12_allows_terminal_text_selection_while_an_overlay_is_open() {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         let mut help_state = AppState::new();
         help_state.help_overlay = true;
         assert_eq!(
             handle_crossterm(&mut help_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(help_state.help_overlay);
 
@@ -23089,7 +22521,7 @@ mod tests {
         permission_state.apply_event(UiEvent::PermissionRequest(pending.prompt));
         assert_eq!(
             handle_crossterm(&mut permission_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(permission_state.has_pending_permission());
 
@@ -23106,7 +22538,7 @@ mod tests {
         assert!(config_state.open_config_value_picker(0));
         assert_eq!(
             handle_crossterm(&mut config_state, &cmd_tx, key(KeyCode::F(12))),
-            TerminalRequest::None
+            TerminalRequest::ToggleTextSelectionMode
         );
         assert!(config_state.config_picker.is_some());
     }
@@ -23559,6 +22991,329 @@ mod tests {
         );
     }
 
+    /// Turns completed through the real prompt lifecycle, so every entry is
+    /// stable and every turn is compactable — the settled-prefix happy path.
+    fn settled_turns_state(turns: usize) -> AppState {
+        let mut state = AppState::new();
+        for index in 0..turns {
+            state.record_user_prompt(format!("prompt {index}"));
+            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                text_chunk(&format!(
+                    "answer {index}: {}",
+                    "prose that wraps across several rendered rows ".repeat(4)
+                )),
+            )));
+            state.apply_event(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn settled_boundary_excludes_live_turns_reveals_plans_and_the_tail() {
+        let mut state = settled_turns_state(3);
+        let turns = transcript_turns(&state);
+        // Only the trailing entry stays live once every turn has settled.
+        assert_eq!(
+            settled_entry_boundary(&state, &turns),
+            state.transcript.len() - 1
+        );
+
+        // An in-flight turn keeps every entry from its prompt onward live.
+        state.record_user_prompt("active".to_string());
+        let active_prompt = state.transcript.len() - 1;
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("streaming answer"),
+        )));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), active_prompt);
+
+        // An entry paced by the reveal controller renders a growing slice.
+        assert!(state.set_stream_visible_bytes(1, 4));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), 1);
+        assert!(state.clear_stream_visible_bytes(1));
+
+        // The newest Plan entry is replaced in place by later plan updates,
+        // so it must stay live even with settled turns behind and after it.
+        let mut state = settled_turns_state(1);
+        let plan_index = state.transcript.len();
+        state.transcript.push(Entry::Plan(Vec::new()));
+        state.record_user_prompt("after the plan".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("done"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), plan_index);
+    }
+
+    #[test]
+    fn chat_cache_with_settled_prefix_matches_the_full_render() {
+        let mut state = settled_turns_state(4);
+        state.record_user_prompt("active".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
+            text_chunk("streaming thought that is still growing"),
+        )));
+
+        let (width, height) = (40u16, 10u16);
+        let mut prefix = None;
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        assert!(
+            cache.prefix_rows > 0,
+            "settled turns must land in the prefix"
+        );
+        let full = render_transcript_lines(&state, width);
+        let (full_starts, full_total) = wrapped_row_starts(&full, width);
+        assert_eq!(cache.line_count, full_total);
+
+        let render = |lines: Vec<Line<'static>>, scroll: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((scroll, 0)),
+                        frame.area(),
+                    )
+                })
+                .expect("draw");
+            buffer_lines(terminal.backend().buffer())
+        };
+
+        let seam = cache.prefix_rows;
+        for top in [
+            0usize,
+            1,
+            seam.saturating_sub(1),
+            seam,
+            seam + 1,
+            full_total.saturating_sub(usize::from(height)),
+            full_total + 3,
+        ] {
+            let (window, inner_scroll) =
+                stitched_visible_window(prefix.as_ref(), &cache, top, height);
+            let (full_window, full_scroll) =
+                wrapped_visible_window(&full, &full_starts, top, height);
+            assert_eq!(
+                render(window, inner_scroll),
+                render(full_window, full_scroll),
+                "stitched window differs from the full render at row {top}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_cache_reuses_the_settled_prefix_across_stream_revisions() {
+        let mut state = settled_turns_state(4);
+        state.record_user_prompt("active".to_string());
+
+        let width = 40u16;
+        let mut prefix = None;
+        build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let frozen = prefix.as_ref().expect("prefix populated").entries;
+        assert!(frozen > 0);
+
+        // Tamper with a cached line: streaming revisions must reuse the
+        // frozen render verbatim, so the marker survives the rebuild.
+        prefix.as_mut().expect("prefix").lines[0] = Line::from("TAMPERED-PREFIX-MARKER");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("more streamed prose"),
+        )));
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let (window, _) = stitched_visible_window(prefix.as_ref(), &cache, 0, 4);
+        assert_eq!(line_text(&window[0]), "TAMPERED-PREFIX-MARKER");
+        assert_eq!(prefix.as_ref().expect("prefix").entries, frozen);
+
+        // A settled-render epoch bump (Ctrl-T changes every collapse budget)
+        // must drop the frozen prefix and rebuild it from live state.
+        state.toggle_expand_transcript_details();
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let (window, _) = stitched_visible_window(prefix.as_ref(), &cache, 0, 4);
+        assert_ne!(line_text(&window[0]), "TAMPERED-PREFIX-MARKER");
+    }
+
+    #[test]
+    fn fullscreen_transcript_draw_extends_the_prefix_like_a_fresh_render() {
+        let mut state = settled_turns_state(3);
+        state.record_user_prompt("active".to_string());
+        let mut scroll = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert!(
+            scroll.prefix.as_ref().is_some_and(|p| p.entries > 0),
+            "fullscreen draw must populate the settled prefix"
+        );
+
+        // Stream more prose and complete the turn: the incremental rebuild
+        // must render exactly what a from-scratch render of the same state
+        // produces.
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("streamed body of the active turn"),
+        )));
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+
+        let mut fresh_scroll = TranscriptScrollState::default();
+        let mut fresh_terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
+        fresh_terminal
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(
+            buffer_lines(terminal.backend().buffer()),
+            buffer_lines(fresh_terminal.backend().buffer()),
+        );
+    }
+
+    #[test]
+    fn settled_boundary_holds_a_running_turn_split_by_a_mid_turn_steer() {
+        let mut state = settled_turns_state(1);
+        state.record_user_prompt("ready the v1 release".to_string());
+        let running_prompt = state.transcript.len() - 1;
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("working on v1"),
+        )));
+        // A steer lands as a later `UserPrompt` without its own lifecycle, so
+        // the running turn is no longer the last turn. Its entries are all
+        // stable (the steer closed the open message) but `PromptDone` still
+        // has to complete it, which compacts its render and adds its elapsed
+        // time to the turn header.
+        state.record_steered_prompt("sorry, make it v2".to_string(), Vec::new());
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), running_prompt);
+
+        let (width, height) = (60u16, 16u16);
+        let mut scroll = TranscriptScrollState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("switching to v2"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .expect("draw");
+
+        let mut fresh_scroll = TranscriptScrollState::default();
+        let mut fresh_terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        fresh_terminal
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .expect("draw");
+        assert_eq!(
+            buffer_lines(terminal.backend().buffer()),
+            buffer_lines(fresh_terminal.backend().buffer()),
+            "the completed turn must re-render compacted, not stay frozen in its streaming form"
+        );
+    }
+
+    #[test]
+    fn settled_boundary_ignores_force_committed_running_tools() {
+        let mut state = settled_turns_state(1);
+        insert_running_terminal_tool_call(&mut state, "stuck-build", "cargo build --watch");
+        let tool_index = state.transcript.len() - 1;
+        state.record_user_prompt("carry on".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("done"),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+
+        // The inline overflow valve committed the running tool to scrollback:
+        // stable by fiat, but its render still resolves once the terminal
+        // exits, so the settled prefix must not freeze it.
+        assert!(state.force_commit_transcript_entries(tool_index + 1));
+        assert!(transcript_entry_is_stable(
+            &state,
+            tool_index,
+            &state.transcript[tool_index]
+        ));
+        let turns = transcript_turns(&state);
+        assert_eq!(settled_entry_boundary(&state, &turns), tool_index);
+    }
+
+    #[test]
+    fn late_update_to_a_settled_tool_bumps_the_settled_render_epoch() {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+
+        let mut state = settled_turns_state(1);
+        state.record_user_prompt("run the tool".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(
+            ToolCall::new("tool-1", "run a check"),
+        )));
+        let mut fail = ToolCallUpdateFields::default();
+        fail.status = Some(ToolCallStatus::Failed);
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", fail),
+        )));
+        state.apply_event(UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        let epoch = state.settled_render_epoch();
+
+        // A no-op update leaves the settled render, and so the epoch, alone.
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", ToolCallUpdateFields::default()),
+        )));
+        assert_eq!(state.settled_render_epoch(), epoch);
+
+        // A late update that rewrites the failed tool changes a render the
+        // settled prefix may have frozen.
+        let mut retitle = ToolCallUpdateFields::default();
+        retitle.title = Some("rewritten after failure".to_string());
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new("tool-1", retitle),
+        )));
+        assert_ne!(state.settled_render_epoch(), epoch);
+    }
+
     #[test]
     fn transcript_search_highlights_visible_matches() {
         let mut state = AppState::new();
@@ -23621,7 +23376,7 @@ mod tests {
             jump_pending: true,
             ..TranscriptSearch::default()
         });
-        let backend = TestBackend::new(70, 16);
+        let backend = TestBackend::new(120, 16);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut scroll = TranscriptScrollState::default();
 
@@ -23638,6 +23393,10 @@ mod tests {
         assert!(
             rendered.contains("selected target entry"),
             "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("[scrolled +"),
+            "search jump must update the scroll indicator in the same frame:\n{rendered}"
         );
     }
 
@@ -23836,6 +23595,31 @@ mod tests {
                 .count(),
             3,
             "user prompt, primary, and subagent answer tails must remain visible: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn command_output_never_collapses() {
+        let mut state = AppState::new();
+        let listing = format!(
+            "Memories — store\n{}  [m99] LAST_MEMORY_LINE (today)",
+            "  [m1] a durable fact worth keeping around (2d ago)\n".repeat(30)
+        );
+        state.transcript.push(Entry::CommandOutput(listing));
+
+        let rendered = render_transcript_lines(&state, 100)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("LAST_MEMORY_LINE")),
+            "command output must stay fully readable: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("details hidden")),
+            "command output must never collapse: {rendered:?}"
         );
     }
 
@@ -27129,7 +26913,15 @@ mod tests {
         let mut cancel_tx = Some(cancel_tx);
 
         stop_dictation(&mut state, &mut cancel_tx);
-        finish_dictation(&mut state, Ok("ignored".to_string()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "ignored".to_string(),
+                finish: DictationFinish::Manual,
+            }),
+        );
 
         assert!(!state.voice_input_active);
         assert!(state.voice_input_range.is_none());
@@ -27193,11 +26985,13 @@ mod tests {
         let mut state = AppState::new();
         state.voice_input_active = true;
         state.voice_input_level = Some(0.35);
+        state.voice_auto_send = config::VoiceAutoSend::SixSeconds;
         state.status_line = Some(StatusMessage::info("listening..."));
 
         let title = line_text(&dictation_prompt_title(&state));
 
         assert!(title.contains("[||||......]"));
+        assert!(title.contains("auto-send after 6s quiet"));
         assert!(!title.contains("listening..."));
     }
 
@@ -27245,12 +27039,69 @@ mod tests {
         state.voice_input_range = Some((state.input_cursor, state.input_cursor));
 
         update_dictation_partial(&mut state, "rough draft");
-        finish_dictation(&mut state, Ok("voice ".to_string()));
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "voice ".to_string(),
+                finish: DictationFinish::Manual,
+            }),
+        );
 
         assert!(!state.voice_input_active);
         assert_eq!(state.input, "before voice after");
         assert_eq!(state.input_cursor, "before voice ".chars().count());
         assert!(state.voice_input_range.is_none());
+    }
+
+    #[test]
+    fn silence_completed_dictation_auto_sends_when_enabled() {
+        let mut state = ready_state_with_session();
+        state.voice_input_active = true;
+        state.voice_input_range = Some((0, 0));
+        state.voice_auto_send = config::VoiceAutoSend::SixSeconds;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "send this prompt".to_string(),
+                finish: DictationFinish::Silence,
+            }),
+        );
+
+        assert!(!state.voice_input_active);
+        assert!(state.input.is_empty());
+        match cmd_rx.try_recv().expect("voice prompt sent") {
+            UiCommand::SendPrompt { text, images, .. } => {
+                assert_eq!(text, "send this prompt");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn silence_completed_dictation_stays_in_composer_when_auto_send_is_off() {
+        let mut state = AppState::new();
+        state.voice_input_active = true;
+        state.voice_input_range = Some((0, 0));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        finish_dictation(
+            &mut state,
+            &cmd_tx,
+            Ok(DictationResult {
+                text: "review this first".to_string(),
+                finish: DictationFinish::Silence,
+            }),
+        );
+
+        assert!(!state.voice_input_active);
+        assert_eq!(state.input, "review this first");
+        assert!(cmd_rx.try_recv().is_err(), "auto-send stays disabled");
     }
 
     #[test]
@@ -28041,461 +27892,6 @@ mod tests {
     }
 
     #[test]
-    fn ragnarok_command_without_task_warns_usage() {
-        let mut state = AppState::new();
-        state.input = "/ragnarok".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        assert!(cmd_rx.try_recv().is_err(), "nothing goes to the agent");
-        assert!(state.take_ragnarok_launch().is_none());
-        assert_eq!(state.prompt_history(), vec!["/ragnarok".to_string()]);
-        let status = state.status_line.clone().expect("status");
-        assert_eq!(status.kind, StatusKind::Warning);
-        assert!(status.text.contains("usage: /ragnarok"));
-    }
-
-    #[test]
-    fn ragnarok_command_requests_launch_without_touching_the_agent() {
-        let mut state = AppState::new();
-        // No session, runtime not even connected: /ragnarok must still work —
-        // battles run on their own ACP connections.
-        state.input = "/ragnarok forge me a hammer".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        assert!(cmd_rx.try_recv().is_err(), "nothing goes to the agent");
-        assert_eq!(
-            state.take_ragnarok_launch().as_deref(),
-            Some("forge me a hammer")
-        );
-        assert_eq!(
-            state.prompt_history(),
-            vec!["/ragnarok forge me a hammer".to_string()]
-        );
-        assert!(state.input.is_empty());
-        assert!(state.prompt_history_previous());
-        assert_eq!(state.input, "/ragnarok forge me a hammer");
-        assert!(matches!(
-            state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("Ragnarok summoned")
-        ));
-    }
-
-    #[test]
-    fn ragnarok_observer_tracks_arena_open_and_close() {
-        let mut state = AppState::new();
-        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
-        let mut last_observation = None;
-
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new(
-            "forge me a hammer".into(),
-            abort_tx,
-            proceed_tx,
-        ));
-        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
-        let open = observer_rx
-            .try_recv()
-            .expect("open observation")
-            .expect("active arena");
-        assert_eq!(open.task, "forge me a hammer");
-        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
-        assert!(
-            observer_rx.try_recv().is_err(),
-            "unchanged arena snapshots must be coalesced"
-        );
-
-        state.ragnarok = None;
-        publish_ragnarok_observation(&state, Some(&observer_tx), &mut last_observation);
-        assert_eq!(observer_rx.try_recv(), Ok(None));
-    }
-
-    #[test]
-    fn active_thor_host_uses_current_agent_and_model_config() {
-        let mut state = AppState::new();
-        state.agent_source_id = "custom:bridge".to_string();
-        state.active_agent_launch = Some(ragnarok::Launch {
-            source_id: "custom:bridge".to_string(),
-            program: PathBuf::from("bridge"),
-            args: vec!["--max-turns".to_string(), "7".to_string()],
-            env: HashMap::from([("BRIDGE_TEST".to_string(), "1".to_string())]),
-        });
-        state.session_config_options = vec![
-            SessionConfigOption::select(
-                "mode",
-                "Mode",
-                "code",
-                vec![SessionConfigSelectOption::new("code", "Code")],
-            )
-            .category(Some(SessionConfigOptionCategory::Mode)),
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "codex::gpt-5-codex",
-                vec![
-                    SessionConfigSelectOption::new("codex::gpt-5-codex", "GPT-5 Codex"),
-                    SessionConfigSelectOption::new("bedrock::us.anthropic.claude-opus-4-8", "Opus"),
-                ],
-            )
-            .category(Some(SessionConfigOptionCategory::Model)),
-        ];
-
-        let host = active_thor_host(&state).expect("host");
-
-        assert_eq!(host.agent_source_id, "custom:bridge");
-        assert_eq!(host.launch.program, PathBuf::from("bridge"));
-        assert_eq!(host.launch.args, vec!["--max-turns", "7"]);
-        assert_eq!(
-            host.launch.env.get("BRIDGE_TEST").map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(host.model_value.as_deref(), Some("codex::gpt-5-codex"));
-        assert_eq!(host.model_name.as_deref(), Some("GPT-5 Codex"));
-    }
-
-    #[test]
-    fn ragnarok_command_warns_when_battle_already_raging() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("first".into(), abort_tx, proceed_tx));
-        state.input = "/ragnarok second task".to_string();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        assert!(state.take_ragnarok_launch().is_none());
-        assert_eq!(
-            state.prompt_history(),
-            vec!["/ragnarok second task".to_string()]
-        );
-        let status = state.status_line.clone().expect("status");
-        assert_eq!(status.kind, StatusKind::Warning);
-        assert!(status.text.contains("already raging"));
-    }
-
-    #[test]
-    fn ragnarok_prefix_must_be_word_aligned() {
-        let mut state = AppState::new();
-        state.session_id = Some("s-1".to_string());
-        state.input = "/ragnarokish".to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-        submit_prompt(&mut state, &cmd_tx);
-        // Not our command: falls through to a normal prompt send.
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(UiCommand::SendPrompt { text, .. }) if text == "/ragnarokish"
-        ));
-        assert!(state.take_ragnarok_launch().is_none());
-    }
-
-    #[test]
-    fn ragnarok_keys_drive_the_arena() {
-        let mut state = AppState::new();
-        let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-            crate::ragnarok::FighterCard {
-                id: 1,
-                agent_source_id: "b".into(),
-                model_value: "m1".into(),
-                model_name: "M1".into(),
-                pass_at_1_bps: 1500,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-
-        // Enter opens the selected fighter transcript during active combat.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Transcript);
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Arena);
-        // Tab remains as a compatibility alias, and t is the mnemonic fallback
-        // when Enter is reserved for approval or closing.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('t'),
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Transcript);
-        state.ragnarok.as_mut().unwrap().quit_armed = true;
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Tab,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Arena);
-        assert!(
-            !state.ragnarok.as_ref().unwrap().quit_armed,
-            "pane toggles disarm the quit confirmation"
-        );
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().pane, ArenaPane::Transcript);
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Esc,
-            UiMode::InlineChat,
-        );
-        assert_eq!(
-            state.ragnarok.as_ref().unwrap().pane,
-            ArenaPane::Arena,
-            "Esc exits the transcript pane"
-        );
-        // Arrows cycle fighters.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Right,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().selected_fighter, 1);
-        for line in ["one", "two", "three"] {
-            state.apply_ragnarok_event(ragnarok::RagnarokEvent::Log {
-                fighter: None,
-                text: line.to_string(),
-            });
-        }
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Up,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().feed_scroll, 1);
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Down,
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().feed_scroll, 0);
-
-        // Enter at the approval gate unleashes combat without closing.
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Phase(ragnarok::Phase::Approval));
-        assert!(!*proceed_rx.borrow());
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert!(state.ragnarok.is_some(), "gate Enter must not close");
-        assert!(*proceed_rx.borrow(), "gate Enter fires the proceed watch");
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Phase(ragnarok::Phase::Combat));
-
-        // q arms, second q fires the abort watch.
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('q'),
-            UiMode::InlineChat,
-        );
-        assert!(state.ragnarok.as_ref().unwrap().quit_armed);
-        assert!(!*abort_rx.borrow());
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Esc,
-            UiMode::InlineChat,
-        );
-        assert!(
-            !state.ragnarok.as_ref().unwrap().quit_armed,
-            "Esc cancels quit confirmation"
-        );
-        assert!(!*abort_rx.borrow());
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('q'),
-            UiMode::InlineChat,
-        );
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('q'),
-            UiMode::InlineChat,
-        );
-        assert!(*abort_rx.borrow(), "second q quits the battle");
-        // The arena stays up until the battle task reports Failed/Done.
-        assert!(state.ragnarok.is_some());
-    }
-
-    #[test]
-    fn ragnarok_stage_height_uses_card_rows_instead_of_dead_air() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-            crate::ragnarok::FighterCard {
-                id: 1,
-                agent_source_id: "b".into(),
-                model_value: "m1".into(),
-                model_name: "M1".into(),
-                pass_at_1_bps: 1500,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::ThorAction(
-            ragnarok::ThorAction::Deciding,
-        ));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Phase(ragnarok::Phase::Combat));
-        let arena = state.ragnarok.as_ref().unwrap();
-
-        assert_eq!(
-            ragnarok_stage_height(arena, 200, 54),
-            RAGNAROK_THOR_STRIP_HEIGHT + RAGNAROK_CARD_HEIGHT
-        );
-    }
-
-    #[test]
-    fn thor_descending_scene_uses_viking_figure() {
-        let scene = thor_descending_scene_rows(0).join("\n");
-
-        assert!(scene.contains("_/\\_"), "scene:\n{scene}");
-        assert!(scene.contains("ᛏ"), "scene:\n{scene}");
-        assert!(scene.contains("__==#"), "scene:\n{scene}");
-        assert!(!scene.contains("MJÖLNIR"), "scene:\n{scene}");
-    }
-
-    #[test]
-    fn ragnarok_fighters_use_ambient_combat_animation_without_events() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::FighterState {
-            id: 0,
-            state: ragnarok::FighterState::Fighting,
-        });
-        let arena = state.ragnarok.as_ref().unwrap();
-        let fighter = &arena.fighters[0];
-
-        let (sprite, _) = sprite_for(fighter, state.theme);
-        assert!(matches!(sprite, SpriteKind::Swing | SpriteKind::Cast));
-        assert!(ambient_combat_caption(fighter).is_some());
-    }
-
-    #[test]
-    fn ragnarok_finalist_pick_and_close_after_verdict() {
-        let mut state = AppState::new();
-        let (abort_tx, _abort_rx) = tokio::sync::watch::channel(false);
-        let (proceed_tx, _proceed_rx) = tokio::sync::watch::channel(false);
-        state.ragnarok = Some(RagnarokUi::new("task".into(), abort_tx, proceed_tx));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Roster(vec![
-            crate::ragnarok::FighterCard {
-                id: 0,
-                agent_source_id: "a".into(),
-                model_value: "m0".into(),
-                model_name: "M0".into(),
-                pass_at_1_bps: 1400,
-                mean_cost_usd: 0.0,
-            },
-            crate::ragnarok::FighterCard {
-                id: 1,
-                agent_source_id: "b".into(),
-                model_value: "m1".into(),
-                model_name: "M1".into(),
-                pass_at_1_bps: 1500,
-                mean_cost_usd: 0.0,
-            },
-        ]));
-        state.apply_ragnarok_event(ragnarok::RagnarokEvent::Verdict(Box::new(
-            crate::ragnarok::Verdict {
-                clear_winner: None,
-                finalists: Some((0, 1)),
-                ranking: vec![0, 1],
-                review_verdicts: Vec::new(),
-                reasoning: "close".into(),
-                thor_fallback: false,
-            },
-        )));
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Char('2'),
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.ragnarok.as_ref().unwrap().chosen_finalist, Some(1));
-        handle_ragnarok_key(
-            &mut state,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::InlineChat,
-        );
-        assert!(state.ragnarok.is_none(), "Enter closes after the verdict");
-        assert!(matches!(
-            state.transcript.last(),
-            Some(Entry::System(text)) if text.contains("your pick")
-        ));
-    }
-
-    #[test]
-    fn wrap_tail_lines_wraps_and_keeps_only_the_tail() {
-        let text = "alpha\nbeta gamma delta\nepsilon";
-        let lines = wrap_tail_lines(text, 6, 10);
-        assert_eq!(
-            lines,
-            vec!["alpha", "beta g", "amma d", "elta", "epsilo", "n"]
-        );
-        // Only the last N lines are kept.
-        let lines = wrap_tail_lines(text, 6, 2);
-        assert_eq!(lines, vec!["epsilo", "n"]);
-        // Wide glyphs never split mid-cell.
-        let wide = "⚔⚔⚔⚔";
-        let lines = wrap_tail_lines(wide, 3, 10);
-        assert!(
-            lines
-                .iter()
-                .all(|l| UnicodeWidthStr::width(l.as_str()) <= 3)
-        );
-        assert!(wrap_tail_lines("", 10, 5).is_empty());
-    }
-
-    #[test]
     fn esc_clears_input_and_attachments() {
         let mut state = AppState::new();
         state.input = "draft".to_string();
@@ -28549,10 +27945,17 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_with_empty_side_composer_returns_even_while_streaming() {
+    fn ctrl_c_with_empty_side_composer_steers_queued_prompt_while_streaming() {
         let mut state = ready_state_with_session();
         state.is_side = true;
+        state.steering_supported = true;
         state.record_user_prompt("long answer".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "focus on the error".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "focus on the error".to_string(),
+        });
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -28561,11 +27964,11 @@ mod tests {
             key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
 
-        assert!(state.side_exit_requested);
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "cleanup is owned by the UI loop"
-        );
+        assert!(!state.side_exit_requested);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SteerPrompt { text, .. }) if text == "focus on the error"
+        ));
         assert!(state.exit_reason.is_none());
     }
 
@@ -28672,7 +28075,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_during_streaming_steers_when_the_agent_supports_it() {
+    fn enter_during_streaming_queues_when_the_agent_supports_steering() {
         let mut state = ready_state_with_session();
         state.steering_supported = true;
         state.record_user_prompt("first".to_string());
@@ -28682,35 +28085,27 @@ mod tests {
         type_string(&mut state, &cmd_tx, "try the other approach");
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
 
-        match cmd_rx.try_recv().expect("steer must be sent immediately") {
-            UiCommand::SteerPrompt {
-                text,
-                images,
-                resources,
-            } => {
-                assert_eq!(text, "try the other approach");
-                assert!(images.is_empty());
-                assert!(resources.is_empty());
-            }
-            other => panic!("expected SteerPrompt, got {other:?}"),
-        }
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "Enter must queue even when steering is available"
+        );
         assert_eq!(
             state.queued_prompt_count(),
-            0,
-            "steered prompts must not queue"
+            1,
+            "the correction waits for Ctrl-C to steer it"
         );
         assert!(
-            state.transcript.iter().any(
+            !state.transcript.iter().any(
                 |entry| matches!(entry, Entry::UserPrompt(text) if text == "try the other approach")
             ),
-            "the steered message joins the transcript immediately"
+            "queued text stays out of the transcript"
         );
         assert_eq!(
             state.connection_state(),
             ConnectionState::Streaming,
-            "steering must not restart turn bookkeeping"
+            "queueing must not restart turn bookkeeping"
         );
-        assert!(state.input.is_empty(), "input cleared after steering");
+        assert!(state.input.is_empty(), "input cleared after queueing");
     }
 
     #[test]
@@ -28732,7 +28127,7 @@ mod tests {
     }
 
     #[test]
-    fn queueing_mentions_when_the_agent_cannot_steer() {
+    fn queueing_reports_fifo_without_a_capability_warning() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
 
@@ -28746,7 +28141,7 @@ mod tests {
             .expect("queued status line")
             .text
             .clone();
-        assert_eq!(status, "queued 1 (agent cannot steer mid-turn): next one");
+        assert_eq!(status, "queued 1: next one");
     }
 
     #[test]
@@ -29083,9 +28478,7 @@ mod tests {
             .clone()
             .expect("queue status set after submit");
         assert!(
-            queued_status
-                .text
-                .starts_with("queued 1 (agent cannot steer mid-turn): "),
+            queued_status.text.starts_with("queued 1: "),
             "expected queue status, got {:?}",
             queued_status.text
         );
@@ -29149,7 +28542,57 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_during_streaming_preserves_queued_prompt() {
+    fn ctrl_c_steers_oldest_queued_prompt_when_supported() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        state.push_queued_prompt(QueuedPrompt {
+            text: "redirect here".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "redirect here".to_string(),
+        });
+        state.push_queued_prompt(QueuedPrompt {
+            text: "then do this".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "then do this".to_string(),
+        });
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(
+            state.queued_prompt_count(),
+            1,
+            "only the oldest prompt steers"
+        );
+        assert_eq!(
+            state.queued_prompts().next().expect("queued prompt").text,
+            "then do this"
+        );
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        match cmd_rx.try_recv().expect("steer dispatched") {
+            UiCommand::SteerPrompt { text, images, .. } => {
+                assert_eq!(text, "redirect here");
+                assert!(images.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, Entry::UserPrompt(text) if text == "redirect here"))
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancels_and_preserves_queue_when_steering_is_unsupported() {
         let mut state = ready_state_with_session();
         state.record_user_prompt("first".to_string());
         state.push_queued_prompt(QueuedPrompt {
@@ -29167,15 +28610,8 @@ mod tests {
         );
 
         assert_eq!(state.queued_prompt_count(), 1, "queue preserved by Ctrl-C");
-        assert_eq!(
-            state.queued_prompts().next().expect("queued prompt").text,
-            "keep me"
-        );
         assert_eq!(state.connection_state(), ConnectionState::Cancelling);
-        match cmd_rx.try_recv().expect("cancel dispatched") {
-            UiCommand::CancelPrompt => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelPrompt)));
     }
 
     #[test]

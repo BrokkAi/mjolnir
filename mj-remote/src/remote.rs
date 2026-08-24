@@ -55,8 +55,8 @@ use mj_core::acp;
 use mj_core::config::{self, SelectedAgent};
 use mj_core::event::{
     ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
-    PromptImage, SessionConfigTarget, SubagentEvent, SubagentOutcome, TerminalOutputSnapshot,
-    UiCommand, UiEvent,
+    PromptImage, ReviewRequest, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
+    TerminalOutputSnapshot, UiCommand, UiEvent,
 };
 use mj_core::roster;
 use mj_core::session_state::{StatusKind, status_transcript_text};
@@ -124,8 +124,9 @@ const REMOTE_BUILTIN_LOAD_COMMAND: &str = "load";
 const REMOTE_BUILTIN_FORK_COMMAND: &str = "fork";
 const REMOTE_BUILTIN_EXPORT_COMMAND: &str = "export";
 const REMOTE_BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
-const REMOTE_BUILTIN_REVIEW_COMMAND: &str = "review";
-const REMOTE_BUILTIN_RAGNAROK_COMMAND: &str = "ragnarok";
+const REMOTE_RETIRED_REVIEW_COMMAND: &str = "review";
+const REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND: &str = "discrete-review";
+const REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND: &str = "adversarial-review";
 const REMOTE_BUILTIN_SIDE_COMMAND: &str = "side";
 const REMOTE_BUILTIN_EXIT_SIDE_COMMAND: &str = "exit";
 /// Default lifetime of a viewer session cookie, in days. Long enough that an
@@ -204,6 +205,11 @@ pub struct SessionRecord {
     pub agent: String,
     #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
+    /// Structured review workflows, including every issue's finding,
+    /// resolution, and correction evidence. Kept apart from the transcript so
+    /// the web viewer can present the same ledger and full reader as the TUI.
+    #[serde(default)]
+    pub review_workflows: Vec<ReviewWorkflowRecord>,
     #[serde(default)]
     pub queued_prompt_count: u64,
     /// True while this session has an ACP prompt turn in flight.
@@ -212,6 +218,10 @@ pub struct SessionRecord {
     /// Whether the live ACP agent accepts image blocks in prompts.
     #[serde(default)]
     pub prompt_images_supported: bool,
+    /// Whether the live ACP agent accepts a prompt injected into a turn that
+    /// is already running.
+    #[serde(default)]
+    pub steering_supported: bool,
     /// Permission prompts currently waiting for an answer in this session.
     #[serde(default)]
     pub pending_permissions: Vec<PendingPermissionRecord>,
@@ -240,15 +250,39 @@ pub struct SessionRecord {
     /// asks, because nothing computes it otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_head_diff: Option<WorkspaceHeadDiffRecord>,
-    /// Active `/ragnarok` arena projected from the TUI's authoritative
-    /// reducer. The web view is deliberately observational only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ragnarok: Option<RagnarokRecord>,
     /// Status-line data mirroring the TUI's bottom status row and usage
     /// displays: model, adapter, effort, per-seat token totals, quota lines
     /// and the current branch's open pull request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SessionStatusRecord>,
+}
+
+/// A review workflow projected for the remote viewer. The runtime owns the
+/// authoritative reducer; this record is the durable display projection it
+/// publishes to the browser and session archive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewWorkflowRecord {
+    pub turn_id: u64,
+    pub operation: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub issues: Vec<ReviewIssueRecord>,
+}
+
+/// Complete display data for one review finding. Status values use the
+/// canonical `ReviewIssueStatus::as_str` labels so the TUI and web wording
+/// remains aligned without making the remote API depend on core's enum serde.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewIssueRecord {
+    pub id: usize,
+    pub pass: u32,
+    pub summary: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_details: Option<String>,
 }
 
 /// A live session plus viewer-only ownership metadata. Ownership is derived
@@ -266,45 +300,6 @@ struct FinishSessionRequest {
     lease_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     snapshot: Option<SessionRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RagnarokRecord {
-    pub task: String,
-    pub phase: String,
-    pub awaiting_approval: bool,
-    pub fighters: Vec<RagnarokFighterRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verdict: Option<RagnarokVerdictRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adoption_hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed: Option<String>,
-    pub done: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RagnarokFighterRecord {
-    pub id: usize,
-    pub source: String,
-    pub model: String,
-    pub status: String,
-    /// Categorical projection of the TUI's animated vigor bar.
-    pub vigor: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RagnarokVerdictRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clear_winner: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finalists: Option<(usize, usize)>,
-    #[serde(default)]
-    pub ranking: Vec<usize>,
-    pub reasoning: String,
-    pub thor_fallback: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chosen_finalist: Option<usize>,
 }
 
 /// The TUI status line projected for the remote viewer. Everything here is
@@ -443,9 +438,15 @@ fn remote_builtin_command_records(include_fork: bool, include_load: bool) -> Vec
             "mjolnir",
         ),
         command_record(
-            REMOTE_BUILTIN_REVIEW_COMMAND,
-            "review selected changes without modifying them",
-            Some("recent|uncommitted|head".to_string()),
+            REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND,
+            "run the configured discrete review",
+            Some("recent|uncommitted|head [quick|extended]".to_string()),
+            "mjolnir",
+        ),
+        command_record(
+            REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
+            "alias for discrete-review",
+            Some("recent|uncommitted|head [quick|extended]".to_string()),
             "mjolnir",
         ),
     ];
@@ -537,8 +538,9 @@ fn is_remote_reserved_command(name: &str) -> bool {
             | REMOTE_BUILTIN_FORK_COMMAND
             | REMOTE_BUILTIN_EXPORT_COMMAND
             | REMOTE_BUILTIN_MJCONFIG_COMMAND
-            | REMOTE_BUILTIN_REVIEW_COMMAND
-            | REMOTE_BUILTIN_RAGNAROK_COMMAND
+            | REMOTE_RETIRED_REVIEW_COMMAND
+            | REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND
+            | REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND
             | REMOTE_BUILTIN_SIDE_COMMAND
             | REMOTE_BUILTIN_EXIT_SIDE_COMMAND
     )
@@ -1090,8 +1092,9 @@ enum RemoteQueuedPromptAction {
     RejectUnsupportedLoad,
     ForkSession,
     RejectUnsupportedFork,
-    RunReview(mj_core::event::ReviewTarget),
+    RunReview(ReviewRequest),
     RejectInvalidReview,
+    RejectRetiredReview,
     CompactPrimary,
     RefreshWorkspaceDiff,
 }
@@ -1152,16 +1155,11 @@ fn remote_queued_prompt_action(
             RemoteQueuedPromptAction::RejectUnsupportedLoad
         };
     }
-    if let Some(rest) = trimmed.strip_prefix("/review")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
-        let target = match rest.trim().to_ascii_lowercase().as_str() {
-            "recent" => Some(mj_core::event::ReviewTarget::Recent),
-            "uncommitted" => Some(mj_core::event::ReviewTarget::Uncommitted),
-            "head" => Some(mj_core::event::ReviewTarget::Head),
-            _ => None,
-        };
-        return target.map_or(
+    if retired_review_command_arguments(trimmed).is_some() {
+        return RemoteQueuedPromptAction::RejectRetiredReview;
+    }
+    if let Some(rest) = discrete_review_command_arguments(trimmed) {
+        return parse_discrete_review_request(rest).map_or(
             RemoteQueuedPromptAction::RejectInvalidReview,
             RemoteQueuedPromptAction::RunReview,
         );
@@ -1185,6 +1183,45 @@ fn remote_queued_prompt_action(
     } else {
         RemoteQueuedPromptAction::RejectUnsupportedFork
     }
+}
+
+fn discrete_review_command_arguments(text: &str) -> Option<&str> {
+    ["/discrete-review", "/adversarial-review"]
+        .into_iter()
+        .find_map(|command| {
+            text.strip_prefix(command)
+                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+}
+
+fn retired_review_command_arguments(text: &str) -> Option<&str> {
+    text.strip_prefix("/review")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn parse_discrete_review_request(value: &str) -> Option<ReviewRequest> {
+    let mut target = None;
+    let mut tier = None;
+    for token in value.split_whitespace() {
+        let token = token.to_ascii_lowercase();
+        if let Some(parsed) = match token.as_str() {
+            "recent" => Some(ReviewTarget::Recent),
+            "uncommitted" => Some(ReviewTarget::Uncommitted),
+            "head" => Some(ReviewTarget::Head),
+            _ => None,
+        } {
+            if target.replace(parsed).is_some() {
+                return None;
+            }
+        } else if let Ok(parsed) = token.parse::<config::ReviewTier>() {
+            if tier.replace(parsed).is_some() {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    target.map(|target| ReviewRequest { target, tier })
 }
 
 fn dispatch_remote_side_start(
@@ -1472,13 +1509,13 @@ struct TrackerState {
     /// Latest published per-turn workspace diff.
     workspace_diff: Option<WorkspaceDiffRecord>,
     workspace_head_diff: Option<WorkspaceHeadDiffRecord>,
-    ragnarok: Option<RagnarokRecord>,
     pending_permissions: Vec<PendingPermissionRecord>,
     session_config: Vec<SessionConfigOptionRecord>,
     native_mode: Option<NativeModeRecord>,
     available_commands: Vec<CommandRecord>,
     main_available_commands: Vec<CommandRecord>,
     prompt_images_supported: bool,
+    steering_supported: bool,
     session_fork_supported: bool,
     session_load_supported: bool,
     side_session_supported: bool,
@@ -1603,6 +1640,9 @@ pub trait ServerSessionManager: Send + Sync {
     fn resume_session(&self, cwd: PathBuf, session_id: String) -> u64;
     fn owns_session(&self, session_id: &str) -> bool;
     async fn archive_session(&self, session_id: &str) -> bool;
+    /// Re-resolve reviewer and subagent routes for active sessions whose
+    /// primary route still matches their running ACP process.
+    async fn reload_auxiliary_agents(&self);
     async fn refresh_for_config(
         &self,
         config_path: &Path,
@@ -1645,13 +1685,13 @@ impl TrackerState {
             workflows: mj_core::workflow::WorkflowStore::default(),
             workspace_diff: None,
             workspace_head_diff: None,
-            ragnarok: None,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             native_mode: None,
             available_commands: remote_builtin_command_records(false, false),
             main_available_commands: remote_builtin_command_records(false, false),
             prompt_images_supported: false,
+            steering_supported: false,
             session_fork_supported: false,
             session_load_supported: false,
             side_session_supported: false,
@@ -1661,15 +1701,27 @@ impl TrackerState {
     }
 
     fn observe_command(&mut self, command: &UiCommand) {
-        if let UiCommand::SendPrompt { text, .. } = command {
-            self.observe_prompt_text_as(text.clone(), None, "primary");
+        match command {
+            UiCommand::SendPrompt { text, .. } => {
+                self.observe_prompt_text_as(text.clone(), None, "primary");
+            }
+            UiCommand::SteerPrompt { text, .. } => {
+                self.observe_steered_prompt_text_as(text.clone(), "primary");
+            }
+            _ => {}
         }
     }
 
     fn observe_side_command(&mut self, command: &UiCommand) {
-        if let UiCommand::SendPrompt { text, .. } = command {
-            self.side_initial_prompt_pending = false;
-            self.observe_prompt_text_as(text.clone(), None, "side");
+        match command {
+            UiCommand::SendPrompt { text, .. } => {
+                self.side_initial_prompt_pending = false;
+                self.observe_prompt_text_as(text.clone(), None, "side");
+            }
+            UiCommand::SteerPrompt { text, .. } => {
+                self.observe_steered_prompt_text_as(text.clone(), "side");
+            }
+            _ => {}
         }
     }
 
@@ -1726,9 +1778,6 @@ impl TrackerState {
         self.workspace_diff = None;
         // A new session may have a different workspace root entirely.
         self.workspace_head_diff = None;
-        // Ragnarok runs on independent ACP connections and can outlive a
-        // primary-session id change in the same TUI. Its observer retracts it
-        // when the arena actually closes.
         self.pending_permissions.clear();
         self.session_config.clear();
         self.native_mode = None;
@@ -1769,12 +1818,14 @@ impl TrackerState {
             UiEvent::RemoteSideStartRequested { .. } | UiEvent::RemoteSideExitRequested => {}
             UiEvent::Connected {
                 prompt_images_supported,
+                steering_supported,
                 session_fork_supported,
                 session_load_supported,
                 side_session_supported,
                 ..
             } => {
                 self.prompt_images_supported = *prompt_images_supported;
+                self.steering_supported = *steering_supported;
                 self.session_fork_supported = *session_fork_supported;
                 self.session_load_supported = *session_load_supported;
                 self.side_session_supported =
@@ -1885,6 +1936,10 @@ impl TrackerState {
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } => {
                 self.end_prompt_turn();
             }
+            // The steered text already entered this transcript when the
+            // `SteerPrompt` command was observed; delivery confirmation only
+            // feeds the orchestrator's user-message history.
+            UiEvent::SteeredPromptDelivered { .. } => {}
             UiEvent::Fatal(message) => {
                 self.end_prompt_turn();
                 self.record_status_notice(StatusKind::Fatal, message);
@@ -1988,6 +2043,7 @@ impl TrackerState {
                 self.observe_terminal_output(&snapshot);
             }
             UiEvent::PromptDone { .. } => self.end_side_prompt_turn(),
+            UiEvent::SteeredPromptDelivered { .. } => {}
             UiEvent::PromptFailed { message } => {
                 self.end_side_prompt_turn();
                 self.push_actor_transcript_entry("system", "side", format!("Warning: {message}"));
@@ -2063,10 +2119,9 @@ impl TrackerState {
     /// Mirror one workflow lifecycle transition.
     ///
     /// Reduce it into the tracker's own `WorkflowStore` first, exactly as
-    /// `AppState` does, then render the same notices the TUI writes to its
-    /// transcript. Review workflows are the longest-running thing a session
-    /// does, so without this a remote watcher sees a silent gap where the
-    /// terminal shows the review starting, waiting and finishing.
+    /// `AppState` does. The snapshot publishes that store's review ledger
+    /// separately from the generic lifecycle notices, so the browser has the
+    /// same issue evidence and verification state as the TUI.
     fn observe_workflow_event(&mut self, event: &mj_core::workflow::WorkflowEvent) {
         use mj_core::workflow::{ApplyOutcome, WorkflowActorId, WorkflowState, WorkflowTransition};
 
@@ -2114,8 +2169,9 @@ impl TrackerState {
             // Listed rather than caught by `_` on purpose: a new transition
             // variant should make whoever adds it decide whether the remote
             // transcript wants it, instead of silently defaulting to "no".
-            // Per-actor transitions drive the subagent status rows, and the
-            // issue transitions are status-line only in the TUI too.
+            // Per-actor transitions drive the subagent status rows. Issue
+            // transitions are represented by the snapshot's structured review
+            // ledger rather than duplicated as generic transcript notices.
             WorkflowTransition::PhaseChanged { .. }
             | WorkflowTransition::CoverageChanged { .. }
             | WorkflowTransition::ActorStarted { .. }
@@ -2124,7 +2180,8 @@ impl TrackerState {
             | WorkflowTransition::ActorResumed { .. }
             | WorkflowTransition::ActorFinished { .. }
             | WorkflowTransition::IssuesValidated { .. }
-            | WorkflowTransition::IssuesResolved { .. } => None,
+            | WorkflowTransition::IssuesResolved { .. }
+            | WorkflowTransition::IssueEvidenceUpdated { .. } => None,
         };
 
         if let Some(notice) = notice {
@@ -2532,6 +2589,42 @@ impl TrackerState {
         self.touch();
     }
 
+    /// Mirror a prompt that joined an existing turn. Like the terminal, keep
+    /// the original turn's elapsed-time and cancellation ownership intact,
+    /// while closing any open agent prose before recording the user message.
+    fn observe_steered_prompt_text_as(&mut self, text: String, actor: &str) {
+        let prompt_at = now_rfc3339();
+        self.total_messages = self.total_messages.saturating_add(1);
+        self.close_agent_message(actor);
+        // The active turn can settle after the remote poller sees it but
+        // before this command reaches the runtime. ACP turns that idle race
+        // into an ordinary prompt, so the tracker must start a new visible
+        // turn in that case instead of leaving the browser falsely idle.
+        if actor == "side" {
+            if !self.side_prompt_in_flight {
+                self.side_prompt_in_flight = true;
+                self.side_prompt_turn_started_at = Some(now_rfc3339());
+            }
+        } else if !self.prompt_in_flight {
+            self.prompt_in_flight = true;
+            self.prompt_turn_started_at = Some(now_rfc3339());
+        }
+        if self
+            .last_prompt_at
+            .as_deref()
+            .is_none_or(|current| prompt_at.as_str() >= current)
+        {
+            self.last_prompt_at = Some(prompt_at.clone());
+        }
+        self.push_transcript_entry_at_with_actor(
+            "user",
+            text,
+            prompt_at,
+            (actor != "primary").then(|| actor.to_string()),
+        );
+        self.touch();
+    }
+
     fn push_tool_transcript_entry(
         &mut self,
         tool_call_id: String,
@@ -2674,6 +2767,7 @@ impl TrackerState {
             worktree: self.worktree.clone(),
             agent: self.agent.clone(),
             transcript: self.published_transcript(),
+            review_workflows: self.review_workflows(),
             queued_prompt_count: 0,
             prompt_in_flight: if self.side_state == RemoteSideState::Inactive {
                 self.prompt_in_flight && self.prompt_turn_started_at.is_some()
@@ -2681,6 +2775,7 @@ impl TrackerState {
                 self.side_prompt_in_flight && self.side_prompt_turn_started_at.is_some()
             },
             prompt_images_supported: self.prompt_images_supported,
+            steering_supported: self.steering_supported,
             pending_permissions: self.pending_permissions.clone(),
             session_config: self.session_config.clone(),
             native_mode: self.native_mode.clone(),
@@ -2688,9 +2783,35 @@ impl TrackerState {
             subagents: self.subagents.values().cloned().collect(),
             workspace_diff: self.workspace_diff.clone(),
             workspace_head_diff: self.workspace_head_diff.clone(),
-            ragnarok: self.ragnarok.clone(),
             status: Some(self.status_record()),
         })
+    }
+
+    fn review_workflows(&self) -> Vec<ReviewWorkflowRecord> {
+        let mut workflows = self
+            .workflows
+            .iter()
+            .filter(|workflow| workflow.kind == mj_core::workflow::WorkflowKind::Review)
+            .map(|workflow| ReviewWorkflowRecord {
+                turn_id: workflow.id.turn_id,
+                operation: workflow.id.operation,
+                outcome: workflow.outcome.map(|outcome| outcome.as_str().to_string()),
+                issues: workflow
+                    .issues
+                    .iter()
+                    .map(|issue| ReviewIssueRecord {
+                        id: issue.id,
+                        pass: issue.pass,
+                        summary: issue.summary.clone(),
+                        status: issue.status.as_str().to_string(),
+                        resolution_reason: issue.resolution_reason.clone(),
+                        resolution_details: issue.resolution_details.clone(),
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        workflows.sort_by_key(|workflow| (workflow.turn_id, workflow.operation));
+        workflows
     }
 
     fn status_record(&self) -> SessionStatusRecord {
@@ -2819,6 +2940,13 @@ impl TrackerState {
                 .flatten()
         }?;
         Some((self.session_id.clone()?, started_at))
+    }
+
+    /// The browser's Stop action only becomes steering when a live turn and
+    /// steering support are both present. Normal browser submissions remain
+    /// FIFO queued until the turn completes.
+    fn can_steer_queued_prompt_on_cancel(&self) -> bool {
+        self.steering_supported && self.prompt_cancel_claim().is_some()
     }
 }
 
@@ -3123,17 +3251,6 @@ impl RemoteSessionTracker {
         }
         if let Ok(mut state) = self.state.lock() {
             state.observe_event(event);
-        }
-        self.request_flush();
-    }
-
-    pub fn observe_ragnarok(&self, observation: Option<RagnarokRecord>) {
-        if self.shutting_down.load(Ordering::Relaxed) {
-            return;
-        }
-        if let Ok(mut state) = self.state.lock() {
-            state.ragnarok = observation;
-            state.touch();
         }
         self.request_flush();
     }
@@ -3465,7 +3582,34 @@ impl RemoteSessionTracker {
                     .await
                     {
                         Ok(Some(_)) => {
-                            if command_tx.send(UiCommand::CancelPrompt).is_err() {
+                            // Browser sends always remain queued while a turn
+                            // is active. Stop is the explicit request to
+                            // inject the oldest queued correction instead of
+                            // cancelling when this runtime supports steering.
+                            let steer_queued_prompt = state
+                                .lock()
+                                .map(|guard| guard.can_steer_queued_prompt_on_cancel())
+                                .unwrap_or(false);
+                            let command = if steer_queued_prompt {
+                                match claim_remote_prompt(connection.clone(), &session_id).await {
+                                    Ok(Some(prompt)) => UiCommand::SteerPrompt {
+                                        text: prompt.text,
+                                        images: prompt.images,
+                                        resources: Vec::new(),
+                                    },
+                                    Ok(None) => UiCommand::CancelPrompt,
+                                    Err(error) => {
+                                        debug!(
+                                            "remote queued-prompt claim for Stop steering failed: {error:#}"
+                                        );
+                                        tracker.reload_connection();
+                                        UiCommand::CancelPrompt
+                                    }
+                                }
+                            } else {
+                                UiCommand::CancelPrompt
+                            };
+                            if command_tx.send(command).is_err() {
                                 break;
                             }
                             continue;
@@ -3562,13 +3706,13 @@ impl RemoteSessionTracker {
                     }
                 }
 
-                let session_id = {
+                let remote_dispatch = {
                     let Ok(mut guard) = state.lock() else {
                         continue;
                     };
                     guard.reserve_remote_prompt_slot()
                 };
-                let Some(session_id) = session_id else {
+                let Some(session_id) = remote_dispatch else {
                     continue;
                 };
 
@@ -3596,7 +3740,7 @@ impl RemoteSessionTracker {
                             .unwrap_or((false, false, false, false, None));
                         let can_compact = ui_event_tx.is_some();
                         let QueuedPrompt { text, images, .. } = prompt;
-                        match remote_queued_prompt_action(
+                        let action = remote_queued_prompt_action(
                             text,
                             !images.is_empty(),
                             can_fork,
@@ -3604,7 +3748,8 @@ impl RemoteSessionTracker {
                             can_compact,
                             can_side,
                             side_active,
-                        ) {
+                        );
+                        match action {
                             RemoteQueuedPromptAction::StartSide(initial_prompt) => {
                                 if !dispatch_remote_side_start(
                                     &command_tx,
@@ -3735,8 +3880,8 @@ impl RemoteSessionTracker {
                                     guard.push_system_notice(message);
                                 }
                             }
-                            RemoteQueuedPromptAction::RunReview(target) => {
-                                if command_tx.send(UiCommand::RunReview { target }).is_err() {
+                            RemoteQueuedPromptAction::RunReview(request) => {
+                                if command_tx.send(UiCommand::RunReview { request }).is_err() {
                                     break;
                                 }
                             }
@@ -3768,7 +3913,17 @@ impl RemoteSessionTracker {
                                 }
                             }
                             RemoteQueuedPromptAction::RejectInvalidReview => {
-                                let message = "usage: /review recent|uncommitted|head".to_string();
+                                let message = "usage: /discrete-review <recent|uncommitted|head> [quick|extended]".to_string();
+                                if let Some(ui_event_tx) = ui_event_tx.as_ref() {
+                                    let _ = ui_event_tx.send(UiEvent::Warning(message.clone()));
+                                }
+                                if let Ok(mut guard) = state.lock() {
+                                    guard.push_system_notice(message);
+                                }
+                            }
+                            RemoteQueuedPromptAction::RejectRetiredReview => {
+                                let message =
+                                    "use /discrete-review or /adversarial-review".to_string();
                                 if let Some(ui_event_tx) = ui_event_tx.as_ref() {
                                     let _ = ui_event_tx.send(UiEvent::Warning(message.clone()));
                                 }
@@ -3859,10 +4014,17 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
     }
 }
 
+/// The server started without a launchable model; the payload is the roster
+/// resolution message. The server serves the viewer anyway so the user can
+/// finish setup there, and the session manager keeps re-resolving until a
+/// roster binds.
+#[derive(Debug, Clone)]
+pub struct SetupPending(pub String);
+
 /// Options for [`run_server`], mirroring the `mj server` CLI surface.
 pub struct RuntimeServerOptions {
     pub config: config::Config,
-    pub roster: roster::Roster,
+    pub roster: std::result::Result<roster::Roster, SetupPending>,
     pub hostname: Option<String>,
     /// Probe this machine for a certificate-capable tailscale node at
     /// startup and, when one is found, serve its `ts.net` certificate.
@@ -3924,12 +4086,23 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     };
     let workspace_roots =
         mj_core::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
-    let mjconfig = Arc::new(MjConfigRuntime::new(
-        config_path.clone(),
-        resolved.choices.clone(),
-        Some(models_config_from_roster(&resolved)),
-        resolved.inventory.clone(),
-    ));
+    let mjconfig = Arc::new(match &resolved {
+        Ok(resolved) => MjConfigRuntime::new(
+            config_path.clone(),
+            resolved.choices.clone(),
+            Some(models_config_from_roster(resolved)),
+            resolved.inventory.clone(),
+        ),
+        // Setup pending: no roster to seed from. Detection-only inventory
+        // keeps the ACP servers panel truthful until the first discovery
+        // pass replaces it.
+        Err(SetupPending(_)) => MjConfigRuntime::new(
+            config_path.clone(),
+            Vec::new(),
+            None,
+            roster::discover_inventory(&cfg),
+        ),
+    });
     let session_ttl = session_ttl_from_days(session_ttl_days);
     let viewer_code = generate_viewer_code()?;
     let viewer_url = remote_qr_login_url(&listen.viewer_host, listen.port, &token);
@@ -4009,6 +4182,11 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         println!("session lifetime: ephemeral (signs out when the browser/PWA closes)");
     } else {
         println!("session lifetime: {session_ttl_days} days");
+    }
+    if resolved.is_err() {
+        println!(
+            "web setup: open the viewer above, enter the viewer code, then sign in to an agent and choose a team."
+        );
     }
 
     serve_listeners_until_terminated(listeners, tls_config, app, termination, session_manager)
@@ -4561,6 +4739,7 @@ struct MjConfigRuntime {
     config_path: PathBuf,
     discovery: Mutex<MjConfigDiscovery>,
     login: Mutex<Option<MjLoginJob>>,
+    credential_detector: fn(mj_core::auth::AuthVendor) -> mj_core::auth::CredentialSource,
 }
 
 #[derive(Debug)]
@@ -4602,7 +4781,21 @@ impl MjConfigRuntime {
                 refresh_requested: false,
             }),
             login: Mutex::new(None),
+            credential_detector: mj_core::auth::detect,
         }
+    }
+
+    fn credentials(&self, vendor: mj_core::auth::AuthVendor) -> mj_core::auth::CredentialSource {
+        (self.credential_detector)(vendor)
+    }
+
+    #[cfg(test)]
+    fn with_credential_detector(
+        mut self,
+        detector: fn(mj_core::auth::AuthVendor) -> mj_core::auth::CredentialSource,
+    ) -> Self {
+        self.credential_detector = detector;
+        self
     }
 
     /// Sync the editor's model choices and active seat details after a
@@ -4693,13 +4886,25 @@ fn inventory_discovery_inputs_equal(
 #[derive(Debug)]
 struct MjLoginJob {
     vendor: mj_core::auth::AuthVendor,
-    output: Arc<Mutex<String>>,
+    output: Arc<Mutex<mj_core::terminal_output::TerminalText>>,
     result: Arc<Mutex<Option<std::result::Result<String, String>>>>,
+    input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     abort: tokio::task::AbortHandle,
+}
+
+const MJ_LOGIN_OUTPUT_LIMIT: usize = 64 * 1024;
+
+fn new_mjconfig_login_output() -> Arc<Mutex<mj_core::terminal_output::TerminalText>> {
+    Arc::new(Mutex::new(mj_core::terminal_output::TerminalText::new(
+        MJ_LOGIN_OUTPUT_LIMIT,
+    )))
 }
 
 #[derive(Debug, Serialize)]
 struct MjConfigSnapshot {
+    /// Panel catalog supplied by mj-core so the web cannot silently lose a
+    /// panel added to the terminal `/mjconfig`.
+    tabs: Vec<MjSettingsTab>,
     team: MjTeamPanel,
     agents: MjAgentsPanel,
     acp_servers: MjServersPanel,
@@ -4710,6 +4915,7 @@ struct MjConfigSnapshot {
     review_options: Option<MjSessionOptionsGroup>,
     /// Session options for the subagent seat, mirroring the Subagents panel.
     subagent_options: Option<MjSessionOptionsGroup>,
+    input: MjInputPanel,
     appearance: MjAppearancePanel,
     login: Option<MjLoginStatus>,
     /// True while adapters are still being probed for model and session-option
@@ -4719,6 +4925,29 @@ struct MjConfigSnapshot {
     discovery_revision: u64,
     /// One-shot message produced while applying an edit.
     notice: Option<String>,
+    /// What still blocks this server from launching sessions. `None` once the
+    /// required providers are authenticated and a team and model are ready.
+    setup: Option<MjSetupPanel>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjSettingsTab {
+    id: String,
+    label: String,
+}
+
+/// First-run state driving the viewer's setup prompt.
+#[derive(Debug, Serialize)]
+struct MjSetupPanel {
+    /// No team is configured and none is adoptable from local credentials.
+    team_selection_required: bool,
+    /// No account is signed in yet, or the selected team still lacks one of
+    /// its providers.
+    authentication_required: bool,
+    /// Discovery has not found a launchable model.
+    no_launchable_models: bool,
+    /// One-line instruction naming the next step.
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -4740,6 +4969,8 @@ struct MjAgentsPanel {
     discrete_review: bool,
     review_tier: String,
     review_tiers: Vec<MjReviewTierEntry>,
+    correction_threshold: String,
+    correction_thresholds: Vec<MjCorrectionThresholdEntry>,
     max_parallel: usize,
     max_parallel_limit: usize,
     auto_failover: bool,
@@ -4756,6 +4987,8 @@ struct MjRoleEntry {
     active_model: Option<String>,
     active_detail: String,
     choices: Vec<MjModelChoiceEntry>,
+    /// Review and subagent seats own a provider-native permission preset.
+    permission: Option<MjPermissionPanel>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4765,8 +4998,28 @@ struct MjModelChoiceEntry {
 }
 
 #[derive(Debug, Serialize)]
+struct MjPermissionPanel {
+    value: String,
+    choices: Vec<MjPermissionChoice>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjPermissionChoice {
+    value: String,
+    label: String,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
 struct MjReviewTierEntry {
     tier: String,
+    label: String,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MjCorrectionThresholdEntry {
+    threshold: String,
     label: String,
     description: String,
 }
@@ -4785,6 +5038,13 @@ struct MjAccountEntry {
     enables: String,
     signed_in: bool,
     login_supported: bool,
+    login_modes: Vec<MjLoginModeEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjLoginModeEntry {
+    id: String,
+    label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -4828,12 +5088,35 @@ struct MjAppearancePanel {
     thought_outputs: Vec<String>,
     feature_hints: bool,
     keep_awake: bool,
+    interface: String,
+    interfaces: Vec<MjInterfaceEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjInterfaceEntry {
+    value: String,
+    label: String,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MjInputPanel {
+    voice_auto_send: String,
+    voice_auto_sends: Vec<MjVoiceAutoSendEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjVoiceAutoSendEntry {
+    value: String,
+    label: String,
+    description: String,
 }
 
 #[derive(Debug, Serialize)]
 struct MjSpinnerEntry {
     name: String,
     frames: Vec<String>,
+    frame_interval_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -4841,6 +5124,7 @@ struct MjLoginStatus {
     vendor: String,
     label: String,
     running: bool,
+    accepts_input: bool,
     output: String,
     ok: Option<bool>,
     message: Option<String>,
@@ -4854,9 +5138,13 @@ struct MjConfigApplyRequest {
     primary_model: Option<String>,
     review_model: Option<String>,
     subagents_model: Option<String>,
+    review_permission: Option<String>,
+    subagents_permission: Option<String>,
     discrete_review: Option<bool>,
     /// `quick` | `extended`.
     review_tier: Option<String>,
+    /// `p0` | `p1` | `p2` | `p3`.
+    correction_threshold: Option<String>,
     max_parallel: Option<usize>,
     auto_failover: Option<bool>,
     theme: Option<String>,
@@ -4864,6 +5152,8 @@ struct MjConfigApplyRequest {
     thought_output: Option<String>,
     feature_hints: Option<bool>,
     keep_awake: Option<bool>,
+    interface: Option<String>,
+    voice_auto_send: Option<String>,
     /// Server id → `auto` | `enabled` | `disabled`.
     server_policies: Option<BTreeMap<String, String>>,
     /// Server id → option key → value written to the primary seat's
@@ -4881,6 +5171,12 @@ struct MjConfigApplyRequest {
 #[derive(Debug, Deserialize)]
 struct MjLoginRequest {
     vendor: String,
+    mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MjLoginInputRequest {
+    input: String,
 }
 
 fn mjconfig_load(state: &ServerState) -> config::Config {
@@ -4891,10 +5187,10 @@ fn mjconfig_load(state: &ServerState) -> config::Config {
     config
 }
 
-fn mjconfig_editor(
+fn mjconfig_catalog(
     state: &ServerState,
     config: config::Config,
-) -> (crate::settings::SettingsEditor, bool, u64) {
+) -> (crate::settings::MjConfigCatalog, bool, u64) {
     let discovery = state
         .mjconfig
         .discovery
@@ -4904,16 +5200,16 @@ fn mjconfig_editor(
     // re-derive from the *current* config (a just-saved policy shows
     // immediately) while probe-only fields like session options survive.
     let inventory = roster::rediscover_inventory(&config, &discovery.inventory);
-    let mut editor = crate::settings::SettingsEditor::new(config, discovery.choices.clone(), None)
+    let mut catalog = crate::settings::MjConfigCatalog::new(config, discovery.choices.clone())
         .with_inventory(inventory);
     let probing = discovery.probing;
     let discovery_revision = discovery.revision;
     let active_models = discovery.active_models.clone();
     drop(discovery);
     if let Some(models) = active_models {
-        editor = editor.with_active_models(models);
+        catalog = catalog.with_active_models(models);
     }
-    (editor, probing, discovery_revision)
+    (catalog, probing, discovery_revision)
 }
 
 /// Mirror of the TUI's server-row status line in `settings::draw_servers`.
@@ -4966,17 +5262,32 @@ fn policy_from_wire(name: &str) -> Option<config::AcpServerPolicy> {
     }
 }
 
+fn mjconfig_permission_panel(permission: config::PermissionPreset) -> MjPermissionPanel {
+    MjPermissionPanel {
+        value: permission.as_str().to_string(),
+        choices: config::PermissionPreset::ALL
+            .into_iter()
+            .map(|candidate| MjPermissionChoice {
+                value: candidate.as_str().to_string(),
+                label: candidate.to_string(),
+                description: candidate.description().to_string(),
+            })
+            .collect(),
+    }
+}
+
 const MJ_SEAT_IDS: [&str; 3] = ["primary", "review", "subagents"];
 
 fn mjconfig_login_status(state: &ServerState) -> Option<MjLoginStatus> {
     let mut guard = state.mjconfig.login.lock().expect("mjconfig login lock");
     let job = guard.as_ref()?;
-    let output = job.output.lock().expect("login output").clone();
+    let output = job.output.lock().expect("login output").render();
     let result = job.result.lock().expect("login result").clone();
     let status = MjLoginStatus {
         vendor: job.vendor.id().to_string(),
         label: job.vendor.label().to_string(),
         running: result.is_none(),
+        accepts_input: job.input.is_some(),
         output,
         ok: result.as_ref().map(|result| result.is_ok()),
         message: result
@@ -4998,9 +5309,9 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let login = mjconfig_login_status(state);
     refresh_mjconfig_discovery_if_needed(state);
     let config = mjconfig_load(state);
-    let (editor, probing, discovery_revision) = mjconfig_editor(state, config);
-    let config = &editor.config;
-    let inventory = editor.inventory();
+    let (catalog, probing, discovery_revision) = mjconfig_catalog(state, config);
+    let config = &catalog.config;
+    let inventory = catalog.inventory();
 
     // Mirrors the TUI's seat labels; settings.rs no longer exports them
     // since #590 split settings into role-scoped panels.
@@ -5023,18 +5334,23 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 model: model.clone(),
-                saved_detail: editor.staged_model_detail(model),
-                model_warning: editor.staged_model_warning(model),
-                active_model: editor.active_model(index).map(str::to_string),
-                active_detail: editor.active_model_detail(index),
-                choices: editor
+                saved_detail: catalog.staged_model_detail(model),
+                model_warning: catalog.staged_model_warning(model),
+                active_model: catalog.active_model(index).map(str::to_string),
+                active_detail: catalog.active_model_detail(index),
+                choices: catalog
                     .model_choices(index)
                     .into_iter()
                     .map(|choice| MjModelChoiceEntry {
-                        detail: editor.staged_model_detail(&choice),
+                        detail: catalog.staged_model_detail(&choice),
                         model: choice,
                     })
                     .collect(),
+                permission: match index {
+                    1 => Some(mjconfig_permission_panel(config.review.permission)),
+                    2 => Some(mjconfig_permission_panel(config.subagents.permission)),
+                    _ => None,
+                },
             }
         })
         .collect();
@@ -5042,14 +5358,22 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let accounts = mj_core::auth::AuthVendor::ALL
         .into_iter()
         .map(|vendor| {
-            let credentials = mj_core::auth::detect(vendor);
+            let credentials = state.mjconfig.credentials(vendor);
             MjAccountEntry {
                 vendor: vendor.id().to_string(),
                 label: vendor.label().to_string(),
                 status: credentials.status(),
                 enables: vendor.enables().to_string(),
                 signed_in: credentials.available(),
-                login_supported: vendor.supports_headless_login(),
+                login_supported: vendor.supports_web_login(),
+                login_modes: vendor
+                    .web_login_modes()
+                    .iter()
+                    .map(|mode| MjLoginModeEntry {
+                        id: mode.id().to_string(),
+                        label: mode.label().to_string(),
+                    })
+                    .collect(),
             }
         })
         .collect();
@@ -5090,7 +5414,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         .collect();
 
     let seat_options = |seat: crate::settings::SessionDefaultsSeat| {
-        let rows = editor.session_option_rows(seat);
+        let rows = catalog.session_option_rows(seat);
         let (server_index, _) = *rows.first()?;
         let server = inventory.servers.get(server_index)?;
         let options = rows
@@ -5099,7 +5423,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             .map(|option| MjSessionOptionEntry {
                 key: acp::session_config_option_key(&option.id),
                 name: option.name.clone(),
-                value: editor.saved_session_value(seat, &server.id, option),
+                value: catalog.saved_session_value(seat, &server.id, option),
                 choices: crate::settings::session_option_choices(option)
                     .into_iter()
                     .map(|(value, label)| MjSessionOptionChoice { value, label })
@@ -5134,6 +5458,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     .iter()
                     .map(|frame| frame.text().to_string())
                     .collect(),
+                frame_interval_ms: style.frame_interval_ms(),
             })
             .collect(),
         thought_output: config.thought_output.to_string(),
@@ -5143,6 +5468,26 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             .collect(),
         feature_hints: config.feature_hints,
         keep_awake: config.keep_awake,
+        interface: config.interface.to_string(),
+        interfaces: config::InterfaceMode::ALL
+            .into_iter()
+            .map(|interface| MjInterfaceEntry {
+                value: interface.as_str().to_string(),
+                label: interface.to_string(),
+                description: interface.description().to_string(),
+            })
+            .collect(),
+    };
+    let input = MjInputPanel {
+        voice_auto_send: config.voice_auto_send.as_str().to_string(),
+        voice_auto_sends: config::VoiceAutoSend::ALL
+            .into_iter()
+            .map(|setting| MjVoiceAutoSendEntry {
+                value: setting.as_str().to_string(),
+                label: setting.to_string(),
+                description: setting.description().to_string(),
+            })
+            .collect(),
     };
 
     let notice = match (config.newer_build_notice(), notice) {
@@ -5150,6 +5495,15 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         (Some(warning), None) => Some(warning),
         (None, notice) => notice,
     };
+
+    let team_selection_required = !config::has_valid_team(config);
+    let no_launchable_models = !catalog.any_model_launchable();
+    let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
+    let setup = mjconfig_setup_panel(
+        team_selection_required,
+        no_launchable_models,
+        &missing_authentication,
+    );
 
     // A registered platform adapter (e.g. Anvil on Android) is the only
     // team: show it as the fixed selection instead of offering built-in
@@ -5178,6 +5532,13 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     };
 
     MjConfigSnapshot {
+        tabs: mj_core::settings::SettingsTab::ALL
+            .into_iter()
+            .map(|tab| MjSettingsTab {
+                id: tab.id().to_string(),
+                label: tab.label().to_string(),
+            })
+            .collect(),
         team,
         agents: MjAgentsPanel {
             roles,
@@ -5191,6 +5552,15 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     description: tier.description().to_string(),
                 })
                 .collect(),
+            correction_threshold: config.agent.correction_threshold.as_str().to_string(),
+            correction_thresholds: config::ReviewCorrectionThreshold::ALL
+                .into_iter()
+                .map(|threshold| MjCorrectionThresholdEntry {
+                    threshold: threshold.as_str().to_string(),
+                    label: threshold.label().to_string(),
+                    description: threshold.description().to_string(),
+                })
+                .collect(),
             max_parallel: config.subagents.max_parallel,
             max_parallel_limit: 16,
             auto_failover: config.subagents.auto_failover,
@@ -5199,12 +5569,107 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         primary_options,
         review_options,
         subagent_options,
+        input,
         appearance,
         login,
         probing,
         discovery_revision,
         notice,
+        setup,
     }
+}
+
+/// The next setup step, named concretely. Sign-in is listed before install
+/// because the ACP adapters launch through npx: a machine that can run this
+/// server can download them, so missing credentials are the usual blocker.
+fn missing_setup_authentication(
+    runtime: &MjConfigRuntime,
+    config: &config::Config,
+) -> Vec<mj_core::auth::AuthVendor> {
+    if roster::external_adapter().is_some() {
+        return Vec::new();
+    }
+    missing_setup_authentication_with(config, |vendor| runtime.credentials(vendor).available())
+}
+
+fn missing_setup_authentication_with(
+    config: &config::Config,
+    signed_in: impl Fn(mj_core::auth::AuthVendor) -> bool,
+) -> Vec<mj_core::auth::AuthVendor> {
+    match config::TeamPreset::from_config(config) {
+        Some(team) => {
+            let (coder, reviewer) = team.sources();
+            mj_core::auth::AuthVendor::ALL
+                .into_iter()
+                .filter(|vendor| {
+                    [coder, reviewer].contains(&vendor.acp_source()) && !signed_in(*vendor)
+                })
+                .collect()
+        }
+        None if mj_core::auth::AuthVendor::ALL.into_iter().any(signed_in) => Vec::new(),
+        None => mj_core::auth::AuthVendor::ALL.to_vec(),
+    }
+}
+
+fn mjconfig_setup_panel(
+    team_selection_required: bool,
+    no_launchable_models: bool,
+    missing_authentication: &[mj_core::auth::AuthVendor],
+) -> Option<MjSetupPanel> {
+    let authentication_required = !missing_authentication.is_empty();
+    (team_selection_required || authentication_required || no_launchable_models).then(|| {
+        MjSetupPanel {
+            team_selection_required,
+            authentication_required,
+            no_launchable_models,
+            message: mjconfig_setup_message(
+                team_selection_required,
+                no_launchable_models,
+                missing_authentication,
+            ),
+        }
+    })
+}
+
+fn mjconfig_setup_message(
+    team_selection_required: bool,
+    no_launchable_models: bool,
+    missing_authentication: &[mj_core::auth::AuthVendor],
+) -> String {
+    if !missing_authentication.is_empty() {
+        let separator = if team_selection_required {
+            " or "
+        } else {
+            " and "
+        };
+        let providers = missing_authentication
+            .iter()
+            .map(|vendor| vendor.enables())
+            .collect::<Vec<_>>()
+            .join(separator);
+        return if team_selection_required {
+            format!("Sign in to {providers} under ACP Servers. Team selection comes next.")
+        } else {
+            format!("Sign in to {providers} under ACP Servers to finish the selected team.")
+        };
+    }
+    if no_launchable_models {
+        "No model is available yet. Check ACP Servers.".to_string()
+    } else {
+        "Choose a team to finish setup.".to_string()
+    }
+}
+
+fn current_mjconfig_setup(state: &ServerState) -> Option<MjSetupPanel> {
+    let config = mjconfig_load(state);
+    let (catalog, _, _) = mjconfig_catalog(state, config);
+    let config = &catalog.config;
+    let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
+    mjconfig_setup_panel(
+        !config::has_valid_team(config),
+        !catalog.any_model_launchable(),
+        &missing_authentication,
+    )
 }
 
 fn refresh_mjconfig_discovery_if_needed(state: &ServerState) {
@@ -5263,6 +5728,16 @@ fn mjconfig_apply_edits(
     if let Some(model) = request.subagents_model {
         config.subagents.model = model;
     }
+    if let Some(permission) = request.review_permission {
+        config.review.permission = permission
+            .parse()
+            .map_err(|error| bad_request(format!("invalid review permission: {error}")))?;
+    }
+    if let Some(permission) = request.subagents_permission {
+        config.subagents.permission = permission
+            .parse()
+            .map_err(|error| bad_request(format!("invalid subagent permission: {error}")))?;
+    }
     if let Some(enabled) = request.discrete_review {
         config.agent.discrete_review = enabled;
     }
@@ -5270,6 +5745,13 @@ fn mjconfig_apply_edits(
         config.agent.review_tier = tier
             .parse()
             .map_err(|()| bad_request(format!("unknown review tier: {tier}")))?;
+    }
+    if let Some(threshold) = request.correction_threshold {
+        config.agent.correction_threshold = threshold.parse().map_err(|()| {
+            bad_request(format!(
+                "unknown automatic correction threshold: {threshold}"
+            ))
+        })?;
     }
     if let Some(max_parallel) = request.max_parallel {
         if max_parallel > 16 {
@@ -5300,6 +5782,16 @@ fn mjconfig_apply_edits(
     }
     if let Some(enabled) = request.keep_awake {
         config.keep_awake = enabled;
+    }
+    if let Some(interface) = request.interface {
+        config.interface = interface
+            .parse()
+            .map_err(|error| bad_request(format!("invalid interface: {error}")))?;
+    }
+    if let Some(voice_auto_send) = request.voice_auto_send {
+        config.voice_auto_send = voice_auto_send
+            .parse()
+            .map_err(|error| bad_request(format!("invalid voice auto-send setting: {error}")))?;
     }
     if let Some(policies) = request.server_policies {
         for (id, policy) in policies {
@@ -5394,14 +5886,15 @@ async fn mjconfig_apply(
     if let Some(warning) = config.newer_build_notice() {
         return Err((StatusCode::CONFLICT, warning));
     }
-    let discovery = state
-        .mjconfig
-        .discovery
-        .lock()
-        .expect("mjconfig discovery lock");
-    let inventory = discovery.inventory.clone();
-    let choices = discovery.choices.clone();
-    drop(discovery);
+    // Scoped so the guard is provably dead before the refresh await below.
+    let (inventory, choices) = {
+        let discovery = state
+            .mjconfig
+            .discovery
+            .lock()
+            .expect("mjconfig discovery lock");
+        (discovery.inventory.clone(), discovery.choices.clone())
+    };
     mjconfig_apply_edits(&mut config, request, &inventory)?;
     // Same guard as the TUI's save: a policy edit that strands a pinned seat
     // model flips that seat to auto, with a notice instead of a later failure.
@@ -5413,6 +5906,23 @@ async fn mjconfig_apply(
     } else {
         format!("Saved. {}", reroute_notices.join("; "))
     };
+    // Rebind the roster now instead of on the next session launch, so a
+    // first-run team save turns the server launchable while the user is
+    // still looking at the panel. A config that still cannot bind (no
+    // credentials yet) is not a save failure; the returned snapshot's setup
+    // panel carries the remaining step.
+    match state
+        .session_manager
+        .refresh_for_config(&state.mjconfig.config_path)
+        .await
+    {
+        Ok(Some(roster)) => {
+            state.mjconfig.update_from_roster(&roster);
+            state.session_manager.reload_auxiliary_agents().await;
+        }
+        Ok(None) => {}
+        Err(error) => warn!("saved configuration does not bind a roster yet: {error}"),
+    }
     Ok(Json(mjconfig_snapshot_response(&state, Some(notice))))
 }
 
@@ -5424,15 +5934,14 @@ async fn mjconfig_login_start(
         StatusCode::UNPROCESSABLE_ENTITY,
         format!("unknown vendor: {}", request.vendor),
     ))?;
-    if !vendor.supports_headless_login() {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "{} sign-in requires an interactive terminal; run mj locally and use the ACP Servers account row",
-                vendor.label()
-            ),
-        ));
-    }
+    let mode = vendor
+        .web_login_mode(request.mode.as_deref())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unsupported {} sign-in mode", vendor.label()),
+            )
+        })?;
     {
         let guard = state.mjconfig.login.lock().expect("mjconfig login lock");
         if guard
@@ -5445,15 +5954,21 @@ async fn mjconfig_login_start(
             ));
         }
     }
-    let output = Arc::new(Mutex::new(String::new()));
+    let output = new_mjconfig_login_output();
     let result: Arc<Mutex<Option<std::result::Result<String, String>>>> =
         Arc::new(Mutex::new(None));
     let task_output = Arc::clone(&output);
     let task_result = Arc::clone(&result);
     let discovery = Arc::clone(&state.mjconfig);
     let session_manager = Arc::clone(&state.session_manager);
+    let (input, task_input) = if vendor.web_login_accepts_input() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        (Some(sender), Some(receiver))
+    } else {
+        (None, None)
+    };
     let task = tokio::spawn(async move {
-        let outcome = mjconfig_run_login(vendor, task_output).await;
+        let outcome = mjconfig_run_login(vendor, mode, task_output, task_input).await;
         let outcome = complete_mjconfig_login(outcome, &discovery, session_manager.as_ref());
         *task_result.lock().expect("login result") =
             Some(outcome.map_err(|error| format!("{error:#}")));
@@ -5462,6 +5977,7 @@ async fn mjconfig_login_start(
         vendor,
         output,
         result,
+        input,
         abort: task.abort_handle(),
     });
     Ok(Json(mjconfig_snapshot_response(&state, None)))
@@ -5480,23 +5996,40 @@ fn complete_mjconfig_login(
 }
 
 /// Run a vendor login with output captured for the browser. Mirrors
-/// `auth::run_login` minus the terminal menu: the web flow always prefers the
-/// device-auth variant because the server may not have a usable browser.
+/// `auth::run_login` minus the terminal menu. The selected flow is explicit in
+/// the viewer, while command output and any pasted Claude code stay server-side.
 async fn mjconfig_run_login(
     vendor: mj_core::auth::AuthVendor,
-    output: Arc<Mutex<String>>,
+    mode: mj_core::auth::WebLoginMode,
+    output: Arc<Mutex<mj_core::terminal_output::TerminalText>>,
+    mut input: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Result<String> {
-    use tokio::io::AsyncReadExt;
-    let invocation = mj_core::auth::headless_login_invocation(vendor).await?;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let invocation = mj_core::auth::web_login_invocation(vendor, mode).await?;
     let mut child = tokio::process::Command::new(&invocation.command)
         .args(&invocation.args)
         .envs(&invocation.env)
-        .stdin(std::process::Stdio::null())
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("run {} login", vendor.label()))?;
+    let input_task = input.take().map(|mut input| {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        tokio::spawn(async move {
+            while let Some(line) = input.recv().await {
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+            }
+            Ok::<(), std::io::Error>(())
+        })
+    });
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     let stdout_sink = Arc::clone(&output);
@@ -5507,7 +6040,7 @@ async fn mjconfig_run_login(
                 break;
             }
             if let Ok(mut sink) = stdout_sink.lock() {
-                sink.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                sink.push(&buffer[..read]);
             }
         }
     });
@@ -5519,13 +6052,19 @@ async fn mjconfig_run_login(
                 break;
             }
             if let Ok(mut sink) = stderr_sink.lock() {
-                sink.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                sink.push(&buffer[..read]);
             }
         }
     });
     let status = child.wait().await?;
+    if let Some(input_task) = input_task {
+        input_task.abort();
+    }
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    if let Ok(mut sink) = output.lock() {
+        sink.finish();
+    }
     if !status.success() {
         anyhow::bail!("{} login exited with {status}", vendor.label());
     }
@@ -5539,6 +6078,49 @@ async fn mjconfig_run_login(
         "Signed in to {}; refreshing models for new sessions",
         vendor.label()
     ))
+}
+
+async fn mjconfig_login_input(
+    State(state): State<ServerState>,
+    Json(request): Json<MjLoginInputRequest>,
+) -> std::result::Result<Json<MjConfigSnapshot>, (StatusCode, String)> {
+    let input = request.input.trim();
+    if input.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "authorization code is required".to_string(),
+        ));
+    }
+    if input.len() > 8192 || input.contains('\r') || input.contains('\n') {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "authorization code must be one line of at most 8192 bytes".to_string(),
+        ));
+    }
+    let sender = {
+        let guard = state.mjconfig.login.lock().expect("mjconfig login lock");
+        let job = guard.as_ref().ok_or((
+            StatusCode::CONFLICT,
+            "no sign-in is waiting for an authorization code".to_string(),
+        ))?;
+        if job.result.lock().expect("login result").is_some() {
+            return Err((
+                StatusCode::CONFLICT,
+                "sign-in has already finished".to_string(),
+            ));
+        }
+        job.input.clone().ok_or((
+            StatusCode::CONFLICT,
+            "this sign-in does not accept an authorization code".to_string(),
+        ))?
+    };
+    sender.send(input.to_string()).map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            "sign-in stopped before it accepted the authorization code".to_string(),
+        )
+    })?;
+    Ok(Json(mjconfig_snapshot_response(&state, None)))
 }
 
 async fn mjconfig_login_cancel(State(state): State<ServerState>) -> Json<MjConfigSnapshot> {
@@ -5637,6 +6219,7 @@ fn build_router_with_cookie_name(config: RouterConfig, cookie_name: &'static str
             "/api/mjconfig/login",
             post(mjconfig_login_start).delete(mjconfig_login_cancel),
         )
+        .route("/api/mjconfig/login/input", post(mjconfig_login_input))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_token,
@@ -6345,6 +6928,42 @@ async fn create_server_owned_session(
     if cwd.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "cwd must not be empty".to_string()));
     }
+    if let Some(setup) = current_mjconfig_setup(&state)
+        && (setup.authentication_required || setup.team_selection_required)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "finish web setup before starting a session: {}",
+                setup.message
+            ),
+        ));
+    }
+    // Credentials can appear without changing the config file. Re-resolve now
+    // so a just-completed web login can make the first session launchable.
+    match state
+        .session_manager
+        .refresh_for_config(&state.mjconfig.config_path)
+        .await
+    {
+        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
+        Ok(None) => {}
+        Err(error) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("saved configuration cannot start a session: {error}"),
+            ));
+        }
+    }
+    if let Some(setup) = current_mjconfig_setup(&state) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "finish web setup before starting a session: {}",
+                setup.message
+            ),
+        ));
+    }
     let roots = Arc::clone(&state.workspace_roots);
     let want_worktree = request.worktree;
     // Path validation and worktree creation shell out to git; both are
@@ -6378,24 +6997,6 @@ async fn create_server_owned_session(
     })
     .await
     .map_err(internal_error)??;
-    // A /mjconfig save (or any config edit) since the last resolve re-binds
-    // the seats now, so this session launches the saved selection. A config
-    // that cannot bind a roster fails the request instead of silently
-    // launching the previous binding.
-    match state
-        .session_manager
-        .refresh_for_config(&state.mjconfig.config_path)
-        .await
-    {
-        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
-        Ok(None) => {}
-        Err(error) => {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("saved configuration cannot start a session: {error}"),
-            ));
-        }
-    }
     let db_path = Arc::clone(&state.db_path);
     let recent_cwd = selected_cwd;
     match tokio::task::spawn_blocking(move || {
@@ -6491,7 +7092,13 @@ async fn queue_prompt(
         RemoteQueuedPromptAction::RejectInvalidReview => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "usage: /review recent|uncommitted|head".to_string(),
+                "usage: /discrete-review <recent|uncommitted|head> [quick|extended]".to_string(),
+            ));
+        }
+        RemoteQueuedPromptAction::RejectRetiredReview => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "use /discrete-review or /adversarial-review".to_string(),
             ));
         }
         RemoteQueuedPromptAction::RejectInvalidLoad => {
@@ -7720,11 +8327,12 @@ fn init_db(db_path: &Path) -> Result<()> {
         "prompt_images_supported",
         "integer not null default 0",
     )?;
+    ensure_sessions_column(&conn, "steering_supported", "integer not null default 0")?;
     ensure_sessions_column(&conn, "worktree", "text")?;
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
-    ensure_sessions_column(&conn, "ragnarok_json", "text")?;
+    ensure_sessions_column(&conn, "review_workflows_json", "text not null default '[]'")?;
     ensure_table_column(
         &conn,
         "queued_prompts",
@@ -7801,12 +8409,8 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
         .map(serde_json::to_string)
         .transpose()
         .context("serialize remote-control workspace diff")?;
-    let ragnarok_json = session
-        .ragnarok
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .context("serialize remote-control Ragnarok arena")?;
+    let review_workflows_json = serde_json::to_string(&session.review_workflows)
+        .context("serialize remote-control review workflows")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     let prompt_images_supported = if session.prompt_images_supported {
@@ -7814,6 +8418,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
     } else {
         0
     };
+    let steering_supported = if session.steering_supported { 1_i64 } else { 0 };
     // The conflict arm refuses to move `last_update` backwards. A new lease
     // may immediately take over a live row when its first snapshot is newer,
     // which is how crash-then-resume avoids waiting for the heartbeat TTL.
@@ -7836,14 +8441,15 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             available_commands_json,
             prompt_in_flight,
             prompt_images_supported,
+            steering_supported,
             worktree,
             subagents_json,
             status_json,
             workspace_diff_json,
-            ragnarok_json,
+            review_workflows_json,
             lease_id,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -7863,11 +8469,12 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             available_commands_json = excluded.available_commands_json,
             prompt_in_flight = excluded.prompt_in_flight,
             prompt_images_supported = excluded.prompt_images_supported,
+            steering_supported = excluded.steering_supported,
             worktree = excluded.worktree,
             subagents_json = excluded.subagents_json,
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
-            ragnarok_json = excluded.ragnarok_json,
+            review_workflows_json = excluded.review_workflows_json,
             lease_id = excluded.lease_id,
             connected = 1
         where excluded.last_update >= sessions.last_update
@@ -7897,11 +8504,12 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             available_commands_json,
             prompt_in_flight,
             prompt_images_supported,
+            steering_supported,
             session.worktree,
             subagents_json,
             status_json,
             workspace_diff_json,
-            ragnarok_json,
+            review_workflows_json,
             session.lease_id,
         ],
     )
@@ -7913,7 +8521,7 @@ fn disconnect_session_record(db_path: &Path, session_id: &str) -> Result<()> {
     init_db(db_path)?;
     let conn = open_db(db_path)?;
     conn.execute(
-        "update sessions set connected = 0, ragnarok_json = null where session_id = ?1",
+        "update sessions set connected = 0 where session_id = ?1",
         params![session_id],
     )
     .context("disconnect remote-control session")?;
@@ -7929,7 +8537,7 @@ fn disconnect_legacy_session_record(db_path: &Path, session_id: &str) -> Result<
     let conn = open_db(db_path)?;
     let changed = conn
         .execute(
-            "update sessions set connected = 0, ragnarok_json = null
+            "update sessions set connected = 0
             where session_id = ?1 and lease_id is null",
             params![session_id],
         )
@@ -7964,7 +8572,7 @@ fn finish_session_record(
     }
     let changed = tx
         .execute(
-            "update sessions set connected = 0, ragnarok_json = null
+            "update sessions set connected = 0
             where session_id = ?1 and lease_id = ?2",
             params![session_id, request.lease_id],
         )
@@ -8135,11 +8743,12 @@ const SESSION_RECORD_SELECT: &str = "select
         where queued_prompts.session_id = sessions.session_id
     ) as queued_prompt_count,
     prompt_images_supported,
+    steering_supported,
     worktree,
     subagents_json,
     status_json,
     workspace_diff_json,
-    ragnarok_json
+    review_workflows_json
 from sessions";
 
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
@@ -8287,11 +8896,12 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                     where queued_prompts.session_id = sessions.session_id
                 ) as queued_prompt_count,
                 prompt_images_supported,
+                steering_supported,
                 worktree,
                 subagents_json,
                 status_json,
                 workspace_diff_json,
-                ragnarok_json
+                review_workflows_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -8317,16 +8927,18 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let prompt_in_flight: i64 = row.get(12)?;
     let queued_prompt_count: i64 = row.get(13)?;
     let prompt_images_supported: i64 = row.get(14)?;
-    let subagents_json: String = row.get(16)?;
-    let status_json: Option<String> = row.get(17)?;
-    let workspace_diff_json: Option<String> = row.get(18)?;
-    let ragnarok_json: Option<String> = row.get(19)?;
+    let steering_supported: i64 = row.get(15)?;
+    let subagents_json: String = row.get(17)?;
+    let status_json: Option<String> = row.get(18)?;
+    let workspace_diff_json: Option<String> = row.get(19)?;
+    let review_workflows_json: String = row.get(20)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
     let session_config = serde_json::from_str(&session_config_json).unwrap_or_default();
     let available_commands = serde_json::from_str(&available_commands_json).unwrap_or_default();
     let subagents = serde_json::from_str(&subagents_json).unwrap_or_default();
+    let review_workflows = serde_json::from_str(&review_workflows_json).unwrap_or_default();
     let last_prompt_at: Option<String> = row
         .get::<_, Option<String>>(4)?
         .filter(|value| !value.is_empty())
@@ -8340,12 +8952,14 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         last_prompt_at,
         total_messages: u64::try_from(total_messages).unwrap_or(0),
         project: row.get(6)?,
-        worktree: row.get::<_, Option<String>>(15)?,
+        worktree: row.get::<_, Option<String>>(16)?,
         agent: row.get(7)?,
         transcript,
+        review_workflows,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
         prompt_in_flight: prompt_in_flight != 0,
         prompt_images_supported: prompt_images_supported != 0,
+        steering_supported: steering_supported != 0,
         pending_permissions,
         session_config,
         native_mode: None,
@@ -8358,9 +8972,6 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         // instant it was taken, so a reconnecting viewer asks again rather
         // than inheriting an answer about a workspace that has moved on.
         workspace_head_diff: None,
-        ragnarok: ragnarok_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str(json).ok()),
         status: status_json
             .as_deref()
             .and_then(|status| serde_json::from_str(status).ok()),
@@ -9480,11 +10091,15 @@ mod tests {
     #[derive(Default)]
     struct TestServerSessionManager {
         roster_refresh_requested: AtomicBool,
+        auxiliary_reloads: AtomicU64,
         roster_refresh_lock: tokio::sync::Mutex<()>,
         launches: Mutex<BTreeMap<u64, ServerSessionLaunchState>>,
         next_launch: AtomicU64,
         sessions: Mutex<Vec<TestAgentSession>>,
         resolve_cwd: Option<PathBuf>,
+        /// Returned (once) by the next `refresh_for_config` call, standing in
+        /// for a re-resolve that succeeded.
+        refresh_roster: Mutex<Option<roster::Roster>>,
     }
 
     #[async_trait::async_trait]
@@ -9531,11 +10146,14 @@ mod tests {
             true
         }
         async fn shutdown_all(&self) {}
+        async fn reload_auxiliary_agents(&self) {
+            self.auxiliary_reloads.fetch_add(1, Ordering::Release);
+        }
         async fn refresh_for_config(
             &self,
             _config_path: &Path,
         ) -> std::result::Result<Option<roster::Roster>, String> {
-            Ok(None)
+            Ok(self.refresh_roster.lock().expect("refresh roster").take())
         }
     }
 
@@ -9607,6 +10225,47 @@ mod tests {
             None,
             roster::AcpInventory::default(),
         ))
+    }
+
+    fn test_credentials_available(
+        _vendor: mj_core::auth::AuthVendor,
+    ) -> mj_core::auth::CredentialSource {
+        mj_core::auth::CredentialSource::Environment("MJOLNIR_TEST_CREDENTIAL")
+    }
+
+    fn test_credentials_missing(
+        _vendor: mj_core::auth::AuthVendor,
+    ) -> mj_core::auth::CredentialSource {
+        mj_core::auth::CredentialSource::Missing
+    }
+
+    fn test_ready_mjconfig_runtime() -> Arc<MjConfigRuntime> {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = DIR.get_or_init(|| tempfile::tempdir().expect("ready mjconfig tempdir"));
+        let config_path = dir.path().join(format!(
+            "config-{}.toml",
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&config_path).expect("save ready config");
+        let roster = test_roster("test-model");
+        Arc::new(
+            MjConfigRuntime::new(
+                config_path,
+                roster.choices.clone(),
+                Some(models_config_from_roster(&roster)),
+                roster.inventory.clone(),
+            )
+            .with_credential_detector(test_credentials_available),
+        )
+    }
+
+    fn test_advertised_unauthenticated_mjconfig_runtime() -> Arc<MjConfigRuntime> {
+        let runtime = test_ready_mjconfig_runtime();
+        let runtime = Arc::try_unwrap(runtime).expect("unshared test runtime");
+        Arc::new(runtime.with_credential_detector(test_credentials_missing))
     }
 
     fn test_roster(model: &str) -> roster::Roster {
@@ -9683,6 +10342,14 @@ mod tests {
     }
 
     fn mjconfig_test_router(mjconfig: Arc<MjConfigRuntime>, token: &str) -> Router {
+        mjconfig_test_router_with_manager(mjconfig, token, test_session_manager())
+    }
+
+    fn mjconfig_test_router_with_manager(
+        mjconfig: Arc<MjConfigRuntime>,
+        token: &str,
+        session_manager: Arc<TestServerSessionManager>,
+    ) -> Router {
         let dir = tempfile::tempdir().expect("tempdir");
         build_router(RouterConfig {
             db_path: dir.path().join("sessions.sqlite3"),
@@ -9691,7 +10358,7 @@ mod tests {
             cookie_key: "test-cookie-key".to_string(),
             session_ttl: DEFAULT_SESSION_TTL,
             workspace_roots: test_workspace_roots(dir.path()),
-            session_manager: test_session_manager(),
+            session_manager,
             mjconfig,
         })
     }
@@ -9835,8 +10502,9 @@ mod tests {
         let login_task = tokio::spawn(std::future::pending::<()>());
         *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
             vendor: mj_core::auth::AuthVendor::OpenAi,
-            output: Arc::new(Mutex::new(String::new())),
+            output: new_mjconfig_login_output(),
             result: Arc::new(Mutex::new(Some(Ok("Signed in".to_string())))),
+            input: None,
             abort: login_task.abort_handle(),
         });
         let manager = Arc::new(TestServerSessionManager {
@@ -9853,6 +10521,89 @@ mod tests {
         assert!(!login.running);
         assert!(snapshot.probing);
         login_task.abort();
+    }
+
+    #[tokio::test]
+    async fn web_login_forwards_claude_authorization_code_to_the_running_cli() {
+        let runtime = test_mjconfig_runtime();
+        let login_task = tokio::spawn(std::future::pending::<()>());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let output = new_mjconfig_login_output();
+        output
+            .lock()
+            .expect("login output")
+            .push(b"Open the authorization URL");
+        *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
+            vendor: mj_core::auth::AuthVendor::Anthropic,
+            output,
+            result: Arc::new(Mutex::new(None)),
+            input: Some(sender),
+            abort: login_task.abort_handle(),
+        });
+        let app = mjconfig_test_router(runtime, "mjconfig-token");
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/mjconfig/login/input")
+            .header(axum::http::header::AUTHORIZATION, "Bearer mjconfig-token")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "input": "claude-auth-code" }).to_string(),
+            ))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(receiver.recv().await.as_deref(), Some("claude-auth-code"));
+        login_task.abort();
+    }
+
+    #[tokio::test]
+    async fn web_login_snapshot_removes_split_ansi_from_device_code() {
+        let runtime = test_mjconfig_runtime();
+        let login_task = tokio::spawn(std::future::pending::<()>());
+        let output = new_mjconfig_login_output();
+        {
+            let mut output = output.lock().expect("login output");
+            output.push(b"Enter code \x1b[9");
+            output.push(b"4m9VFA-AFFFH\x1b[");
+            output.push(b"0m to continue");
+        }
+        *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
+            vendor: mj_core::auth::AuthVendor::OpenAi,
+            output,
+            result: Arc::new(Mutex::new(None)),
+            input: None,
+            abort: login_task.abort_handle(),
+        });
+        let mut state = test_state();
+        state.mjconfig = runtime;
+
+        let login = mjconfig_login_status(&state).expect("running login status");
+
+        assert_eq!(login.output, "Enter code 9VFA-AFFFH to continue");
+        assert!(!login.output.contains("[94m"));
+        assert!(!login.output.contains("[0m"));
+        assert!(!login.output.contains('\u{1b}'));
+        login_task.abort();
+    }
+
+    #[tokio::test]
+    async fn web_login_rejects_a_mode_from_the_wrong_provider() {
+        let app = mjconfig_test_router(test_mjconfig_runtime(), "mjconfig-token");
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/mjconfig/login")
+            .header(axum::http::header::AUTHORIZATION, "Bearer mjconfig-token")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "vendor": "openai", "mode": "console" }).to_string(),
+            ))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -9884,7 +10635,32 @@ mod tests {
         assert_eq!(roles.len(), 3);
         assert_eq!(roles[0]["role"], "primary");
         assert!(!roles[0]["choices"].as_array().expect("choices").is_empty());
+        assert!(roles[0]["permission"].is_null());
+        assert_eq!(roles[1]["permission"]["value"], "auto");
+        assert_eq!(
+            roles[1]["permission"]["choices"]
+                .as_array()
+                .expect("review permission choices")
+                .len(),
+            config::PermissionPreset::ALL.len()
+        );
+        assert_eq!(
+            roles[1]["permission"]["choices"][1]["description"],
+            config::PermissionPreset::Auto.description()
+        );
+        assert_eq!(roles[2]["permission"]["value"], "auto");
         assert_eq!(snapshot["agents"]["max_parallel_limit"], 16);
+
+        let tabs = snapshot["tabs"].as_array().expect("settings tabs");
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab["id"].as_str().expect("tab id"))
+                .collect::<Vec<_>>(),
+            mj_core::settings::SettingsTab::ALL
+                .into_iter()
+                .map(mj_core::settings::SettingsTab::id)
+                .collect::<Vec<_>>(),
+        );
 
         let presets = snapshot["team"]["presets"]
             .as_array()
@@ -9899,8 +10675,11 @@ mod tests {
         assert_eq!(accounts.len(), mj_core::auth::AuthVendor::ALL.len());
         assert_eq!(accounts[0]["vendor"], "openai");
         assert_eq!(accounts[0]["login_supported"], true);
+        assert_eq!(accounts[0]["login_modes"][0]["id"], "device");
         assert_eq!(accounts[1]["vendor"], "anthropic");
-        assert_eq!(accounts[1]["login_supported"], false);
+        assert_eq!(accounts[1]["login_supported"], true);
+        assert_eq!(accounts[1]["login_modes"][0]["id"], "subscription");
+        assert_eq!(accounts[1]["login_modes"][1]["id"], "console");
 
         let themes = snapshot["appearance"]["themes"].as_array().expect("themes");
         assert_eq!(themes.len(), mj_core::theme::TerminalThemeKind::ALL.len());
@@ -9908,16 +10687,37 @@ mod tests {
             .as_array()
             .expect("spinners");
         assert_eq!(spinners.len(), mj_core::spinner::SpinnerStyle::ALL.len());
-        for spinner in spinners {
+        for (spinner, style) in spinners.iter().zip(mj_core::spinner::SpinnerStyle::ALL) {
+            assert_eq!(spinner["name"].as_str(), Some(style.as_str()));
             assert!(!spinner["frames"].as_array().expect("frames").is_empty());
+            assert_eq!(
+                spinner["frame_interval_ms"].as_u64(),
+                Some(style.frame_interval_ms() as u64)
+            );
         }
         assert_eq!(snapshot["appearance"]["thought_output"], "default");
+        assert_eq!(snapshot["appearance"]["interface"], "inline");
+        assert_eq!(
+            snapshot["appearance"]["interfaces"]
+                .as_array()
+                .expect("interface choices")
+                .len(),
+            config::InterfaceMode::ALL.len()
+        );
         assert_eq!(
             snapshot["appearance"]["thought_outputs"]
                 .as_array()
                 .expect("thought outputs")
                 .len(),
             config::ThoughtOutput::ALL.len()
+        );
+        assert_eq!(snapshot["input"]["voice_auto_send"], "off");
+        assert_eq!(
+            snapshot["input"]["voice_auto_sends"]
+                .as_array()
+                .expect("voice auto-send choices")
+                .len(),
+            config::VoiceAutoSend::ALL.len()
         );
 
         assert!(
@@ -9984,6 +10784,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mjconfig_snapshot_reports_setup_while_nothing_is_launchable() {
+        let runtime = test_mjconfig_runtime();
+        // A saved team makes the team step deterministic. Authentication can
+        // still depend on the host, but an empty model catalog always blocks.
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&runtime.config_path).expect("seed config");
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        assert_eq!(snapshot["setup"]["no_launchable_models"], true);
+        assert_eq!(snapshot["setup"]["team_selection_required"], false);
+        assert!(
+            !snapshot["setup"]["message"]
+                .as_str()
+                .expect("setup message")
+                .is_empty()
+        );
+    }
+
+    /// `team_selection_required` cannot be pinned through the saved config:
+    /// runtime route hints are `#[serde(skip)]` and `normalize` clears team
+    /// ids this build cannot map, so after a load the flag is purely "does
+    /// this host have credentials to adopt a default team" — exactly the
+    /// fresh-machine state, and host-dependent in a test. The wire coverage
+    /// above exercises the setup panel; this covers the message mapping.
+    #[test]
+    fn mjconfig_setup_message_names_the_blocking_step() {
+        use mj_core::auth::AuthVendor::{Anthropic, OpenAi};
+
+        assert_eq!(
+            mjconfig_setup_message(true, true, &[OpenAi, Anthropic]),
+            "Sign in to Codex or Claude under ACP Servers. Team selection comes next."
+        );
+        assert_eq!(
+            mjconfig_setup_message(false, true, &[OpenAi, Anthropic]),
+            "Sign in to Codex and Claude under ACP Servers to finish the selected team."
+        );
+        assert_eq!(
+            mjconfig_setup_message(true, false, &[]),
+            "Choose a team to finish setup."
+        );
+        assert_eq!(
+            mjconfig_setup_message(false, true, &[]),
+            "No model is available yet. Check ACP Servers."
+        );
+    }
+
+    #[test]
+    fn advertised_models_do_not_complete_setup_without_required_authentication() {
+        use mj_core::auth::AuthVendor::{Anthropic, OpenAi};
+
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        assert_eq!(
+            missing_setup_authentication_with(&config, |_| false),
+            vec![OpenAi]
+        );
+        let setup = mjconfig_setup_panel(false, false, &[OpenAi]).expect("setup remains pending");
+        assert!(setup.authentication_required);
+        assert!(!setup.no_launchable_models);
+
+        assert!(mjconfig_setup_panel(false, false, &[]).is_none());
+
+        config::TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        assert_eq!(
+            missing_setup_authentication_with(&config, |vendor| vendor == OpenAi),
+            vec![Anthropic]
+        );
+    }
+
+    #[test]
+    fn first_run_authentication_advances_to_team_then_checks_the_selected_team() {
+        use mj_core::auth::AuthVendor::{Anthropic, OpenAi};
+
+        let mut config = config::Config::default();
+        assert_eq!(
+            missing_setup_authentication_with(&config, |_| false),
+            vec![OpenAi, Anthropic]
+        );
+        assert!(missing_setup_authentication_with(&config, |vendor| vendor == OpenAi).is_empty());
+
+        config::TeamPreset::Claude.apply(&mut config);
+        assert_eq!(
+            missing_setup_authentication_with(&config, |vendor| vendor == OpenAi),
+            vec![Anthropic]
+        );
+        assert!(
+            missing_setup_authentication_with(&config, |vendor| vendor == Anthropic).is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn mjconfig_apply_rebinds_the_roster_with_the_save() {
+        let runtime = test_mjconfig_runtime();
+        let manager = test_session_manager();
+        *manager.refresh_roster.lock().expect("refresh roster") = Some(test_roster("test-model"));
+        let token = "mjconfig-token";
+        let app =
+            mjconfig_test_router_with_manager(Arc::clone(&runtime), token, Arc::clone(&manager));
+
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({ "team": "codex" })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+        // The re-resolve ran with the save: the returned snapshot already
+        // shows the launchable catalog — no restart or extra session launch is
+        // needed to bind the roster. Setup may still require host credentials.
+        assert_eq!(snapshot["team"]["selected"], "codex");
+        if !snapshot["setup"].is_null() {
+            assert_eq!(snapshot["setup"]["no_launchable_models"], false);
+            assert_eq!(snapshot["setup"]["authentication_required"], true);
+        }
+        let discovery = runtime.discovery.lock().expect("discovery lock");
+        assert_eq!(discovery.choices.len(), 1);
+        assert_eq!(
+            manager.auxiliary_reloads.load(Ordering::Acquire),
+            1,
+            "a successful mjconfig rebind reloads active server sessions' auxiliary routes"
+        );
+    }
+
+    #[tokio::test]
     async fn mjconfig_snapshot_reports_probed_session_options() {
         use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
         let runtime = test_mjconfig_runtime();
@@ -9998,15 +10933,23 @@ mod tests {
         let mut inventory = roster::discover_inventory(&config);
         let server = inventory.servers.first_mut().expect("visible ACP server");
         let server_id = server.id.clone();
-        server.session_config = vec![SessionConfigOption::select(
-            "service_tier",
-            "Service tier",
-            "default",
-            vec![
-                SessionConfigSelectOption::new("default", "Default"),
-                SessionConfigSelectOption::new("flex", "Flex"),
-            ],
-        )];
+        server.session_config = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "agent",
+                vec![SessionConfigSelectOption::new("agent", "Agent")],
+            ),
+            SessionConfigOption::select(
+                "service_tier",
+                "Service tier",
+                "default",
+                vec![
+                    SessionConfigSelectOption::new("default", "Default"),
+                    SessionConfigSelectOption::new("flex", "Flex"),
+                ],
+            ),
+        ];
         runtime.discovery.lock().expect("discovery lock").inventory = inventory;
 
         let token = "mjconfig-token";
@@ -10018,15 +10961,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
         // With the default "auto" models, every seat falls back to the first
-        // priority source advertising options — the server we seeded.
+        // priority source advertising options — the server we seeded. The
+        // delegated Codex permission control owns `mode`, so it cannot become
+        // a competing reviewer/subagent session-default override.
         for seat in ["primary_options", "review_options", "subagent_options"] {
             let group = &snapshot[seat];
             assert_eq!(group["server_id"], server_id.as_str(), "{seat} server");
-            let option = &group["options"][0];
+            let options = group["options"].as_array().expect("options");
+            let option = options
+                .iter()
+                .find(|option| option["key"] == "config:service_tier")
+                .expect("service tier option");
             assert_eq!(option["key"], "config:service_tier");
             assert_eq!(option["name"], "Service tier");
             assert_eq!(option["value"], "default");
             assert_eq!(option["choices"].as_array().expect("choices").len(), 2);
+            assert_eq!(
+                options
+                    .iter()
+                    .filter(|option| option["key"] == "config:mode")
+                    .count(),
+                usize::from(seat == "primary_options"),
+                "{seat} mode visibility"
+            );
         }
     }
 
@@ -10101,13 +11058,19 @@ mod tests {
                 Some(serde_json::json!({
                     "team": "claude_codex",
                     "primary_model": "gpt-5-6-terra",
+                    "review_permission": "manual",
+                    "subagents_permission": "yolo",
                     "discrete_review": false,
                     "review_tier": "extended",
+                    "correction_threshold": "p1",
                     "max_parallel": 4,
                     "theme": "ansi",
                     "spinner": "wave",
                     "thought_output": "full",
                     "feature_hints": false,
+                    "keep_awake": false,
+                    "interface": "fullscreen",
+                    "voice_auto_send": "four_seconds",
                     "primary_session_defaults": {
                         "codex-acp": { "config:collaboration_mode": "yolo" }
                     },
@@ -10135,22 +11098,47 @@ mod tests {
         assert_eq!(snapshot["agents"]["discrete_review"], false);
         assert_eq!(snapshot["agents"]["review_tier"], "extended");
         assert_eq!(snapshot["agents"]["review_tiers"][0]["tier"], "quick");
+        assert_eq!(snapshot["agents"]["correction_threshold"], "p1");
+        assert_eq!(
+            snapshot["agents"]["correction_thresholds"][3]["threshold"],
+            "p3"
+        );
         assert_eq!(snapshot["agents"]["max_parallel"], 4);
         assert_eq!(snapshot["appearance"]["theme"], "ansi");
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
         assert_eq!(snapshot["appearance"]["thought_output"], "full");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
+        assert_eq!(snapshot["appearance"]["keep_awake"], false);
+        assert_eq!(snapshot["appearance"]["interface"], "fullscreen");
+        assert_eq!(snapshot["input"]["voice_auto_send"], "four_seconds");
+        assert_eq!(
+            snapshot["agents"]["roles"][1]["permission"]["value"],
+            "manual"
+        );
+        assert_eq!(
+            snapshot["agents"]["roles"][2]["permission"]["value"],
+            "yolo"
+        );
         assert_eq!(snapshot["team"]["selected"], "claude_codex");
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
         assert!(!saved.agent.discrete_review);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
+        assert_eq!(
+            saved.agent.correction_threshold,
+            config::ReviewCorrectionThreshold::P1
+        );
         assert_eq!(saved.subagents.max_parallel, 4);
         assert_eq!(saved.theme, mj_core::theme::TerminalThemeKind::Ansi);
         assert_eq!(saved.spinner, mj_core::spinner::SpinnerStyle::Wave);
         assert_eq!(saved.thought_output, config::ThoughtOutput::Full);
         assert!(!saved.feature_hints);
+        assert!(!saved.keep_awake);
+        assert_eq!(saved.interface, config::InterfaceMode::Fullscreen);
+        assert_eq!(saved.voice_auto_send, config::VoiceAutoSend::FourSeconds);
+        assert_eq!(saved.review.permission, config::PermissionPreset::Manual);
+        assert_eq!(saved.subagents.permission, config::PermissionPreset::Yolo);
         assert_eq!(
             saved
                 .agent
@@ -10277,6 +11265,11 @@ mod tests {
             serde_json::json!({ "spinner": "cube" }),
             serde_json::json!({ "thought_output": "summary" }),
             serde_json::json!({ "review_tier": "thorough" }),
+            serde_json::json!({ "correction_threshold": "p4" }),
+            serde_json::json!({ "review_permission": "always" }),
+            serde_json::json!({ "subagents_permission": "ask" }),
+            serde_json::json!({ "interface": "windowed" }),
+            serde_json::json!({ "voice_auto_send": "one_second" }),
             serde_json::json!({ "team": "sidekick" }),
             serde_json::json!({ "priority": { "sidekick": { "source": "x" } } }),
             serde_json::json!({ "server_policies": { "custom:company": "enabled" } }),
@@ -10497,6 +11490,136 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_renders_the_review_ledger_and_full_evidence_reader() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"review-board\""));
+        assert!(viewer.contains("id=\"review-issues-modal\""));
+
+        let review_start = viewer
+            .find("      const REVIEW_STATUS = {")
+            .expect("embedded viewer review ledger");
+        let review_end = viewer
+            .find("      function appendToolDiffs")
+            .expect("review ledger boundary");
+        let review_source = &viewer[review_start..review_end];
+
+        // Execute the exact browser rendering functions with a deliberately
+        // small DOM shim. This verifies the visible board and the evidence
+        // reader instead of merely checking that their source text exists.
+        let mut script = String::from(
+            r##"
+class FixtureNode {
+  constructor(tag = "div") {
+    this.tagName = tag;
+    this.children = [];
+    this.className = "";
+    this.dataset = {};
+    this.hidden = false;
+    this.textContent = "";
+    this.title = "";
+    this.type = "";
+    this.attributes = {};
+    this.listeners = {};
+  }
+  append(...nodes) { this.children.push(...nodes); }
+  appendChild(node) { this.children.push(node); return node; }
+  replaceChildren(...nodes) { this.children = [...nodes]; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+  click() { this.listeners.click?.({ target: this }); }
+  focus() {}
+  get innerText() {
+    return `${this.textContent}${this.children.map((child) => child.innerText ?? child.textContent ?? "").join("")}`;
+  }
+}
+
+globalThis.document = {
+  createElement(tag) { return new FixtureNode(tag); },
+  createDocumentFragment() { return new FixtureNode("#fragment"); },
+};
+
+const reviewBoardEl = new FixtureNode("section");
+const reviewIssuesBodyEl = new FixtureNode("div");
+const reviewIssuesModalEl = new FixtureNode("section");
+reviewIssuesModalEl.hidden = true;
+const reviewIssuesCloseEl = new FixtureNode("button");
+const fixtureSession = {
+  review_workflows: [{
+    turn_id: 7,
+    operation: 1,
+    outcome: "completed",
+    issues: [{
+      id: 1,
+      pass: 0,
+      summary: "P1 mj-remote/src/remote.rs: browser must expose this finding",
+      status: "corrected; verification pending",
+      resolution_reason: "the correction changed the workspace",
+      resolution_details: "cargo test -p brokk-mj-remote\n\ndiff --git a/mj-remote/src/remote.rs",
+    }],
+  }],
+};
+function selectedSession() { return fixtureSession; }
+function emptyNote(text) {
+  const note = new FixtureNode("p");
+  note.textContent = text;
+  return note;
+}
+function renderRichText(text) {
+  const rendered = new FixtureNode("div");
+  rendered.textContent = text;
+  return rendered;
+}
+"##,
+        );
+        script.push_str(review_source);
+        script.push_str(
+            r##"
+renderReviewBoard(fixtureSession);
+if (!reviewBoardEl.innerText.includes("Review · completed")) {
+  throw new Error(`review board did not render completed workflow: ${reviewBoardEl.innerText}`);
+}
+if (!reviewBoardEl.innerText.includes("#1 P1 mj-remote/src/remote.rs")) {
+  throw new Error(`review board did not render finding summary: ${reviewBoardEl.innerText}`);
+}
+if (!reviewBoardEl.innerText.includes("verification pending")) {
+  throw new Error(`review board did not render finding status: ${reviewBoardEl.innerText}`);
+}
+const fullEvidence = reviewBoardEl.children[0].children.find((child) => child.textContent === "Full evidence");
+if (!fullEvidence) {
+  throw new Error("review board did not render full evidence action");
+}
+fullEvidence.click();
+if (reviewIssuesModalEl.hidden) {
+  throw new Error("full evidence action did not open the evidence reader");
+}
+const evidence = reviewIssuesBodyEl.innerText;
+for (const expected of [
+  "Finding — validated review evidence",
+  "browser must expose this finding",
+  "Correction evidence",
+  "diff --git a/mj-remote/src/remote.rs",
+]) {
+  if (!evidence.includes(expected)) {
+    throw new Error(`evidence reader omitted ${expected}: ${evidence}`);
+  }
+}
+"##,
+        );
+
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer review behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
     fn embedded_viewer_keeps_session_actions_in_wrapping_mobile_header() {
         let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
         assert!(viewer.contains("id=\"mobile-new-session-button\""));
@@ -10523,9 +11646,105 @@ mod tests {
         assert!(viewer.contains("function scheduleSessionResumeRetry"));
         assert!(viewer.contains("function retryPendingViewerSession"));
         assert!(viewer.contains("showAuth(`Can't reach Mjolnir."));
+        assert!(
+            !viewer.contains("showAuth(`Can't reach Mjolnir. Reconnecting automatically…`, true)")
+        );
         assert!(viewer.contains("scheduleSessionResumeRetry();"));
         assert!(viewer.contains("window.addEventListener(\"online\", retryPendingViewerSession)"));
         assert!(viewer.contains("showAuth(\"Your session expired."));
+    }
+
+    #[test]
+    fn embedded_viewer_routes_each_onboarding_step_to_its_required_control() {
+        let viewer = include_str!("remote_viewer.html");
+        let start = viewer
+            .find("      let setupState = null;")
+            .expect("setup state");
+        let end = viewer[start..]
+            .find("      function openViewerSettings")
+            .map(|offset| start + offset)
+            .expect("setup flow boundary");
+        let setup_source = &viewer[start..end];
+        let script = format!(
+            r#"
+const mjconfigModalEl = {{ hidden: true }};
+const mjcfg = {{ snapshot: null, tab: null }};
+let opened = null;
+let renders = 0;
+function openMjConfig(tab) {{ opened = tab; }}
+function renderMjConfig() {{ renders += 1; }}
+function renderSessions() {{}}
+{setup_source}
+if (setupStep({{ no_launchable_models: true, authentication_required: false }}) !== "servers") {{
+  throw new Error("missing models must open ACP Servers");
+}}
+if (setupStep({{ no_launchable_models: false, authentication_required: true }}) !== "servers") {{
+  throw new Error("missing authentication must open ACP Servers");
+}}
+if (setupStep({{ no_launchable_models: false, authentication_required: false, team_selection_required: true }}) !== "team") {{
+  throw new Error("configured models must advance to Team");
+}}
+setupState = {{ no_launchable_models: true, authentication_required: true, team_selection_required: true }};
+maybePromptSetup();
+if (opened !== "servers") {{ throw new Error(`opened ${{opened}} instead of servers`); }}
+mjconfigModalEl.hidden = false;
+mjcfg.snapshot = {{}};
+setupState = {{ no_launchable_models: false, authentication_required: false, team_selection_required: true }};
+maybePromptSetup();
+if (mjcfg.tab !== "team" || renders !== 1) {{
+  throw new Error("successful authentication did not advance to team selection");
+}}
+"#,
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer setup behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(viewer.contains("Paste the Claude authorization code"));
+        assert!(viewer.contains("/api/mjconfig/login/input"));
+    }
+
+    #[test]
+    fn embedded_viewer_extracts_a_clean_login_url_from_terminal_output() {
+        let viewer = include_str!("remote_viewer.html");
+        let start = viewer
+            .find("      function mjExtractUrl")
+            .expect("URL helper");
+        let end = viewer[start..]
+            .find("      function renderMjTabs")
+            .map(|offset| start + offset)
+            .expect("URL helper boundary");
+        let source = &viewer[start..end];
+        let script = format!(
+            r#"
+{source}
+const styled = "Open \u001b[34mhttps://example.com/device\u001b[0m now";
+if (mjExtractUrl(styled) !== "https://example.com/device") {{
+  throw new Error(`bad styled URL: ${{mjExtractUrl(styled)}}`);
+}}
+if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/device") {{
+  throw new Error("trailing punctuation was retained");
+}}
+"#,
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer URL extraction failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]
@@ -10572,10 +11791,8 @@ mod tests {
     #[test]
     fn embedded_viewer_contains_role_scoped_acp_session_controls() {
         let viewer = include_str!("remote_viewer.html");
-        assert!(viewer.contains("[\"team\", \"Team\"]"));
-        assert!(viewer.contains("[\"agents\", \"Agent\"]"));
-        assert!(viewer.contains("[\"reviewer\", \"Reviewer\"]"));
-        assert!(viewer.contains("[\"subagents\", \"Subagents\"]"));
+        assert!(viewer.contains("mjcfg.snapshot?.tabs || []"));
+        assert!(viewer.contains("case \"input\":"));
         assert!(viewer.contains("snapshot.primary_options"));
         assert!(viewer.contains("snapshot.review_options"));
         assert!(viewer.contains("snapshot.subagent_options"));
@@ -10593,6 +11810,13 @@ mod tests {
         assert!(viewer.contains("Discovering ACP session options"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));
         assert!(viewer.contains("function renderMjTeam()"));
+        assert!(viewer.contains("function renderMjInput()"));
+        assert!(viewer.contains("function mjRolePermissionRow(role, field)"));
+        assert!(viewer.contains("review_permission"));
+        assert!(viewer.contains("subagents_permission"));
+        assert!(viewer.contains("voice_auto_send"));
+        assert!(viewer.contains("Terminal theme"));
+        assert!(viewer.contains("Terminal interface"));
         assert!(!viewer.contains("ACP Priority"));
         assert!(!viewer.contains("renderMjPriority"));
     }
@@ -10602,7 +11826,7 @@ mod tests {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("mjRow(\"Thought output\")"));
         assert!(viewer.contains("mjcfg.edits.thought_output = next"));
-        assert!(viewer.contains("function refreshThoughtOutput()"));
+        assert!(viewer.contains("function refreshServerSnapshot()"));
         assert!(viewer.contains("function thoughtSummary(text)"));
         assert!(viewer.contains("function activeThoughtTail(text)"));
         assert!(viewer.contains("function nestedThoughtFinished(actor, laterEntries, session)"));
@@ -10611,6 +11835,50 @@ mod tests {
         assert!(viewer.contains("actorPrefix === \"subagent\" ? \"subagent\" : \"review\""));
         assert!(viewer.contains("entry._thoughtCompleted"));
         assert!(viewer.contains("thoughtOutput === \"default\""));
+    }
+
+    #[test]
+    fn embedded_viewer_prompts_first_run_setup() {
+        let viewer = include_str!("remote_viewer.html");
+        // Boot captures setup state and routes to the blocking step.
+        assert!(viewer.contains("function maybePromptSetup()"));
+        assert!(viewer.contains("promptedSetupStep = step;"));
+        assert!(viewer.contains("void openMjConfig(step);"));
+        // The sidebar carries the setup card while sessions cannot launch.
+        assert!(viewer.contains("function setupRequiredCard()"));
+        assert!(viewer.contains("querySelector(\".empty, .setup-card\")"));
+        // The dialog banner falls back to the blocking step, and a save that
+        // leaves setup unfinished keeps the editor open on it.
+        assert!(viewer.contains("mjcfg.snapshot?.setup?.message"));
+        assert!(viewer.contains("if (mjcfg.snapshot?.setup) {"));
+        assert!(viewer.contains("newSessionButtonEl.disabled = Boolean(setupState);"));
+        let picker_start = viewer
+            .find("      function openNewSessionPicker()")
+            .expect("new-session picker");
+        let picker_end = viewer[picker_start..]
+            .find("      function closeNewSessionPicker()")
+            .map(|offset| picker_start + offset)
+            .expect("new-session picker boundary");
+        let picker = &viewer[picker_start..picker_end];
+        assert!(picker.contains("if (setupState)"));
+        assert!(picker.contains("void openMjConfig(setupStep());"));
+    }
+
+    #[test]
+    fn embedded_viewer_shares_the_tui_spinner_and_exposes_its_choice() {
+        let viewer = include_str!("remote_viewer.html");
+
+        assert!(viewer.contains("id=\"working-spinner\""));
+        assert!(viewer.contains("function applyAppearanceSnapshot"));
+        assert!(viewer.contains("function syncWorkingSpinner"));
+        assert!(viewer.contains("spinner.frame_interval_ms"));
+        assert!(viewer.contains("function spinnerFrameIndex"));
+        assert!(viewer.contains("reducedMotion.matches"));
+        assert!(viewer.contains("reducedMotion.addEventListener(\"change\""));
+        assert!(viewer.contains("mjRow(\"Spinner\")"));
+        assert!(viewer.contains("mjcfg.edits.spinner = next"));
+        assert!(viewer.contains("matches the terminal prompt-working spinner"));
+        assert!(!viewer.contains("cursor-blink"));
     }
 
     #[test]
@@ -10643,31 +11911,6 @@ mod tests {
         assert!(viewer.contains("queueSessionAction(\"/exit\""));
         assert!(viewer.contains("type exit to return"));
         assert!(viewer.contains("titleActor === bodyActor"));
-    }
-
-    #[test]
-    fn embedded_viewer_contains_read_only_ragnarok_observability() {
-        let viewer = include_str!("remote_viewer.html");
-        assert!(viewer.contains("id=\"ragnarok-panel\""));
-        assert!(viewer.contains("function renderRagnarok"));
-        assert!(viewer.contains("session?.ragnarok"));
-        assert!(viewer.contains("arena.awaiting_approval"));
-        assert!(viewer.contains("awaiting local unleash"));
-        assert!(viewer.contains("fighter.vigor"));
-        assert!(viewer.contains("arena.adoption_hint"));
-        assert!(viewer.contains("read only"));
-        assert!(viewer.contains("renderRagnarok(session)"));
-        let arena_render = viewer
-            .find("renderRagnarok(session);")
-            .expect("arena render call");
-        let transcript_render = viewer
-            .find("renderTranscript(session, archived);")
-            .expect("transcript render call");
-        assert!(
-            arena_render < transcript_render,
-            "arena geometry must settle before transcript scroll anchoring"
-        );
-        assert!(!viewer.contains("queueSessionAction(\"/ragnarok"));
     }
 
     #[test]
@@ -10937,6 +12180,87 @@ mod tests {
         ));
 
         assert_eq!(state.total_messages, 2);
+    }
+
+    #[test]
+    fn tracker_keeps_remote_prompts_queued_until_stop_steers_one() {
+        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::Connected {
+            agent_name: None,
+            agent_version: None,
+            prompt_images_supported: false,
+            session_fork_supported: false,
+            session_load_supported: false,
+            side_session_supported: false,
+            side_session_unsupported_reason: None,
+            steering_supported: true,
+        });
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "implement it".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+        let (_, started_at) = state
+            .prompt_cancel_claim()
+            .expect("the first prompt should be active");
+        state.observe_session_update(&SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::Text(TextContent::new("working")),
+        )));
+
+        assert!(state.can_steer_queued_prompt_on_cancel());
+        assert!(
+            state.reserve_remote_prompt_slot().is_none(),
+            "normal browser prompts must remain FIFO queued while a turn is active"
+        );
+        state.observe_command(&UiCommand::SteerPrompt {
+            text: "use the streaming API".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert!(snapshot.steering_supported);
+        assert!(snapshot.prompt_in_flight, "a steer must not end the turn");
+        assert_eq!(
+            state.prompt_cancel_claim(),
+            Some(("sess-1".to_string(), started_at)),
+            "a steer must keep the original turn's cancellation ownership"
+        );
+        assert_eq!(snapshot.total_messages, 3);
+        assert_eq!(
+            snapshot.transcript.last().expect("steered prompt").text,
+            "use the streaming API"
+        );
+
+        state.steering_supported = false;
+        assert!(!state.can_steer_queued_prompt_on_cancel());
+        assert!(
+            state.reserve_remote_prompt_slot().is_none(),
+            "an agent without steering support must also retain its FIFO queue"
+        );
+
+        state.observe_event(&UiEvent::PromptDone {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        });
+        state.observe_command(&UiCommand::SteerPrompt {
+            text: "retry after the turn ended".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+        assert!(
+            state
+                .snapshot()
+                .expect("idle-race snapshot")
+                .prompt_in_flight,
+            "an idle-race steer becomes a new ordinary prompt"
+        );
     }
 
     #[test]
@@ -11235,7 +12559,7 @@ mod tests {
         });
 
         state.observe_event(&subagent_message(11, "mimir first"));
-        state.observe_event(&subagent_message(22, "heimdall"));
+        state.observe_event(&subagent_message(22, "tests"));
         state.observe_event(&subagent_message(11, "mimir second"));
 
         let snapshot = state.snapshot().expect("snapshot");
@@ -11248,7 +12572,7 @@ mod tests {
             entries,
             vec![
                 (Some("subagent-11"), "mimir first"),
-                (Some("subagent-22"), "heimdall"),
+                (Some("subagent-22"), "tests"),
                 (Some("subagent-11"), "mimir second"),
             ]
         );
@@ -11761,7 +13085,7 @@ mod tests {
         assert!(record.diffs.is_empty());
     }
 
-    /// A remote `/diff` is a client-side command like `/review`, not text for
+    /// A remote `/diff` is a client-side command like the discrete-review aliases, not text for
     /// the agent, and it must never be forwarded as a prompt.
     #[test]
     fn remote_diff_command_requests_a_worktree_read() {
@@ -11907,6 +13231,63 @@ mod tests {
                 "review · waiting for 2 reviewers",
                 "review complete · no material findings",
             ]
+        );
+    }
+
+    #[test]
+    fn tracker_publishes_full_review_issue_evidence() {
+        use mj_core::workflow::{
+            ReviewIssueStatus, WorkflowCoverage, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = started_session_tracker();
+        let workflow_id = WorkflowId::review(7);
+        for transition in [
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec!["P1 src/lib.rs: stale state escapes the correction".to_string()],
+            },
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: None,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some("updated the transition and added a focused test".to_string()),
+                details: Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string()),
+            },
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Completed,
+                coverage: WorkflowCoverage::Complete,
+            },
+        ] {
+            state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+                workflow_id,
+                transition,
+            )));
+        }
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.review_workflows.len(), 1);
+        let workflow = &snapshot.review_workflows[0];
+        assert_eq!(workflow.turn_id, 7);
+        assert_eq!(workflow.outcome.as_deref(), Some("completed"));
+        assert_eq!(workflow.issues.len(), 1);
+        assert_eq!(
+            workflow.issues[0].summary,
+            "P1 src/lib.rs: stale state escapes the correction"
+        );
+        assert_eq!(workflow.issues[0].status, "corrected; verification pending");
+        assert_eq!(
+            workflow.issues[0].resolution_reason.as_deref(),
+            Some("updated the transition and added a focused test")
+        );
+        assert_eq!(
+            workflow.issues[0].resolution_details.as_deref(),
+            Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs")
         );
     }
 
@@ -12271,75 +13652,6 @@ mod tests {
             "completed turns must hide stop controls"
         );
         assert!(state.prompt_cancel_claim().is_none());
-    }
-
-    #[test]
-    fn tracker_projects_and_clears_ragnarok_observations() {
-        let observation = RagnarokRecord {
-            task: "forge the feature".to_string(),
-            phase: "verdict".to_string(),
-            awaiting_approval: false,
-            fighters: vec![
-                RagnarokFighterRecord {
-                    id: 0,
-                    source: "claude".to_string(),
-                    model: "Opus".to_string(),
-                    status: "slain: tests failed".to_string(),
-                    vigor: "empty".to_string(),
-                },
-                RagnarokFighterRecord {
-                    id: 1,
-                    source: "codex".to_string(),
-                    model: "GPT".to_string(),
-                    status: "standing".to_string(),
-                    vigor: "full".to_string(),
-                },
-            ],
-            verdict: Some(RagnarokVerdictRecord {
-                clear_winner: Some(1),
-                finalists: None,
-                ranking: vec![1, 0],
-                reasoning: "GPT passed the full gate.".to_string(),
-                thor_fallback: false,
-                chosen_finalist: None,
-            }),
-            adoption_hint: Some("Adopt GPT with `mj --worktree ragnarok-gpt`.".to_string()),
-            failed: None,
-            done: true,
-        };
-        let tracker =
-            RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string());
-        tracker.observe_event(&UiEvent::SessionStarted {
-            session_id: "sess-1".to_string(),
-            resumed: false,
-        });
-        tracker.observe_ragnarok(Some(observation));
-        let snapshot = tracker
-            .state
-            .lock()
-            .expect("state")
-            .snapshot()
-            .expect("snapshot");
-        let arena = snapshot.ragnarok.expect("arena");
-        assert_eq!(arena.phase, "verdict");
-        assert_eq!(arena.fighters[0].status, "slain: tests failed");
-        assert_eq!(arena.fighters[1].source, "codex");
-        assert_eq!(
-            arena.adoption_hint.as_deref(),
-            Some("Adopt GPT with `mj --worktree ragnarok-gpt`.")
-        );
-        assert_eq!(arena.verdict.as_ref().expect("verdict").ranking, vec![1, 0]);
-        tracker.observe_ragnarok(None);
-        assert!(
-            tracker
-                .state
-                .lock()
-                .expect("state")
-                .snapshot()
-                .expect("snapshot")
-                .ragnarok
-                .is_none()
-        );
     }
 
     #[test]
@@ -12746,9 +14058,23 @@ mod tests {
                     tool_diffs: Vec::new(),
                 },
             ],
+            review_workflows: vec![ReviewWorkflowRecord {
+                turn_id: 4,
+                operation: 1,
+                outcome: Some("completed".to_string()),
+                issues: vec![ReviewIssueRecord {
+                    id: 1,
+                    pass: 0,
+                    summary: "P1 src/lib.rs: stale state escapes the correction".to_string(),
+                    status: "verified fixed".to_string(),
+                    resolution_reason: Some("verified by a later clean review".to_string()),
+                    resolution_details: Some("cargo test -p mj-core".to_string()),
+                }],
+            }],
             queued_prompt_count: 0,
             prompt_in_flight: true,
             prompt_images_supported: true,
+            steering_supported: true,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: vec![command_record(
@@ -12769,7 +14095,6 @@ mod tests {
             }],
             workspace_diff: None,
             workspace_head_diff: None,
-            ragnarok: None,
             status: Some(SessionStatusRecord {
                 model: "gpt-5.6".to_string(),
                 model_source: Some("codex-acp".to_string()),
@@ -12789,6 +14114,21 @@ mod tests {
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
+        let updated_review_workflows = vec![ReviewWorkflowRecord {
+            turn_id: 4,
+            operation: 1,
+            outcome: Some("completed".to_string()),
+            issues: vec![ReviewIssueRecord {
+                id: 1,
+                pass: 1,
+                summary: "P1 src/lib.rs: stale state escapes the correction".to_string(),
+                status: "corrected; verification pending".to_string(),
+                resolution_reason: Some("the correction changed the workspace".to_string()),
+                resolution_details: Some(
+                    "cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string(),
+                ),
+            }],
+        }];
         upsert_session_record(
             &db_path,
             &SessionRecord {
@@ -12816,6 +14156,7 @@ mod tests {
                         tool_diffs: Vec::new(),
                     },
                 ],
+                review_workflows: updated_review_workflows.clone(),
                 ..session.clone()
             },
         )
@@ -12827,6 +14168,7 @@ mod tests {
         assert_eq!(sessions[0].total_messages, 6);
         assert!(sessions[0].prompt_in_flight);
         assert!(sessions[0].prompt_images_supported);
+        assert!(sessions[0].steering_supported);
         assert_eq!(sessions[0].start_time, "2026-06-03T10:00:00Z");
         assert_eq!(sessions[0].last_update, "2026-06-03T10:00:40Z");
         assert_eq!(
@@ -12834,6 +14176,8 @@ mod tests {
             Some("2026-06-03T10:00:05Z")
         );
         assert_eq!(sessions[0].transcript.len(), 2);
+        assert_eq!(sessions[0].review_workflows, updated_review_workflows);
+        assert_ne!(sessions[0].review_workflows, session.review_workflows);
         assert_eq!(sessions[0].transcript[0].kind, "user");
         assert_eq!(sessions[0].transcript[0].text, "hello");
         assert_eq!(sessions[0].transcript[1].kind, "agent");
@@ -12857,6 +14201,7 @@ mod tests {
         }"#;
         let record: SessionRecord = serde_json::from_str(json).expect("deserialize");
         assert_eq!(record.worktree, None);
+        assert!(!record.steering_supported);
     }
 
     fn init_committed_git_repo(path: &Path) {
@@ -13189,6 +14534,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_session_endpoint_blocks_launch_until_web_setup_finishes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = "integration-token".to_string();
+        let app = build_router(RouterConfig {
+            db_path: dir.path().join("sessions.sqlite3"),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            // The adapter advertises a model, exactly the state that used to
+            // let setup disappear before the provider was authenticated.
+            mjconfig: test_advertised_unauthenticated_mjconfig_runtime(),
+        });
+
+        let response = app
+            .oneshot(new_session_request(
+                &token,
+                serde_json::json!({ "cwd": dir.path().display().to_string(), "worktree": false }),
+            ))
+            .await
+            .expect("create session");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert!(
+            String::from_utf8_lossy(&body).contains("finish web setup before starting a session")
+        );
+        assert!(String::from_utf8_lossy(&body).contains("Sign in to Codex"));
+    }
+
+    #[tokio::test]
     async fn server_session_endpoint_creates_worktree_when_requested() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("project");
@@ -13204,7 +14587,7 @@ mod tests {
             session_ttl: DEFAULT_SESSION_TTL,
             workspace_roots: test_workspace_roots(dir.path()),
             session_manager: test_session_manager(),
-            mjconfig: test_mjconfig_runtime(),
+            mjconfig: test_ready_mjconfig_runtime(),
         });
 
         let response = app
@@ -13259,7 +14642,7 @@ mod tests {
             session_ttl: DEFAULT_SESSION_TTL,
             workspace_roots: test_workspace_roots(dir.path()),
             session_manager: test_session_manager(),
-            mjconfig: test_mjconfig_runtime(),
+            mjconfig: test_ready_mjconfig_runtime(),
         });
 
         let response = app
@@ -13289,9 +14672,11 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -13299,7 +14684,6 @@ mod tests {
             native_mode: None,
             workspace_diff: None,
             workspace_head_diff: None,
-            ragnarok: None,
             status: None,
         };
         let disconnected = SessionRecord {
@@ -13633,7 +15017,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_queued_prompt_action_routes_fork_commands() {
+    fn remote_queued_prompt_action_routes_review_and_fork_commands() {
         assert_eq!(
             remote_queued_prompt_action("/fork".to_string(), false, true, true, true, false, false),
             RemoteQueuedPromptAction::ForkSession
@@ -13668,7 +15052,7 @@ mod tests {
         );
         assert_eq!(
             remote_queued_prompt_action(
-                "/review recent".to_string(),
+                "/discrete-review recent".to_string(),
                 false,
                 true,
                 true,
@@ -13676,11 +15060,14 @@ mod tests {
                 false,
                 false
             ),
-            RemoteQueuedPromptAction::RunReview(mj_core::event::ReviewTarget::Recent)
+            RemoteQueuedPromptAction::RunReview(ReviewRequest {
+                target: ReviewTarget::Recent,
+                tier: None,
+            })
         );
         assert_eq!(
             remote_queued_prompt_action(
-                "/review head".to_string(),
+                "/adversarial-review head extended".to_string(),
                 false,
                 true,
                 true,
@@ -13688,7 +15075,22 @@ mod tests {
                 false,
                 false
             ),
-            RemoteQueuedPromptAction::RunReview(mj_core::event::ReviewTarget::Head)
+            RemoteQueuedPromptAction::RunReview(ReviewRequest {
+                target: ReviewTarget::Head,
+                tier: Some(config::ReviewTier::Extended),
+            })
+        );
+        assert_eq!(
+            remote_queued_prompt_action(
+                "/discrete-review".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
+            RemoteQueuedPromptAction::RejectInvalidReview
         );
         assert_eq!(
             remote_queued_prompt_action(
@@ -13700,7 +15102,19 @@ mod tests {
                 false,
                 false
             ),
-            RemoteQueuedPromptAction::RejectInvalidReview
+            RemoteQueuedPromptAction::RejectRetiredReview
+        );
+        assert_eq!(
+            remote_queued_prompt_action(
+                "/review-branch main".to_string(),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false
+            ),
+            RemoteQueuedPromptAction::SendPrompt("/review-branch main".to_string())
         );
         assert_eq!(
             remote_queued_prompt_action("/fork".to_string(), true, true, true, true, false, false),
@@ -14261,9 +15675,11 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -14271,43 +15687,8 @@ mod tests {
             native_mode: None,
             workspace_diff: None,
             workspace_head_diff: None,
-            ragnarok: None,
             status: None,
         }
-    }
-
-    #[test]
-    fn active_ragnarok_arena_round_trips_through_sqlite() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("sessions.sqlite3");
-        let arena = RagnarokRecord {
-            task: "forge the feature".to_string(),
-            phase: "combat".to_string(),
-            awaiting_approval: false,
-            fighters: vec![RagnarokFighterRecord {
-                id: 0,
-                source: "codex".to_string(),
-                model: "GPT".to_string(),
-                status: "fighting".to_string(),
-                vigor: "active".to_string(),
-            }],
-            verdict: None,
-            adoption_hint: None,
-            failed: None,
-            done: false,
-        };
-        let session = SessionRecord {
-            ragnarok: Some(arena.clone()),
-            ..session_named("sess-ragnarok", "2026-06-10T10:00:00Z")
-        };
-
-        upsert_session_record(&db_path, &session).expect("insert arena");
-        let loaded = load_session_records(&db_path).expect("load arena");
-        assert_eq!(loaded[0].ragnarok.as_ref(), Some(&arena));
-
-        disconnect_session_record(&db_path, "sess-ragnarok").expect("disconnect");
-        let loaded = load_session_records(&db_path).expect("reload disconnected session");
-        assert!(loaded[0].ragnarok.is_none());
     }
 
     #[test]
@@ -14900,10 +16281,10 @@ mod tests {
                 AvailableCommand::new("fork ", "agent fork should be hidden"),
                 AvailableCommand::new("New", "agent case variant should be hidden"),
                 AvailableCommand::new("", "empty should be hidden"),
-                AvailableCommand::new("review", "review the workspace").input(
+                AvailableCommand::new("discrete-review", "agent command should be hidden").input(
                     AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("scope")),
                 ),
-                AvailableCommand::new(" review ", "duplicate review should be hidden"),
+                AvailableCommand::new(" adversarial-review ", "duplicate alias should be hidden"),
             ])),
         ));
 
@@ -14917,14 +16298,22 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "new", "clear", "compact", "export", "mjconfig", "review", "fork", "load",
+                "new",
+                "clear",
+                "compact",
+                "export",
+                "mjconfig",
+                "discrete-review",
+                "adversarial-review",
+                "fork",
+                "load",
             ]
         );
         assert_eq!(snapshot.available_commands[0].source, "mjolnir");
         assert_eq!(snapshot.available_commands[5].source, "mjolnir");
         assert_eq!(
             snapshot.available_commands[5].input_hint.as_deref(),
-            Some("recent|uncommitted|head")
+            Some("recent|uncommitted|head [quick|extended]")
         );
     }
 
@@ -14947,7 +16336,7 @@ mod tests {
         });
         state.observe_event(&UiEvent::SessionUpdate(
             SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
-                AvailableCommand::new("review", "review the workspace"),
+                AvailableCommand::new("review_pr", "review the pull request"),
             ])),
         ));
         assert!(
@@ -14956,7 +16345,7 @@ mod tests {
                 .expect("snapshot")
                 .available_commands
                 .iter()
-                .any(|command| command.name == "review")
+                .any(|command| command.name == "review_pr")
         );
 
         state.observe_event(&UiEvent::SessionStarted {
@@ -14973,13 +16362,20 @@ mod tests {
         assert_eq!(
             same_session_names,
             vec![
-                "new", "clear", "compact", "export", "mjconfig", "review", "fork",
+                "new",
+                "clear",
+                "compact",
+                "export",
+                "mjconfig",
+                "discrete-review",
+                "adversarial-review",
+                "fork",
             ]
         );
 
         state.observe_event(&UiEvent::SessionUpdate(
             SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
-                AvailableCommand::new("review", "review the workspace"),
+                AvailableCommand::new("review_pr", "review the pull request"),
             ])),
         ));
         state.observe_event(&UiEvent::SessionStarted {
@@ -14996,7 +16392,14 @@ mod tests {
         assert_eq!(
             new_session_names,
             vec![
-                "new", "clear", "compact", "export", "mjconfig", "review", "fork",
+                "new",
+                "clear",
+                "compact",
+                "export",
+                "mjconfig",
+                "discrete-review",
+                "adversarial-review",
+                "fork",
             ]
         );
     }
@@ -15377,9 +16780,11 @@ mod tests {
             worktree: None,
             agent: "opencode".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: vec![pending.clone()],
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -15387,7 +16792,6 @@ mod tests {
             native_mode: None,
             workspace_diff: None,
             workspace_head_diff: None,
-            ragnarok: None,
             status: None,
         };
 
@@ -16729,9 +18133,11 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
+            steering_supported: false,
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -16739,7 +18145,6 @@ mod tests {
             native_mode: None,
             workspace_diff: None,
             workspace_head_diff: None,
-            ragnarok: None,
             status: None,
         };
 

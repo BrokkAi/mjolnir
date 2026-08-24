@@ -12,7 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::{
-    AcpServerPolicy, Config, InterfaceMode, ModelsConfig, TeamPreset, ThoughtOutput,
+    AcpServerPolicy, Config, InterfaceMode, ModelsConfig, PermissionPreset, TeamPreset,
+    ThoughtOutput, VoiceAutoSend,
 };
 use crate::event::{ComputerControlAction, ComputerControlStatus};
 use crate::ink::InkStyle;
@@ -21,19 +22,18 @@ use crate::palette::TerminalThemeKindExt;
 use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
+pub(crate) use mj_core::settings::{SessionDefaultsSeat, session_option_is_editable};
 
 const ACCOUNT_COUNT: usize = crate::auth::AuthVendor::ALL.len();
 pub(crate) const SETTINGS_PANEL_MIN_WIDTH: u16 = 28;
 pub(crate) const SETTINGS_PANEL_MIN_HEIGHT: u16 = 12;
 pub(crate) const SERVER_ROW_OFFSET: usize = ACCOUNT_COUNT;
-pub(crate) const CONFIGURABLE_ACP_SERVERS: [&str; 2] = ["codex-acp", "claude-acp"];
+pub(crate) use mj_core::settings::is_configurable_acp_server;
 
-pub(crate) fn is_configurable_acp_server(id: &str) -> bool {
-    // The platform adapter (e.g. Anvil on Android) is deliberately absent:
-    // it is the only route on its build, so disabling it can never be valid.
-    CONFIGURABLE_ACP_SERVERS.contains(&id)
-}
-
+/// Terminal-specific `/mjconfig` panels. Computer Control is deliberately
+/// local to the macOS terminal session: its Screen Recording and
+/// Accessibility permissions belong to the app running on this machine, not
+/// to the web viewer's remote-server configuration surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Team,
@@ -41,29 +41,32 @@ pub enum SettingsTab {
     Reviewer,
     Subagents,
     AcpServers,
+    Input,
     Computer,
     Appearance,
 }
 
 impl SettingsTab {
     #[cfg(target_os = "macos")]
+    const ALL: [Self; 8] = [
+        Self::Team,
+        Self::Agents,
+        Self::Reviewer,
+        Self::Subagents,
+        Self::AcpServers,
+        Self::Input,
+        Self::Computer,
+        Self::Appearance,
+    ];
+
+    #[cfg(not(target_os = "macos"))]
     const ALL: [Self; 7] = [
         Self::Team,
         Self::Agents,
         Self::Reviewer,
         Self::Subagents,
         Self::AcpServers,
-        Self::Computer,
-        Self::Appearance,
-    ];
-
-    #[cfg(not(target_os = "macos"))]
-    const ALL: [Self; 6] = [
-        Self::Team,
-        Self::Agents,
-        Self::Reviewer,
-        Self::Subagents,
-        Self::AcpServers,
+        Self::Input,
         Self::Appearance,
     ];
 
@@ -74,6 +77,7 @@ impl SettingsTab {
             Self::Reviewer => "Reviewer",
             Self::Subagents => "Subagents",
             Self::AcpServers => "ACP Servers",
+            Self::Input => "Input",
             Self::Computer => "Computer",
             Self::Appearance => "Appearance",
         }
@@ -91,17 +95,12 @@ pub enum SettingsAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionDefaultsSeat {
-    Primary,
-    Review,
-    Subagents,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsRow {
     PrimaryModel,
     ReviewModel,
+    ReviewPermissions,
     SubagentModel,
+    SubagentPermissions,
     SessionOption {
         seat: SessionDefaultsSeat,
         server_index: usize,
@@ -109,6 +108,7 @@ enum SettingsRow {
     },
     DiscreteReview,
     ReviewTier,
+    CorrectionThreshold,
     MaxParallelSubagents,
     AutomaticQuotaFailover,
 }
@@ -261,6 +261,7 @@ impl SettingsEditor {
                     SettingsTab::Reviewer,
                     SettingsTab::Subagents,
                     SettingsTab::AcpServers,
+                    SettingsTab::Input,
                     SettingsTab::Appearance,
                 ]
             }
@@ -308,6 +309,7 @@ impl SettingsEditor {
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
             SettingsTab::Computer => 1,
+            SettingsTab::Input => 1,
             SettingsTab::Appearance => 6,
         }
     }
@@ -331,6 +333,12 @@ impl SettingsEditor {
                 SettingsRow::PrimaryModel => self.cycle_model(0, delta),
                 SettingsRow::ReviewModel => self.cycle_model(1, delta),
                 SettingsRow::SubagentModel => self.cycle_model(2, delta),
+                SettingsRow::ReviewPermissions => {
+                    cycle_permission_preset(&mut self.config.review.permission, delta)
+                }
+                SettingsRow::SubagentPermissions => {
+                    cycle_permission_preset(&mut self.config.subagents.permission, delta)
+                }
                 SettingsRow::SessionOption {
                     seat,
                     server_index,
@@ -345,6 +353,7 @@ impl SettingsEditor {
                         (self.config.subagents.max_parallel as i32 + delta).rem_euclid(17) as usize;
                 }
                 SettingsRow::ReviewTier => self.cycle_review_tier(delta),
+                SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(delta),
                 SettingsRow::DiscreteReview | SettingsRow::AutomaticQuotaFailover => {
                     return SettingsAction::None;
                 }
@@ -421,6 +430,15 @@ impl SettingsEditor {
                     (current as i32 + delta).rem_euclid(InterfaceMode::ALL.len() as i32) as usize;
                 self.config.interface = InterfaceMode::ALL[next];
             }
+            SettingsTab::Input if self.selected == 0 => {
+                let current = VoiceAutoSend::ALL
+                    .iter()
+                    .position(|setting| *setting == self.config.voice_auto_send)
+                    .unwrap_or(0);
+                let next =
+                    (current as i32 + delta).rem_euclid(VoiceAutoSend::ALL.len() as i32) as usize;
+                self.config.voice_auto_send = VoiceAutoSend::ALL[next];
+            }
             _ => return SettingsAction::None,
         }
         self.notice = None;
@@ -442,6 +460,7 @@ impl SettingsEditor {
                 // Two tiers, so the toggle key advances the same way the
                 // left/right keys do rather than doing nothing here.
                 SettingsRow::ReviewTier => self.cycle_review_tier(1),
+                SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(1),
                 SettingsRow::AutomaticQuotaFailover => {
                     self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
                 }
@@ -496,7 +515,7 @@ impl SettingsEditor {
                 rows
             }
             SettingsTab::Reviewer => {
-                let mut rows = vec![SettingsRow::ReviewModel];
+                let mut rows = vec![SettingsRow::ReviewModel, SettingsRow::ReviewPermissions];
                 rows.extend(
                     self.session_option_rows(SessionDefaultsSeat::Review)
                         .into_iter()
@@ -508,10 +527,11 @@ impl SettingsEditor {
                 );
                 rows.push(SettingsRow::DiscreteReview);
                 rows.push(SettingsRow::ReviewTier);
+                rows.push(SettingsRow::CorrectionThreshold);
                 rows
             }
             SettingsTab::Subagents => {
-                let mut rows = vec![SettingsRow::SubagentModel];
+                let mut rows = vec![SettingsRow::SubagentModel, SettingsRow::SubagentPermissions];
                 rows.extend(
                     self.session_option_rows(SessionDefaultsSeat::Subagents)
                         .into_iter()
@@ -646,13 +666,7 @@ impl SettingsEditor {
             .session_config
             .iter()
             .enumerate()
-            .filter(|(_, option)| {
-                matches!(option.kind, SessionConfigKind::Select(_))
-                    && !matches!(
-                        option.category,
-                        Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Model)
-                    )
-            })
+            .filter(|(_, option)| session_option_is_editable(seat, server.launch.kind, option))
             .map(|(option_index, _)| (server_index, option_index))
             .collect()
     }
@@ -810,6 +824,16 @@ impl SettingsEditor {
         self.config.agent.review_tier = tiers[next];
     }
 
+    fn cycle_correction_threshold(&mut self, delta: i32) {
+        let thresholds = crate::config::ReviewCorrectionThreshold::ALL;
+        let current = thresholds
+            .iter()
+            .position(|threshold| *threshold == self.config.agent.correction_threshold)
+            .unwrap_or(thresholds.len() - 1);
+        let next = (current as i32 + delta).rem_euclid(thresholds.len() as i32) as usize;
+        self.config.agent.correction_threshold = thresholds[next];
+    }
+
     fn cycle_team(&mut self, delta: i32) {
         if self.config.apply_registered_external_team() {
             return;
@@ -826,8 +850,7 @@ impl SettingsEditor {
         let next = (current as i32 + delta).rem_euclid(TeamPreset::ALL.len() as i32) as usize;
         TeamPreset::ALL[next].apply(&mut self.config);
         self.refresh_inventory();
-        self.notice =
-            Some("Team updated; start a new session or restart Mjolnir to apply it.".to_string());
+        self.notice = Some("Team updated; save to apply it.".to_string());
     }
 
     pub(crate) fn model_choices(&self, role: usize) -> Vec<String> {
@@ -946,6 +969,7 @@ pub fn draw_settings_panel(
         SettingsTab::Subagents => draw_subagents(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
         SettingsTab::Computer => draw_computer(frame, rows[1], editor, theme),
+        SettingsTab::Input => draw_input_settings(frame, rows[1], editor, theme),
         SettingsTab::Appearance => draw_appearance(frame, rows[1], editor, theme),
     }
     if let Some(notice) = &editor.notice {
@@ -1127,7 +1151,7 @@ fn draw_tabs(
         };
         [
             Span::styled(format!(" {} ", tab.label()), style),
-            Span::raw("  "),
+            Span::raw(" "),
         ]
     });
     frame.render_widget(Paragraph::new(Line::from(tabs.collect::<Vec<_>>())), area);
@@ -1184,6 +1208,29 @@ fn model_lines(
         ));
     }
     lines
+}
+
+fn permission_lines(
+    selected: bool,
+    permission: PermissionPreset,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    vec![
+        selected_line(selected, format!("Permissions < {permission} >"), theme),
+        Line::styled(
+            format!("  {}", permission.description()),
+            Style::default().ink(theme.muted),
+        ),
+    ]
+}
+
+fn cycle_permission_preset(permission: &mut PermissionPreset, delta: i32) {
+    let current = PermissionPreset::ALL
+        .iter()
+        .position(|candidate| *candidate == *permission)
+        .unwrap_or(0);
+    let next = (current as i32 + delta).rem_euclid(PermissionPreset::ALL.len() as i32) as usize;
+    *permission = PermissionPreset::ALL[next];
 }
 
 fn draw_agents(
@@ -1249,9 +1296,12 @@ fn draw_agents(
                 }
             }
             SettingsRow::ReviewModel
+            | SettingsRow::ReviewPermissions
             | SettingsRow::SubagentModel
+            | SettingsRow::SubagentPermissions
             | SettingsRow::DiscreteReview
             | SettingsRow::ReviewTier
+            | SettingsRow::CorrectionThreshold
             | SettingsRow::MaxParallelSubagents
             | SettingsRow::AutomaticQuotaFailover => {}
         }
@@ -1272,10 +1322,12 @@ fn draw_reviewer(
         .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
     let mut lines = Vec::new();
     let mut selected_line_index = 0;
+    let mut session_options_heading_drawn = false;
     for (row_index, row) in rows.into_iter().enumerate() {
-        if row_index == 1 && has_options {
+        if matches!(row, SettingsRow::SessionOption { .. }) && !session_options_heading_drawn {
             lines.push(Line::raw(""));
             lines.push(session_options_heading(editor, source.as_deref(), theme));
+            session_options_heading_drawn = true;
         }
         if has_options && matches!(row, SettingsRow::DiscreteReview) {
             lines.push(Line::raw(""));
@@ -1293,6 +1345,13 @@ fn draw_reviewer(
                     model,
                     1,
                     editor,
+                    theme,
+                ));
+            }
+            SettingsRow::ReviewPermissions => {
+                lines.extend(permission_lines(
+                    selected,
+                    editor.config.review.permission,
                     theme,
                 ));
             }
@@ -1348,8 +1407,31 @@ fn draw_reviewer(
                     ));
                 }
             }
+            SettingsRow::CorrectionThreshold => {
+                let threshold = editor.config.agent.correction_threshold;
+                lines.push(selected_line(
+                    selected,
+                    format!("Automatic correction through < {} >", threshold.label()),
+                    theme,
+                ));
+                lines.push(Line::styled(
+                    format!("  {}", threshold.description()),
+                    Style::default().ink(if editor.config.agent.discrete_review {
+                        theme.muted
+                    } else {
+                        theme.warning
+                    }),
+                ));
+                if !editor.config.agent.discrete_review {
+                    lines.push(Line::styled(
+                        "  discrete review is off, so no finding is corrected automatically",
+                        Style::default().ink(theme.warning),
+                    ));
+                }
+            }
             SettingsRow::PrimaryModel
             | SettingsRow::SubagentModel
+            | SettingsRow::SubagentPermissions
             | SettingsRow::MaxParallelSubagents
             | SettingsRow::AutomaticQuotaFailover => {}
         }
@@ -1370,10 +1452,12 @@ fn draw_subagents(
         .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
     let mut lines = Vec::new();
     let mut selected_line_index = 0;
+    let mut session_options_heading_drawn = false;
     for (row_index, row) in rows.into_iter().enumerate() {
-        if row_index == 1 && has_options {
+        if matches!(row, SettingsRow::SessionOption { .. }) && !session_options_heading_drawn {
             lines.push(Line::raw(""));
             lines.push(session_options_heading(editor, source.as_deref(), theme));
+            session_options_heading_drawn = true;
         }
         if has_options && matches!(row, SettingsRow::MaxParallelSubagents) {
             lines.push(Line::raw(""));
@@ -1391,6 +1475,13 @@ fn draw_subagents(
                     model,
                     2,
                     editor,
+                    theme,
+                ));
+            }
+            SettingsRow::SubagentPermissions => {
+                lines.extend(permission_lines(
+                    selected,
+                    editor.config.subagents.permission,
                     theme,
                 ));
             }
@@ -1434,8 +1525,10 @@ fn draw_subagents(
             )),
             SettingsRow::PrimaryModel
             | SettingsRow::ReviewModel
+            | SettingsRow::ReviewPermissions
             | SettingsRow::DiscreteReview
-            | SettingsRow::ReviewTier => {}
+            | SettingsRow::ReviewTier
+            | SettingsRow::CorrectionThreshold => {}
         }
     }
     draw_scrolling_settings_lines(frame, area, lines, selected_line_index);
@@ -1909,6 +2002,34 @@ fn draw_appearance(
     frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), area);
 }
 
+fn draw_input_settings(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &SettingsEditor,
+    theme: TerminalTheme,
+) {
+    let lines = vec![
+        Line::styled(
+            "Input settings apply when saved.",
+            Style::default().ink(theme.muted),
+        ),
+        Line::raw(""),
+        selected_line(
+            editor.selected == 0,
+            format!("Voice auto-send < {} >", editor.config.voice_auto_send),
+            theme,
+        ),
+        Line::styled(
+            format!(
+                "                {}",
+                editor.config.voice_auto_send.description()
+            ),
+            Style::default().ink(theme.muted),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
 /// What the startup probe learned, phrased for the appearance tab.
 ///
 /// Worth surfacing because it explains an otherwise mysterious difference
@@ -2064,6 +2185,8 @@ mod tests {
             });
         editor.tab = SettingsTab::AcpServers;
 
+        assert_eq!(editor.handle_key(KeyCode::Tab), SettingsAction::None);
+        assert_eq!(editor.tab, SettingsTab::Input);
         assert_eq!(editor.handle_key(KeyCode::Tab), SettingsAction::None);
         assert_eq!(editor.tab, SettingsTab::Computer);
     }
@@ -2371,25 +2494,41 @@ mod tests {
         );
 
         editor.tab = SettingsTab::Reviewer;
-        for selected in 1..=5 {
+        assert_eq!(
+            editor
+                .session_option_rows(SessionDefaultsSeat::Review)
+                .len(),
+            4,
+            "review permissions owns the provider mode option"
+        );
+        for selected in 2..=5 {
             editor.selected = selected;
             assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         }
-        assert_eq!(editor.config.review.session_defaults[&server_id].len(), 5);
+        assert_eq!(editor.config.review.session_defaults[&server_id].len(), 4);
+        assert!(!editor.config.review.session_defaults[&server_id].contains_key("config:mode"));
         assert_eq!(
             editor.config.review.reasoning_effort.as_deref(),
             Some("value")
         );
 
         editor.tab = SettingsTab::Subagents;
-        for selected in 1..=5 {
+        assert_eq!(
+            editor
+                .session_option_rows(SessionDefaultsSeat::Subagents)
+                .len(),
+            4,
+            "subagent permissions owns the provider mode option"
+        );
+        for selected in 2..=5 {
             editor.selected = selected;
             assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         }
         assert_eq!(
             editor.config.subagents.session_defaults[&server_id].len(),
-            5
+            4
         );
+        assert!(!editor.config.subagents.session_defaults[&server_id].contains_key("config:mode"));
         assert_eq!(
             editor.config.subagents.reasoning_effort.as_deref(),
             Some("value")
@@ -2642,6 +2781,10 @@ mod tests {
             editor.config.acp.policy("codex-acp"),
             AcpServerPolicy::Disabled
         );
+        editor.handle_key(KeyCode::Tab);
+        assert_eq!(editor.tab, SettingsTab::Input);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::TwoSeconds);
     }
 
     #[test]
@@ -2657,12 +2800,41 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::ReviewTier)
             .expect("review tier row");
+        let threshold = rows
+            .iter()
+            .position(|row| *row == SettingsRow::CorrectionThreshold)
+            .expect("correction threshold row");
         assert_eq!(tier, review + 1, "the tier belongs beside the switch");
+        assert_eq!(
+            threshold,
+            tier + 1,
+            "the correction policy belongs beside review depth"
+        );
 
         editor.selected = tier;
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Quick);
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Extended);
+
+        editor.selected = threshold;
+        assert_eq!(
+            editor.config.agent.correction_threshold,
+            crate::config::ReviewCorrectionThreshold::P3
+        );
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.agent.correction_threshold,
+            crate::config::ReviewCorrectionThreshold::P2
+        );
+        assert_eq!(
+            editor.handle_key(KeyCode::Char(' ')),
+            SettingsAction::Changed
+        );
+        assert_eq!(
+            editor.config.agent.correction_threshold,
+            crate::config::ReviewCorrectionThreshold::P3
+        );
+        editor.selected = tier;
         // Two tiers, so left, right, and the toggle key all return to Quick.
         assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Quick);
@@ -2687,6 +2859,31 @@ mod tests {
             SettingsAction::Changed
         );
         assert!(!editor.config.subagents.auto_failover);
+    }
+
+    #[test]
+    fn reviewer_and_subagent_permissions_are_configured_independently() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = editor
+            .settings_rows(SettingsTab::Reviewer)
+            .iter()
+            .position(|row| *row == SettingsRow::ReviewPermissions)
+            .expect("review permissions row");
+        assert_eq!(editor.config.review.permission, PermissionPreset::Auto);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.review.permission, PermissionPreset::Manual);
+        assert_eq!(editor.config.subagents.permission, PermissionPreset::Auto);
+
+        editor.tab = SettingsTab::Subagents;
+        editor.selected = editor
+            .settings_rows(SettingsTab::Subagents)
+            .iter()
+            .position(|row| *row == SettingsRow::SubagentPermissions)
+            .expect("subagent permissions row");
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.subagents.permission, PermissionPreset::Yolo);
+        assert_eq!(editor.config.review.permission, PermissionPreset::Manual);
     }
 
     #[test]
@@ -2742,7 +2939,7 @@ mod tests {
         );
         assert_eq!(
             editor.notice.as_deref(),
-            Some("Team updated; start a new session or restart Mjolnir to apply it.")
+            Some("Team updated; save to apply it.")
         );
     }
 
@@ -2896,6 +3093,18 @@ mod tests {
     }
 
     #[test]
+    fn input_tab_cycles_voice_auto_send_delay() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Input;
+
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::Off);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::TwoSeconds);
+        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
+        assert_eq!(editor.config.voice_auto_send, VoiceAutoSend::Off);
+    }
+
+    #[test]
     fn standard_tabs_render_their_controls() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
@@ -2958,12 +3167,24 @@ mod tests {
         assert!(appearance.contains("Keep awake"), "rendered:\n{appearance}");
         assert!(appearance.contains("Interface"), "rendered:\n{appearance}");
         assert!(appearance.contains("< inline >"), "rendered:\n{appearance}");
+        assert!(
+            !appearance.contains("Voice auto-send"),
+            "rendered:\n{appearance}"
+        );
+
+        editor.tab = SettingsTab::Input;
+        let input = render(&editor, 100, 30);
+        assert!(input.contains("Voice auto-send"), "rendered:\n{input}");
+        assert!(
+            input.contains("Input settings apply when saved"),
+            "rendered:\n{input}"
+        );
 
         assert!(!render(&editor, 27, 11).contains("mj config"));
     }
 
     #[test]
-    fn reviewer_panel_keeps_persistence_details_out_of_the_control_list() {
+    fn reviewer_panel_keeps_mode_under_the_permissions_control() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -3004,7 +3225,14 @@ mod tests {
             reviewer.contains("Session options ·"),
             "rendered:\n{reviewer}"
         );
-        assert!(reviewer.contains("Mode < Agent >"), "rendered:\n{reviewer}");
+        assert!(
+            reviewer.contains("Permissions < Auto >"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(
+            !reviewer.contains("Mode < Agent >"),
+            "rendered:\n{reviewer}"
+        );
         assert!(
             reviewer.contains("Reasoning effort < High >"),
             "rendered:\n{reviewer}"

@@ -52,7 +52,7 @@ The nested runtime is not given this MCP server, so it cannot recursively
 delegate.
 
 The first version is interactive-only and hard-codes Codex as the nested ACP
-agent. Headless, MCP, remote-server, Ragnarok, and other auxiliary runtimes do
+agent. Headless, MCP, remote-server, and other auxiliary runtimes do
 not inject the tool.
 
 ## End-to-end checks

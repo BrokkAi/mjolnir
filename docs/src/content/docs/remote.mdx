@@ -1,6 +1,6 @@
 ---
 title: Mjolnir Web
-description: One command publishes the coding session on your machine to a browser — read the diff, answer permission prompts, and start worktree sessions from your phone while the repository stays on the host.
+description: One command publishes the coding session on your machine to a browser — read the diff, steer a running turn, answer permission prompts, and start worktree sessions from your phone while the repository stays on the host.
 ---
 
 import { Image } from 'astro:assets';
@@ -9,8 +9,9 @@ import shotNewSession from '../../assets/remote/new-session-worktree.png';
 import shotFolderSearch from '../../assets/remote/folder-search.png';
 import shotMobileSessions from '../../assets/remote/mobile-sessions.png';
 import shotSubagentApproval from '../../assets/remote/subagent-approval.png';
-import shotSubagentsReview from '../../assets/remote/subagents-review.png';
 import shotCommandPalette from '../../assets/remote/command-palette.png';
+import shotSideConversation from '../../assets/remote/side-conversation.png';
+import shotSidePalette from '../../assets/remote/side-palette.png';
 import shotSessionConfig from '../../assets/remote/session-config.png';
 import shotStatusLine from '../../assets/remote/status-line.png';
 import shotHistory from '../../assets/remote/history-archive.png';
@@ -47,7 +48,10 @@ The browser is a control surface for that session, not a copy of your code.
 - **Pick up sessions from either side.** Sessions started in the terminal appear
   in the browser; sessions started in the browser record their adapter and model
   so `mj resume` reopens them on the host.
-- **Queue a prompt while the agent is busy** — it runs when the turn frees up.
+- **Steer the running turn** — send a correction while the agent is working
+  to place it in the same FIFO queue the terminal uses, then select **Stop**
+  to inject the oldest queued correction into that turn when steering is
+  supported.
 - **Attach an image** to a prompt, and run the agent's own slash commands: typing
   `/` opens a palette of the commands the connected agent advertises.
 - **Install it as an app.** Mjolnir Web ships a web app manifest and service
@@ -156,31 +160,58 @@ running rows first in spawn order, each showing its id, label, latest activity,
 and elapsed time, and finished rows marked `✔`, `✘`, or `⊘`. This is more
 granular than the terminal's aggregate workflow progress rows.
 
-<figure class="shot">
-  <a class="shot__zoom" href={shotSubagentsReview.src} aria-label="Open the full-size screenshot: subagent work under review">
-    <Image src={shotSubagentsReview} alt="Mjolnir Web transcript showing a SUBAGENT-1 entry, a REVIEW entry raising a P1 finding that README.md documents a helper weather.py does not define, and a review supervisor starting a validator pass." />
-  </a>
-  <figcaption>Delegated work and the review that challenges it, in one browser transcript: subagent output, a P1 finding against it, and the supervisor opening a validator pass.</figcaption>
-</figure>
-
 ## Side conversations
 
-When the connected agent supports ephemeral side sessions, the web command
-palette exposes `/side` with an optional question. The same transcript stays open
-in a visible side mode, but side prompts, replies, and tools are labelled with
-the `Side` actor so they cannot be mistaken for main-session history. Use the
-**Exit side** action (or send `exit`) to delete the temporary session and return
-the composer to the main conversation.
-
-Typing `/` opens the palette of commands the connected agent advertises, so the
-list reflects that agent's capabilities rather than a fixed menu — `/side` only
-appears on an agent that supports side sessions.
+A side conversation is a throwaway fork of the primary session: ask a question,
+think out loud, or get a second opinion without the exchange landing in the
+main transcript or steering the agent's real work. Typing `/side` (with an
+optional question) in the web composer forks the session; everything that
+follows is labelled with the `Side` actor, the composer switches to side mode,
+and **Exit side** (or sending `exit`) deletes the fork and returns you to the
+main conversation.
 
 <figure class="shot">
-  <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: the command palette">
-    <Image src={shotCommandPalette} alt="The Mjolnir Web composer with a slash typed, showing a command palette listing /new, /clear, /compact, /export, /mjconfig, and /review with their descriptions." />
+  <a class="shot__zoom" href={shotSideConversation.src} aria-label="Open the full-size screenshot: a side conversation in Mjolnir Web">
+    <Image src={shotSideConversation} alt="Mjolnir Web on a Claude coder + Codex reviewer session. Below a blue PRIMARY usage entry, amber SIDE entries read Side conversation started, session forked, a user question asking whether a dict of city defaults would be cleaner than hardcoding values, and the agent's reply with a CITY_DEFAULTS code block. The header shows a SIDE badge and the composer reads Message the side conversation — type exit to return, with an Exit side button." />
   </a>
-  <figcaption>The command palette over a finished turn — the commands this agent advertises, not a fixed list.</figcaption>
+  <figcaption>A side conversation on a Claude coder + Codex reviewer session: the main turn's <code>PRIMARY</code> entry above, the forked <code>SIDE</code> exchange below, and the composer in side mode with <strong>Exit side</strong>.</figcaption>
+</figure>
+
+Side conversations are available only on **Claude-primary teams**. They belong
+to the primary session, not the reviewer, so the team's coder decides whether
+`/side` exists at all:
+
+| Team | `/side` |
+| --- | --- |
+| Claude | Yes |
+| Claude coder + Codex reviewer | Yes |
+| Codex | No |
+| Codex coder + Claude reviewer | No |
+
+Mjolnir only exposes `/side` when the primary agent advertises ACP
+`session/fork`, `session/resume` (or `session/load`), and `session/delete`.
+Claude's ACP adapter advertises all three; Codex's advertises load/resume and
+delete but not `session/fork`, so Codex-primary sessions never see the command.
+
+Typing `/` opens the palette of commands the connected agent advertises, so the
+list reflects that agent's capabilities rather than a fixed menu. On a
+Claude-primary session, filtering the palette brings up `/side`:
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotSidePalette.src} aria-label="Open the full-size screenshot: the command palette filtered to /side">
+    <Image src={shotSidePalette} alt="The Mjolnir Web composer with /si typed on a Claude session, the palette filtered to two entries: /simplify and /side <optional question> — open an isolated ephemeral conversation." />
+  </a>
+  <figcaption>The palette on a Claude-primary session filtered to <code>/si</code>: <code>/side &lt;optional question&gt;</code> opens an isolated ephemeral conversation.</figcaption>
+</figure>
+
+For comparison, the same palette on a Codex-primary session lists the commands
+that agent advertises and has no `/side` entry:
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: the command palette on a Codex-primary session">
+    <Image src={shotCommandPalette} alt="The Mjolnir Web composer with a slash typed on a Codex session, showing a command palette listing /new, /clear, /compact, /export, /mjconfig, and discrete-review commands with their descriptions. /side is not listed." />
+  </a>
+  <figcaption>The same palette on a Codex-primary session — no <code>/side</code>, because codex-acp does not advertise <code>session/fork</code>.</figcaption>
 </figure>
 
 ## Status line
@@ -224,17 +255,6 @@ the turn already running.
   </a>
   <figcaption>The configuration editor in the browser, with the connected adapter’s own session options underneath Mjolnir’s.</figcaption>
 </figure>
-
-## Ragnarok, read-only
-
-`/ragnarok <task>` is Mjolnir's model-vs-model arena: several champion models
-implement the same task in parallel worktrees, each adversarially reviews a
-rival's implementation, and a router agent judges the results and crowns a
-winner. While a local `/ragnarok` arena is active, the browser shows its task and
-phase, each fighter's model source, status, and vigor, plus the final verdict and
-adoption guidance when available. This view is read-only: summoning the arena,
-approving `UNLEASH`, choosing between finalists, and publishing a draft pull
-request remain local TUI actions.
 
 ## Reach it from another device
 

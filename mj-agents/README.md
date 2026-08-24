@@ -1,7 +1,7 @@
 # brokk-mj-agents
 
 `brokk-mj-agents` contains Mjolnir's multi-agent orchestration, subagent,
-review, quota, and Ragnarok workflow implementations.
+review and quota workflow implementations.
 
 This crate is primarily published so the Mjolnir workspace components can be
 versioned and distributed together. Its Rust crate name is `mj_agents`, and its

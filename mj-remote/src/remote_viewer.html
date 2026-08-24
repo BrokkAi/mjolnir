@@ -1205,6 +1205,40 @@
         box-shadow: 0 0 14px rgb(235 63 51 / 0.64);
       }
 
+      /* First-run: the server needs setup before sessions can launch. Same
+         red-rail grammar as the launch card — this state needs the user. */
+      .setup-card {
+        position: relative;
+        display: grid;
+        gap: 8px;
+        justify-items: start;
+        padding: 14px 14px 16px 18px;
+        border-bottom: 1px solid var(--line-row);
+        background:
+          linear-gradient(90deg, rgb(235 63 51 / 0.14), transparent 62%),
+          var(--surface-panel);
+      }
+
+      .setup-card::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 3px;
+        background: var(--red-hot);
+        box-shadow: 0 0 14px rgb(235 63 51 / 0.64);
+      }
+
+      .setup-card-title {
+        color: var(--text-control);
+        font: 600 15px/1.25 var(--font-body);
+      }
+
+      .setup-card-detail {
+        color: var(--muted);
+        font: 400 10.5px/1.5 var(--font-mono);
+        overflow-wrap: anywhere;
+      }
+
       .launch-card-top {
         display: flex;
         align-items: center;
@@ -1423,14 +1457,13 @@
         font: 700 10px/1 var(--font-mono);
         letter-spacing: 0.12em;
         text-transform: uppercase;
+      }
 
-        &::after {
-          content: "";
-          width: 6px;
-          height: 11px;
-          background: currentColor;
-          animation: cursor-blink 1.05s steps(2, start) infinite;
-        }
+      .working-spinner {
+        font: 700 11px/1 var(--font-mono);
+        letter-spacing: 0;
+        text-transform: none;
+        white-space: pre;
       }
 
       .approval-badge {
@@ -1551,143 +1584,9 @@
         letter-spacing: 0.04em;
       }
 
-      /* Read-only projection of the local `/ragnarok` arena. Decisions stay
-         in the TUI; this panel only exposes the compact battle state. */
-      .ragnarok-panel {
-        display: grid;
-        gap: 10px;
-        padding: 10px 18px 12px;
-        padding-right: calc(18px + env(safe-area-inset-right));
-        border-bottom: 1px solid var(--line);
-        background:
-          linear-gradient(90deg, rgb(235 63 51 / 0.1), transparent 55%),
-          var(--surface-terminal);
-      }
-
-      .ragnarok-head {
-        display: flex;
-        align-items: baseline;
-        gap: 10px;
-        min-width: 0;
-      }
-
-      .ragnarok-kicker,
-      .ragnarok-read-only {
-        flex: none;
-        color: var(--red-hot);
-        font: 700 9.5px/1 var(--font-mono);
-        letter-spacing: 0.13em;
-        text-transform: uppercase;
-      }
-
-      .ragnarok-task {
-        flex: 1;
-        min-width: 0;
-        color: var(--text);
-        font: 600 12px/1.4 var(--font-body);
-        overflow-wrap: anywhere;
-      }
-
-      .ragnarok-read-only {
-        color: var(--dim);
-        letter-spacing: 0.08em;
-      }
-
-      .ragnarok-fighters {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-        gap: 7px;
-      }
-
-      .ragnarok-fighter {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 5px 10px;
-        padding: 8px 9px;
-        border: 1px solid var(--line-row);
-        background: var(--surface-control);
-      }
-
-      .ragnarok-fighter-name {
-        min-width: 0;
-        color: var(--text-control);
-        font: 700 11px/1.35 var(--font-mono);
-        overflow-wrap: anywhere;
-      }
-
-      .ragnarok-fighter-source,
-      .ragnarok-fighter-status {
-        color: var(--dim);
-        font: 500 9.5px/1.35 var(--font-mono);
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-
-      .ragnarok-fighter-status {
-        color: var(--muted);
-        text-align: right;
-      }
-
-      .ragnarok-vigor {
-        grid-column: 1 / -1;
-        height: 3px;
-        background: var(--line-row);
-        overflow: hidden;
-
-        &::before {
-          content: "";
-          display: block;
-          width: 24%;
-          height: 100%;
-          background: var(--thought);
-        }
-
-        &[data-vigor="active"]::before {
-          width: 66%;
-          background: var(--red-hot);
-        }
-
-        &[data-vigor="full"]::before {
-          width: 100%;
-          background: var(--agent);
-        }
-
-        &[data-vigor="empty"]::before {
-          width: 0;
-        }
-      }
-
-      .ragnarok-result {
-        display: grid;
-        gap: 4px;
-        padding-left: 9px;
-        border-left: 2px solid rgb(235 63 51 / 0.55);
-        color: var(--muted);
-        font: 400 11px/1.45 var(--font-body);
-      }
-
-      .ragnarok-verdict {
-        color: var(--text);
-      }
-
-      .ragnarok-adoption {
-        color: var(--thought);
-        font-family: var(--font-mono);
-      }
-
-      .ragnarok-failure {
-        color: var(--red-hot);
-      }
-
       @keyframes attention-fade {
         50% {
           opacity: 0.55;
-        }
-      }
-
-      @keyframes cursor-blink {
-        50% {
-          opacity: 0;
         }
       }
 
@@ -2389,6 +2288,196 @@
         letter-spacing: 0.06em;
       }
 
+      /* Review output is a first-class session record, not a vague system
+         notice. Keep the current or latest board above the transcript where a
+         finding cannot be lost, and let its reader carry the full evidence
+         without forcing a user to leave the web session. */
+      .review-board {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        padding: 10px 12px 11px;
+        border: 1px solid rgb(235 63 51 / 0.42);
+        border-left: 3px solid var(--red);
+        background:
+          linear-gradient(90deg, rgb(235 63 51 / 0.1), transparent 58%),
+          var(--surface-terminal);
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .review-board-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 5px 12px;
+      }
+
+      .review-board-title {
+        color: var(--red-hot);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .review-board-tally {
+        flex: 1 1 220px;
+        color: var(--muted);
+        font: 400 10.5px/1.4 var(--font-mono);
+      }
+
+      .review-board-details {
+        border: 0;
+        background: transparent;
+        padding: 2px 0;
+        color: var(--text-control);
+        cursor: pointer;
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+
+        &:hover {
+          color: var(--button-hover-text);
+        }
+      }
+
+      .review-board-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: baseline;
+        gap: 8px;
+        width: 100%;
+        border: 0;
+        border-top: 1px solid var(--line-row);
+        background: transparent;
+        padding: 7px 0 0;
+        color: var(--text-control);
+        cursor: pointer;
+        font: 400 11.5px/1.45 var(--font-mono);
+        text-align: left;
+
+        &:hover .review-board-summary {
+          color: var(--button-hover-text);
+        }
+      }
+
+      .review-board-glyph {
+        font-weight: 700;
+      }
+
+      .review-board-summary {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .review-board-state {
+        color: var(--dim);
+        font-size: 10px;
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .review-state[data-status="validated"],
+      .review-state[data-status="uncorrected"] {
+        color: var(--user);
+      }
+
+      .review-state[data-status="corrected; verification pending"] {
+        color: var(--primary);
+      }
+
+      .review-state[data-status="verified fixed"] {
+        color: var(--agent);
+      }
+
+      .review-state[data-status="deferred by correction threshold"] {
+        color: var(--tool);
+      }
+
+      .review-state[data-status="invalidated"] {
+        color: var(--red-hot);
+      }
+
+      .review-issues-panel {
+        width: min(980px, 100%);
+      }
+
+      .review-issues-body {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .review-workflow {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .review-workflow-title {
+        margin: 0;
+        color: var(--red-hot);
+        font: 700 10px/1.4 var(--font-mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .review-issue-detail {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px;
+        border: 1px solid var(--line-row);
+        border-left: 3px solid var(--line-strong);
+        background: var(--surface-terminal);
+      }
+
+      .review-issue-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 5px 10px;
+      }
+
+      .review-issue-title {
+        margin: 0;
+        color: var(--text-control);
+        font: 700 12px/1.35 var(--font-mono);
+      }
+
+      .review-issue-status {
+        font: 700 10px/1.35 var(--font-mono);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .review-detail-section {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .review-detail-label {
+        color: var(--dim);
+        font: 700 9.5px/1.3 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .review-detail-content {
+        color: var(--text);
+        font-size: 13px;
+      }
+
+      .review-detail-content .entry-text,
+      .review-detail-content .code-block {
+        margin: 0;
+      }
+
       /* The frame is a dedicated child (edge bg + gap/fill pseudos) instead of
          layers on .console itself: clip-path on .console would also clip the
          combobox popups that open out of the control strip. */
@@ -3006,6 +3095,26 @@
         word-break: break-all;
       }
 
+      .mjconfig-login-input {
+        display: flex;
+        gap: 8px;
+
+        & input {
+          flex: 1;
+          min-width: 0;
+          height: 34px;
+          border: 1px solid var(--line-control);
+          background: var(--bg);
+          color: var(--text-control);
+          padding: 0 10px;
+          font: 500 12px/1 var(--font-mono);
+        }
+
+        & button {
+          height: 34px;
+        }
+      }
+
       .mjconfig-foot {
         display: flex;
         align-items: center;
@@ -3189,21 +3298,6 @@
           order: 1;
         }
 
-        .ragnarok-panel {
-          max-height: 34dvh;
-          overflow-y: auto;
-          padding: 9px 12px 10px;
-        }
-
-        .ragnarok-head {
-          flex-wrap: wrap;
-          gap: 5px 9px;
-        }
-
-        .ragnarok-task {
-          flex-basis: calc(100% - 90px);
-        }
-
         .composer {
           gap: 8px;
           padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
@@ -3276,7 +3370,6 @@
 
       @media (prefers-reduced-motion: reduce) {
         .entry,
-        .working-badge::after,
         .approval-badge,
         .connection-badge,
         .session-approval,
@@ -3345,7 +3438,10 @@
           <span id="archive-badge" class="archive-badge" hidden>archived</span>
           <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
-          <span id="working-badge" class="working-badge" hidden>working</span>
+          <span id="working-badge" class="working-badge" hidden>
+            <span id="working-spinner" class="working-spinner" aria-hidden="true"></span>
+            <span>working</span>
+          </span>
           <div class="mobile-chat-actions">
             <button id="mobile-new-session-button" class="primary sidebar-new-button" type="button">New</button>
             <button id="mobile-logout-button" class="ghost-danger" type="button">Log out</button>
@@ -3357,15 +3453,7 @@
           <div id="status-fields" class="status-fields"></div>
           <div id="status-quotas" class="status-quotas" hidden></div>
         </div>
-        <section id="ragnarok-panel" class="ragnarok-panel" aria-label="Ragnarok arena" hidden>
-          <div class="ragnarok-head">
-            <span id="ragnarok-phase" class="ragnarok-kicker"></span>
-            <span id="ragnarok-task" class="ragnarok-task"></span>
-            <span class="ragnarok-read-only">read only</span>
-          </div>
-          <div id="ragnarok-fighters" class="ragnarok-fighters"></div>
-          <div id="ragnarok-result" class="ragnarok-result" hidden></div>
-        </section>
+        <section id="review-board" class="review-board" aria-label="Review findings"></section>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
@@ -3423,6 +3511,16 @@
         </header>
         <div id="workspace-diff-notice" class="mjconfig-notice" role="status"></div>
         <div id="workspace-diff-body" class="mjconfig-body"></div>
+      </div>
+    </section>
+
+    <section id="review-issues-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="review-issues-title" hidden>
+      <div class="new-session-panel review-issues-panel">
+        <header class="new-session-head">
+          <h2 id="review-issues-title">Review issues — full evidence</h2>
+          <button id="review-issues-close" class="new-session-close" type="button" aria-label="Close review issues">×</button>
+        </header>
+        <div id="review-issues-body" class="mjconfig-body review-issues-body"></div>
       </div>
     </section>
 
@@ -3575,6 +3673,10 @@
       const workspaceDiffRefreshEl = $("workspace-diff-refresh");
       const workspaceDiffNoticeEl = $("workspace-diff-notice");
       const workspaceDiffBodyEl = $("workspace-diff-body");
+      const reviewBoardEl = $("review-board");
+      const reviewIssuesModalEl = $("review-issues-modal");
+      const reviewIssuesCloseEl = $("review-issues-close");
+      const reviewIssuesBodyEl = $("review-issues-body");
       const settingsModalEl = $("settings-modal");
       const settingsCloseEl = $("settings-close");
       const showDiffsToggleEl = $("show-diffs-toggle");
@@ -3610,12 +3712,8 @@
       const statusLineEl = $("status-line");
       const statusFieldsEl = $("status-fields");
       const statusQuotasEl = $("status-quotas");
-      const ragnarokPanelEl = $("ragnarok-panel");
-      const ragnarokPhaseEl = $("ragnarok-phase");
-      const ragnarokTaskEl = $("ragnarok-task");
-      const ragnarokFightersEl = $("ragnarok-fighters");
-      const ragnarokResultEl = $("ragnarok-result");
       const workingBadgeEl = $("working-badge");
+      const workingSpinnerEl = $("working-spinner");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
       const archiveBadgeEl = $("archive-badge");
@@ -3699,6 +3797,8 @@
       let commandSelected = 0;
       let showTranscriptDiffs = true;
       let thoughtOutput = "default";
+      let activeSpinner = null;
+      let workingSpinnerTimer = null;
       const draftBySessionId = new Map();
       const attachmentsBySessionId = new Map();
       const activityBySessionId = new Map();
@@ -3792,24 +3892,111 @@
         renderChat();
       }
 
-      function applyThoughtOutputSnapshot(snapshot, render = false) {
+      /* Server-reported first-run state: authentication, team, or model work
+         that still blocks session launches. Null once setup is complete. */
+      let setupState = null;
+      let promptedSetupStep = null;
+
+      function setupStep(setup = setupState) {
+        if (!setup) {
+          return null;
+        }
+        return setup.authentication_required || setup.no_launchable_models ? "servers" : "team";
+      }
+
+      function spinnerEntry(snapshot, name = snapshot?.appearance?.spinner) {
+        return snapshot?.appearance?.spinners?.find(
+          (spinner) => spinner.name === name && Array.isArray(spinner.frames) && spinner.frames.length,
+        ) || null;
+      }
+
+      function spinnerFrameIndex(spinner) {
+        if (reducedMotion.matches) {
+          return 0;
+        }
+        return Math.floor(Date.now() / spinner.frame_interval_ms) % spinner.frames.length;
+      }
+
+      function renderWorkingSpinner() {
+        const spinner = activeSpinner;
+        if (!spinner || workingBadgeEl.hidden) {
+          workingSpinnerEl.textContent = "";
+          return;
+        }
+        workingSpinnerEl.textContent = spinner.frames[spinnerFrameIndex(spinner)];
+      }
+
+      function syncWorkingSpinner() {
+        if (workingSpinnerTimer) {
+          clearInterval(workingSpinnerTimer);
+          workingSpinnerTimer = null;
+        }
+        renderWorkingSpinner();
+        if (!activeSpinner || workingBadgeEl.hidden || reducedMotion.matches) {
+          return;
+        }
+        workingSpinnerTimer = setInterval(renderWorkingSpinner, activeSpinner.frame_interval_ms);
+      }
+
+      function setActiveSpinner(spinner) {
+        const interval = Number(spinner?.frame_interval_ms);
+        activeSpinner = spinner && Number.isFinite(interval) && interval > 0
+          ? { frames: spinner.frames, frame_interval_ms: interval }
+          : null;
+        syncWorkingSpinner();
+      }
+
+      function applyAppearanceSnapshot(snapshot, render = false) {
         const next = snapshot?.appearance?.thought_output === "full" ? "full" : "default";
         const changed = thoughtOutput !== next;
         thoughtOutput = next;
+        setActiveSpinner(spinnerEntry(snapshot));
         if (render && changed) {
           renderChat();
         }
       }
 
-      async function refreshThoughtOutput() {
+      function applyServerSnapshot(snapshot, render = false) {
+        const nextSetup = snapshot?.setup || null;
+        const setupChanged = Boolean(setupState) !== Boolean(nextSetup);
+        setupState = nextSetup;
+        if (!setupState) {
+          promptedSetupStep = null;
+        }
+        newSessionButtonEl.disabled = Boolean(setupState);
+        mobileNewSessionButtonEl.disabled = Boolean(setupState);
+        if (setupChanged) {
+          renderSessions();
+        }
+        applyAppearanceSnapshot(snapshot, render);
+      }
+
+      async function refreshServerSnapshot() {
         try {
           const response = await apiFetch("/api/mjconfig", { cache: "no-store" });
           if (response.ok) {
-            applyThoughtOutputSnapshot(await response.json());
+            applyServerSnapshot(await response.json());
+            maybePromptSetup();
           }
         } catch {
-          // Keep the compatibility default when configuration is unavailable.
+          // Keep the existing appearance when configuration is unavailable.
         }
+      }
+
+      /* First connect opens the actual blocking step. After browser sign-in
+         makes a model launchable, advance directly to team selection. */
+      function maybePromptSetup() {
+        const step = setupStep();
+        if (!step || promptedSetupStep === step) {
+          return;
+        }
+        promptedSetupStep = step;
+        if (!mjconfigModalEl.hidden && mjcfg.snapshot) {
+          mjcfg.tab = step;
+          renderMjConfig();
+          return;
+        }
+        void openMjConfig(step);
       }
 
       function openViewerSettings() {
@@ -3831,15 +4018,6 @@
       const mjconfigCloseEl = $("mjconfig-close");
       const mjconfigCancelEl = $("mjconfig-cancel");
       const mjconfigSaveEl = $("mjconfig-save");
-
-      const MJ_TABS = [
-        ["team", "Team"],
-        ["agents", "Agent"],
-        ["reviewer", "Reviewer"],
-        ["subagents", "Subagents"],
-        ["servers", "ACP Servers"],
-        ["appearance", "Appearance"],
-      ];
 
       const mjcfg = {
         snapshot: null,
@@ -3878,7 +4056,7 @@
             throw new Error(`HTTP ${response.status}`);
           }
           mjcfg.snapshot = await response.json();
-          applyThoughtOutputSnapshot(mjcfg.snapshot, true);
+          applyServerSnapshot(mjcfg.snapshot, true);
           mjSetStatus("");
           renderMjConfig();
           mjSchedulePoll();
@@ -3892,6 +4070,9 @@
       }
 
       function closeMjConfig() {
+        if (mjcfg.snapshot) {
+          applyServerSnapshot(mjcfg.snapshot);
+        }
         mjconfigModalEl.hidden = true;
         mjcfg.edits = {};
         mjcfg.snapshot = null;
@@ -3932,6 +4113,7 @@
             if (response.ok) {
               const previous = mjcfg.snapshot;
               mjcfg.snapshot = await response.json();
+              applyServerSnapshot(mjcfg.snapshot, true);
               const wasRunning =
                 (previous.login && previous.login.running)
                 || previous.probing;
@@ -3945,6 +4127,7 @@
               } else {
                 mjPatchJobUi();
               }
+              maybePromptSetup();
             }
           } catch {
             // Poll failures are transient; the next tick retries.
@@ -3973,13 +4156,15 @@
       }
 
       function mjExtractUrl(text) {
-        const match = text.match(/https?:\/\/\S+/);
-        return match ? match[0].replace(/[).,]$/, "") : null;
+        // ANSI styling can be present in captured CLI output. Stop before an
+        // escape sequence so the clickable URL never includes terminal bytes.
+        const match = text.match(/https?:\/\/[^\s\x1b]+/);
+        return match ? match[0].replace(/[).,]+$/, "") : null;
       }
 
       function renderMjTabs() {
         mjconfigTabsEl.replaceChildren();
-        for (const [id, label] of MJ_TABS) {
+        for (const { id, label } of mjcfg.snapshot?.tabs || []) {
           const tab = document.createElement("button");
           tab.type = "button";
           tab.className = "mjconfig-tab";
@@ -3997,7 +4182,8 @@
 
       function renderMjConfig() {
         renderMjTabs();
-        mjconfigNoticeEl.textContent = mjcfg.snapshot?.notice || "";
+        mjconfigNoticeEl.textContent =
+          mjcfg.snapshot?.notice || mjcfg.snapshot?.setup?.message || "";
         mjconfigBodyEl.replaceChildren();
         if (mjcfg.spinnerTimer) {
           clearInterval(mjcfg.spinnerTimer);
@@ -4021,6 +4207,9 @@
             break;
           case "servers":
             renderMjServers();
+            break;
+          case "input":
+            renderMjInput();
             break;
           case "appearance":
             renderMjAppearance();
@@ -4127,6 +4316,33 @@
         return row;
       }
 
+      function mjRolePermissionRow(role, field) {
+        if (!role.permission) {
+          return null;
+        }
+        const value = mjEditedValue(field, role.permission.value);
+        const row = mjRow("Permissions");
+        row.appendChild(
+          mjCombo(
+            role.permission.choices.map((choice) => ({
+              value: choice.value,
+              label: choice.label,
+              description: choice.description,
+            })),
+            value,
+            (next) => {
+              mjcfg.edits[field] = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selected = role.permission.choices.find((choice) => choice.value === value);
+        if (selected) {
+          row.appendChild(mjDetail(selected.description));
+        }
+        return row;
+      }
+
       // Session options for one seat's bound ACP source, staged into that
       // role's session_defaults map.
       function mjSeatOptionRows(group, editsField, seat) {
@@ -4196,6 +4412,10 @@
       function renderMjReviewer() {
         const panel = mjcfg.snapshot.agents;
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[1], "review_model"));
+        const permissionRow = mjRolePermissionRow(panel.roles[1], "review_permission");
+        if (permissionRow) {
+          mjconfigBodyEl.appendChild(permissionRow);
+        }
         for (const row of mjSeatOptionRows(mjcfg.snapshot.review_options, "review_session_defaults", "review")) {
           mjconfigBodyEl.appendChild(row);
         }
@@ -4229,11 +4449,39 @@
           tierRow.appendChild(mjDetail(selectedTier.description));
         }
         mjconfigBodyEl.appendChild(tierRow);
+
+        const thresholdRow = mjRow("Automatic correction through");
+        const threshold = mjEditedValue("correction_threshold", panel.correction_threshold);
+        thresholdRow.appendChild(
+          mjCombo(
+            panel.correction_thresholds.map((entry) => ({
+              value: entry.threshold,
+              label: entry.label,
+              description: entry.description,
+            })),
+            threshold,
+            (next) => {
+              mjcfg.edits.correction_threshold = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selectedThreshold = panel.correction_thresholds.find(
+          (entry) => entry.threshold === threshold,
+        );
+        if (selectedThreshold) {
+          thresholdRow.appendChild(mjDetail(selectedThreshold.description));
+        }
+        mjconfigBodyEl.appendChild(thresholdRow);
       }
 
       function renderMjSubagents() {
         const panel = mjcfg.snapshot.agents;
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[2], "subagents_model"));
+        const permissionRow = mjRolePermissionRow(panel.roles[2], "subagents_permission");
+        if (permissionRow) {
+          mjconfigBodyEl.appendChild(permissionRow);
+        }
         for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults", "subagents")) {
           mjconfigBodyEl.appendChild(row);
         }
@@ -4289,12 +4537,21 @@
                 await mjJobRequest("/api/mjconfig/login", "DELETE");
               }),
             );
-          } else if (account.login_supported) {
-            row.appendChild(
-              mjButton(account.signed_in ? "Sign in again" : "Sign in", async () => {
-                await mjJobRequest("/api/mjconfig/login", "POST", { vendor: account.vendor });
-              }),
-            );
+          } else if (account.login_supported && account.login_modes.length) {
+            for (const mode of account.login_modes) {
+              const label = account.signed_in && account.login_modes.length === 1
+                ? "Sign in again"
+                : mode.label;
+              row.appendChild(
+                mjButton(label, async () => {
+                  await mjJobRequest(
+                    "/api/mjconfig/login",
+                    "POST",
+                    { vendor: account.vendor, mode: mode.id },
+                  );
+                }),
+              );
+            }
           } else {
             row.appendChild(mjDetail("sign in from the local mj terminal"));
           }
@@ -4316,6 +4573,44 @@
               output.dataset.mjLoginOutput = "true";
               mjconfigBodyEl.appendChild(output);
               mjPatchJobUi();
+            }
+            if (login.running && login.accepts_input) {
+              const form = document.createElement("form");
+              form.className = "mjconfig-login-input";
+              const input = document.createElement("input");
+              input.type = "text";
+              input.autocomplete = "one-time-code";
+              input.spellcheck = false;
+              input.placeholder = "Paste the Claude authorization code";
+              input.setAttribute("aria-label", "Claude authorization code");
+              const submit = document.createElement("button");
+              submit.type = "submit";
+              submit.className = "primary";
+              submit.textContent = "Continue";
+              form.addEventListener("submit", async (event) => {
+                event.preventDefault();
+                const value = input.value.trim();
+                if (!value) {
+                  mjSetStatus("Paste the Claude authorization code.", true);
+                  return;
+                }
+                input.disabled = true;
+                submit.disabled = true;
+                const accepted = await mjJobRequest(
+                  "/api/mjconfig/login/input",
+                  "POST",
+                  { input: value },
+                );
+                if (accepted) {
+                  input.value = "";
+                  mjSetStatus("Authorization code sent. Waiting for Claude…");
+                } else {
+                  input.disabled = false;
+                  submit.disabled = false;
+                }
+              });
+              form.append(input, submit);
+              mjconfigBodyEl.appendChild(form);
             }
           }
         }
@@ -4351,13 +4646,15 @@
           if (!response.ok) {
             const text = await response.text();
             mjSetStatus(text || `HTTP ${response.status}`, true);
-            return;
+            return false;
           }
           mjcfg.snapshot = await response.json();
           renderMjConfig();
           mjSchedulePoll();
+          return true;
         } catch (error) {
           mjSetStatus(`Request failed: ${error.message}`, true);
+          return false;
         }
       }
 
@@ -4384,9 +4681,9 @@
       function renderMjAppearance() {
         const panel = mjcfg.snapshot.appearance;
         mjconfigBodyEl.appendChild(
-          mjNote("The web theme is local to this browser. Thought output applies to web and terminal transcripts."),
+          mjNote("Viewer theme is local to this browser. Terminal appearance and startup settings are shared with /mjconfig in the terminal."),
         );
-        const themeRow = mjRow("Theme");
+        const themeRow = mjRow("Viewer theme");
         const current = themePreference();
         for (const preference of ["light", "dark", "system"]) {
           const button = document.createElement("button");
@@ -4402,6 +4699,58 @@
           themeRow.appendChild(button);
         }
         mjconfigBodyEl.appendChild(themeRow);
+
+        const terminalThemeRow = mjRow("Terminal theme");
+        const terminalTheme = mjEditedValue("theme", panel.theme);
+        terminalThemeRow.appendChild(
+          mjCombo(
+            panel.themes.map((value) => ({
+              value,
+              label: value.charAt(0).toUpperCase() + value.slice(1),
+            })),
+            terminalTheme,
+            (next) => {
+              mjcfg.edits.theme = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        terminalThemeRow.appendChild(mjDetail("applies to terminal sessions"));
+        mjconfigBodyEl.appendChild(terminalThemeRow);
+
+        const spinnerRow = mjRow("Spinner");
+        const currentSpinner = mjEditedValue("spinner", panel.spinner);
+        spinnerRow.appendChild(
+          mjCombo(
+            panel.spinners.map((spinner) => ({
+              value: spinner.name,
+              label: spinner.name.charAt(0).toUpperCase() + spinner.name.slice(1),
+            })),
+            currentSpinner,
+            (next) => {
+              mjcfg.edits.spinner = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const spinnerPreview = document.createElement("span");
+        spinnerPreview.className = "mjconfig-spinner-preview";
+        spinnerPreview.setAttribute("aria-label", `${currentSpinner} spinner preview`);
+        spinnerRow.appendChild(spinnerPreview);
+        spinnerRow.appendChild(mjDetail("matches the terminal prompt-working spinner"));
+        mjconfigBodyEl.appendChild(spinnerRow);
+
+        const previewSpinner = spinnerEntry(mjcfg.snapshot, currentSpinner);
+        setActiveSpinner(previewSpinner);
+        if (previewSpinner) {
+          const renderPreview = () => {
+            spinnerPreview.textContent = previewSpinner.frames[spinnerFrameIndex(previewSpinner)];
+          };
+          renderPreview();
+          if (!reducedMotion.matches) {
+            mjcfg.spinnerTimer = setInterval(renderPreview, previewSpinner.frame_interval_ms);
+          }
+        }
 
         const thoughtRow = mjRow("Thought output");
         const currentThoughtOutput = mjEditedValue("thought_output", panel.thought_output);
@@ -4426,6 +4775,75 @@
           ),
         );
         mjconfigBodyEl.appendChild(thoughtRow);
+
+        const hintsRow = mjRow("Feature tips");
+        hintsRow.appendChild(
+          mjToggle(mjEditedValue("feature_hints", panel.feature_hints), (next) => {
+            mjcfg.edits.feature_hints = next;
+            renderMjConfig();
+          }),
+        );
+        mjconfigBodyEl.appendChild(hintsRow);
+
+        const awakeRow = mjRow("Keep awake");
+        awakeRow.appendChild(
+          mjToggle(mjEditedValue("keep_awake", panel.keep_awake), (next) => {
+            mjcfg.edits.keep_awake = next;
+            renderMjConfig();
+          }),
+        );
+        awakeRow.appendChild(mjDetail("prevent sleep while the server runs or a turn is in flight"));
+        mjconfigBodyEl.appendChild(awakeRow);
+
+        const interfaceRow = mjRow("Terminal interface");
+        const interfaceMode = mjEditedValue("interface", panel.interface);
+        interfaceRow.appendChild(
+          mjCombo(
+            panel.interfaces.map((entry) => ({
+              value: entry.value,
+              label: entry.label,
+              description: entry.description,
+            })),
+            interfaceMode,
+            (next) => {
+              mjcfg.edits.interface = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selectedInterface = panel.interfaces.find((entry) => entry.value === interfaceMode);
+        if (selectedInterface) {
+          interfaceRow.appendChild(mjDetail(`${selectedInterface.description}; applies when the next terminal session starts`));
+        }
+        mjconfigBodyEl.appendChild(interfaceRow);
+      }
+
+      function renderMjInput() {
+        const panel = mjcfg.snapshot.input;
+        mjconfigBodyEl.appendChild(
+          mjNote("Voice auto-send applies to terminal dictation. Off leaves dictated text in the composer for review."),
+        );
+        const voiceRow = mjRow("Voice auto-send");
+        const voiceAutoSend = mjEditedValue("voice_auto_send", panel.voice_auto_send);
+        voiceRow.appendChild(
+          mjCombo(
+            panel.voice_auto_sends.map((entry) => ({
+              value: entry.value,
+              label: entry.label,
+              description: entry.description,
+            })),
+            voiceAutoSend,
+            (next) => {
+              mjcfg.edits.voice_auto_send = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selectedVoice = panel.voice_auto_sends.find((entry) => entry.value === voiceAutoSend);
+        if (selectedVoice) {
+          voiceRow.appendChild(mjDetail(selectedVoice.description));
+        }
+        mjconfigBodyEl.appendChild(voiceRow);
       }
 
       async function saveMjConfig() {
@@ -4451,7 +4869,7 @@
             return;
           }
           mjcfg.snapshot = await response.json();
-          applyThoughtOutputSnapshot(mjcfg.snapshot, true);
+          applyServerSnapshot(mjcfg.snapshot, true);
           // Parity with the TUI: saved primary session-option defaults also
           // update the selected live session where it exposes the same option.
           const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
@@ -4475,6 +4893,15 @@
           }
           mjcfg.edits = {};
           const notice = mjcfg.snapshot?.notice;
+          if (mjcfg.snapshot?.setup) {
+            /* Setup is not finished (e.g. a team saved before any sign-in):
+               keep the editor open on the remaining step. Clear the one-shot
+               save notice so the banner shows that step instead. */
+            mjcfg.snapshot.notice = null;
+            renderMjConfig();
+            mjSetStatus(notice || "Saved");
+            return;
+          }
           closeMjConfig();
           // Surface save-time adjustments (e.g. a seat flipped to auto because
           // its model lost every enabled ACP route) where the user will see them.
@@ -4674,6 +5101,10 @@
 
       function openNewSessionPicker() {
         if (!authenticated) {
+          return;
+        }
+        if (setupState) {
+          void openMjConfig(setupStep());
           return;
         }
         newSessionModalEl.hidden = false;
@@ -5537,14 +5968,51 @@
         card.action.disabled = pendingSessionActions.has(session.session_id);
       }
 
+      /* The server is up but cannot launch sessions until setup finishes.
+         The card opens the step that is actually blocking progress. */
+      function setupRequiredCard() {
+        if (!setupState) {
+          return null;
+        }
+        const card = document.createElement("div");
+        card.className = "setup-card";
+        card.setAttribute("role", "status");
+        const title = document.createElement("div");
+        title.className = "setup-card-title";
+        title.textContent = "Finish setup";
+        const detail = document.createElement("div");
+        detail.className = "setup-card-detail";
+        detail.textContent = setupState.message;
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "primary";
+        open.textContent = "Open setup";
+        open.addEventListener("click", () => {
+          void openMjConfig(setupStep());
+        });
+        card.append(title, detail, open);
+        return card;
+      }
+
       function renderSessions() {
         const launchCardRoot = renderLaunchSessionCard();
         if (!sessions.length) {
           sessionCardById.clear();
-          sessionsEl.replaceChildren(launchCardRoot || emptyNote("No live sessions. Use New to start one."));
+          const existingSetup = sessionsEl.querySelector(".setup-card");
+          if (launchCardRoot) {
+            sessionsEl.replaceChildren(launchCardRoot);
+          } else if (setupState && existingSetup) {
+            /* Update in place: replacing the card on every poll tick would
+               drop focus from its button. */
+            existingSetup.querySelector(".setup-card-detail").textContent = setupState.message;
+          } else if (setupState) {
+            sessionsEl.replaceChildren(setupRequiredCard());
+          } else {
+            sessionsEl.replaceChildren(emptyNote("No live sessions. Use New to start one."));
+          }
           return;
         }
-        if (sessionsEl.querySelector(".empty")) {
+        if (sessionsEl.querySelector(".empty, .setup-card")) {
           sessionsEl.replaceChildren();
         }
         if (launchCardRoot && launchCardRoot.parentElement !== sessionsEl) {
@@ -6964,6 +7432,263 @@
         void requestWorkspaceDiffRefresh();
       }
 
+      /* ---- review ledger ---- */
+
+      const REVIEW_STATUS = {
+        "validated": {
+          glyph: "●",
+          label: "awaiting correction",
+          explanation: "The review supervisor confirmed this finding. No correction has completed for it.",
+        },
+        "corrected; verification pending": {
+          glyph: "◐",
+          label: "verification pending",
+          explanation: "The workspace changed and correction evidence is recorded below. No later review has returned clean, so this is not presented as fixed.",
+        },
+        "verified fixed": {
+          glyph: "✔",
+          label: "independently verified",
+          explanation: "A later verification review returned clean after the correction.",
+        },
+        "deferred by correction threshold": {
+          glyph: "⏸",
+          label: "deferred by policy",
+          explanation: "The review supervisor validated this finding, but it was below the configured automatic correction threshold. It remains tracked and was not sent for correction.",
+        },
+        "unresolved": {
+          glyph: "!",
+          label: "unresolved",
+          explanation: "The correction turn completed without changing the workspace. This validated finding is not fixed.",
+        },
+        "invalidated": {
+          glyph: "✘",
+          label: "invalidated",
+          explanation: "The review workflow explicitly invalidated this finding; the recorded reason is below.",
+        },
+      };
+
+      function reviewWorkflows(session) {
+        if (!Array.isArray(session?.review_workflows)) {
+          return [];
+        }
+        return [...session.review_workflows]
+          .filter((workflow) => workflow && Array.isArray(workflow.issues))
+          .sort((left, right) => (left.turn_id || 0) - (right.turn_id || 0) || (left.operation || 0) - (right.operation || 0));
+      }
+
+      function reviewStatus(issue) {
+        const status = typeof issue?.status === "string" ? issue.status : "validated";
+        return {
+          status,
+          ...(REVIEW_STATUS[status] || {
+            glyph: "•",
+            label: status || "recorded",
+            explanation: "This review status was recorded by the session.",
+          }),
+        };
+      }
+
+      function reviewSummaryLine(summary) {
+        const first = String(summary || "").split("\n").find((line) => line.trim());
+        return first?.trim() || "Review finding";
+      }
+
+      function reviewIssueTally(issues) {
+        const tally = {
+          found: issues.length,
+          validated: 0,
+          corrected: 0,
+          fixed: 0,
+          deferred: 0,
+          unresolved: 0,
+          invalidated: 0,
+        };
+        for (const issue of issues) {
+          switch (issue?.status) {
+            case "validated": tally.validated += 1; break;
+            case "corrected; verification pending": tally.corrected += 1; break;
+            case "verified fixed": tally.fixed += 1; break;
+            case "deferred by correction threshold": tally.deferred += 1; break;
+            case "unresolved": tally.unresolved += 1; break;
+            case "invalidated": tally.invalidated += 1; break;
+            default: tally.validated += 1; break;
+          }
+        }
+        return tally;
+      }
+
+      function reviewTallyText(issues) {
+        const tally = reviewIssueTally(issues);
+        const parts = [`${tally.found} issue${tally.found === 1 ? "" : "s"}`];
+        for (const [count, label] of [
+          [tally.validated, "open"],
+          [tally.corrected, "unverified"],
+          [tally.fixed, "verified"],
+          [tally.deferred, "deferred"],
+          [tally.unresolved, "unresolved"],
+          [tally.invalidated, "invalidated"],
+        ]) {
+          if (count) {
+            parts.push(`${count} ${label}`);
+          }
+        }
+        return parts.join(" · ");
+      }
+
+      function visibleReviewWorkflow(session) {
+        const workflows = reviewWorkflows(session)
+          .filter((workflow) => workflow.issues.length);
+        const active = workflows.filter((workflow) => !workflow.outcome);
+        return active[active.length - 1] || workflows[workflows.length - 1] || null;
+      }
+
+      function openReviewIssues() {
+        paintReviewIssues(selectedSession());
+        reviewIssuesModalEl.hidden = false;
+        reviewIssuesCloseEl.focus();
+      }
+
+      function closeReviewIssues() {
+        reviewIssuesModalEl.hidden = true;
+      }
+
+      function renderReviewBoard(session) {
+        reviewBoardEl.replaceChildren();
+        const workflow = visibleReviewWorkflow(session);
+        if (!workflow) {
+          return;
+        }
+
+        const head = document.createElement("div");
+        head.className = "review-board-head";
+        const title = document.createElement("span");
+        title.className = "review-board-title";
+        title.textContent = workflow.outcome ? `⚖ Review · ${workflow.outcome}` : "⚖ Review";
+        const tally = document.createElement("span");
+        tally.className = "review-board-tally";
+        tally.textContent = reviewTallyText(workflow.issues);
+        const details = document.createElement("button");
+        details.className = "review-board-details";
+        details.type = "button";
+        details.textContent = "Full evidence";
+        details.addEventListener("click", openReviewIssues);
+        head.append(title, tally, details);
+        reviewBoardEl.appendChild(head);
+
+        const visible = workflow.issues
+          .slice()
+          .sort((left, right) => reviewIssueRank(left) - reviewIssueRank(right) || (left.id || 0) - (right.id || 0));
+        const maxRows = 5;
+        for (const issue of visible.slice(0, maxRows)) {
+          const status = reviewStatus(issue);
+          const row = document.createElement("button");
+          row.className = "review-board-row";
+          row.type = "button";
+          row.setAttribute("aria-label", `Review issue ${issue.id}: ${reviewSummaryLine(issue.summary)} — ${status.label}. Open full evidence.`);
+          row.addEventListener("click", openReviewIssues);
+
+          const glyph = document.createElement("span");
+          glyph.className = "review-board-glyph review-state";
+          glyph.dataset.status = status.status;
+          glyph.setAttribute("aria-hidden", "true");
+          glyph.textContent = status.glyph;
+          const summary = document.createElement("span");
+          summary.className = "review-board-summary";
+          summary.title = issue.summary || "";
+          summary.textContent = `#${issue.id} ${reviewSummaryLine(issue.summary)}`;
+          const state = document.createElement("span");
+          state.className = "review-board-state review-state";
+          state.dataset.status = status.status;
+          state.textContent = status.label;
+          row.append(glyph, summary, state);
+          reviewBoardEl.appendChild(row);
+        }
+        if (visible.length > maxRows) {
+          const more = document.createElement("button");
+          more.className = "review-board-details";
+          more.type = "button";
+          more.textContent = `… ${visible.length - maxRows} more issue${visible.length - maxRows === 1 ? "" : "s"} · full evidence`;
+          more.addEventListener("click", openReviewIssues);
+          reviewBoardEl.appendChild(more);
+        }
+      }
+
+      function reviewIssueRank(issue) {
+        switch (issue?.status) {
+          case "validated": return 0;
+          case "deferred by correction threshold": return 1;
+          case "corrected; verification pending": return 2;
+          case "unresolved": return 3;
+          case "invalidated": return 4;
+          case "verified fixed": return 5;
+          default: return 0;
+        }
+      }
+
+      function appendReviewDetail(parent, label, content, voice = "prose") {
+        if (!content) {
+          return;
+        }
+        const section = document.createElement("section");
+        section.className = "review-detail-section";
+        const heading = document.createElement("div");
+        heading.className = "review-detail-label";
+        heading.textContent = label;
+        const body = document.createElement("div");
+        body.className = "review-detail-content";
+        body.appendChild(renderRichText(content, voice));
+        section.append(heading, body);
+        parent.appendChild(section);
+      }
+
+      function paintReviewIssues(session) {
+        reviewIssuesBodyEl.replaceChildren();
+        const workflows = reviewWorkflows(session);
+        if (!workflows.length) {
+          reviewIssuesBodyEl.appendChild(emptyNote("No review issues recorded yet."));
+          return;
+        }
+
+        for (const workflow of workflows) {
+          const group = document.createElement("section");
+          group.className = "review-workflow";
+          const title = document.createElement("h3");
+          title.className = "review-workflow-title";
+          const outcome = workflow.outcome ? ` · ${workflow.outcome}` : " · active";
+          title.textContent = `⚖ Turn ${workflow.turn_id} · review${outcome} · ${reviewTallyText(workflow.issues)}`;
+          group.appendChild(title);
+
+          const issues = workflow.issues
+            .slice()
+            .sort((left, right) => (left.pass || 0) - (right.pass || 0) || (left.id || 0) - (right.id || 0));
+          if (!issues.length) {
+            group.appendChild(emptyNote("No material findings in this review."));
+          }
+          for (const issue of issues) {
+            const status = reviewStatus(issue);
+            const card = document.createElement("article");
+            card.className = "review-issue-detail";
+            const head = document.createElement("header");
+            head.className = "review-issue-head";
+            const issueTitle = document.createElement("h4");
+            issueTitle.className = "review-issue-title";
+            issueTitle.textContent = `#${issue.id} · review pass ${(issue.pass || 0) + 1}`;
+            const issueStatus = document.createElement("span");
+            issueStatus.className = "review-issue-status review-state";
+            issueStatus.dataset.status = status.status;
+            issueStatus.textContent = `${status.glyph} ${status.label}`;
+            head.append(issueTitle, issueStatus);
+            card.appendChild(head);
+            appendReviewDetail(card, "Finding — validated review evidence", issue.summary || "Review finding");
+            appendReviewDetail(card, "Status", status.explanation);
+            appendReviewDetail(card, "Recorded outcome", issue.resolution_reason);
+            appendReviewDetail(card, "Correction evidence", issue.resolution_details, "mono");
+            group.appendChild(card);
+          }
+          reviewIssuesBodyEl.appendChild(group);
+        }
+      }
+
       function appendToolDiffs(body, entry) {
         if (!showTranscriptDiffs) {
           return;
@@ -7227,6 +7952,7 @@
           transcriptTitleEl.textContent = "Transcript";
           transcriptMetaEl.textContent = "Select a session to inspect its history.";
           workingBadgeEl.hidden = true;
+          syncWorkingSpinner();
           renderWorkspaceDiff(null);
           stopTurnEl.hidden = true;
           stopTurnEl.disabled = true;
@@ -7247,6 +7973,7 @@
           : "";
         transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
         workingBadgeEl.hidden = archived || !sessionIsWorking(session);
+        syncWorkingSpinner();
         renderWorkspaceDiff(session.workspace_diff);
         renderWorkspaceHeadDiff(session.workspace_head_diff);
         const activeTurn = !archived && sessionHasActiveTurn(session);
@@ -7853,15 +8580,19 @@
           return;
         }
 
-        // Verb = intent, status = mechanism: the button says Send while the
-        // strip and rows report what is queued. The placeholder tracks the
-        // agent state instead of explaining the queue transport.
+        // Browser and terminal submissions always share the same FIFO queue.
+        // When steering is available, Stop applies its oldest prompt to the
+        // running turn instead of cancelling it.
         setComposerPlaceholder(sideActive
           ? (session.prompt_in_flight
-            ? "Side conversation is working — your prompt runs when it's free"
+            ? (session.steering_supported
+              ? "Side conversation is working — Send queues; Stop steers the next prompt"
+              : "Side conversation is working — your prompt runs when it's free")
             : "Message the side conversation — type exit to return")
           : (session.prompt_in_flight
-            ? "Agent is working — your prompt runs when it's free"
+            ? (session.steering_supported
+              ? "Agent is working — Send queues; Stop steers the next prompt"
+              : "Agent is working — your prompt runs when it's free")
             : "Message the agent"));
         setQueueStatus(queuedPrompts.length ? `${queuedPrompts.length} queued` : "");
 
@@ -7967,6 +8698,7 @@
         approvalBadgeEl.hidden = !pending.length;
         if (pending.length) {
           workingBadgeEl.hidden = true;
+          syncWorkingSpinner();
         }
         for (const request of pending) {
           const card = cloneTemplate(permissionTpl);
@@ -8589,86 +9321,6 @@
         statusLineEl.hidden = false;
       }
 
-      function renderRagnarok(session) {
-        const arena = session?.ragnarok;
-        if (!arena) {
-          ragnarokPanelEl.hidden = true;
-          ragnarokPhaseEl.textContent = "";
-          ragnarokTaskEl.textContent = "";
-          ragnarokFightersEl.replaceChildren();
-          ragnarokResultEl.replaceChildren();
-          ragnarokResultEl.hidden = true;
-          return;
-        }
-
-        const fighters = Array.isArray(arena.fighters) ? arena.fighters : [];
-        const fighterName = (id) => fighters.find((fighter) => fighter.id === id)?.model || `fighter ${id}`;
-        const phase = String(arena.phase || "arena").replaceAll("_", " ");
-        ragnarokPhaseEl.textContent = arena.awaiting_approval
-          ? `${phase} · awaiting local unleash`
-          : phase;
-        ragnarokTaskEl.textContent = arena.task || "Ragnarok arena";
-
-        ragnarokFightersEl.replaceChildren(...fighters.map((fighter) => {
-          const card = document.createElement("article");
-          card.className = "ragnarok-fighter";
-
-          const name = document.createElement("span");
-          name.className = "ragnarok-fighter-name";
-          name.textContent = fighter.model || `fighter ${fighter.id}`;
-          const status = document.createElement("span");
-          status.className = "ragnarok-fighter-status";
-          status.textContent = fighter.status || "waiting";
-          const source = document.createElement("span");
-          source.className = "ragnarok-fighter-source";
-          source.textContent = fighter.source || "unknown source";
-          const vigor = document.createElement("span");
-          vigor.className = "ragnarok-vigor";
-          vigor.dataset.vigor = fighter.vigor || "waiting";
-          vigor.setAttribute("aria-label", `Vigor: ${fighter.vigor || "waiting"}`);
-          card.append(name, status, source, vigor);
-          return card;
-        }));
-
-        const result = [];
-        const verdict = arena.verdict;
-        if (verdict) {
-          const summary = document.createElement("div");
-          summary.className = "ragnarok-verdict";
-          if (verdict.clear_winner != null) {
-            summary.textContent = `Winner: ${fighterName(verdict.clear_winner)}`;
-          } else if (Array.isArray(verdict.finalists) && verdict.finalists.length === 2) {
-            summary.textContent = `Finalists: ${fighterName(verdict.finalists[0])} and ${fighterName(verdict.finalists[1])}`;
-          } else {
-            summary.textContent = "Verdict available";
-          }
-          if (verdict.thor_fallback) {
-            summary.textContent += " · local fallback judgment";
-          }
-          result.push(summary);
-          if (verdict.reasoning) {
-            const reasoning = document.createElement("div");
-            reasoning.textContent = verdict.reasoning;
-            result.push(reasoning);
-          }
-        }
-        if (arena.adoption_hint) {
-          const adoption = document.createElement("div");
-          adoption.className = "ragnarok-adoption";
-          adoption.textContent = arena.adoption_hint;
-          result.push(adoption);
-        }
-        if (arena.failed) {
-          const failure = document.createElement("div");
-          failure.className = "ragnarok-failure";
-          failure.textContent = `Arena failed: ${arena.failed}`;
-          result.push(failure);
-        }
-        ragnarokResultEl.replaceChildren(...result);
-        ragnarokResultEl.hidden = !result.length;
-        ragnarokPanelEl.hidden = false;
-      }
-
       function renderChat() {
         const session = selectedSession();
         const archived = selectedSessionIsArchived();
@@ -8678,12 +9330,15 @@
         archiveBadgeEl.hidden = !archived;
         sideBadgeEl.hidden = readOnly || !sideActive;
         renderStatusLine(session);
-        renderRagnarok(session);
         renderTranscript(session, archived);
         renderConfig(readOnly || sideActive ? null : session);
+        renderReviewBoard(session);
         renderSubagents(session);
         renderPermissions(readOnly ? null : session);
         renderQueue(readOnly ? null : session);
+        if (!reviewIssuesModalEl.hidden) {
+          paintReviewIssues(session);
+        }
         updateCommandPalette();
       }
 
@@ -8744,7 +9399,7 @@
       async function tryResumeViewerSession() {
         if (viewerToken) {
           showApp();
-          await refreshThoughtOutput();
+          await refreshServerSnapshot();
           await refreshSessions();
           applyRoute();
           return;
@@ -8767,7 +9422,7 @@
           syncPendingStopState();
           noteSessionActivity();
           showApp();
-          await refreshThoughtOutput();
+          await refreshServerSnapshot();
           const routed = routeSessionId();
           if (routed && !sessions.some((session) => session.session_id === routed)) {
             await refreshHistory(false);
@@ -8776,11 +9431,10 @@
           applyRoute();
           await refreshQueuedPrompts();
         } catch (error) {
-          // A suspended iOS PWA can wake before Wi-Fi or its VPN tunnel. A
-          // transport failure says nothing about the cookie, so keep retrying
-          // instead of making the user sign in again. Only the explicit 401
-          // branch above exposes the viewer-code form.
-          showAuth(`Can't reach Mjolnir. Reconnecting automatically…`, true);
+          // Keep retrying an existing cookie, but never hide the viewer-code
+          // form: this can also be a first connection to a setup-pending
+          // server, and hiding the only way forward dead-ends onboarding.
+          showAuth(`Can't reach Mjolnir. Reconnecting automatically…`);
           scheduleSessionResumeRetry();
         }
       }
@@ -8974,7 +9628,9 @@
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
-          setQueueStatus("Stop requested.");
+          setQueueStatus(session.steering_supported && session.queued_prompt_count > 0
+            ? "Steering the next queued prompt."
+            : "Stop requested.");
           await refreshSessions();
         } catch (error) {
           stopRequestBySessionId.delete(sessionId);
@@ -9012,7 +9668,7 @@
           }
           authTokenEl.value = "";
           showApp();
-          await refreshThoughtOutput();
+          await refreshServerSnapshot();
           await refreshSessions();
           applyRoute();
         } catch (error) {
@@ -9056,6 +9712,12 @@
       workspaceDiffModalEl.addEventListener("click", (event) => {
         if (event.target === workspaceDiffModalEl) {
           workspaceDiffModalEl.hidden = true;
+        }
+      });
+      reviewIssuesCloseEl.addEventListener("click", closeReviewIssues);
+      reviewIssuesModalEl.addEventListener("click", (event) => {
+        if (event.target === reviewIssuesModalEl) {
+          closeReviewIssues();
         }
       });
       settingsCloseEl.addEventListener("click", closeViewerSettings);
@@ -9104,6 +9766,9 @@
         if (!workspaceDiffModalEl.hidden) {
           event.preventDefault();
           workspaceDiffModalEl.hidden = true;
+        } else if (!reviewIssuesModalEl.hidden) {
+          event.preventDefault();
+          closeReviewIssues();
         } else if (!mjconfigModalEl.hidden) {
           event.preventDefault();
           closeMjConfig();
@@ -9132,6 +9797,12 @@
       narrowScreen.addEventListener("change", () => {
         if (authenticated) {
           renderAll();
+        }
+      });
+      reducedMotion.addEventListener("change", () => {
+        syncWorkingSpinner();
+        if (!mjconfigModalEl.hidden && mjcfg.tab === "appearance") {
+          renderMjConfig();
         }
       });
       window.addEventListener("resize", syncKeyboardInset);

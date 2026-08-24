@@ -91,23 +91,27 @@ impl UsageFactStore {
     /// Atomically claim the refresh lease for `provider`. Returns true
     /// when this owner now holds the lease and should run the probe.
     /// Fails when another live owner holds an unexpired lease; expired
-    /// leases (crashed or hung holders) are taken over.
+    /// leases (crashed or hung holders) are taken over. A fact fetched at
+    /// or after `current_fact_minimum` also prevents a checkout, closing the
+    /// read-then-checkout race after another owner publishes.
     pub fn try_checkout(
         &self,
         provider: &str,
         owner: &str,
         lease: Duration,
         now: i64,
+        current_fact_minimum: i64,
     ) -> rusqlite::Result<bool> {
         let expires = now.saturating_add(lease.as_secs() as i64);
         let changed = self.connect()?.execute(
             "INSERT INTO usage_facts (provider, lease_owner, lease_expires_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(provider) DO UPDATE SET lease_owner = ?2, lease_expires_at = ?3
-             WHERE usage_facts.lease_owner IS NULL
-                OR usage_facts.lease_owner = ?2
-                OR usage_facts.lease_expires_at <= ?4",
-            params![provider, owner, expires, now],
+             WHERE (usage_facts.payload IS NULL OR usage_facts.fetched_at < ?5)
+               AND (usage_facts.lease_owner IS NULL
+                    OR usage_facts.lease_owner = ?2
+                    OR usage_facts.lease_expires_at <= ?4)",
+            params![provider, owner, expires, now, current_fact_minimum],
         )?;
         Ok(changed > 0)
     }
@@ -169,24 +173,24 @@ mod tests {
         let (_dir, store) = store();
         assert!(
             store
-                .try_checkout("claude", "a", Duration::from_secs(30), 1000)
+                .try_checkout("claude", "a", Duration::from_secs(30), 1000, i64::MAX)
                 .expect("checkout a")
         );
         assert!(
             !store
-                .try_checkout("claude", "b", Duration::from_secs(30), 1010)
+                .try_checkout("claude", "b", Duration::from_secs(30), 1010, i64::MAX)
                 .expect("checkout b while leased")
         );
         // The same owner may renew its own lease.
         assert!(
             store
-                .try_checkout("claude", "a", Duration::from_secs(30), 1010)
+                .try_checkout("claude", "a", Duration::from_secs(30), 1010, i64::MAX)
                 .expect("renew a")
         );
         // After expiry another owner takes the lease over.
         assert!(
             store
-                .try_checkout("claude", "b", Duration::from_secs(30), 1041)
+                .try_checkout("claude", "b", Duration::from_secs(30), 1041, i64::MAX)
                 .expect("checkout b after expiry")
         );
     }
@@ -196,7 +200,7 @@ mod tests {
         let (_dir, store) = store();
         assert!(
             store
-                .try_checkout("claude", "a", Duration::from_secs(30), 1000)
+                .try_checkout("claude", "a", Duration::from_secs(30), 1000, i64::MAX)
                 .expect("checkout")
         );
         assert_eq!(store.read("claude").expect("read"), None);
@@ -213,7 +217,7 @@ mod tests {
         // The lease is free again once the fact is published.
         assert!(
             store
-                .try_checkout("claude", "b", Duration::from_secs(30), 1006)
+                .try_checkout("claude", "b", Duration::from_secs(30), 1006, i64::MAX)
                 .expect("checkout after publish")
         );
     }
@@ -223,19 +227,19 @@ mod tests {
         let (_dir, store) = store();
         assert!(
             store
-                .try_checkout("claude", "a", Duration::from_secs(30), 1000)
+                .try_checkout("claude", "a", Duration::from_secs(30), 1000, i64::MAX)
                 .expect("checkout")
         );
         store.release("claude", "b").expect("release wrong owner");
         assert!(
             !store
-                .try_checkout("claude", "b", Duration::from_secs(30), 1001)
+                .try_checkout("claude", "b", Duration::from_secs(30), 1001, i64::MAX)
                 .expect("still leased")
         );
         store.release("claude", "a").expect("release");
         assert!(
             store
-                .try_checkout("claude", "b", Duration::from_secs(30), 1002)
+                .try_checkout("claude", "b", Duration::from_secs(30), 1002, i64::MAX)
                 .expect("checkout after release")
         );
     }
@@ -245,13 +249,13 @@ mod tests {
         let (_dir, store) = store();
         assert!(
             store
-                .try_checkout("claude", "a", Duration::from_secs(30), 1000)
+                .try_checkout("claude", "a", Duration::from_secs(30), 1000, i64::MAX)
                 .expect("checkout a")
         );
         // a's lease expires and b takes over the refresh.
         assert!(
             store
-                .try_checkout("claude", "b", Duration::from_secs(30), 1031)
+                .try_checkout("claude", "b", Duration::from_secs(30), 1031, i64::MAX)
                 .expect("checkout b after expiry")
         );
         // a's slow probe still lands its data, but b keeps the lease.
@@ -262,7 +266,7 @@ mod tests {
         assert_eq!(fact.payload, "late-fact");
         assert!(
             !store
-                .try_checkout("claude", "c", Duration::from_secs(30), 1033)
+                .try_checkout("claude", "c", Duration::from_secs(30), 1033, i64::MAX)
                 .expect("b's lease survives the stale publish")
         );
     }
@@ -276,10 +280,29 @@ mod tests {
         assert_eq!(store.read("codex").expect("read"), None);
         assert!(
             store
-                .try_checkout("codex", "a", Duration::from_secs(30), 1000)
+                .try_checkout("codex", "a", Duration::from_secs(30), 1000, i64::MAX)
                 .expect("codex checkout unaffected")
         );
         let fact = store.read("claude").expect("read").expect("fact");
         assert_eq!(fact.payload, "claude-fact");
+    }
+
+    #[test]
+    fn current_fact_prevents_a_late_checkout_after_publish() {
+        let (_dir, store) = store();
+        store
+            .publish("codex", "fresh", "first", 1_000)
+            .expect("publish fresh fact");
+
+        assert!(
+            !store
+                .try_checkout("codex", "late", Duration::from_secs(30), 1_001, 1_000)
+                .expect("current fact blocks checkout")
+        );
+        assert!(
+            store
+                .try_checkout("codex", "later", Duration::from_secs(30), 1_001, 1_001)
+                .expect("older fact permits checkout")
+        );
     }
 }

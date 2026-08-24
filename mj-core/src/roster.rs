@@ -421,6 +421,24 @@ fn inventory_server_is_visible(server: &AcpServerInfo) -> bool {
         || server.policy != AcpServerPolicy::Auto
 }
 
+/// Resolution found no launchable model at all — the machine has no usable
+/// adapter, typically because nothing is installed or authenticated yet.
+/// Callers that can guide the user through setup (the remote server) detect
+/// this with `downcast_ref` and degrade instead of failing; every other
+/// resolution error stays fatal.
+#[derive(Debug, Clone)]
+pub struct NothingLaunchable {
+    pub message: String,
+}
+
+impl std::fmt::Display for NothingLaunchable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NothingLaunchable {}
+
 type ProbeResult = std::result::Result<probe::AdapterCapabilities, String>;
 static WARNED_ADAPTERS: LazyLock<std::sync::Mutex<HashSet<String>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
@@ -639,22 +657,24 @@ fn preferred_primary_candidate(
         .map(|candidate| candidate.model.pass_at_1)
         .max_by(f64::total_cmp);
     available.iter().filter(eligible).max_by(|a, b| {
-        primary_ranking_score(a, strongest_opus)
-            .total_cmp(&primary_ranking_score(b, strongest_opus))
+        primary_ranking_score(&a.model.model, a.model.pass_at_1, strongest_opus)
+            .total_cmp(&primary_ranking_score(
+                &b.model.model,
+                b.model.pass_at_1,
+                strongest_opus,
+            ))
             .then_with(|| b.model.mean_cost_usd.total_cmp(&a.model.mean_cost_usd))
             .then_with(|| b.model.model.cmp(&a.model.model))
     })
 }
 
-fn primary_ranking_score(candidate: &ResolvedAgent, strongest_opus: Option<f64>) -> f64 {
-    if is_claude_fable_5(&candidate.model.model) {
+fn primary_ranking_score(model: &str, pass_at_1: f64, strongest_opus: Option<f64>) -> f64 {
+    if is_claude_fable_5(model) {
         // Fable 5 is the Claude flagship for the primary seat. Lift it only
         // enough to outrank Opus without changing review or subagent scoring.
-        strongest_opus.map_or(candidate.model.pass_at_1, |opus| {
-            candidate.model.pass_at_1.max(opus + f64::EPSILON)
-        })
+        strongest_opus.map_or(pass_at_1, |opus| pass_at_1.max(opus + f64::EPSILON))
     } else {
-        candidate.model.pass_at_1
+        pass_at_1
     }
 }
 
@@ -666,6 +686,38 @@ fn is_claude_fable_5(model: &str) -> bool {
 fn is_claude_opus(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model == "claude-opus" || model.starts_with("claude-opus-")
+}
+
+/// Resolve the automatic primary model when the seat is constrained to one
+/// adapter. The UI uses this to tell whether a saved team still targets its
+/// already-running primary before reloading only the auxiliary routes.
+pub fn auto_primary_model_for_source<'a>(
+    choices: &'a [ModelChoice],
+    source: &str,
+) -> Option<&'a str> {
+    let eligible = |choice: &&ModelChoice| {
+        choice.available && choice.ranked && choice.adapter.as_deref() == Some(source)
+    };
+    let strongest_opus = choices
+        .iter()
+        .filter(eligible)
+        .filter(|choice| is_claude_opus(&choice.model))
+        .map(|choice| choice.pass_at_1)
+        .max_by(f64::total_cmp);
+    choices
+        .iter()
+        .filter(eligible)
+        .max_by(|a, b| {
+            primary_ranking_score(&a.model, a.pass_at_1, strongest_opus)
+                .total_cmp(&primary_ranking_score(
+                    &b.model,
+                    b.pass_at_1,
+                    strongest_opus,
+                ))
+                .then_with(|| b.mean_cost_usd.total_cmp(&a.mean_cost_usd))
+                .then_with(|| b.model.cmp(&a.model))
+        })
+        .map(|choice| choice.model.as_str())
 }
 
 /// `auto` takes the best-ranked launchable model, except that a strictly
@@ -998,17 +1050,20 @@ fn assemble_roster(
             .next()
             .map(|reason| format!(" ({reason})"))
             .unwrap_or_default();
-        if let Some(external) = inventory
+        let message = match inventory
             .servers
             .iter()
             .find(|server| server.launch.kind == AdapterKind::External)
         {
-            bail!(
+            Some(external) => format!(
                 "no model is launchable{diagnostic}: {} did not advertise a usable model",
                 external.label
-            );
-        }
-        bail!("no model is launchable{diagnostic}: install or authenticate Codex or Claude Code");
+            ),
+            None => format!(
+                "no model is launchable{diagnostic}: install or authenticate Codex or Claude Code"
+            ),
+        };
+        return Err(NothingLaunchable { message }.into());
     }
 
     if matches!(
@@ -1181,12 +1236,41 @@ mod tests {
 
     #[test]
     fn permission_presets_map_to_provider_controls() {
-        let mut env = HashMap::new();
+        let mut env = HashMap::from([(
+            "CODEX_CONFIG".to_string(),
+            r#"{"model":"gpt-5.6"}"#.to_string(),
+        )]);
         let codex = configure_permissions(AdapterKind::Codex, PermissionPreset::Auto, &mut env)
             .expect("Codex preset");
         assert_eq!(codex.config_id, "mode");
         assert_eq!(codex.value, "agent");
         assert_eq!(codex.manual_fallback.as_deref(), Some("read-only"));
+        let codex_config: serde_json::Value =
+            serde_json::from_str(env.get("CODEX_CONFIG").expect("Codex configuration"))
+                .expect("valid Codex configuration");
+        assert_eq!(
+            codex_config["approvals_reviewer"],
+            serde_json::Value::String("auto_review".to_string())
+        );
+        assert_eq!(codex_config["model"], "gpt-5.6");
+
+        let mut codex_manual_env = HashMap::new();
+        configure_permissions(
+            AdapterKind::Codex,
+            PermissionPreset::Manual,
+            &mut codex_manual_env,
+        )
+        .expect("Codex manual preset");
+        let codex_manual_config: serde_json::Value = serde_json::from_str(
+            codex_manual_env
+                .get("CODEX_CONFIG")
+                .expect("Codex configuration"),
+        )
+        .expect("valid Codex configuration");
+        assert_eq!(
+            codex_manual_config["approvals_reviewer"],
+            serde_json::Value::String("user".to_string())
+        );
 
         let claude = configure_permissions(AdapterKind::Claude, PermissionPreset::Manual, &mut env)
             .expect("Claude preset");
@@ -1234,6 +1318,18 @@ mod tests {
             launch: launch_for(adapter_kind(model).expect("model has a built-in adapter")),
             ranked: true,
             reasoning_effort: None,
+        }
+    }
+
+    fn choice(model: &str, pass_at_1: f64, source: &str) -> ModelChoice {
+        ModelChoice {
+            model: model.to_string(),
+            pass_at_1,
+            mean_cost_usd: 1.0,
+            available: true,
+            disabled_reason: None,
+            adapter: Some(source.to_string()),
+            ranked: true,
         }
     }
 
@@ -1428,6 +1524,20 @@ mod tests {
                 .model
                 .model,
             "claude-fable-5"
+        );
+    }
+
+    #[test]
+    fn auto_primary_model_for_source_matches_the_constrained_auto_route() {
+        let choices = vec![
+            choice("gpt-5-6-terra", 0.65, "codex-acp"),
+            choice("gpt-5-6-sol", 0.70, "codex-acp"),
+            choice("claude-fable-5", 0.99, "claude-acp"),
+        ];
+
+        assert_eq!(
+            auto_primary_model_for_source(&choices, "codex-acp"),
+            Some("gpt-5-6-sol")
         );
     }
 
@@ -2191,6 +2301,37 @@ mod tests {
 
         assert_eq!(resolved.primary.reasoning_effort.as_deref(), Some("high"));
         assert!(resolved.subagent_default.is_none());
+    }
+
+    #[test]
+    fn empty_discovery_types_the_error_as_nothing_launchable() {
+        let discovery = Discovery {
+            available: Vec::new(),
+            adapter_errors: HashMap::new(),
+            session_config: HashMap::new(),
+        };
+        let availability = Availability {
+            codex_credentials: false,
+            claude_status: ClaudeAuthStatus::NotLoggedIn,
+            subscriptions: Subscriptions::default(),
+        };
+        let error = assemble_roster(
+            &Config::default(),
+            &[],
+            &availability,
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect_err("nothing launchable");
+        let nothing = error
+            .downcast_ref::<NothingLaunchable>()
+            .expect("typed as NothingLaunchable so the server can degrade to setup");
+        assert_eq!(
+            nothing.message,
+            "no model is launchable: install or authenticate Codex or Claude Code"
+        );
+        // The rendered error keeps the message the CLI has always printed.
+        assert_eq!(format!("{error:#}"), nothing.message);
     }
 
     #[test]

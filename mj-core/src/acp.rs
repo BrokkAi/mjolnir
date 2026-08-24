@@ -134,9 +134,6 @@ pub struct RuntimeRoleConfig {
     pub model_id: String,
     pub model_value: String,
     pub adapter_source_id: String,
-    /// Require an adapter-native read-only policy before the first prompt.
-    /// Discrete-review seats set this in addition to the client-side ACP gate.
-    pub require_native_read_only: bool,
     /// Provider-native permission preset applied after model selection.
     pub permission: Option<crate::config::RuntimePermissionConfig>,
     /// Correlates primary and subagent records in one interactive session.
@@ -145,74 +142,6 @@ pub struct RuntimeRoleConfig {
     /// applied to this seat's ACP session after the model is set. `None`
     /// leaves the adapter's own default effort untouched.
     pub reasoning_effort: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeReadOnlyPolicy {
-    Codex,
-    Claude,
-}
-
-const CLAUDE_READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
-
-const CLAUDE_MUTATING_TOOLS: &[&str] = &[
-    "Agent",
-    "Bash",
-    "Edit",
-    "Write",
-    "NotebookEdit",
-    "TaskStop",
-    "TodoWrite",
-    "SendFeedback",
-    "ClaudeDesign",
-    "Projects",
-    "TaskCreate",
-    "TaskUpdate",
-    "REPL",
-    "Workflow",
-    "CronCreate",
-    "CronDelete",
-    "ScheduleWakeup",
-    "RemoteTrigger",
-    "ShowOnboardingRolePicker",
-    "ProposeSkills",
-    "Artifact",
-    "PushNotification",
-    "EnterWorktree",
-    "ExitWorktree",
-];
-
-fn native_read_only_policy(
-    role: Option<&RuntimeRoleConfig>,
-) -> Result<Option<NativeReadOnlyPolicy>> {
-    let Some(role) = role.filter(|role| role.require_native_read_only) else {
-        return Ok(None);
-    };
-    let policy = match role.adapter_source_id.as_str() {
-        "codex-acp" => NativeReadOnlyPolicy::Codex,
-        "claude-acp" => NativeReadOnlyPolicy::Claude,
-        _ => {
-            anyhow::bail!(
-                "native read-only enforcement is unavailable for adapter '{}'; review lane disabled",
-                role.adapter_source_id
-            )
-        }
-    };
-    Ok(Some(policy))
-}
-
-fn claude_read_only_meta() -> serde_json::Map<String, serde_json::Value> {
-    serde_json::json!({
-        "claudeCode": {
-            "options": {
-                "tools": CLAUDE_READ_ONLY_TOOLS,
-                "disallowedTools": CLAUDE_MUTATING_TOOLS,
-            }
-        }
-    })
-    .as_object()
-    .expect("Claude read-only metadata is an object")
-    .clone()
 }
 
 const MAX_LOGGED_UPDATE_BYTES: usize = 4096;
@@ -1037,16 +966,10 @@ fn new_session_request(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
 ) -> NewSessionRequest {
-    let request = NewSessionRequest::new(cwd)
+    NewSessionRequest::new(cwd)
         .additional_directories(additional_directories.to_vec())
-        .mcp_servers(mcp_servers.to_vec());
-    if native_read_only == Some(NativeReadOnlyPolicy::Claude) {
-        request.meta(claude_read_only_meta())
-    } else {
-        request
-    }
+        .mcp_servers(mcp_servers.to_vec())
 }
 
 async fn create_new_session(
@@ -1054,17 +977,9 @@ async fn create_new_session(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
     auth_methods: &[AuthMethod],
 ) -> std::result::Result<NewSessionResponse, LaunchError> {
-    let request = || {
-        new_session_request(
-            cwd.clone(),
-            additional_directories,
-            mcp_servers,
-            native_read_only,
-        )
-    };
+    let request = || new_session_request(cwd.clone(), additional_directories, mcp_servers);
     match conn.send_request(request()).block_task().await {
         Ok(response) => Ok(response),
         Err(source) => match auth_required_detail(&source) {
@@ -1085,7 +1000,6 @@ async fn create_initial_session_with_retry(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
     auth_methods: &[AuthMethod],
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
 ) -> std::result::Result<NewSessionResponse, LaunchError> {
@@ -1094,7 +1008,6 @@ async fn create_initial_session_with_retry(
         cwd.clone(),
         additional_directories,
         mcp_servers,
-        native_read_only,
         auth_methods,
     )
     .await;
@@ -1105,15 +1018,7 @@ async fn create_initial_session_with_retry(
     let _ = ui_tx.send(UiEvent::Warning(format!(
         "session/new failed; retrying once on the existing agent connection: {first_error}"
     )));
-    create_new_session(
-        conn,
-        cwd,
-        additional_directories,
-        mcp_servers,
-        native_read_only,
-        auth_methods,
-    )
-    .await
+    create_new_session(conn, cwd, additional_directories, mcp_servers, auth_methods).await
 }
 
 fn resume_session_request(
@@ -1283,11 +1188,6 @@ pub async fn run(
     ui_rx: mpsc::UnboundedReceiver<UiCommand>,
 ) -> Result<()> {
     let fatal_emitted = Arc::new(AtomicBool::new(false));
-    if let Err(error) = native_read_only_policy(cfg.role_config.as_ref()) {
-        let text = error.to_string();
-        emit_fatal(&ui_tx, &fatal_emitted, text.clone());
-        return Err(anyhow::anyhow!(text));
-    }
     if let Some(role) = cfg.role_config.as_ref()
         && let Some(session_tag) = role.session_tag.as_deref()
     {
@@ -1302,17 +1202,19 @@ pub async fn run(
         );
     }
 
-    // Rotate a near-expiry Claude OAuth token before the spawn so this
-    // seat never has to refresh concurrently with its siblings; see
-    // `claude_token` for why racing refreshes sign the account out.
-    if crate::claude_token::is_claude_invocation(
+    // Rotate a near-expiry OAuth token before the spawn so this seat
+    // never has to refresh concurrently with its siblings; see
+    // `claude_token` and `codex_token` for why racing refreshes sign
+    // the account out.
+    crate::token_gate::ensure_fresh_before_spawn(
         cfg.role_config
             .as_ref()
             .map(|role| role.adapter_source_id.as_str()),
         &cfg.args,
-    ) {
-        crate::claude_token::ensure_fresh_before_spawn(cfg.cwd.clone(), &cfg.env).await;
-    }
+        cfg.cwd.clone(),
+        &cfg.env,
+    )
+    .await;
 
     let prepared = match prepare_agent_command_for_spawn(&cfg.command, &cfg.env, &ui_tx).await {
         Ok(prepared) => prepared,
@@ -2498,19 +2400,6 @@ async fn drive_session(
     manual_compact_suppression: Arc<AtomicBool>,
     stderr_tail: Option<AgentStderrTail>,
 ) -> Result<()> {
-    let native_read_only = match native_read_only_policy(role_config.as_ref()) {
-        Ok(policy) => policy,
-        Err(error) => {
-            let text = emit_fatal_with_stderr(
-                ui_tx,
-                &fatal_emitted,
-                error.to_string(),
-                stderr_tail.as_ref(),
-            )
-            .await;
-            return Err(anyhow::anyhow!(text));
-        }
-    };
     // Advertise the client capabilities backed by handlers registered in
     // `drive_client` above.
     let mut client_meta = serde_json::Map::new();
@@ -2594,8 +2483,8 @@ async fn drive_session(
     if let Some(server) = subagent_service.as_ref() {
         mcp_servers.push(server.advertised().clone());
     }
-    // Memory tools are additive: a failed listener downgrades to
-    // injection-only rather than aborting.
+    // Memory tools are additive: a failed listener leaves native-memory
+    // synchronization intact rather than aborting the session.
     let memory_tools = match memory.as_ref().filter(|memory| memory.tools) {
         Some(session_memory) => match crate::memory::ToolServer::start(session_memory).await {
             Ok(server) => Some(server),
@@ -2608,6 +2497,9 @@ async fn drive_session(
     };
     if let Some(server) = memory_tools.as_ref() {
         mcp_servers.push(server.advertised().clone());
+    }
+    if let Some(session_memory) = memory.clone() {
+        let _ = tokio::task::spawn_blocking(move || session_memory.synchronize_native()).await;
     }
     let side_session_unsupported_reason =
         side_session_capability_error(&init_resp.agent_capabilities);
@@ -2693,7 +2585,6 @@ async fn drive_session(
             cwd.clone(),
             &additional_directories,
             &mcp_servers,
-            native_read_only,
             &init_resp.auth_methods,
             ui_tx,
         )
@@ -2728,16 +2619,11 @@ async fn drive_session(
         options: session_config_options,
         targets: session_config_targets,
     };
-    let mut hidden_config_ids = role_config
+    let hidden_config_ids = role_config
         .as_ref()
         .and_then(|role| role.permission.as_ref())
         .map(|permission| vec![permission.config_id.clone()])
         .unwrap_or_default();
-    if let Some(config_id) = native_read_only.and_then(native_read_only_config_id)
-        && !hidden_config_ids.contains(&config_id.to_string())
-    {
-        hidden_config_ids.push(config_id.to_string());
-    }
     if let Some(role) = role_config.as_ref() {
         match apply_runtime_role_config(&conn, &session_id, &mut session_config, role).await {
             Ok(warnings) => {
@@ -2780,19 +2666,6 @@ async fn drive_session(
         )
         .await;
     }
-    if let Some(policy) = native_read_only
-        && let Err(error) =
-            enforce_native_read_only(&conn, &session_id, &mut session_config, policy, resumed).await
-    {
-        let text = emit_fatal_with_stderr(
-            ui_tx,
-            &fatal_emitted,
-            format!("native read-only policy failed: {error}; review lane disabled"),
-            stderr_tail.as_ref(),
-        )
-        .await;
-        return Err(anyhow::anyhow!(text));
-    }
     let _ = ui_tx.send(UiEvent::SessionStarted {
         session_id: session_id.to_string(),
         resumed,
@@ -2824,9 +2697,6 @@ async fn drive_session(
     workspace_roots.extend(additional_directories.iter().cloned());
     let mut next_turn_diff_id = 1_u64;
     let mut session_has_history = resumed;
-    // Reread shared knowledge at every turn boundary so concurrent Claude and
-    // Codex sessions observe one another's durable discoveries without restart.
-    let mut last_memory_entries: Option<Vec<crate::memory::MemoryEntry>> = None;
     // Prompts that arrived while another operation owned `ui_rx` (a turn, a
     // config update, a session fork). They are replayed here, ahead of any
     // command still sitting in the channel, instead of being dropped: an
@@ -2888,31 +2758,6 @@ async fn drive_session(
                     );
                 }
                 session_state.clear_permissions_cancelled(&session_id).await;
-                let current_memory_entries = if let Some(memory) = memory.clone() {
-                    tokio::task::spawn_blocking(move || memory.refresh_entries())
-                        .await
-                        .unwrap_or_else(|error| {
-                            tracing::warn!("memory refresh task failed: {error}");
-                            None
-                        })
-                } else {
-                    None
-                };
-                let pending_memory = current_memory_entries.as_deref().and_then(|entries| {
-                    memory.as_ref().and_then(|memory| {
-                        crate::memory::render_preamble_update(
-                            entries,
-                            last_memory_entries.as_deref(),
-                            &memory.project,
-                            memory.tools,
-                        )
-                    })
-                });
-                let text = match pending_memory.as_ref().map(|update| update.text.as_str()) {
-                    Some(preamble) if text.is_empty() => preamble.to_string(),
-                    Some(preamble) => format!("{preamble}\n\n{text}"),
-                    None => text,
-                };
                 let prompt = prompt_content_blocks(text, images, resources, side_prompt_policy);
                 let req = PromptRequest::new(session_id.clone(), prompt);
                 let keep_running = drive_prompt_turn(
@@ -2938,16 +2783,6 @@ async fn drive_session(
                 )
                 .await?;
                 session_has_history = true;
-                if let Some(update) = pending_memory {
-                    let delivered = last_memory_entries.get_or_insert_with(Vec::new);
-                    for entry in update.delivered {
-                        if let Some(old) = delivered.iter_mut().find(|old| old.id == entry.id) {
-                            *old = entry;
-                        } else {
-                            delivered.push(entry);
-                        }
-                    }
-                }
                 if !keep_running {
                     break;
                 }
@@ -3003,13 +2838,17 @@ async fn drive_session(
                 }
             }
             UiCommand::NewSession { responder } => {
+                if let Some(session_memory) = memory.clone() {
+                    let _ =
+                        tokio::task::spawn_blocking(move || session_memory.synchronize_native())
+                            .await;
+                }
                 match start_fresh_session(
                     &conn,
                     &session_id,
                     cwd.clone(),
                     &additional_directories,
                     &mcp_servers,
-                    native_read_only,
                     &init_resp.auth_methods,
                     role_config.as_ref(),
                     &saved_session_config,
@@ -3027,7 +2866,6 @@ async fn drive_session(
                         context_usage.reset_for_session();
                         session_has_history = false;
                         next_turn_diff_id = 1;
-                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(message) => {
@@ -3123,7 +2961,6 @@ async fn drive_session(
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
-                        last_memory_entries = None;
                         let _ = responder.send(LoadSessionResult::Switched);
                     }
                     Err(launch_err) => {
@@ -3134,6 +2971,7 @@ async fn drive_session(
                 }
             }
             UiCommand::SetReviewPolicy { .. }
+            | UiCommand::ReloadAuxiliaryAgents
             | UiCommand::RunReview { .. }
             | UiCommand::ComputerControl { .. }
             | UiCommand::RefreshWorkspaceDiff => {}
@@ -3226,7 +3064,6 @@ async fn start_fresh_session(
     cwd: PathBuf,
     additional_directories: &[PathBuf],
     mcp_servers: &[McpServer],
-    native_read_only: Option<NativeReadOnlyPolicy>,
     auth_methods: &[AuthMethod],
     role_config: Option<&RuntimeRoleConfig>,
     saved_session_config: &HashMap<String, String>,
@@ -3241,7 +3078,6 @@ async fn start_fresh_session(
         cwd.clone(),
         additional_directories,
         mcp_servers,
-        native_read_only,
         auth_methods,
     )
     .await
@@ -3274,11 +3110,6 @@ async fn start_fresh_session(
                 ui_tx,
             )
             .await;
-        }
-        if let Some(policy) = native_read_only {
-            enforce_native_read_only(conn, &new_session_id, &mut new_config, policy, false)
-                .await
-                .map_err(|error| format!("native read-only policy failed: {error}"))?;
         }
         Ok::<(), String>(())
     }
@@ -3578,6 +3409,7 @@ async fn drive_fork_session(
                     Some(UiCommand::CancelPrompt) => {}
                     Some(
                         UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
                         | UiCommand::ComputerControl { .. }
                         | UiCommand::RefreshWorkspaceDiff,
@@ -5342,90 +5174,6 @@ pub fn session_config_option_contains_value(
     }
 }
 
-fn native_read_only_config_id(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
-    match policy {
-        NativeReadOnlyPolicy::Codex => Some("mode"),
-        NativeReadOnlyPolicy::Claude => None,
-    }
-}
-
-fn native_read_only_config_value(policy: NativeReadOnlyPolicy) -> Option<&'static str> {
-    match policy {
-        NativeReadOnlyPolicy::Codex => Some("read-only"),
-        NativeReadOnlyPolicy::Claude => None,
-    }
-}
-
-async fn enforce_native_read_only(
-    conn: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    session_config: &mut SessionConfigCache,
-    policy: NativeReadOnlyPolicy,
-    resumed: bool,
-) -> Result<()> {
-    if policy == NativeReadOnlyPolicy::Claude {
-        if resumed {
-            anyhow::bail!(
-                "Claude read-only tool restrictions cannot be confirmed for a resumed session"
-            );
-        }
-        // A successful fresh session/new confirms that claude-agent-acp accepted
-        // the options carrying the explicit built-in allowlist and denylist.
-        return Ok(());
-    }
-
-    let config_id = native_read_only_config_id(policy).expect("config-backed policy");
-    let desired = SessionConfigValueId::from(
-        native_read_only_config_value(policy).expect("config-backed policy"),
-    );
-    let option_index = session_config
-        .targets
-        .iter()
-        .position(|target| {
-            matches!(target, SessionConfigTarget::ConfigOption { config_id: candidate } if candidate.to_string() == config_id)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "ACP adapter did not advertise required read-only configuration '{config_id}'"
-            )
-        })?;
-    if !session_config_option_contains_value(&session_config.options[option_index], &desired) {
-        anyhow::bail!(
-            "ACP adapter did not advertise required read-only value '{}' for '{config_id}'",
-            desired
-        );
-    }
-    if config_option_current_value(&session_config.options[option_index]) != Some(&desired) {
-        let target = session_config.targets[option_index].clone();
-        match send_config_update(conn, session_id, target.clone(), desired.clone()).await? {
-            Some(options) => {
-                session_config.targets = config_option_targets(&options);
-                session_config.options = options;
-            }
-            None => set_current_config_value(
-                &mut session_config.options,
-                &session_config.targets,
-                &target,
-                &desired,
-            ),
-        }
-    }
-    let confirmed = session_config
-        .targets
-        .iter()
-        .position(|target| {
-            matches!(target, SessionConfigTarget::ConfigOption { config_id: candidate } if candidate.to_string() == config_id)
-        })
-        .and_then(|index| config_option_current_value(&session_config.options[index]));
-    if confirmed != Some(&desired) {
-        anyhow::bail!(
-            "ACP adapter did not confirm required read-only value '{}' for '{config_id}'",
-            desired
-        );
-    }
-    Ok(())
-}
-
 fn select_runtime_permission_value(
     option: &SessionConfigOption,
     permission: &crate::config::RuntimePermissionConfig,
@@ -5905,6 +5653,7 @@ async fn drive_config_update(
                     Some(UiCommand::CancelPrompt) => {}
                     Some(
                         UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
                         | UiCommand::ComputerControl { .. }
                         | UiCommand::RefreshWorkspaceDiff,
@@ -6065,6 +5814,10 @@ async fn apply_steer_outcome(
     match outcome {
         Ok(value) => match value.get("outcome").and_then(serde_json::Value::as_str) {
             Some("injected") => {
+                // Recorded only on confirmed delivery: every other outcome
+                // requeues the text as an ordinary prompt, whose dispatch
+                // already records it into the user-message history.
+                let _ = ui_tx.send(UiEvent::SteeredPromptDelivered { text });
                 let _ = ui_tx.send(UiEvent::Info(
                     "message steered into the running turn".to_string(),
                 ));
@@ -6250,6 +6003,22 @@ async fn drive_prompt_turn(
         tokio::select! {
             prompt_result = &mut prompt => {
                 let turn_failed = prompt_result.is_err();
+                // Resolve steering before announcing the turn's end: the
+                // orchestrator snapshots the user-message history into the
+                // discrete-review job while handling `PromptDone`, so a steer
+                // whose delivery confirmation arrived after that emission
+                // would be invisible to review. The flush bounds its wait, so
+                // an unresponsive agent cannot hold the completion back.
+                flush_pending_steers(
+                    conn,
+                    session_id,
+                    session_state,
+                    std::mem::take(&mut steers),
+                    ui_tx,
+                    deferred_prompts,
+                    turn_failed,
+                )
+                .await;
                 match prompt_result {
                     Ok(resp) => {
                         turn_diff_tracker
@@ -6274,16 +6043,6 @@ async fn drive_prompt_turn(
                         let _ = ui_tx.send(UiEvent::PromptFailed { message });
                     }
                 }
-                flush_pending_steers(
-                    conn,
-                    session_id,
-                    session_state,
-                    std::mem::take(&mut steers),
-                    ui_tx,
-                    deferred_prompts,
-                    turn_failed,
-                )
-                .await;
                 return Ok(true);
             }
             steer_outcome = async {
@@ -6420,6 +6179,7 @@ async fn drive_prompt_turn(
                     }
                     Some(
                         UiCommand::SetReviewPolicy { .. }
+                        | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
                         | UiCommand::ComputerControl { .. }
                         | UiCommand::RefreshWorkspaceDiff,
@@ -8358,7 +8118,6 @@ mod tests {
             model_id: "claude-sonnet-5".to_string(),
             model_value: "claude-sonnet-5".to_string(),
             adapter_source_id: "claude-acp".to_string(),
-            require_native_read_only: false,
             permission: None,
             session_tag: None,
             reasoning_effort: None,
@@ -8383,7 +8142,6 @@ mod tests {
             model_id: "gpt-5-6-sol".to_string(),
             model_value: "gpt-5-6-sol".to_string(),
             adapter_source_id: "codex-acp".to_string(),
-            require_native_read_only: false,
             permission: None,
             session_tag: None,
             reasoning_effort: None,
@@ -8392,62 +8150,6 @@ mod tests {
             select_role_model(&codex_model, &codex_role).map(|value| value.to_string()),
             Some("gpt-5.6-sol".to_string())
         );
-    }
-
-    #[test]
-    fn claude_native_read_only_policy_limits_builtin_tools_at_session_creation() {
-        let request = new_session_request(
-            PathBuf::from("/workspace"),
-            &[],
-            &[],
-            Some(NativeReadOnlyPolicy::Claude),
-        );
-        let options = request
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("claudeCode"))
-            .and_then(|claude| claude.get("options"))
-            .expect("Claude read-only options");
-
-        assert_eq!(options["tools"], serde_json::json!(CLAUDE_READ_ONLY_TOOLS));
-        assert_eq!(
-            options["disallowedTools"],
-            serde_json::json!(CLAUDE_MUTATING_TOOLS)
-        );
-        assert!(
-            options["tools"]
-                .as_array()
-                .expect("tool allowlist")
-                .iter()
-                .any(|tool| tool == "Read")
-        );
-        for denied in ["Bash", "Edit", "Write", "NotebookEdit", "Agent"] {
-            assert!(
-                options["disallowedTools"]
-                    .as_array()
-                    .expect("tool denylist")
-                    .iter()
-                    .any(|tool| tool == denied),
-                "missing mutating tool {denied}"
-            );
-        }
-    }
-
-    #[test]
-    fn required_native_read_only_policy_rejects_unknown_adapters() {
-        let role = RuntimeRoleConfig {
-            label: "reviewer".to_string(),
-            model_id: "custom-model".to_string(),
-            model_value: "custom-model".to_string(),
-            adapter_source_id: "custom:unsafe".to_string(),
-            require_native_read_only: true,
-            permission: None,
-            session_tag: None,
-            reasoning_effort: None,
-        };
-
-        let error = native_read_only_policy(Some(&role)).expect_err("unsupported adapter");
-        assert!(error.to_string().contains("review lane disabled"));
     }
 
     #[test]
@@ -8832,11 +8534,7 @@ mod tests {
             .await;
     }
 
-    fn native_read_only_config_options(
-        config_id: &str,
-        current_value: &str,
-        read_only_value: &str,
-    ) -> Vec<SessionConfigOption> {
+    fn reviewer_mode_config_options(current_value: &str) -> Vec<SessionConfigOption> {
         vec![
             SessionConfigOption::select(
                 "model",
@@ -8846,30 +8544,26 @@ mod tests {
             )
             .category(SessionConfigOptionCategory::Model),
             SessionConfigOption::select(
-                config_id.to_string(),
+                "mode",
                 "Permission mode",
                 current_value.to_string(),
                 vec![
                     SessionConfigSelectOption::new("default", "Default"),
-                    SessionConfigSelectOption::new(read_only_value.to_string(), "Read-only"),
+                    SessionConfigSelectOption::new("agent", "Auto"),
                 ],
             )
             .category(SessionConfigOptionCategory::Mode),
         ]
     }
 
-    async fn run_mock_agent_confirming_native_read_only(
+    async fn run_mock_agent_confirming_saved_reviewer_mode(
         stream: tokio::io::DuplexStream,
-        config_id: &'static str,
-        read_only_value: &'static str,
         startup_stage: Arc<AtomicUsize>,
     ) {
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
-        let initial_options =
-            native_read_only_config_options(config_id, "default", read_only_value);
-        let confirmed_options =
-            native_read_only_config_options(config_id, read_only_value, read_only_value);
+        let initial_options = reviewer_mode_config_options("default");
+        let confirmed_options = reviewer_mode_config_options("agent");
         let config_stage = startup_stage.clone();
         let prompt_stage = startup_stage.clone();
         let _ = AgentRole
@@ -8893,11 +8587,8 @@ mod tests {
             )
             .on_receive_request(
                 async move |req: SetSessionConfigOptionRequest, responder, _cx| {
-                    assert_eq!(req.config_id.to_string(), config_id);
-                    assert_eq!(
-                        req.value,
-                        SessionConfigOptionValue::value_id(read_only_value)
-                    );
+                    assert_eq!(req.config_id.to_string(), "mode");
+                    assert_eq!(req.value, SessionConfigOptionValue::value_id("agent"));
                     assert_eq!(config_stage.swap(1, Ordering::SeqCst), 0);
                     responder.respond(SetSessionConfigOptionResponse::new(
                         confirmed_options.clone(),
@@ -8953,19 +8644,13 @@ mod tests {
         }
     }
 
-    async fn assert_native_read_only_is_confirmed_before_prompt(
-        adapter_source_id: &'static str,
-        config_id: &'static str,
-        read_only_value: &'static str,
-    ) {
+    async fn assert_saved_reviewer_mode_is_confirmed_before_prompt() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
         let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
         let startup_stage = Arc::new(AtomicUsize::new(0));
-        let mut agent_task = tokio::spawn(run_mock_agent_confirming_native_read_only(
+        let mut agent_task = tokio::spawn(run_mock_agent_confirming_saved_reviewer_mode(
             agent_side,
-            config_id,
-            read_only_value,
             startup_stage.clone(),
         ));
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
@@ -8982,15 +8667,14 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::ReadOnly,
-            Some(adapter_source_id.to_string()),
+            Some("codex-acp".to_string()),
             None,
-            HashMap::new(),
+            HashMap::from([("config:mode".to_string(), "agent".to_string())]),
             Some(RuntimeRoleConfig {
                 label: "reviewer".to_string(),
                 model_id: "model-a".to_string(),
                 model_value: "model-a".to_string(),
-                adapter_source_id: adapter_source_id.to_string(),
-                require_native_read_only: true,
+                adapter_source_id: "codex-acp".to_string(),
                 permission: None,
                 session_tag: None,
                 reasoning_effort: None,
@@ -9033,8 +8717,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn codex_native_read_only_is_confirmed_before_review_prompt() {
-        assert_native_read_only_is_confirmed_before_prompt("codex-acp", "mode", "read-only").await;
+    async fn saved_reviewer_mode_is_confirmed_before_review_prompt() {
+        assert_saved_reviewer_mode_is_confirmed_before_prompt().await;
     }
 
     async fn run_mock_agent_with_additional_directories(
@@ -9390,25 +9074,43 @@ mod tests {
             .await;
     }
 
-    /// Mock agent for `_session/steering`. When `advertise` is set the
-    /// initialize response carries `_meta.steering.supported`. The first
+    /// How [`run_mock_agent_with_steering`] behaves. When `advertise` is set
+    /// the initialize response carries `_meta.steering.supported`. The first
     /// prompt stays in flight until a steering request arrives (or the
     /// fallback delay passes) and then completes — or errors, when
     /// `fail_first_prompt` is set; later prompts resolve immediately.
-    /// Steering requests are logged and answered with `steer_outcome`.
-    async fn run_mock_agent_with_steering(
-        stream: tokio::io::DuplexStream,
+    /// Steering requests are logged and answered with `steer_outcome`,
+    /// deferred past the first prompt's response when
+    /// `answer_steer_after_prompt` is set.
+    #[derive(Clone, Copy)]
+    struct SteeringMockBehavior {
         advertise: bool,
         steer_outcome: &'static str,
         fail_first_prompt: bool,
+        answer_steer_after_prompt: bool,
+    }
+
+    async fn run_mock_agent_with_steering(
+        stream: tokio::io::DuplexStream,
+        behavior: SteeringMockBehavior,
         prompts: Arc<std::sync::Mutex<Vec<String>>>,
         steers: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
         cancels: Arc<AtomicU64>,
     ) {
+        let SteeringMockBehavior {
+            advertise,
+            steer_outcome,
+            fail_first_prompt,
+            answer_steer_after_prompt,
+        } = behavior;
         let (r, w) = split(stream);
         let transport = ByteStreams::new(w.compat_write(), r.compat());
         let release = Arc::new(tokio::sync::Notify::new());
         let prompt_release = Arc::clone(&release);
+        // Notified once the first prompt's response has been sent, so the
+        // steering answer can be deliberately held until the turn resolved.
+        let prompt_responded = Arc::new(tokio::sync::Notify::new());
+        let prompt_responded_signal = Arc::clone(&prompt_responded);
         let cancel_prompts = Arc::clone(&prompts);
         let _ = AgentRole
             .builder()
@@ -9462,6 +9164,7 @@ mod tests {
                     ));
                     if first {
                         let release = Arc::clone(&prompt_release);
+                        let responded = Arc::clone(&prompt_responded_signal);
                         tokio::spawn(async move {
                             let _ =
                                 tokio::time::timeout(Duration::from_secs(2), release.notified())
@@ -9473,6 +9176,7 @@ mod tests {
                             } else {
                                 responder.respond(PromptResponse::new(StopReason::EndTurn))
                             };
+                            responded.notify_one();
                         });
                         Ok(())
                     } else {
@@ -9486,7 +9190,22 @@ mod tests {
                     assert_eq!(req.method, SESSION_STEERING_METHOD);
                     steers.lock().expect("steer log").push(req.params.clone());
                     release.notify_one();
-                    responder.respond(serde_json::json!({ "outcome": steer_outcome }))
+                    if answer_steer_after_prompt {
+                        // Hold the steering answer until the prompt response
+                        // went out, so the runtime resolves the turn while
+                        // this steer's confirmation is still in flight.
+                        let responded = Arc::clone(&prompt_responded);
+                        tokio::spawn(async move {
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(2), responded.notified())
+                                    .await;
+                            let _ =
+                                responder.respond(serde_json::json!({ "outcome": steer_outcome }));
+                        });
+                        Ok(())
+                    } else {
+                        responder.respond(serde_json::json!({ "outcome": steer_outcome }))
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -10760,7 +10479,6 @@ mod tests {
             model_id: "model-a".to_string(),
             model_value: "model-a".to_string(),
             adapter_source_id: "brokk-acp-rust".to_string(),
-            require_native_read_only: false,
             permission: Some(crate::config::RuntimePermissionConfig {
                 config_id: "permission_mode".to_string(),
                 value: "bypassPermissions".to_string(),
@@ -11122,14 +10840,16 @@ mod tests {
     /// confirm the advertised capability on `Connected`, and start one turn
     /// that stays in flight until the mock's steer/fallback releases it.
     async fn steering_rig(advertise: bool, steer_outcome: &'static str) -> SteeringRig {
-        steering_rig_with(advertise, steer_outcome, false).await
+        steering_rig_with(SteeringMockBehavior {
+            advertise,
+            steer_outcome,
+            fail_first_prompt: false,
+            answer_steer_after_prompt: false,
+        })
+        .await
     }
 
-    async fn steering_rig_with(
-        advertise: bool,
-        steer_outcome: &'static str,
-        fail_first_prompt: bool,
-    ) -> SteeringRig {
+    async fn steering_rig_with(behavior: SteeringMockBehavior) -> SteeringRig {
         let temp = tempfile::tempdir().expect("tempdir");
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
@@ -11140,9 +10860,7 @@ mod tests {
         let cancels = Arc::new(AtomicU64::new(0));
         let agent_task = tokio::spawn(run_mock_agent_with_steering(
             agent_side,
-            advertise,
-            steer_outcome,
-            fail_first_prompt,
+            behavior,
             Arc::clone(&prompts),
             Arc::clone(&steers),
             Arc::clone(&cancels),
@@ -11178,7 +10896,7 @@ mod tests {
         }
         assert_eq!(
             advertised,
-            Some(advertise),
+            Some(behavior.advertise),
             "Connected must mirror the agent's steering advertisement"
         );
 
@@ -11210,7 +10928,10 @@ mod tests {
     }
 
     /// Collect UI events until `count` `PromptDone`s were seen; returns every
-    /// Info/Warning text observed along the way.
+    /// Info/Warning text observed along the way, plus a
+    /// `steered prompt delivered: <text>` marker for each
+    /// [`UiEvent::SteeredPromptDelivered`] so tests can assert the history
+    /// record fires exactly on confirmed injection.
     async fn collect_until_prompt_done(
         ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
         count: usize,
@@ -11224,6 +10945,9 @@ mod tests {
                 .expect("ui event channel closed");
             match ev {
                 UiEvent::Info(text) | UiEvent::Warning(text) => notices.push(text),
+                UiEvent::SteeredPromptDelivered { text } => {
+                    notices.push(format!("steered prompt delivered: {text}"));
+                }
                 UiEvent::PromptDone { .. } => done += 1,
                 UiEvent::PromptFailed { message } => panic!("prompt failed: {message}"),
                 UiEvent::Fatal(message) => panic!("fatal: {message}"),
@@ -11248,10 +10972,22 @@ mod tests {
                 .await
                 .expect("timed out waiting for the steering confirmation")
                 .expect("ui event channel closed");
-            if let UiEvent::Info(text) | UiEvent::Warning(text) = ev {
-                notices.push(text);
+            match ev {
+                UiEvent::Info(text) | UiEvent::Warning(text) => notices.push(text),
+                UiEvent::SteeredPromptDelivered { text } => {
+                    notices.push(format!("steered prompt delivered: {text}"));
+                }
+                _ => {}
             }
         }
+        // Confirmed delivery must record the message for the user-message
+        // history, ahead of its confirmation notice.
+        assert!(
+            notices
+                .iter()
+                .any(|text| text == "steered prompt delivered: steer me"),
+            "injection must announce the delivered text: {notices:?}"
+        );
 
         let steer = rig.steers.lock().expect("steer log")[0].clone();
         assert_eq!(steer["sessionId"], "test-session");
@@ -11275,6 +11011,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn steer_confirmed_at_turn_end_is_recorded_before_prompt_done() {
+        // The agent holds the steering answer until after the prompt
+        // response, so the turn resolves while the steer's confirmation is
+        // still in flight. The runtime must still deliver
+        // `SteeredPromptDelivered` ahead of `PromptDone`: the orchestrator
+        // snapshots the user-message history for discrete review when it
+        // processes the completion, and a steer recorded after that snapshot
+        // would leave review auditing a superseded request.
+        let mut rig = steering_rig_with(SteeringMockBehavior {
+            advertise: true,
+            steer_outcome: "injected",
+            fail_first_prompt: false,
+            answer_steer_after_prompt: true,
+        })
+        .await;
+
+        let mut delivered_at = None;
+        let mut prompt_done_at = None;
+        let mut position = 0_usize;
+        while prompt_done_at.is_none() {
+            let ev = tokio::time::timeout(EVENT_DEADLINE, rig.ui_rx.recv())
+                .await
+                .expect("timed out waiting for PromptDone")
+                .expect("ui event channel closed");
+            match ev {
+                UiEvent::SteeredPromptDelivered { text } => {
+                    assert_eq!(text, "steer me");
+                    delivered_at = Some(position);
+                }
+                UiEvent::PromptDone { .. } => prompt_done_at = Some(position),
+                UiEvent::PromptFailed { message } => panic!("prompt failed: {message}"),
+                UiEvent::Fatal(message) => panic!("fatal: {message}"),
+                _ => {}
+            }
+            position += 1;
+        }
+        assert!(
+            delivered_at.expect("the steer delivery must be announced")
+                < prompt_done_at.expect("the turn must complete"),
+            "the delivered steer must precede PromptDone"
+        );
+
+        // Delivery confirmed: the message joined the turn and is not resent.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            rig.prompts.lock().expect("prompt log").as_slice(),
+            ["start work"]
+        );
+
+        rig.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn steer_answered_started_new_turn_is_cancelled_and_resent_owned() {
         // codex-acp's idle-race answer starts a detached turn mjolnir has no
         // prompt request for and no way to await. The runtime reclaims the
@@ -11292,6 +11081,12 @@ mod tests {
                 .expect("ui event channel closed");
             match ev {
                 UiEvent::Info(text) | UiEvent::Warning(text) => notices.push(text),
+                // The reclaimed message goes out as an ordinary prompt, whose
+                // dispatch records it; a delivery event here would put the
+                // message into the user-message history twice.
+                UiEvent::SteeredPromptDelivered { text } => {
+                    panic!("a reclaimed steer must not announce delivery: {text}")
+                }
                 UiEvent::PromptDone { .. } => done += 1,
                 // The detached turn may already have raised a permission
                 // request; its prompt must not stay actionable.
@@ -11337,6 +11132,14 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("the turn ended before the message could be steered")),
             "the miss must be narrated: {notices:?}"
+        );
+        // The resent prompt is recorded by ordinary dispatch; announcing
+        // delivery for the miss would double-record it in the history.
+        assert!(
+            !notices
+                .iter()
+                .any(|text| text.starts_with("steered prompt delivered:")),
+            "a missed steer must not announce delivery: {notices:?}"
         );
         wait_for_prompt_count(&rig.prompts, 2).await;
         assert_eq!(
@@ -11402,7 +11205,13 @@ mod tests {
         // is not auto-resubmitted into before the user sees the failure. An
         // undelivered steer must follow the same policy: dropped with a
         // warning, never replayed as the next prompt.
-        let mut rig = steering_rig_with(true, "promptRequired", true).await;
+        let mut rig = steering_rig_with(SteeringMockBehavior {
+            advertise: true,
+            steer_outcome: "promptRequired",
+            fail_first_prompt: true,
+            answer_steer_after_prompt: false,
+        })
+        .await;
 
         let mut saw_failed = false;
         let mut drop_notice = None;
@@ -12631,7 +12440,6 @@ mod tests {
                 model_id: "model-a".to_string(),
                 model_value: "model-a".to_string(),
                 adapter_source_id: "codex-acp".to_string(),
-                require_native_read_only: false,
                 permission: None,
                 session_tag: None,
                 reasoning_effort: None,
@@ -12877,51 +12685,6 @@ mod tests {
             .await
             .expect("run task did not finish");
         assert!(result.expect("run task panicked").is_err());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_rejects_unsupported_native_read_only_before_spawn() {
-        let cfg = AcpRuntimeConfig {
-            command: PathBuf::from("definitely-not-a-real-mjolnir-command"),
-            args: Vec::new(),
-            cwd: std::env::temp_dir(),
-            additional_directories: Vec::new(),
-            mcp_servers: Vec::new(),
-            resume_session: None,
-            session_restore_mode: SessionRestoreMode::Continue,
-            env: HashMap::new(),
-            agent_stderr: None,
-            fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
-            access_mode: RuntimeAccessMode::ReadOnly,
-            agent_source_id: Some("custom:unsafe".to_string()),
-            config_path: None,
-            saved_session_config: HashMap::new(),
-            role_config: Some(RuntimeRoleConfig {
-                label: "reviewer".to_string(),
-                model_id: "custom-model".to_string(),
-                model_value: "custom-model".to_string(),
-                adapter_source_id: "custom:unsafe".to_string(),
-                require_native_read_only: true,
-                permission: None,
-                session_tag: None,
-                reasoning_effort: None,
-            }),
-            subagents: None,
-            memory: None,
-            side_prompt_policy: false,
-            termination: None,
-        };
-        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
-        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
-
-        let result = run(cfg, ui_tx, cmd_rx).await.expect_err("must fail closed");
-        let event = ui_rx.recv().await.expect("fatal event");
-        let UiEvent::Fatal(message) = event else {
-            panic!("unexpected event: {event:?}");
-        };
-        assert!(message.contains("native read-only enforcement is unavailable"));
-        assert!(!message.contains("agent command not found"));
-        assert!(result.to_string().contains("review lane disabled"));
     }
 
     /// End-to-end check that a bad `--agent-stderr` path emits the right
@@ -14072,7 +13835,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_preamble_rides_first_prompt_and_rearms_after_new_session() {
+    async fn shared_memory_never_changes_the_user_prompt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = dir.path().join("memories.json");
         crate::memory::add(&store, "prefers pnpm", None).expect("seed memory");
@@ -14109,10 +13872,11 @@ mod tests {
             None,
             Some(crate::memory::SessionMemory {
                 store_path: store.clone(),
+                config_path: None,
                 project: PathBuf::from("/tmp/proj"),
-                inject: true,
+                inject: false,
+                cleanup: false,
                 tools: false,
-                import_claude_auto: false,
             }),
             false,
             None,
@@ -14129,10 +13893,7 @@ mod tests {
         wait_for_prompt_count(&prompts, 2).await;
         {
             let log = prompts.lock().expect("prompt log");
-            assert!(log[0].contains("<mj-memory>"), "first prompt: {:?}", log[0]);
-            assert!(log[0].contains("prefers pnpm"));
-            assert!(log[0].ends_with("first"));
-            // The preamble rides only the first prompt of a session.
+            assert_eq!(log[0], "first");
             assert_eq!(log[1], "second");
         }
 
@@ -14148,11 +13909,7 @@ mod tests {
         wait_for_prompt_count(&prompts, 3).await;
         {
             let log = prompts.lock().expect("prompt log");
-            assert!(
-                log[2].contains("parser paths are normalized"),
-                "live update: {:?}",
-                log[2]
-            );
+            assert_eq!(log[2], "after update");
         }
 
         let (responder, response) = oneshot::channel();
@@ -14168,12 +13925,7 @@ mod tests {
         wait_for_prompt_count(&prompts, 4).await;
         {
             let log = prompts.lock().expect("prompt log");
-            assert!(
-                log[3].contains("<mj-memory>"),
-                "fresh-session prompt must carry memories again: {:?}",
-                log[3]
-            );
-            assert!(log[3].ends_with("third"));
+            assert_eq!(log[3], "third");
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
@@ -14482,7 +14234,7 @@ mod tests {
         let session_id = SessionId::from("session-1");
 
         assert_eq!(
-            new_session_request(cwd.clone(), &additional, &servers, None).mcp_servers,
+            new_session_request(cwd.clone(), &additional, &servers).mcp_servers,
             servers
         );
         assert_eq!(

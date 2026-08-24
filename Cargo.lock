@@ -503,14 +503,13 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-agents"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-trait",
  "brokk-mj-core",
  "futures",
- "getrandom 0.3.4",
  "rmcp",
  "schemars 1.2.1",
  "serde",
@@ -523,14 +522,14 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-anvil"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "brokk-mj-core",
 ]
 
 [[package]]
 name = "brokk-mj-core"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -574,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -598,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-remote"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -635,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -673,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "anyhow",
  "bzip2 0.6.1",
@@ -689,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "1.11.5"
+version = "1.12.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",

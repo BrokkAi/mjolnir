@@ -12,7 +12,7 @@ and relevance of what they submit. Please follow the
   is running. Use the other-bug form for installation, development setup,
   packaging, updating, or documentation problems. Blank issues remain
   available when neither form fits.
-- Keep changes focused on one problem or capability. For a large ACP, Council,
+- Keep changes focused on one problem or capability. For a large ACP, orchestration,
   permission, session-format, terminal-mode, or release change, open an issue
   or discuss the direction on [Discord](https://discord.gg/geYkWUeH) first.
 - Do not put credentials, private source code, or unredacted private
@@ -82,7 +82,7 @@ dictation, put `mj-voice-worker` beside `mj` in the target directory or set
 ## Understand the Runtime Boundaries
 
 Mjolnir is an ACP client that owns terminal presentation, user input,
-permissions, session controls, Council orchestration, and persistence around
+permissions, session controls, multi-agent orchestration, and persistence around
 one or more agent subprocesses. The detailed repository contracts are
 maintained in [AGENTS.md](AGENTS.md). The most important contribution
 boundaries are:
@@ -97,10 +97,10 @@ boundaries are:
   wrapping, scrolling, paging, and resizing.
 - Terminal ownership and restoration must be deterministic across normal exit,
   cancellation, signals, panics, subprocess failures, and startup errors.
-- Keep model selection separate from ACP adapter selection. Council role
+- Keep model selection separate from ACP adapter selection. Agent role
   handoffs, cancellation, permissions, token usage, and transcript labels must
   remain attributable to the correct role.
-- Headless and remote paths share the Council runtime with the TUI. Preserve
+- Headless and remote paths share the orchestration runtime with the TUI. Preserve
   machine-readable output, non-blocking permission behavior, nested permission
   identity, and shutdown semantics when changing shared code.
 - Configuration and session provenance are versioned persisted formats. Make
@@ -119,14 +119,14 @@ Add the smallest regression test that would have caught the problem:
 - For state-machine changes, test the event transition or input handler
   directly instead of relying only on a manual TUI check.
 - Use `tests/termination_pty.rs` for terminal restoration and signal behavior.
-- Use the deterministic fixtures in `tests/e2e/` for ACP process, Council
+- Use the deterministic fixtures in `tests/e2e/` for ACP process, agent
   handoff, tool, permission, transcript, or cancellation flows that need a
   process boundary.
 - Add negative controls for permission, protocol, persistence, cleanup, and
   terminal-lifecycle changes.
 - Update the relevant page in the [documentation site](docs/src/content/docs/)
   when a user-visible command, keyboard action, setup flow, ACP adapter,
-  Council behavior, remote feature, configuration option, or limitation
+  orchestration behavior, remote feature, configuration option, or limitation
   changes. Update [README.md](README.md) when the front-door positioning,
   installation, compatibility, or primary quick start changes.
 - Update [AGENTS.md](AGENTS.md) when an implementation invariant or contributor
@@ -157,7 +157,7 @@ cargo build --release -p brokk-mj-voice-worker
 UI changes need proportionate manual validation in every affected surface.
 Check inline and fullscreen modes separately; for layout changes, include narrow
 and resized terminals. Also exercise headless output or the remote viewer when
-shared rendering, Council, permission, or session code affects those paths.
+shared rendering, orchestration, permission, or session code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
 CI runs the main checks on Linux, macOS, and Windows, checks the voice worker on
@@ -207,7 +207,7 @@ requests consistently provide:
 - Key semantic changes rather than a list of edited files.
 - Root cause for bug fixes when it is known.
 - Before/after evidence and capability or safety boundaries for UI, session,
-  ACP, Council, permission, terminal, remote, or voice changes.
+  ACP, orchestration, permission, terminal, remote, or voice changes.
 - Important touch points for broad or cross-cutting changes.
 - Exact test, lint, build, packaging, benchmark, and manual-validation commands
   actually run.
@@ -222,7 +222,7 @@ Reviewers will pay particular attention to:
   permission content.
 - ACP compatibility and correct separation between Mjolnir-owned and
   adapter-owned state.
-- Council role attribution, cancellation, and deterministic transcript and
+- Agent role attribution, cancellation, and deterministic transcript and
   tool-result behavior.
 - Safe permission, worktree, session, configuration, and remote-control
   boundaries.

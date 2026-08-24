@@ -48,22 +48,22 @@ Web](/remote/) for behavioral boundaries.
 | `/mjconfig` | Configure agents, ACP servers, and appearance |
 | `/diff` | Show workspace changes against `HEAD` |
 | `/agents` | Show the active model selections and per-seat usage |
-| `/review` | Choose a recent, uncommitted, or HEAD findings-only review |
-| `/review recent` | Review the latest change-producing turn |
-| `/review uncommitted` | Review all current worktree changes |
-| `/review head` | Review `HEAD` |
+| `/discrete-review` | Choose a target for the configured discrete-review tier |
+| `/discrete-review <recent\|uncommitted\|head> [quick\|extended]` | Run an on-demand discrete-review pass, optionally overriding the configured tier |
+| `/adversarial-review …` | Alias for `/discrete-review …` |
 | `/memory` | List stored memories and the use/generate toggles |
 | `/memory add [--global] <text>` | Save a memory for this project (or globally) |
 | `/compact` | Compact the primary agent's session where supported |
 | `/subagents` | Open the session-wide actor roster and its retained transcripts |
-| `/ragnarok TASK` | Summon the model-vs-model arena for one implementation task |
+| `/exit` | Quit Mjolnir; in a side conversation, return to the primary conversation |
 
 The interactive autocomplete is the source of truth for commands in the
 installed version.
 
 ## Keyboard basics
 
-- Enter sends a prompt or accepts the selected action.
+- Enter sends a prompt or accepts the selected action. During a primary turn,
+  it queues the prompt FIFO behind that turn.
 - Up/Down navigate autocomplete and permission choices.
 - PageUp/PageDown scroll the transcript.
 - Shift+Tab (or Ctrl+Tab in terminals that can send it) switches between the
@@ -75,10 +75,24 @@ installed version.
   for editing.
 - F10 toggles help.
 - Esc dismisses autocomplete, clears input, or cancels a permission prompt.
-- Ctrl-C cancels the active turn together with every running subagent; on an
-  idle, empty prompt it quits.
+- Ctrl-C steers the oldest queued prompt into the active turn when the agent
+  supports steering; otherwise it cancels the active turn together with every
+  running subagent. On an idle, empty prompt it quits.
 - Ctrl-D quits when input is empty.
 - Ctrl-R starts or stops microphone dictation when the voice worker is available.
+
+## Mid-turn steering
+
+Use either composer to correct or redirect an agent without losing your place
+in its work. While its primary turn is streaming, press Enter (or **Send** in
+Mjolnir Web) to place the instruction in the FIFO queue. Then press Ctrl-C
+(or **Stop** in Mjolnir Web). When the agent advertises steering, Mjolnir
+removes the oldest queued instruction and injects it into the current turn;
+the message appears in the transcript immediately and the turn keeps running.
+
+Without steering support, Ctrl-C or Stop performs a normal cancellation and
+the queued instruction runs after the turn finishes. The terminal and Mjolnir
+Web use this same queue-first behavior.
 
 Long permission commands, descriptions, and options must remain reachable; a
 truncated prompt is a UI bug, not an instruction to guess.

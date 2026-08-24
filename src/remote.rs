@@ -4,139 +4,6 @@ pub use mj_remote::*;
 
 use anyhow::Context;
 
-pub fn ragnarok_record_from_observation(
-    observation: crate::session_state::RagnarokObservation,
-) -> RagnarokRecord {
-    let adoption_hint = ragnarok_adoption_hint(&observation);
-    let fighters = observation
-        .fighters
-        .into_iter()
-        .map(|fighter| {
-            let (status, vigor) = ragnarok_fighter_status(&fighter.state);
-            RagnarokFighterRecord {
-                id: fighter.id,
-                source: fighter.agent_source_id,
-                model: fighter.model_name,
-                status,
-                vigor,
-            }
-        })
-        .collect();
-    let verdict = observation.verdict.map(|verdict| RagnarokVerdictRecord {
-        clear_winner: verdict.clear_winner,
-        finalists: verdict.finalists,
-        ranking: verdict.ranking,
-        reasoning: verdict.reasoning,
-        thor_fallback: verdict.thor_fallback,
-        chosen_finalist: observation.chosen_finalist,
-    });
-    RagnarokRecord {
-        task: observation.task,
-        phase: ragnarok_phase_id(observation.phase).to_string(),
-        awaiting_approval: observation.awaiting_approval,
-        fighters,
-        verdict,
-        adoption_hint,
-        failed: observation.failed,
-        done: observation.done,
-    }
-}
-
-fn ragnarok_phase_id(phase: crate::ragnarok::Phase) -> &'static str {
-    match phase {
-        crate::ragnarok::Phase::Mustering => "mustering",
-        crate::ragnarok::Phase::Routing => "routing",
-        crate::ragnarok::Phase::Approval => "approval",
-        crate::ragnarok::Phase::Combat => "combat",
-        crate::ragnarok::Phase::Review => "review",
-        crate::ragnarok::Phase::Judgment => "judgment",
-        crate::ragnarok::Phase::Verdict => "verdict",
-    }
-}
-
-fn ragnarok_fighter_status(state: &crate::ragnarok::FighterState) -> (String, String) {
-    match state {
-        crate::ragnarok::FighterState::Summoned => ("summoned".into(), "waiting".into()),
-        crate::ragnarok::FighterState::Forging => ("forging camp".into(), "waiting".into()),
-        crate::ragnarok::FighterState::Connecting => ("approaching".into(), "waiting".into()),
-        crate::ragnarok::FighterState::Fighting => ("fighting".into(), "active".into()),
-        crate::ragnarok::FighterState::Capturing => ("tallying".into(), "active".into()),
-        crate::ragnarok::FighterState::Standing => ("standing".into(), "full".into()),
-        crate::ragnarok::FighterState::Slain(reason) => {
-            (format!("slain: {reason}"), "empty".into())
-        }
-    }
-}
-
-fn ragnarok_adoption_hint(
-    observation: &crate::session_state::RagnarokObservation,
-) -> Option<String> {
-    use crate::session_state::RagnarokDraftPrStatus;
-
-    if let Some(status) = observation.draft_pr_status.as_ref() {
-        return Some(match status {
-            RagnarokDraftPrStatus::Publishing { winner } => {
-                format!(
-                    "Publishing a draft PR for {}.",
-                    ragnarok_fighter_name(observation, *winner)
-                )
-            }
-            RagnarokDraftPrStatus::Published { winner, url } => format!(
-                "Draft PR for {}: {url}",
-                ragnarok_fighter_name(observation, *winner)
-            ),
-            RagnarokDraftPrStatus::Failed { winner, message } => format!(
-                "Draft PR for {} failed: {message}",
-                ragnarok_fighter_name(observation, *winner)
-            ),
-        });
-    }
-
-    let recommended = observation.chosen_finalist.or_else(|| {
-        observation
-            .verdict
-            .as_ref()
-            .and_then(|verdict| verdict.clear_winner)
-    });
-    if let Some(winner) = recommended {
-        let fighter = observation
-            .fighters
-            .iter()
-            .find(|fighter| fighter.id == winner)?;
-        return Some(fighter.worktree_name.as_ref().map_or_else(
-            || {
-                format!(
-                    "{} is selected; its worktree is not ready yet.",
-                    fighter.model_name
-                )
-            },
-            |worktree| {
-                format!(
-                    "Adopt {} with `mj --worktree {worktree}`.",
-                    fighter.model_name
-                )
-            },
-        ));
-    }
-    observation
-        .verdict
-        .as_ref()
-        .and_then(|verdict| verdict.finalists)
-        .map(|_| "Choose a finalist in the local TUI before adopting a worktree.".to_string())
-}
-
-fn ragnarok_fighter_name(
-    observation: &crate::session_state::RagnarokObservation,
-    id: crate::ragnarok::FighterId,
-) -> String {
-    observation
-        .fighters
-        .iter()
-        .find(|fighter| fighter.id == id)
-        .map(|fighter| fighter.model_name.clone())
-        .unwrap_or_else(|| format!("champion {id}"))
-}
-
 #[derive(Debug)]
 pub struct ServerOptions {
     pub hostname: Option<String>,
@@ -157,19 +24,43 @@ pub async fn run_server(options: ServerOptions) -> anyhow::Result<()> {
     let mut cfg = crate::config::Config::load(&config_path)
         .with_context(|| format!("load {}", config_path.display()))?;
     cfg.apply_default_team();
-    let resolved = crate::roster::resolve(&cfg, &options.cwd).await?;
-    let session_manager =
-        std::sync::Arc::new(crate::remote_host::RootServerSessionManager::new_roster(
-            resolved.clone(),
-            crate::remote_host::config_file_hash(&config_path),
-            options.cwd.clone(),
-            options.additional_directories.clone(),
-            options.snapshot_exclusions.clone(),
-            options.fs_max_text_bytes,
-        ));
+    // A machine with no launchable model still gets a serving viewer: the
+    // web UI walks the user through sign-in and team selection, and the
+    // session manager re-resolves until a roster binds. Every other
+    // resolution failure stays fatal.
+    let resolved = match crate::roster::resolve(&cfg, &options.cwd).await {
+        Ok(roster) => Ok(roster),
+        Err(error) => match error.downcast_ref::<mj_core::roster::NothingLaunchable>() {
+            Some(nothing) => {
+                tracing::warn!("starting setup-pending: {}", nothing.message);
+                Err(nothing.message.clone())
+            }
+            None => return Err(error),
+        },
+    };
+    let config_hash = crate::remote_host::config_file_hash(&config_path);
+    let session_manager: std::sync::Arc<crate::remote_host::RootServerSessionManager> =
+        std::sync::Arc::new(match &resolved {
+            Ok(roster) => crate::remote_host::RootServerSessionManager::new_roster(
+                roster.clone(),
+                config_hash,
+                options.cwd.clone(),
+                options.additional_directories.clone(),
+                options.snapshot_exclusions.clone(),
+                options.fs_max_text_bytes,
+            ),
+            Err(reason) => crate::remote_host::RootServerSessionManager::new_unresolved(
+                reason.clone(),
+                config_hash,
+                options.cwd.clone(),
+                options.additional_directories.clone(),
+                options.snapshot_exclusions.clone(),
+                options.fs_max_text_bytes,
+            ),
+        });
     run_server_runtime(RuntimeServerOptions {
         config: cfg,
-        roster: resolved,
+        roster: resolved.map_err(SetupPending),
         hostname: options.hostname,
         tailscale_detect: options.tailscale_detect,
         port: options.port,

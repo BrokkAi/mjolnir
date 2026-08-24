@@ -13,7 +13,7 @@ use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
 
 pub const DISABLED_MODEL: &str = "disabled";
-pub const CONFIG_VERSION: u32 = 4;
+pub const CONFIG_VERSION: u32 = 6;
 /// Version of the product-model explanation accepted by the user. This is
 /// intentionally independent from the storage schema version.
 pub const ONBOARDING_CONTENT_VERSION: u32 = 4;
@@ -36,8 +36,9 @@ fn model_provider(model: &str) -> Option<&'static str> {
     }
 }
 /// Schema versions this build can migrate forward from.
-const V2_CONFIG_VERSION: u32 = 2;
 const V3_CONFIG_VERSION: u32 = 3;
+const V4_CONFIG_VERSION: u32 = 4;
+const V5_CONFIG_VERSION: u32 = 5;
 
 /// Saved ACP session defaults are scoped to the seat that will consume them.
 /// Live accepted values remain in the top-level `session_config` cache.
@@ -179,6 +180,102 @@ impl std::str::FromStr for InterfaceMode {
     }
 }
 
+/// Whether a completed spoken prompt is submitted after a period of silence.
+///
+/// This stays opt-in because sending a prompt is materially different from
+/// the established dictation behavior of leaving the transcript in the
+/// composer for review.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceAutoSend {
+    #[default]
+    Off,
+    TwoSeconds,
+    FourSeconds,
+    SixSeconds,
+    EightSeconds,
+}
+
+impl VoiceAutoSend {
+    pub const ALL: [Self; 5] = [
+        Self::Off,
+        Self::TwoSeconds,
+        Self::FourSeconds,
+        Self::SixSeconds,
+        Self::EightSeconds,
+    ];
+
+    /// Delay after detected speech stops before the voice worker completes a
+    /// dictation and the TUI submits it. `None` keeps manual sending.
+    pub const fn silence_timeout_secs(self) -> Option<u64> {
+        match self {
+            Self::Off => None,
+            Self::TwoSeconds => Some(2),
+            Self::FourSeconds => Some(4),
+            Self::SixSeconds => Some(6),
+            Self::EightSeconds => Some(8),
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Off => "leave dictated text in the composer for review",
+            Self::TwoSeconds => "send after 2 seconds of detected silence",
+            Self::FourSeconds => "send after 4 seconds of detected silence",
+            Self::SixSeconds => "send after 6 seconds of detected silence",
+            Self::EightSeconds => "send after 8 seconds of detected silence",
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::TwoSeconds => "two_seconds",
+            Self::FourSeconds => "four_seconds",
+            Self::SixSeconds => "six_seconds",
+            Self::EightSeconds => "eight_seconds",
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl std::fmt::Display for VoiceAutoSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("off"),
+            Self::TwoSeconds => f.write_str("2 seconds"),
+            Self::FourSeconds => f.write_str("4 seconds"),
+            Self::SixSeconds => f.write_str("6 seconds"),
+            Self::EightSeconds => f.write_str("8 seconds"),
+        }
+    }
+}
+
+impl std::str::FromStr for VoiceAutoSend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "two_seconds" => Ok(Self::TwoSeconds),
+            "four_seconds" => Ok(Self::FourSeconds),
+            "six_seconds" => Ok(Self::SixSeconds),
+            "eight_seconds" => Ok(Self::EightSeconds),
+            _ => Err(format!(
+                "unknown voice auto-send setting {value:?}; expected one of: {}",
+                Self::ALL
+                    .iter()
+                    .map(|setting| setting.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Config {
     pub version: u32,
@@ -208,6 +305,9 @@ pub struct Config {
     /// flag forces the fullscreen TUI for a single run without changing this.
     #[serde(default, skip_serializing_if = "InterfaceMode::is_default")]
     pub interface: InterfaceMode,
+    /// Optional hands-free submit for voice dictation after detected silence.
+    #[serde(default, skip_serializing_if = "VoiceAutoSend::is_default")]
+    pub voice_auto_send: VoiceAutoSend,
     /// Persistent cross-session memory behavior.
     #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
     pub memory: MemoryConfig,
@@ -235,9 +335,6 @@ pub struct Config {
     /// ACP session option overrides, keyed by ACP server id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_config: BTreeMap<String, AcpSessionConfig>,
-    /// `/ragnarok` battle knobs.
-    #[serde(default, skip_serializing_if = "RagnarokConfig::is_default")]
-    pub ragnarok: RagnarokConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -262,6 +359,7 @@ impl Default for Config {
             feature_hints: true,
             keep_awake: true,
             interface: InterfaceMode::default(),
+            voice_auto_send: VoiceAutoSend::default(),
             memory: MemoryConfig::default(),
             computer: ComputerConfig::default(),
             team: None,
@@ -270,7 +368,6 @@ impl Default for Config {
             subagents: SubagentsConfig::default(),
             acp: AcpConfig::default(),
             session_config: BTreeMap::new(),
-            ragnarok: RagnarokConfig::default(),
         }
     }
 }
@@ -304,17 +401,17 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Persistent cross-session memories: whether the feature is on at all,
-/// whether stored entries are injected into new primary sessions, and
+/// whether stored entries are synchronized into native provider memory, and
 /// whether the agent may save new ones. The store itself lives next to the
 /// config as `memories.json`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MemoryConfig {
-    /// Master switch. `false` disables the whole feature — no injection and
+    /// Master switch. `false` disables the whole feature — no synchronization and
     /// no memory tools — regardless of the toggles below. The store and its
     /// management commands remain available.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
-    /// Inject stored memories into the first prompt of new primary sessions.
+    /// Synchronize stored memories into native Claude and Codex memory files.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub use_memories: bool,
     /// Expose the `memory_save` / `memory_forget` MCP tools so the agent can
@@ -339,15 +436,41 @@ impl MemoryConfig {
     }
 }
 
-/// Permission preset applied to an ACP runtime. Never persisted: interactive
-/// and remote sessions inherit the ACP harness policy, and headless sessions
-/// pass `--permission-mode` through directly.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Provider-native permission preset for a delegated or review session.
+///
+/// Headless runs also pass `--permission-mode` through directly, overriding
+/// these saved seat defaults for that invocation.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum PermissionPreset {
     Manual,
     #[default]
     Auto,
     Yolo,
+}
+
+impl PermissionPreset {
+    pub const ALL: [Self; 3] = [Self::Manual, Self::Auto, Self::Yolo];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+            Self::Yolo => "yolo",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Manual => "Provider uses its restrictive policy.",
+            Self::Auto => "Codex: Approve for me; Claude Code: Auto.",
+            Self::Yolo => "Provider grants full access.",
+        }
+    }
+
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,6 +488,26 @@ impl std::fmt::Display for PermissionPreset {
             Self::Auto => "Auto",
             Self::Yolo => "YOLO",
         })
+    }
+}
+
+impl std::str::FromStr for PermissionPreset {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "manual" => Ok(Self::Manual),
+            "auto" => Ok(Self::Auto),
+            "yolo" => Ok(Self::Yolo),
+            _ => Err(format!(
+                "unknown permission preset {value:?}; expected one of: {}",
+                Self::ALL
+                    .iter()
+                    .map(|preset| preset.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
     }
 }
 
@@ -501,13 +644,19 @@ impl TeamPreset {
     pub fn apply(self, config: &mut Config) {
         config.team = Some(self.id().to_string());
         let (coder, reviewer) = self.sources();
+        // Seat-level reasoning efforts were picked against the seat's previous
+        // adapter's advertised values ("default" exists on claude-acp but not
+        // codex-acp), so rerouting a seat resets them along with its model.
         config.agent.model = default_auto();
         config.agent.acp_source = Some(coder.to_string());
+        config.agent.reasoning_effort = None;
         config.agent.discrete_review = true;
         config.review.model = default_auto();
         config.review.acp_source = Some(reviewer.to_string());
+        config.review.reasoning_effort = None;
         config.subagents.model = default_auto();
         config.subagents.acp_source = Some(reviewer.to_string());
+        config.subagents.reasoning_effort = None;
         config.subagents.auto_failover = true;
         for source in [coder, reviewer] {
             config.set_acp_server_policy(source, AcpServerPolicy::Enabled);
@@ -569,7 +718,7 @@ fn default_team_for(config: &Config, signed_in: &[String]) -> Option<TeamPreset>
 ///
 /// `Quick` runs a single general reviewer and then validates its findings,
 /// which is the cheap default. `Extended` runs the full adversarial
-/// supervisor with its on-demand Norse specialist roster.
+/// supervisor with its on-demand specialist roster.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ReviewTier {
@@ -600,7 +749,7 @@ impl ReviewTier {
         match self {
             Self::Quick => "one general reviewer, then a validation pass over its findings",
             Self::Extended => {
-                "adversarial supervisor with on-demand Norse specialist lanes; far more tokens"
+                "adversarial supervisor with on-demand specialist lanes; far more tokens"
             }
         }
     }
@@ -654,6 +803,101 @@ impl std::str::FromStr for ReviewTier {
     }
 }
 
+/// The lowest-severity validated review finding that still starts an automatic
+/// correction. Lower-priority findings remain visible in the ledger with the
+/// configured threshold as their reason for being deferred.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewCorrectionThreshold {
+    P0,
+    P1,
+    P2,
+    #[default]
+    P3,
+}
+
+impl ReviewCorrectionThreshold {
+    pub const ALL: [Self; 4] = [Self::P0, Self::P1, Self::P2, Self::P3];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "p0",
+            Self::P1 => "p1",
+            Self::P2 => "p2",
+            Self::P3 => "p3",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::P0 => "P0",
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::P0 => {
+                "automatically correct validated P0 findings only; retain P1-P3 in the ledger"
+            }
+            Self::P1 => {
+                "automatically correct validated P0-P1 findings; retain P2-P3 in the ledger"
+            }
+            Self::P2 => "automatically correct validated P0-P2 findings; retain P3 in the ledger",
+            Self::P3 => "automatically correct every validated P0-P3 finding",
+        }
+    }
+
+    /// Does this configured threshold dispatch a correction for `priority`?
+    pub const fn corrects(self, priority: Self) -> bool {
+        priority.as_index() <= self.as_index()
+    }
+
+    /// Compact representation for the orchestrator's atomic live switch.
+    pub const fn as_index(self) -> u8 {
+        match self {
+            Self::P0 => 0,
+            Self::P1 => 1,
+            Self::P2 => 2,
+            Self::P3 => 3,
+        }
+    }
+
+    /// An unreadable switch must retain the established default: correct all
+    /// validated priority findings rather than silently leaving one open.
+    pub const fn from_index(index: u8) -> Self {
+        match index {
+            0 => Self::P0,
+            1 => Self::P1,
+            2 => Self::P2,
+            _ => Self::P3,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        matches!(self, Self::P3)
+    }
+}
+
+impl std::fmt::Display for ReviewCorrectionThreshold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReviewCorrectionThreshold {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|threshold| threshold.as_str().eq_ignore_ascii_case(value))
+            .ok_or(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentConfig {
     #[serde(default = "default_auto")]
@@ -684,6 +928,10 @@ pub struct AgentConfig {
     /// `Quick` without editing anything.
     #[serde(default, skip_serializing_if = "ReviewTier::is_default")]
     pub review_tier: ReviewTier,
+    /// Highest numerical priority included in automatic correction. The P3
+    /// default preserves the original all-priority corrective behavior.
+    #[serde(default, skip_serializing_if = "ReviewCorrectionThreshold::is_default")]
+    pub correction_threshold: ReviewCorrectionThreshold,
     /// Explicit override for how many corrective re-review passes one user
     /// turn may dispatch after its initial discrete review. When omitted,
     /// Quick uses zero and Extended uses one.
@@ -701,6 +949,7 @@ impl Default for AgentConfig {
             session_defaults: BTreeMap::new(),
             discrete_review: true,
             review_tier: ReviewTier::default(),
+            correction_threshold: ReviewCorrectionThreshold::default(),
             max_correction_rounds: None,
         }
     }
@@ -732,6 +981,10 @@ pub struct ReviewConfig {
     /// `--review-model MODEL+high` override replaces it only for that run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Provider-native permission preset for review sessions. `auto` lets the
+    /// provider decide routine actions and surface risky ones.
+    #[serde(default, skip_serializing_if = "PermissionPreset::is_default")]
+    pub permission: PermissionPreset,
     /// Adapter-owned session defaults selected for future review sessions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
@@ -744,6 +997,7 @@ impl Default for ReviewConfig {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
+            permission: PermissionPreset::default(),
             session_defaults: BTreeMap::new(),
         }
     }
@@ -774,6 +1028,10 @@ pub struct SubagentsConfig {
     /// `--subagent-model MODEL+high` override replaces it only for that run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Provider-native permission preset for delegated sessions. `auto` lets
+    /// the provider decide routine actions and surface risky ones.
+    #[serde(default, skip_serializing_if = "PermissionPreset::is_default")]
+    pub permission: PermissionPreset,
     /// Adapter-owned session defaults selected for future delegated sessions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
@@ -799,6 +1057,7 @@ impl Default for SubagentsConfig {
             acp_source: None,
             acp_priority: default_acp_priority(),
             reasoning_effort: None,
+            permission: PermissionPreset::default(),
             session_defaults: BTreeMap::new(),
             max_parallel: default_max_parallel(),
             auto_failover: true,
@@ -854,33 +1113,6 @@ impl std::fmt::Display for AcpServerPolicy {
     }
 }
 
-/// Knobs for `/ragnarok` battles.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RagnarokConfig {
-    /// Hard cap on how many champions Thor may field (2-10). Thor still
-    /// decides the count from task complexity; this caps the bill.
-    #[serde(default = "default_max_competitors")]
-    pub max_competitors: usize,
-}
-
-fn default_max_competitors() -> usize {
-    10
-}
-
-impl Default for RagnarokConfig {
-    fn default() -> Self {
-        Self {
-            max_competitors: default_max_competitors(),
-        }
-    }
-}
-
-impl RagnarokConfig {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
 fn default_true() -> bool {
     true
 }
@@ -911,8 +1143,9 @@ impl Config {
                 .and_then(|document| document.get("version").and_then(toml::Value::as_integer)),
             Some(version)
                 if version >= i64::from(CONFIG_VERSION)
-                    || version == i64::from(V2_CONFIG_VERSION)
                     || version == i64::from(V3_CONFIG_VERSION)
+                    || version == i64::from(V4_CONFIG_VERSION)
+                    || version == i64::from(V5_CONFIG_VERSION)
         )
     }
 
@@ -1038,13 +1271,18 @@ impl Config {
         let document: toml::Value =
             toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
         let version = document.get("version").and_then(toml::Value::as_integer);
-        if version == Some(i64::from(V2_CONFIG_VERSION)) {
-            let mut cfg = migrate_v2(&s).with_context(|| format!("migrate {}", path.display()))?;
+        if version == Some(i64::from(V3_CONFIG_VERSION)) {
+            let mut cfg = migrate_v3(&s).with_context(|| format!("migrate {}", path.display()))?;
             cfg.normalize()?;
             return Ok(cfg);
         }
-        if version == Some(i64::from(V3_CONFIG_VERSION)) {
-            let mut cfg = migrate_v3(&s).with_context(|| format!("migrate {}", path.display()))?;
+        if version == Some(i64::from(V4_CONFIG_VERSION)) {
+            let mut cfg = migrate_v4(&s).with_context(|| format!("migrate {}", path.display()))?;
+            cfg.normalize()?;
+            return Ok(cfg);
+        }
+        if version == Some(i64::from(V5_CONFIG_VERSION)) {
+            let mut cfg = migrate_v5(&s).with_context(|| format!("migrate {}", path.display()))?;
             cfg.normalize()?;
             return Ok(cfg);
         }
@@ -1131,13 +1369,13 @@ impl Config {
             feature_hints,
             keep_awake,
             interface,
+            voice_auto_send,
             memory,
             agent,
             review,
             subagents,
             acp,
             session_config,
-            ragnarok,
         );
         cfg.team = field(document, "team");
         cfg
@@ -1320,167 +1558,6 @@ impl AcpConfig {
     }
 }
 
-/// The v2 (`[thor]`/`[eitri]`/`[loki]`/`[council]`) schema, parsed leniently so
-/// a stale file never blocks startup. Unknown keys are ignored; sections that
-/// survived the schema change (`theme`, `spinner`, `acp`, `ragnarok`) are
-/// carried over verbatim by reusing their current types.
-#[derive(Debug, Default, Deserialize)]
-struct ConfigV2 {
-    #[serde(default)]
-    theme: TerminalThemeKind,
-    #[serde(default)]
-    spinner: SpinnerStyle,
-    #[serde(default)]
-    thor: ThorV2,
-    #[serde(default)]
-    loki: LokiV2,
-    #[serde(default)]
-    eitri: EitriV2,
-    #[serde(default)]
-    council: CouncilV2,
-    #[serde(default)]
-    acp: AcpConfig,
-    #[serde(default)]
-    ragnarok: RagnarokConfig,
-}
-
-#[derive(Debug, Deserialize)]
-struct ThorV2 {
-    #[serde(default = "default_auto")]
-    model: String,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    #[serde(default = "default_true")]
-    discrete_review: bool,
-    #[serde(default)]
-    max_correction_rounds: Option<u32>,
-}
-
-impl Default for ThorV2 {
-    fn default() -> Self {
-        Self {
-            model: default_auto(),
-            reasoning_effort: None,
-            discrete_review: true,
-            max_correction_rounds: None,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct LokiV2 {
-    #[serde(default = "default_auto")]
-    model: String,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-}
-
-impl Default for LokiV2 {
-    fn default() -> Self {
-        Self {
-            model: default_auto(),
-            reasoning_effort: None,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct EitriV2 {
-    #[serde(default = "default_auto")]
-    model: String,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    #[serde(default = "default_max_parallel")]
-    max_parallel_explores: usize,
-    #[serde(default = "default_true")]
-    debrief: bool,
-    #[serde(default = "default_progress_wake_minutes")]
-    progress_wake_minutes: u64,
-}
-
-impl Default for EitriV2 {
-    fn default() -> Self {
-        Self {
-            model: default_auto(),
-            reasoning_effort: None,
-            max_parallel_explores: default_max_parallel(),
-            debrief: true,
-            progress_wake_minutes: default_progress_wake_minutes(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CouncilV2 {
-    #[serde(default = "default_true")]
-    auto_failover: bool,
-}
-
-impl Default for CouncilV2 {
-    fn default() -> Self {
-        Self {
-            auto_failover: true,
-        }
-    }
-}
-
-/// Map a `version = 2` document onto the current schema.
-/// `council.permission_mode` is dropped: the permission preset is no longer
-/// persisted.
-fn migrate_v2(body: &str) -> Result<Config> {
-    let old: ConfigV2 = toml::from_str(body).context("parse v2 config")?;
-    let max_correction_rounds = match old.thor.max_correction_rounds {
-        // V2 also serialized the former global default into saved configs.
-        Some(1) => None,
-        configured => configured,
-    };
-    Ok(Config {
-        version: CONFIG_VERSION,
-        newer_config_version: None,
-        onboarding_version: 0,
-        theme: old.theme,
-        spinner: old.spinner,
-        thought_output: ThoughtOutput::default(),
-        feature_hints: true,
-        keep_awake: true,
-        interface: InterfaceMode::default(),
-        memory: MemoryConfig::default(),
-        computer: ComputerConfig::default(),
-        team: None,
-        agent: AgentConfig {
-            model: old.thor.model,
-            acp_source: None,
-            acp_priority: default_acp_priority(),
-            reasoning_effort: old.thor.reasoning_effort,
-            session_defaults: BTreeMap::new(),
-            discrete_review: old.thor.discrete_review,
-            review_tier: ReviewTier::default(),
-            max_correction_rounds,
-        },
-        review: ReviewConfig {
-            model: old.loki.model,
-            acp_source: None,
-            acp_priority: default_acp_priority(),
-            reasoning_effort: old.loki.reasoning_effort,
-            session_defaults: BTreeMap::new(),
-        },
-        subagents: SubagentsConfig {
-            model: old.eitri.model,
-            acp_source: None,
-            acp_priority: default_acp_priority(),
-            reasoning_effort: old.eitri.reasoning_effort,
-            session_defaults: BTreeMap::new(),
-            max_parallel: old.eitri.max_parallel_explores,
-            auto_failover: old.council.auto_failover,
-            debrief: old.eitri.debrief,
-            progress_wake_minutes: old.eitri.progress_wake_minutes,
-        },
-        acp: old.acp,
-        session_config: BTreeMap::new(),
-        ragnarok: old.ragnarok,
-    })
-}
-
 /// V3 serialized the then-global correction-round default (`1`) into every
 /// saved config. Treat that indistinguishable value as unset so existing Quick
 /// users receive the new tier default; genuinely non-default budgets survive.
@@ -1494,6 +1571,23 @@ fn migrate_v3(body: &str) -> Result<Config> {
     if config.agent.max_correction_rounds == Some(1) {
         config.agent.max_correction_rounds = None;
     }
+    Ok(config)
+}
+
+/// V4 predates persisted voice auto-send preferences. Its remaining shape is
+/// current, so deserialize with the new field's default and advance only the
+/// schema marker.
+fn migrate_v4(body: &str) -> Result<Config> {
+    let mut config: Config = toml::from_str(body).context("parse v4 config")?;
+    config.version = CONFIG_VERSION;
+    Ok(config)
+}
+
+/// V5 still allowed the removed `[ragnarok]` section. Serde ignores that
+/// obsolete table while preserving all fields that remain in the schema.
+fn migrate_v5(body: &str) -> Result<Config> {
+    let mut config: Config = toml::from_str(body).context("parse v5 config")?;
+    config.version = CONFIG_VERSION;
     Ok(config)
 }
 
@@ -1731,36 +1825,6 @@ mod tests {
         assert_eq!(body, "");
         let loaded = load_history(&path);
         assert!(loaded.is_empty());
-    }
-
-    #[test]
-    fn ragnarok_max_competitors_roundtrips_and_defaults() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-
-        // Default cap is omitted from the serialized form.
-        Config::default().save(&path).expect("save default");
-        let body = std::fs::read_to_string(&path).expect("read");
-        assert!(
-            !body.contains("ragnarok"),
-            "default ragnarok config should not be serialized: {body:?}"
-        );
-        assert_eq!(
-            Config::load(&path).expect("load").ragnarok.max_competitors,
-            10
-        );
-
-        // A custom cap survives the round trip.
-        std::fs::write(
-            &path,
-            format!("version = {CONFIG_VERSION}\n[ragnarok]\nmax_competitors = 3\n"),
-        )
-        .expect("write");
-        let cfg = Config::load(&path).expect("load custom");
-        assert_eq!(cfg.ragnarok.max_competitors, 3);
-        cfg.save(&path).expect("save custom");
-        let body = std::fs::read_to_string(&path).expect("read saved");
-        assert!(body.contains("max_competitors = 3"), "body: {body:?}");
     }
 
     #[test]
@@ -2150,11 +2214,13 @@ kimi = "disabled"
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "version = 1\n").expect("old config");
         assert!(!Config::path_has_saved_config(&path));
-        // A v2 file is migrated on load, while the separate content version
-        // still lets startup show the major-upgrade explanation.
         std::fs::write(&path, "version = 2\n").expect("v2 config");
-        assert!(Config::path_has_saved_config(&path));
+        assert!(!Config::path_has_saved_config(&path));
         std::fs::write(&path, "version = 3\n").expect("v3 config");
+        assert!(Config::path_has_saved_config(&path));
+        std::fs::write(&path, "version = 4\n").expect("v4 config");
+        assert!(Config::path_has_saved_config(&path));
+        std::fs::write(&path, "version = 5\n").expect("v5 config");
         assert!(Config::path_has_saved_config(&path));
         Config::default().save(&path).expect("current config");
         assert!(Config::path_has_saved_config(&path));
@@ -2162,110 +2228,6 @@ kimi = "disabled"
         // so this build must not run fresh onboarding over it.
         std::fs::write(&path, format!("version = {}\n", CONFIG_VERSION + 1)).expect("newer config");
         assert!(Config::path_has_saved_config(&path));
-    }
-
-    #[test]
-    fn v2_config_migrates_every_mapped_field_in_memory_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-version = 2
-theme = "ansi-light"
-spinner = "bars"
-
-[thor]
-model = "gpt-5-6-sol"
-reasoning_effort = "high"
-discrete_review = false
-max_correction_rounds = 3
-
-[eitri]
-model = "gpt-5-6-terra"
-max_parallel_explores = 9
-debrief = false
-progress_wake_minutes = 5
-
-[loki]
-model = "claude-fable-5"
-reasoning_effort = "xhigh"
-
-[council]
-auto_failover = false
-permission_mode = "manual"
-
-[ragnarok]
-max_competitors = 4
-
-[acp.policies]
-codex-acp = "disabled"
-
-[[acp.servers]]
-id = "custom:company"
-label = "company"
-command = "/usr/local/bin/company-acp"
-args = ["--stdio"]
-origin = "custom"
-"#,
-        )
-        .expect("write v2 config");
-
-        let cfg = Config::load(&path).expect("migrate v2");
-        assert_eq!(cfg.version, CONFIG_VERSION);
-        assert_eq!(cfg.theme, TerminalThemeKind::Ansi);
-        assert_eq!(cfg.spinner, SpinnerStyle::Bars);
-        assert_eq!(cfg.agent.model, "gpt-5-6-sol");
-        assert_eq!(cfg.agent.reasoning_effort.as_deref(), Some("high"));
-        assert!(!cfg.agent.discrete_review);
-        assert_eq!(cfg.agent.max_correction_rounds, Some(3));
-        assert_eq!(cfg.review.model, "claude-fable-5");
-        assert_eq!(cfg.review.reasoning_effort.as_deref(), Some("xhigh"));
-        assert_eq!(cfg.subagents.model, "gpt-5-6-terra");
-        assert_eq!(cfg.subagents.max_parallel, 9);
-        assert!(!cfg.subagents.auto_failover);
-        assert!(!cfg.subagents.debrief);
-        assert_eq!(cfg.subagents.progress_wake_minutes, 5);
-        assert_eq!(cfg.ragnarok.max_competitors, 4);
-        assert_eq!(cfg.acp.policy("codex-acp"), AcpServerPolicy::Disabled);
-
-        // A load never rewrites the file: an older build must stay able to
-        // read it until the user actually saves. Reloading migrates again to
-        // the same result.
-        let body = std::fs::read_to_string(&path).expect("read after load");
-        assert!(body.contains("version = 2"), "{body}");
-        assert!(body.contains("[thor]"), "{body}");
-        assert_eq!(Config::load(&path).expect("reload"), cfg);
-
-        // The migrated schema reaches disk on the next real save.
-        cfg.save(&path).expect("save migrated");
-        let body = std::fs::read_to_string(&path).expect("read saved");
-        assert!(
-            body.contains(&format!("version = {CONFIG_VERSION}")),
-            "{body}"
-        );
-        assert!(!body.contains("[thor]"), "{body}");
-        assert!(!body.contains("[eitri]"), "{body}");
-        assert!(!body.contains("[loki]"), "{body}");
-        assert!(!body.contains("[council]"), "{body}");
-        assert!(!body.contains("permission_mode"), "{body}");
-        assert!(!body.contains("acp.servers"), "{body}");
-        assert_eq!(Config::load(&path).expect("reload saved"), cfg);
-    }
-
-    #[test]
-    fn v2_migration_keeps_defaults_for_absent_sections() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "version = 2\n").expect("write");
-        let cfg = Config::load(&path).expect("migrate");
-        assert_eq!(
-            cfg,
-            Config {
-                version: CONFIG_VERSION,
-                ..Config::default()
-            }
-        );
     }
 
     #[test]
@@ -2288,6 +2250,37 @@ origin = "custom"
     }
 
     #[test]
+    fn v4_migration_defaults_voice_auto_send_to_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, format!("version = {V4_CONFIG_VERSION}\n")).expect("write v4 config");
+
+        let config = Config::load(&path).expect("migrate v4");
+
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(config.voice_auto_send, VoiceAutoSend::Off);
+    }
+
+    #[test]
+    fn v5_migration_drops_removed_ragnarok_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = format!(
+            "version = {V5_CONFIG_VERSION}\ntheme = \"ansi-light\"\n\n[ragnarok]\nmax_competitors = 4\n"
+        );
+        std::fs::write(&path, &body).expect("write v5 config");
+
+        let config = Config::load(&path).expect("migrate v5");
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(config.theme, TerminalThemeKind::Ansi);
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
+
+        config.save(&path).expect("save migrated config");
+        let saved = std::fs::read_to_string(&path).expect("read saved config");
+        assert!(!saved.contains("ragnarok"), "saved config: {saved}");
+    }
+
+    #[test]
     fn migratable_config_is_not_rewritten_by_a_load() {
         // The write-back this test forbids is what let one newer build
         // invalidate the config for every older build on the machine just by
@@ -2302,22 +2295,6 @@ origin = "custom"
         assert_eq!(config.version, CONFIG_VERSION);
         assert_eq!(config.team.as_deref(), Some("claude_codex"));
         assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
-    }
-
-    #[test]
-    fn v2_migration_removes_serialized_old_round_default_but_keeps_overrides() {
-        for (saved, expected) in [(1, None), (0, Some(0)), (3, Some(3))] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().join("config.toml");
-            std::fs::write(
-                &path,
-                format!("version = {V2_CONFIG_VERSION}\n[thor]\nmax_correction_rounds = {saved}\n"),
-            )
-            .expect("write v2 config");
-
-            let config = Config::load(&path).expect("migrate v2");
-            assert_eq!(config.agent.max_correction_rounds, expected);
-        }
     }
 
     /// The progress heartbeat is config-file only, so absent means the default
@@ -2353,7 +2330,19 @@ origin = "custom"
     fn v1_config_starts_fresh() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "version = 1\n[thor]\nmodel = \"gpt-5-6-sol\"\n").expect("write");
+        std::fs::write(&path, "version = 1\n[agent]\nmodel = \"gpt-5-6-sol\"\n").expect("write");
+        assert_eq!(Config::load(&path).expect("load"), Config::default());
+    }
+
+    #[test]
+    fn v2_config_starts_fresh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "version = 2\n[agent]\nmodel = \"gpt-5-6-sol\"\n[subagents]\nauto_failover = false\n",
+        )
+        .expect("write");
         assert_eq!(Config::load(&path).expect("load"), Config::default());
     }
 
@@ -2424,6 +2413,7 @@ origin = "custom"
                 session_defaults: BTreeMap::new(),
                 discrete_review: false,
                 review_tier: ReviewTier::Extended,
+                correction_threshold: ReviewCorrectionThreshold::P1,
                 max_correction_rounds: Some(1),
             },
             subagents: SubagentsConfig {
@@ -2438,7 +2428,60 @@ origin = "custom"
         assert_eq!(loaded.agent.model, "gpt-5-6-sol");
         assert!(!loaded.agent.discrete_review);
         assert_eq!(loaded.agent.review_tier, ReviewTier::Extended);
+        assert_eq!(
+            loaded.agent.correction_threshold,
+            ReviewCorrectionThreshold::P1
+        );
         assert!(!loaded.subagents.auto_failover);
+    }
+
+    #[test]
+    fn review_and_subagent_permissions_default_and_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        Config::default().save(&path).expect("save defaults");
+        let default_body = std::fs::read_to_string(&path).expect("read defaults");
+        assert!(!default_body.contains("permission"), "{default_body}");
+        let defaults = Config::load(&path).expect("load defaults");
+        assert_eq!(defaults.review.permission, PermissionPreset::Auto);
+        assert_eq!(defaults.subagents.permission, PermissionPreset::Auto);
+
+        let mut configured = Config::default();
+        configured.review.permission = PermissionPreset::Manual;
+        configured.subagents.permission = PermissionPreset::Yolo;
+        configured.save(&path).expect("save configured permissions");
+        let configured_body = std::fs::read_to_string(&path).expect("read configured");
+        assert!(
+            configured_body.contains("permission = \"manual\""),
+            "{configured_body}"
+        );
+        assert!(
+            configured_body.contains("permission = \"yolo\""),
+            "{configured_body}"
+        );
+        let loaded = Config::load(&path).expect("load configured permissions");
+        assert_eq!(loaded.review.permission, PermissionPreset::Manual);
+        assert_eq!(loaded.subagents.permission, PermissionPreset::Yolo);
+    }
+
+    #[test]
+    fn permission_preset_wire_values_and_descriptions_are_stable() {
+        assert_eq!(PermissionPreset::Manual.as_str(), "manual");
+        assert_eq!(
+            PermissionPreset::Manual.description(),
+            "Provider uses its restrictive policy."
+        );
+        assert_eq!(PermissionPreset::Auto.as_str(), "auto");
+        assert_eq!(
+            PermissionPreset::Auto.description(),
+            "Codex: Approve for me; Claude Code: Auto."
+        );
+        assert_eq!(PermissionPreset::Yolo.as_str(), "yolo");
+        assert_eq!(
+            PermissionPreset::Yolo.description(),
+            "Provider grants full access."
+        );
     }
 
     #[test]
@@ -2703,8 +2746,8 @@ origin = "custom"
             &path,
             r#"
 [models]
-thor = "gpt-5-6-sol"
-eitri = "gpt-5-6-luna"
+primary = "gpt-5-6-sol"
+worker = "gpt-5-6-luna"
 "#,
         )
         .expect("write");
@@ -2939,6 +2982,9 @@ mode = "ask"
             config.agent.model = "provider-specific-primary".to_string();
             config.review.model = "provider-specific-review".to_string();
             config.subagents.model = "provider-specific-subagent".to_string();
+            config.agent.reasoning_effort = Some("xhigh".to_string());
+            config.review.reasoning_effort = Some("default".to_string());
+            config.subagents.reasoning_effort = Some("default".to_string());
 
             preset.apply(&mut config);
 
@@ -2950,6 +2996,9 @@ mode = "ask"
             assert_eq!(config.agent.model, "auto");
             assert_eq!(config.review.model, "auto");
             assert_eq!(config.subagents.model, "auto");
+            assert_eq!(config.agent.reasoning_effort, None);
+            assert_eq!(config.review.reasoning_effort, None);
+            assert_eq!(config.subagents.reasoning_effort, None);
             assert!(config.agent.discrete_review);
             assert_eq!(config.acp.policy(coder), AcpServerPolicy::Enabled);
             assert_eq!(config.acp.policy(reviewer), AcpServerPolicy::Enabled);
@@ -3013,6 +3062,31 @@ mode = "ask"
         let loaded = Config::load(&path).expect("load saved config");
         assert!(loaded.computer.enabled);
         assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
+    }
+
+    #[test]
+    fn voice_auto_send_defaults_off_and_round_trips_selected_delay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        Config::default().save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read default");
+        assert!(!body.contains("voice_auto_send"));
+
+        let config = Config {
+            voice_auto_send: VoiceAutoSend::SixSeconds,
+            ..Config::default()
+        };
+        config.save(&path).expect("save selected delay");
+        let body = std::fs::read_to_string(&path).expect("read selected delay");
+        assert!(body.contains("voice_auto_send = \"six_seconds\""));
+        assert_eq!(
+            Config::load(&path)
+                .expect("load selected delay")
+                .voice_auto_send,
+            VoiceAutoSend::SixSeconds
+        );
+        assert_eq!(VoiceAutoSend::SixSeconds.silence_timeout_secs(), Some(6));
     }
 
     #[test]

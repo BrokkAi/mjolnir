@@ -213,6 +213,12 @@ pub enum UiEvent {
     /// The prompt request failed before returning a stop reason. UI can
     /// re-enable the input prompt and surface the error.
     PromptFailed { message: String },
+    /// A `_session/steering` request confirmed delivery (`injected`), so this
+    /// user message became part of the running turn. Adapters do not reliably
+    /// echo steered text back as a `UserMessageChunk`, so this event is the
+    /// authoritative signal that keeps the orchestrator's user-message history
+    /// — and therefore discrete review's intent evidence — complete.
+    SteeredPromptDelivered { text: String },
     /// `session/fork` failed before switching to the forked session. UI can
     /// leave the forking state and surface the error.
     SessionForkFailed { message: String },
@@ -406,6 +412,13 @@ pub enum ReviewTarget {
     Head,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewRequest {
+    pub target: ReviewTarget,
+    /// `None` uses the configured default tier for this one review.
+    pub tier: Option<crate::config::ReviewTier>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SideSessionSource {
     pub session_id: String,
@@ -443,12 +456,17 @@ pub enum UiCommand {
     SetReviewPolicy {
         enabled: bool,
         tier: crate::config::ReviewTier,
+        correction_threshold: crate::config::ReviewCorrectionThreshold,
     },
     /// Run one user-initiated operation from Mjolnir's `/mjconfig` Computer
     /// tab. The main session owns the host and intercepts this before ACP.
     ComputerControl { action: ComputerControlAction },
-    /// Run one Mjolnir-owned findings-only review while the primary is idle.
-    RunReview { target: ReviewTarget },
+    /// Re-resolve and replace the reviewer and subagent seats while retaining
+    /// the active primary ACP session. The command is accepted only when the
+    /// resolved primary still matches that session.
+    ReloadAuxiliaryAgents,
+    /// Run one Mjolnir-owned discrete review while the primary is idle.
+    RunReview { request: ReviewRequest },
     /// Recompute the worktree-versus-`HEAD` diff for the Ctrl-G reader. Sent
     /// on open and on explicit refresh; the reader pulls rather than replaying
     /// retained turn events, so what it shows is current as of the request.
@@ -539,5 +557,61 @@ pub fn content_block_text(block: &ContentBlock) -> String {
         ContentBlock::ResourceLink(link) => format!("[link {}]", link.uri),
         ContentBlock::Resource(_) => "[resource]".to_string(),
         _ => "[unknown content]".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        AudioContent, EmbeddedResource, EmbeddedResourceResource, ImageContent, ResourceLink,
+        TextContent, TextResourceContents,
+    };
+
+    #[test]
+    fn subagent_outcome_labels_are_stable() {
+        assert_eq!(SubagentOutcome::Completed.label(), "completed");
+        assert_eq!(SubagentOutcome::Cancelled.label(), "cancelled");
+        assert_eq!(
+            SubagentOutcome::Failed("nope".to_string()).label(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn manual_compact_trigger_has_a_stable_label() {
+        assert_eq!(CompactTrigger::Manual.label(), "manual");
+    }
+
+    #[test]
+    fn content_blocks_have_visible_text_representations() {
+        let blocks = [
+            (ContentBlock::Text(TextContent::new("hello")), "hello"),
+            (
+                ContentBlock::Image(ImageContent::new("data", "image/png")),
+                "[image]",
+            ),
+            (
+                ContentBlock::Audio(AudioContent::new("data", "audio/wav")),
+                "[audio]",
+            ),
+            (
+                ContentBlock::ResourceLink(ResourceLink::new("readme", "file:///README.md")),
+                "[link file:///README.md]",
+            ),
+            (
+                ContentBlock::Resource(EmbeddedResource::new(
+                    EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                        "excerpt",
+                        "file:///README.md",
+                    )),
+                )),
+                "[resource]",
+            ),
+        ];
+
+        for (block, expected) in blocks {
+            assert_eq!(content_block_text(&block), expected);
+        }
     }
 }

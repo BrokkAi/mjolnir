@@ -10,6 +10,31 @@ pub enum AuthVendor {
     Anthropic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebLoginMode {
+    OpenAiDevice,
+    ClaudeSubscription,
+    AnthropicConsole,
+}
+
+impl WebLoginMode {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::OpenAiDevice => "device",
+            Self::ClaudeSubscription => "subscription",
+            Self::AnthropicConsole => "console",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenAiDevice => "Sign in",
+            Self::ClaudeSubscription => "Claude subscription",
+            Self::AnthropicConsole => "Anthropic Console",
+        }
+    }
+}
+
 impl AuthVendor {
     pub const ALL: [Self; 2] = [Self::OpenAi, Self::Anthropic];
 
@@ -27,6 +52,13 @@ impl AuthVendor {
         }
     }
 
+    pub fn acp_source(self) -> &'static str {
+        match self {
+            Self::OpenAi => "codex-acp",
+            Self::Anthropic => "claude-acp",
+        }
+    }
+
     /// Stable wire identifier used by the remote-control API.
     pub fn id(self) -> &'static str {
         match self {
@@ -39,10 +71,38 @@ impl AuthVendor {
         Self::ALL.into_iter().find(|vendor| vendor.id() == id)
     }
 
-    /// Whether the remote viewer can complete this vendor's login without an
-    /// interactive terminal or a channel for writing to the child process.
-    pub fn supports_headless_login(self) -> bool {
-        matches!(self, Self::OpenAi)
+    /// Whether the remote viewer can complete this vendor's login. OpenAI uses
+    /// device auth; Claude streams its authorization prompt to the viewer and
+    /// accepts the pasted code there.
+    pub fn supports_web_login(self) -> bool {
+        !self.web_login_modes().is_empty()
+    }
+
+    /// Claude's authorization command waits for the code produced by its
+    /// browser flow. OpenAI device auth only needs captured output.
+    pub fn web_login_accepts_input(self) -> bool {
+        matches!(self, Self::Anthropic)
+    }
+
+    pub fn web_login_modes(self) -> &'static [WebLoginMode] {
+        match self {
+            Self::OpenAi => &[WebLoginMode::OpenAiDevice],
+            Self::Anthropic => &[
+                WebLoginMode::ClaudeSubscription,
+                WebLoginMode::AnthropicConsole,
+            ],
+        }
+    }
+
+    pub fn web_login_mode(self, id: Option<&str>) -> Option<WebLoginMode> {
+        match id {
+            Some(id) => self
+                .web_login_modes()
+                .iter()
+                .copied()
+                .find(|mode| mode.id() == id),
+            None => self.web_login_modes().first().copied(),
+        }
     }
 }
 
@@ -211,26 +271,46 @@ fn credential_file_has_any(path: &Path, pointers: &[&str]) -> bool {
     })
 }
 
-/// Login invocation for contexts without an interactive terminal (the remote
-/// viewer's sign-in runs the command server-side and streams its output to the
-/// browser). Only OpenAI currently offers a device-auth flow that can complete
-/// without writing to the child process.
+/// Login invocation for the remote viewer. The command runs server-side and
+/// streams its output to the browser; Claude additionally receives its pasted
+/// authorization code through the viewer.
 pub struct LoginInvocation {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub env: std::collections::HashMap<String, String>,
 }
 
-pub async fn headless_login_invocation(vendor: AuthVendor) -> Result<LoginInvocation> {
-    if !vendor.supports_headless_login() {
+pub async fn web_login_invocation(
+    vendor: AuthVendor,
+    mode: WebLoginMode,
+) -> Result<LoginInvocation> {
+    let mut invocation = bundled_invocation(vendor).await?;
+    configure_web_login_invocation(vendor, mode, &mut invocation)?;
+    Ok(invocation)
+}
+
+fn configure_web_login_invocation(
+    vendor: AuthVendor,
+    mode: WebLoginMode,
+    invocation: &mut LoginInvocation,
+) -> Result<()> {
+    if !vendor.web_login_modes().contains(&mode) {
         bail!(
-            "{} sign-in requires an interactive terminal; run mj locally and use the ACP Servers account row",
-            vendor.label()
+            "{} does not support {} web sign-in",
+            vendor.label(),
+            mode.id()
         );
     }
-    let mut invocation = bundled_invocation(vendor).await?;
-    append_login_args(&mut invocation, headless_login_args(vendor));
-    Ok(invocation)
+    append_login_args(invocation, web_login_args(mode));
+    if vendor == AuthVendor::Anthropic {
+        // The browser is on the viewer's machine, so a localhost OAuth
+        // callback would return to the wrong host. Force Claude's manual-code
+        // flow and send the pasted code through the protected viewer API.
+        invocation
+            .env
+            .insert("NO_BROWSER".to_string(), "1".to_string());
+    }
+    Ok(())
 }
 
 pub fn login_args_for_selection(selected: usize) -> &'static [&'static str] {
@@ -247,10 +327,11 @@ pub fn append_login_args(invocation: &mut LoginInvocation, args: &[&str]) {
         .extend(args.iter().map(|arg| arg.to_string()));
 }
 
-fn headless_login_args(vendor: AuthVendor) -> &'static [&'static str] {
-    match vendor {
-        AuthVendor::OpenAi => &["login", "--device-auth"],
-        AuthVendor::Anthropic => &[],
+fn web_login_args(mode: WebLoginMode) -> &'static [&'static str] {
+    match mode {
+        WebLoginMode::OpenAiDevice => &["login", "--device-auth"],
+        WebLoginMode::ClaudeSubscription => &["auth", "login", "--claudeai"],
+        WebLoginMode::AnthropicConsole => &["auth", "login", "--console"],
     }
 }
 
@@ -328,12 +409,25 @@ mod tests {
         assert_eq!(AuthVendor::OpenAi.label(), "OpenAI / ChatGPT");
         assert_eq!(AuthVendor::OpenAi.enables(), "Codex");
         assert_eq!(AuthVendor::OpenAi.id(), "openai");
+        assert_eq!(AuthVendor::OpenAi.acp_source(), "codex-acp");
         assert_eq!(AuthVendor::from_id("openai"), Some(AuthVendor::OpenAi));
         assert_eq!(AuthVendor::Anthropic.label(), "Anthropic / Claude");
         assert_eq!(AuthVendor::Anthropic.enables(), "Claude");
         assert_eq!(AuthVendor::Anthropic.id(), "anthropic");
-        assert!(AuthVendor::OpenAi.supports_headless_login());
-        assert!(!AuthVendor::Anthropic.supports_headless_login());
+        assert_eq!(AuthVendor::Anthropic.acp_source(), "claude-acp");
+        assert!(AuthVendor::OpenAi.supports_web_login());
+        assert!(AuthVendor::Anthropic.supports_web_login());
+        assert!(!AuthVendor::OpenAi.web_login_accepts_input());
+        assert!(AuthVendor::Anthropic.web_login_accepts_input());
+        assert_eq!(
+            AuthVendor::OpenAi.web_login_mode(None),
+            Some(WebLoginMode::OpenAiDevice)
+        );
+        assert_eq!(
+            AuthVendor::Anthropic.web_login_mode(Some("console")),
+            Some(WebLoginMode::AnthropicConsole)
+        );
+        assert_eq!(AuthVendor::Anthropic.web_login_mode(Some("unknown")), None);
         assert_eq!(
             AuthVendor::from_id("anthropic"),
             Some(AuthVendor::Anthropic)
@@ -348,10 +442,17 @@ mod tests {
     #[test]
     fn vendors_select_their_supported_login_commands() {
         assert_eq!(
-            headless_login_args(AuthVendor::OpenAi),
+            web_login_args(WebLoginMode::OpenAiDevice),
             ["login", "--device-auth"]
         );
-        assert!(headless_login_args(AuthVendor::Anthropic).is_empty());
+        assert_eq!(
+            web_login_args(WebLoginMode::ClaudeSubscription),
+            ["auth", "login", "--claudeai"]
+        );
+        assert_eq!(
+            web_login_args(WebLoginMode::AnthropicConsole),
+            ["auth", "login", "--console"]
+        );
         assert_eq!(anthropic_login_args(false), ["auth", "login", "--claudeai"]);
         assert_eq!(anthropic_login_args(true), ["auth", "login", "--console"]);
     }
@@ -362,15 +463,6 @@ mod tests {
         let hint = login_terminal_hint(AuthVendor::Anthropic).expect("Claude login hint");
         assert!(hint.contains("will not appear"), "{hint}");
         assert!(hint.contains("press Enter"), "{hint}");
-    }
-
-    #[tokio::test]
-    async fn anthropic_headless_login_requires_an_interactive_terminal() {
-        let error = match headless_login_invocation(AuthVendor::Anthropic).await {
-            Ok(_) => panic!("headless Claude login must be rejected"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("interactive terminal"));
     }
 
     #[test]
@@ -404,6 +496,20 @@ mod tests {
             bundled_provider(AuthVendor::OpenAi),
             crate::acp::ProviderCli::Codex
         );
+
+        let mut claude = LoginInvocation {
+            command: PathBuf::from("npx"),
+            args: vec!["--cli".to_string()],
+            env: Default::default(),
+        };
+        configure_web_login_invocation(
+            AuthVendor::Anthropic,
+            WebLoginMode::ClaudeSubscription,
+            &mut claude,
+        )
+        .expect("configure Claude web login");
+        assert_eq!(claude.args, ["--cli", "auth", "login", "--claudeai"]);
+        assert_eq!(claude.env["NO_BROWSER"], "1");
     }
 
     #[test]

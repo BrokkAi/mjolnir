@@ -10,7 +10,6 @@ pub mod notifications;
 pub mod onboarding;
 pub mod palette;
 pub mod qr;
-pub mod ragnarok_sprites;
 pub mod session;
 pub mod session_state;
 pub mod settings;
@@ -55,9 +54,6 @@ pub mod memory {
 }
 pub mod pull_request {
     pub use mj_agents::pull_request::*;
-}
-pub mod ragnarok {
-    pub use mj_agents::ragnarok::*;
 }
 pub mod roster {
     pub use mj_core::roster::*;

@@ -14,8 +14,6 @@
 # with a comment saying why:
 #
 #   * `terminal_palette` — constructs the derived colors themselves.
-#   * `ragnarok_sprites` — pixel art, where the RGB *is* the artwork; remapping
-#     a skin tone onto the ANSI 16 would destroy it rather than adapt it.
 disallowed-methods = [
     { path = "ratatui::style::Color::Rgb", reason = "Use an Ink from the palette. Terminal themes remap ANSI colors to contrast with their own background; RGB cannot adapt. For a color derived from the measured terminal background, go through terminal_palette::best_color_for_level." },
     { path = "ratatui::style::Color::Indexed", reason = "Use an Ink from the palette, or terminal_palette::best_color_for_level for a color derived from the measured terminal background." },
