@@ -211,6 +211,11 @@ pub struct Config {
     /// Persistent cross-session memory behavior.
     #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
     pub memory: MemoryConfig,
+    /// Whether the Mjolnir-owned Computer Control host may serve this user's
+    /// primary sessions. The setup surface, not a command-line flag, owns this
+    /// choice because it has to show macOS permission readiness and revocation.
+    #[serde(default, skip_serializing_if = "ComputerConfig::is_default")]
+    pub computer: ComputerConfig,
     /// The semantic team preference used to constrain automatic selection.
     /// ACP adapter identities themselves are never persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,6 +263,7 @@ impl Default for Config {
             keep_awake: true,
             interface: InterfaceMode::default(),
             memory: MemoryConfig::default(),
+            computer: ComputerConfig::default(),
             team: None,
             agent: AgentConfig::default(),
             review: ReviewConfig::default(),
@@ -269,12 +275,32 @@ impl Default for Config {
     }
 }
 
+/// Persistent consent for the Mjolnir-owned Computer Control capability.
+///
+/// This deliberately stores only the user's product choice. The live host,
+/// its IPC capability, and its macOS permission state are per-session.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ComputerConfig {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+}
+
+impl ComputerConfig {
+    fn is_default(&self) -> bool {
+        !self.enabled
+    }
+}
+
 fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Persistent cross-session memories: whether the feature is on at all,
@@ -1419,6 +1445,7 @@ fn migrate_v2(body: &str) -> Result<Config> {
         keep_awake: true,
         interface: InterfaceMode::default(),
         memory: MemoryConfig::default(),
+        computer: ComputerConfig::default(),
         team: None,
         agent: AgentConfig {
             model: old.thor.model,
@@ -1522,6 +1549,10 @@ pub fn save_user_config_preserving_session_routes(path: &Path, config: &mut Conf
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let latest = Config::load(path)?;
+    // Computer Control changes through its user-owned `/mjconfig` tab. A
+    // stale `/mjconfig` editor must not re-enable or disable desktop control
+    // merely by saving unrelated settings.
+    config.computer = latest.computer.clone();
     for (source_id, saved) in latest.session_config {
         let changed_defaults = config
             .session_config
@@ -1545,6 +1576,20 @@ pub fn save_user_config_preserving_session_routes(path: &Path, config: &mut Conf
             }
         }
     }
+    config.save(path)
+}
+
+/// Persist the one global Computer Control choice from the `/mjconfig` Computer tab.
+///
+/// This starts from the latest config instead of an editor snapshot, so a
+/// simultaneous settings save cannot overwrite the user's explicit desktop
+/// control decision.
+pub fn set_computer_control_enabled(path: &Path, enabled: bool) -> Result<()> {
+    let _guard = SESSION_CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = Config::load(path)?;
+    config.computer.enabled = enabled;
     config.save(path)
 }
 
@@ -2936,6 +2981,38 @@ mode = "ask"
             !body.contains("theme"),
             "default theme should not be serialized: {body:?}"
         );
+    }
+
+    #[test]
+    fn computer_control_is_off_by_default_and_persists_when_enabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        assert!(!config.computer.enabled);
+        config.computer.enabled = true;
+        config.save(&path).expect("save");
+
+        let body = std::fs::read_to_string(&path).expect("read");
+        assert!(body.contains("[computer]"), "config: {body:?}");
+        assert!(body.contains("enabled = true"), "config: {body:?}");
+        assert!(Config::load(&path).expect("load").computer.enabled);
+    }
+
+    #[test]
+    fn saving_stale_settings_preserves_the_latest_computer_control_choice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).expect("save initial config");
+        let mut stale_editor = Config::load(&path).expect("load editor snapshot");
+
+        set_computer_control_enabled(&path, true).expect("enable computer control");
+        stale_editor.theme = TerminalThemeKind::Ansi;
+        save_user_config_preserving_session_routes(&path, &mut stale_editor)
+            .expect("save editor snapshot");
+
+        let loaded = Config::load(&path).expect("load saved config");
+        assert!(loaded.computer.enabled);
+        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
     }
 
     #[test]

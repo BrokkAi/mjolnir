@@ -1942,6 +1942,7 @@ impl TrackerState {
             // owns the pending-record lifecycle. Nothing to fold in here.
             UiEvent::PermissionRequest(_)
             | UiEvent::ElicitationRequest(_)
+            | UiEvent::ComputerControlStatus(_)
             | UiEvent::RemotePermissionDecision { .. } => {}
             UiEvent::Subagent(subagent_event) => self.observe_subagent_event(subagent_event),
             UiEvent::Workflow(event) => self.observe_workflow_event(event),
@@ -2024,6 +2025,7 @@ impl TrackerState {
             | UiEvent::SubagentPoolModelChanged { .. }
             | UiEvent::WorkspaceDiff(_)
             | UiEvent::WorkspaceHeadDiff(_)
+            | UiEvent::ComputerControlStatus(_)
             | UiEvent::PermissionRequest(_)
             | UiEvent::ElicitationRequest(_)
             | UiEvent::Subagent(_)

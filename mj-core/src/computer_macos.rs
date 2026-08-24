@@ -42,6 +42,27 @@ type CGEventRef = *mut c_void;
 type CGEventSourceRef = *mut c_void;
 type CFDictionaryRef = *const c_void;
 
+/// Layout-only bindings for CoreFoundation's predefined dictionary callback
+/// tables. The callbacks themselves remain owned by CoreFoundation.
+#[repr(C)]
+struct CFDictionaryKeyCallBacks {
+    version: isize,
+    retain: *const c_void,
+    release: *const c_void,
+    copy_description: *const c_void,
+    equal: *const c_void,
+    hash: *const c_void,
+}
+
+#[repr(C)]
+struct CFDictionaryValueCallBacks {
+    version: isize,
+    retain: *const c_void,
+    release: *const c_void,
+    copy_description: *const c_void,
+    equal: *const c_void,
+}
+
 const KCG_ERROR_SUCCESS: CGError = 0;
 const KCG_HID_EVENT_TAP: u32 = 0;
 const KCG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
@@ -98,6 +119,8 @@ unsafe extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
     fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
+    fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
+    fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
     fn CGEventCreateMouseEvent(
         source: CGEventSourceRef,
         mouse_type: u32,
@@ -141,11 +164,13 @@ unsafe extern "C" {
     fn CFDictionaryCreateMutable(
         allocator: *const c_void,
         capacity: isize,
-        key_callbacks: *const c_void,
-        value_callbacks: *const c_void,
+        key_callbacks: *const CFDictionaryKeyCallBacks,
+        value_callbacks: *const CFDictionaryValueCallBacks,
     ) -> *mut c_void;
     fn CFDictionarySetValue(dictionary: *mut c_void, key: *const c_void, value: *const c_void);
     static kCFBooleanTrue: *const c_void;
+    static kCFTypeDictionaryKeyCallBacks: CFDictionaryKeyCallBacks;
+    static kCFTypeDictionaryValueCallBacks: CFDictionaryValueCallBacks;
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -339,6 +364,15 @@ impl ComputerBackend for MacosComputerBackend {
         })?
     }
 
+    async fn current_display(
+        &self,
+        display_id: DisplayId,
+        cancellation: CancellationToken,
+    ) -> Result<CurrentDisplay, ComputerError> {
+        check_cancelled(&cancellation)?;
+        self.current_display(&display_id)
+    }
+
     async fn host_lock_state(
         &self,
         cancellation: CancellationToken,
@@ -378,6 +412,16 @@ impl MacosComputerBackend {
         }
         let source = EventSource::new()?;
         match action {
+            BackendAction::Verify => {
+                let point = Event::current_pointer_location(&source)?;
+                post_mouse(
+                    &source,
+                    KCG_EVENT_MOUSE_MOVED,
+                    point.x,
+                    point.y,
+                    PointerButton::Left,
+                )?;
+            }
             BackendAction::Move { x, y } => {
                 post_mouse(&source, KCG_EVENT_MOUSE_MOVED, x, y, PointerButton::Left)?;
             }
@@ -475,24 +519,37 @@ fn request_screen_recording_permission() {
 }
 
 fn request_accessibility_permission() {
-    let Ok(key) = CoreFoundationString::new("AXTrustedCheckOptionPrompt") else {
+    let Ok(options) = accessibility_prompt_options() else {
         return;
     };
-    // SAFETY: the mutable dictionary is retained by CoreFoundation and both
-    // key/value stay valid through AXIsProcessTrustedWithOptions below.
-    let options = unsafe {
-        CFDictionaryCreateMutable(std::ptr::null(), 1, std::ptr::null(), std::ptr::null())
-    };
-    if options.is_null() {
-        return;
-    }
-    let options = CoreFoundationObject(options.cast());
-    // SAFETY: options is a valid mutable dictionary; the key is a live CFString
-    // and kCFBooleanTrue is a process-lifetime CoreFoundation singleton.
-    unsafe { CFDictionarySetValue(options.0.cast_mut(), key.0, kCFBooleanTrue) };
     // SAFETY: options remains valid throughout this synchronous permission
     // request; no ownership transfers to Accessibility.
     let _ = unsafe { AXIsProcessTrustedWithOptions(options.0) };
+}
+
+fn accessibility_prompt_options() -> Result<CoreFoundationObject, ComputerError> {
+    let key = CoreFoundationString::new("AXTrustedCheckOptionPrompt")?;
+    // SAFETY: the CoreFoundation callback tables retain the CFString key and
+    // Boolean value while the dictionary exists. Null callbacks use pointer
+    // equality, so this fresh key would not match Accessibility's constant.
+    let options = unsafe {
+        CFDictionaryCreateMutable(
+            std::ptr::null(),
+            1,
+            &raw const kCFTypeDictionaryKeyCallBacks,
+            &raw const kCFTypeDictionaryValueCallBacks,
+        )
+    };
+    if options.is_null() {
+        return Err(ComputerError::Backend(
+            "allocate Accessibility permission options failed".to_string(),
+        ));
+    }
+    let options = CoreFoundationObject(options.cast());
+    // SAFETY: `options` is a valid mutable CFDictionary and `key` remains
+    // alive through insertion. `kCFBooleanTrue` is process-lifetime.
+    unsafe { CFDictionarySetValue(options.0.cast_mut(), key.0, kCFBooleanTrue) };
+    Ok(options)
 }
 
 fn host_lock_state() -> HostLockState {
@@ -566,6 +623,17 @@ impl Drop for EventSource {
 struct Event(CGEventRef);
 
 impl Event {
+    fn current_pointer_location(source: &EventSource) -> Result<CGPoint, ComputerError> {
+        // SAFETY: `source` is a valid retained event source. CoreGraphics
+        // returns a retained snapshot event whose location is the current
+        // pointer position; `Event` releases it after the read.
+        let event = Self::from_raw(unsafe { CGEventCreate(source.0) }, "read pointer location")?;
+        // SAFETY: `event` owns a valid CoreGraphics event.
+        let point = unsafe { CGEventGetLocation(event.0) };
+        validate_point(point.x, point.y)?;
+        Ok(point)
+    }
+
     fn mouse(
         source: &EventSource,
         event_type: u32,
@@ -1221,6 +1289,22 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_prompt_options_hold_a_typed_true_value() {
+        let options = accessibility_prompt_options().expect("create Accessibility prompt options");
+        let key = CoreFoundationString::new("AXTrustedCheckOptionPrompt").unwrap();
+        // SAFETY: `options` is a live CFDictionary and `key` is a live
+        // CFString for this lookup. The stored value must be a CFBoolean.
+        let value = unsafe { CFDictionaryGetValue(options.0, key.0) };
+        assert!(!value.is_null());
+        // SAFETY: the non-null value came from the CoreFoundation dictionary.
+        assert_eq!(unsafe { CFGetTypeID(value) }, unsafe {
+            CFBooleanGetTypeID()
+        });
+        // SAFETY: the type assertion above establishes that `value` is a CFBoolean.
+        assert!(unsafe { CFBooleanGetValue(value) });
+    }
+
+    #[test]
     fn scroll_deltas_reject_non_finite_or_unrepresentable_values() {
         assert_eq!(scroll_delta(2.6), Ok(3));
         assert_eq!(scroll_delta(-2.6), Ok(-3));
@@ -1246,7 +1330,20 @@ mod tests {
     #[test]
     fn main_display_uses_display_mode_pixel_dimensions_without_screen_recording_permission() {
         let display = main_display_id();
-        let mode_pixels = display_mode_pixel_size(display).expect("read main display mode");
+        let mode_pixels = match display_mode_pixel_size(display) {
+            Ok(mode_pixels) => mode_pixels,
+            // A headless macOS test runner can have a main display ID while
+            // CoreGraphics exposes no display mode. There is no geometry to
+            // compare in that environment; interactive Macs still exercise
+            // the assertions below without Screen Recording permission.
+            Err(ComputerError::Backend(message))
+                if message == "CoreGraphics did not return a display mode" =>
+            {
+                eprintln!("skipping display-mode geometry check: no CoreGraphics display mode");
+                return;
+            }
+            Err(error) => panic!("read main display mode: {error}"),
+        };
         // SAFETY: the main display ID is valid for CoreGraphics geometry
         // queries; unlike display capture, this does not require TCC consent.
         let bounds = unsafe { CGDisplayBounds(display) };

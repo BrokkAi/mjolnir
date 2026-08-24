@@ -24,9 +24,10 @@ use agent_client_protocol::schema::v1::{
 };
 
 use crate::event::{
-    ElicitationOutcome, ElicitationPrompt, InternalMessage, PermissionDecision, PermissionPrompt,
-    PromptImage, PromptResource, ReviewTarget, SessionConfigTarget, SubagentEvent, SubagentOutcome,
-    SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
+    ComputerControlStatus, ElicitationOutcome, ElicitationPrompt, InternalMessage,
+    PermissionDecision, PermissionPrompt, PromptImage, PromptResource, ReviewTarget,
+    SessionConfigTarget, SubagentEvent, SubagentOutcome, SubagentStatusKind,
+    TerminalOutputSnapshot, UiEvent, content_block_text,
 };
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
@@ -1267,6 +1268,9 @@ pub struct AppState {
     pub thought_output: crate::config::ThoughtOutput,
     /// Open `/mjconfig` overlay, if any.
     pub mjconfig_menu: Option<MjConfigMenu>,
+    /// Latest host/readiness result, retained so the Computer tab in
+    /// `/mjconfig` never lies while a native permission prompt is in progress.
+    pub computer_control_status: ComputerControlStatus,
     pub acp_inventory: crate::roster::AcpInventory,
     /// Active `/ragnarok` battle (arena overlay), if any.
     pub ragnarok: Option<RagnarokUi>,
@@ -2141,6 +2145,7 @@ impl AppState {
             spinner_style: SpinnerStyle::default(),
             thought_output: crate::config::ThoughtOutput::default(),
             mjconfig_menu: None,
+            computer_control_status: ComputerControlStatus::disabled(),
             acp_inventory: crate::roster::AcpInventory::default(),
             ragnarok: None,
             ragnarok_launch: None,
@@ -2389,11 +2394,19 @@ impl AppState {
             editor: SettingsEditor::new(config, self.model_choices.clone(), notice)
                 .with_active_models(self.active_models.clone())
                 .with_active_session_config(self.session_config_options.clone())
-                .with_inventory(self.acp_inventory.clone()),
+                .with_inventory(self.acp_inventory.clone())
+                .with_computer_status(self.computer_control_status.clone()),
             orig_theme: self.theme_kind,
             orig_spinner: self.spinner_style,
             orig_thought_output: self.thought_output,
         });
+    }
+
+    pub fn apply_computer_control_status(&mut self, status: ComputerControlStatus) {
+        self.computer_control_status = status.clone();
+        if let Some(menu) = self.mjconfig_menu.as_mut() {
+            menu.editor.set_computer_status(status);
+        }
     }
 
     /// Apply a shared editor key and synchronize appearance preview.
@@ -4404,6 +4417,9 @@ impl AppState {
                     subagent_id: None,
                 });
                 self.update_autocomplete();
+            }
+            UiEvent::ComputerControlStatus(status) => {
+                self.apply_computer_control_status(status);
             }
             UiEvent::CancelPendingPermissions => {
                 self.finalize_thinking(EntryKind::Thought);

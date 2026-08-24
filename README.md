@@ -29,6 +29,9 @@ and remote-control surface.
   driving the session from another browser or device.
 - **Local voice input:** dictate prompts on macOS, Linux, and Windows with
   cross-platform, on-device speech recognition.
+- **Mac computer control:** optionally give one primary macOS session fresh,
+  screenshot-grounded pointer, keyboard, and scroll control through a separate
+  Mjolnir Computer app—not through the terminal running `mj`.
 
 ### Terminal
 
@@ -177,6 +180,42 @@ Use an isolated worktree for an interactive coding session:
 ```bash
 mj --worktree
 ```
+
+## Local macOS computer control
+
+Open `/mjconfig` and select the **Computer** tab in a primary macOS session.
+It enables or disables Computer Control, shows Screen Recording and
+Accessibility readiness for **Mjolnir Computer.app**, and runs a safe capture
+→ no-op pointer event → capture verification. The terminal never receives
+those macOS grants.
+
+Mjolnir keeps a private MCP connection for the primary session, but exposes no
+computer tools until you enable control. It then sends the standard
+`tools/list_changed` update, so a compatible ACP client gains the
+screenshot-grounded pointer, keyboard, scroll, and wait tools in the current
+session; subagents and review workers never receive them. Mjolnir rejects
+expired screenshots and changed displays, and asks you to approve every input
+action before the app receives it. Disabling control, ending the session, or
+cancelling it revokes the app's private control capability.
+
+macOS release installs place `Mjolnir Computer.app` beside `mj`, including the
+release installer, self-update, and the platform npm package. From a source
+checkout on macOS, build the same sibling app bundle with:
+
+```bash
+bash scripts/build-macos-computer-app.sh
+cargo run
+```
+
+The script places an ad-hoc-signed development bundle beside
+`target/debug/mj`, so the Computer tab works without a flag or environment
+variable. Run the script before granting the two macOS permissions; its ad-hoc
+identity changes whenever it rebuilds the host. After enabling **Mjolnir
+Computer** in System Settings, return to the Computer tab and press `r` once:
+Mjolnir restarts the host and reports the fresh permission state. This is for
+local testing, not the stable release-signed Mjolnir identity required for
+production macOS permission grants. Pass `--release` to build the
+release-profile pair instead.
 
 ## Documentation
 

@@ -1412,6 +1412,7 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
         | UiEvent::SessionConfigOptions { .. }
         | UiEvent::WorkspaceDiff(_)
         | UiEvent::WorkspaceHeadDiff(_)
+        | UiEvent::ComputerControlStatus(_)
         | UiEvent::PermissionRequest(_)
         | UiEvent::ElicitationRequest(_)
         | UiEvent::CancelPendingPermissions
@@ -5868,6 +5869,10 @@ fn handle_mjconfig_menu_key(
             } else {
                 TerminalRequest::Authenticate(vendor)
             }
+        }
+        SettingsAction::Computer(action) => {
+            let _ = cmd_tx.send(UiCommand::ComputerControl { action });
+            TerminalRequest::None
         }
         SettingsAction::None | SettingsAction::Changed => TerminalRequest::None,
     }
@@ -19392,6 +19397,46 @@ mod tests {
     }
 
     #[test]
+    fn mjconfig_computer_tab_routes_its_actions_locally() {
+        let mut state = AppState::new();
+        state.input = "/mjconfig".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+        state
+            .mjconfig_menu
+            .as_mut()
+            .expect("menu should be open")
+            .editor
+            .tab = crate::settings::SettingsTab::Computer;
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('r')));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ComputerControl {
+                action: crate::event::ComputerControlAction::Refresh
+            })
+        ));
+
+        state.apply_event(UiEvent::ComputerControlStatus(
+            crate::event::ComputerControlStatus {
+                enabled: true,
+                readiness: Some(crate::computer::PermissionReadiness {
+                    screen_recording: crate::computer::PermissionState::Granted,
+                    accessibility: crate::computer::PermissionState::Granted,
+                }),
+                detail: None,
+            },
+        ));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ComputerControl {
+                action: crate::event::ComputerControlAction::Verify
+            })
+        ));
+    }
+
+    #[test]
     fn slash_diff_opens_workspace_viewer_without_queueing_while_busy() {
         let mut state = AppState::new();
         state.record_user_prompt("active".to_string());
@@ -19787,12 +19832,10 @@ mod tests {
         state.open_mjconfig_menu();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        // Preview different values in both sections.
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
-        state.mjconfig_menu_key(KeyCode::Tab);
+        // Select the target tab directly: platform-specific tabs may sit
+        // between ACP Servers and Appearance.
+        state.mjconfig_menu.as_mut().expect("menu open").editor.tab =
+            crate::settings::SettingsTab::Appearance;
         state.mjconfig_menu_key(KeyCode::Right);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);

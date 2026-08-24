@@ -2055,6 +2055,24 @@ fn launched_adapter_kind(
         .map(|role| role.launch.kind)
 }
 
+#[cfg(target_os = "macos")]
+fn save_computer_control_enabled(path: &Path, enabled: bool) -> Result<()> {
+    config::set_computer_control_enabled(path, enabled)
+}
+
+#[cfg(target_os = "macos")]
+fn add_computer_control_detail(
+    status: &mut mj_core::event::ComputerControlStatus,
+    detail: impl std::fmt::Display,
+) {
+    let existing = status.detail.take().unwrap_or_default();
+    status.detail = Some(if existing.is_empty() {
+        detail.to_string()
+    } else {
+        format!("{existing} {detail}")
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     agent: &SelectedAgent,
@@ -2257,12 +2275,36 @@ async fn run_session(
     let memory_config = Config::load(&config::default_config_path())
         .map(|config| config.memory)
         .unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let computer_control_config_path = config::default_config_path();
+    #[cfg(target_os = "macos")]
+    let computer_tools = Arc::new(
+        mj_core::computer_mcp::ToolServer::start(
+            ui_event_tx.clone(),
+            computer_control_config_path.clone(),
+        )
+        .await
+        .context("start Mjolnir Computer Control bridge")?,
+    );
+    #[cfg(target_os = "macos")]
+    if Config::load(&computer_control_config_path)
+        .map(|config| config.computer.enabled)
+        .unwrap_or(false)
+    {
+        let _ = ui_event_tx.send(UiEvent::ComputerControlStatus(
+            computer_tools.activate().await,
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    let mcp_servers = vec![computer_tools.advertised().clone()];
+    #[cfg(not(target_os = "macos"))]
+    let mcp_servers = Vec::new();
     let runtime_cfg = acp::AcpRuntimeConfig {
         command: agent.program.clone(),
         args: agent.args.clone(),
         cwd: cwd.clone(),
         additional_directories: runtime_options.additional_directories.clone(),
-        mcp_servers: Vec::new(),
+        mcp_servers,
         resume_session,
         session_restore_mode: acp::SessionRestoreMode::Replay,
         env: primary_env,
@@ -2324,7 +2366,11 @@ async fn run_session(
     // current task's stdio (ratatui draws through stdout while ACP
     // talks to the agent's stdout/stdin, which are separate file
     // descriptors).
+    #[cfg(target_os = "macos")]
+    let cmd_computer_tools = computer_tools.clone();
     let acp_handle = tokio::spawn(async move {
+        #[cfg(target_os = "macos")]
+        let _computer_tools = computer_tools;
         if let Err(e) = acp::run(runtime_cfg, event_tx, cmd_rx).await {
             tracing::error!("acp runtime error: {e:#}");
         }
@@ -2473,6 +2519,10 @@ async fn run_session(
     let side_additional_directories = runtime_options.additional_directories.clone();
     let side_agent_stderr = runtime_options.agent_stderr.clone();
     let side_fs_max_text_bytes = runtime_options.fs_max_text_bytes;
+    #[cfg(target_os = "macos")]
+    let computer_config_path = computer_control_config_path.clone();
+    #[cfg(target_os = "macos")]
+    let computer_status_tx = side_ui_event_tx.clone();
     let cmd_proxy = tokio::spawn(async move {
         let mut side_runtime: Option<side::Runtime> = None;
         let mut local_epoch = 0_u64;
@@ -2534,6 +2584,65 @@ async fn run_session(
                 UiCommand::Main(command) => (*command, true),
                 command => (command, false),
             };
+            #[cfg(target_os = "macos")]
+            if let UiCommand::ComputerControl { action } = command {
+                let status = match action {
+                    mj_core::event::ComputerControlAction::Refresh => {
+                        cmd_computer_tools.refresh().await
+                    }
+                    mj_core::event::ComputerControlAction::Enable => {
+                        match save_computer_control_enabled(&computer_config_path, true) {
+                            Ok(()) => {
+                                let mut status = cmd_computer_tools.set_up().await;
+                                if !status.enabled
+                                    && let Err(error) =
+                                        save_computer_control_enabled(&computer_config_path, false)
+                                {
+                                    add_computer_control_detail(
+                                        &mut status,
+                                        format!(
+                                            "Could not clear the Computer Control preference: {error:#}"
+                                        ),
+                                    );
+                                }
+                                status
+                            }
+                            Err(error) => mj_core::event::ComputerControlStatus {
+                                enabled: false,
+                                readiness: None,
+                                detail: Some(format!(
+                                    "Could not save the Computer Control preference: {error:#}"
+                                )),
+                            },
+                        }
+                    }
+                    mj_core::event::ComputerControlAction::Disable => {
+                        let saved = save_computer_control_enabled(&computer_config_path, false);
+                        let mut status = cmd_computer_tools.disable().await;
+                        if let Err(error) = saved {
+                            add_computer_control_detail(
+                                &mut status,
+                                format!(
+                                    "Could not save the Computer Control preference: {error:#}"
+                                ),
+                            );
+                        }
+                        status
+                    }
+                    mj_core::event::ComputerControlAction::Verify => {
+                        cmd_computer_tools.verify().await
+                    }
+                };
+                let _ = computer_status_tx.send(UiEvent::ComputerControlStatus(status));
+                continue;
+            }
+            #[cfg(not(target_os = "macos"))]
+            if matches!(command, UiCommand::ComputerControl { .. }) {
+                let _ = side_ui_event_tx.send(UiEvent::Warning(
+                    "Computer Control is currently available only on macOS".to_string(),
+                ));
+                continue;
+            }
             if !force_main && side_runtime.is_some() {
                 if matches!(command, UiCommand::Shutdown) {
                     if let Some(side) = side_runtime.take() {

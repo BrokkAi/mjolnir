@@ -431,6 +431,34 @@ find_extracted_binary() {
   printf '%s\n' "$found"
 }
 
+install_macos_computer_bundle() {
+  local extract_dir="$1"
+  local source
+  local dest="${INSTALL_DIR}/Mjolnir Computer.app"
+
+  source="$(find "$extract_dir" -type d -name "Mjolnir Computer.app" -print -quit)"
+  if [[ -z "$source" || ! -f "$source/Contents/Info.plist" || ! -f "$source/Contents/MacOS/mj-computer-host" ]]; then
+    die "macOS archive did not contain a complete Mjolnir Computer.app"
+  fi
+
+  chmod 0755 "$source/Contents/MacOS/mj-computer-host"
+  strip_quarantine "$source"
+  if [[ -w "$INSTALL_DIR" ]]; then
+    rm -rf "$dest"
+    cp -R "$source" "$dest"
+    strip_quarantine "$dest"
+  else
+    command -v sudo >/dev/null 2>&1 || die "cannot write ${INSTALL_DIR}; set INSTALL_DIR to a writable directory"
+    sudo rm -rf "$dest"
+    sudo cp -R "$source" "$dest"
+    if command -v xattr >/dev/null 2>&1; then
+      sudo xattr -dr com.apple.quarantine "$dest" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  log "installed Mjolnir Computer.app to ${dest}"
+}
+
 install_from_asset() {
   local label="$1"
   local repo="$2"
@@ -458,7 +486,7 @@ install_from_asset() {
 
   # Skip download when the stored archive checksum matches the remote one
   expected="$(fetch_checksum "$release_file" "$asset_name" || true)"
-  if [[ -n "$expected" && -f "$dest" && ( -z "$companion_name" || -f "${INSTALL_DIR}/${companion_name}" ) ]]; then
+  if [[ -n "$expected" && -f "$dest" && ( -z "$companion_name" || -f "${INSTALL_DIR}/${companion_name}" ) && ( "$OS_FAMILY" != "macos" || -d "${INSTALL_DIR}/Mjolnir Computer.app" ) ]]; then
     local stored_checksum_file
     stored_checksum_file="$(stored_checksum_path "$bin_name")"
     if [[ -f "$stored_checksum_file" ]]; then
@@ -495,6 +523,9 @@ install_from_asset() {
       if [[ -n "$companion_name" ]]; then
         src="$(find_extracted_binary "$extract_dir" "$companion_name")"
         install_binary "$src" "$companion_name"
+      fi
+      if [[ "$OS_FAMILY" == "macos" && "$bin_name" == "mj" ]]; then
+        install_macos_computer_bundle "$extract_dir"
       fi
       ;;
     *.zip)

@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     computer::{
-        BackendAction, ComputerBackend, ComputerError, ComputerPermission, HostLockState,
-        Observation, ObserveArgs, PermissionReadiness,
+        BackendAction, ComputerBackend, ComputerError, ComputerPermission, CurrentDisplay,
+        DisplayId, HostLockState, Observation, ObserveArgs, PermissionReadiness,
     },
     computer_host::{
         HostCallError, HostCapability, HostClient, HostLaunchDescriptor, HostRequest, HostResponse,
@@ -199,6 +199,20 @@ impl ComputerBackend for MacosComputerHost {
         }
     }
 
+    async fn current_display(
+        &self,
+        display_id: DisplayId,
+        cancellation: CancellationToken,
+    ) -> Result<CurrentDisplay, ComputerError> {
+        match self
+            .call(HostRequest::CurrentDisplay(display_id), cancellation)
+            .await?
+        {
+            HostResponse::CurrentDisplay(display) => Ok(display),
+            response => Err(unexpected_response("current display", &response)),
+        }
+    }
+
     async fn execute(
         &self,
         action: BackendAction,
@@ -292,6 +306,7 @@ fn response_name(response: &HostResponse) -> &'static str {
         HostResponse::Hello { .. } => "hello",
         HostResponse::PermissionReadiness(_) => "permission readiness",
         HostResponse::PermissionRequested(_) => "permission requested",
+        HostResponse::CurrentDisplay(_) => "current display",
         HostResponse::HostLockState(_) => "lock state",
         HostResponse::Observation(_) => "observation",
         HostResponse::Completed => "completed",
@@ -333,5 +348,23 @@ mod tests {
         write_private_descriptor(&path, &descriptor).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
         assert!(write_private_descriptor(&path, &descriptor).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a locally built Mjolnir Computer.app and launches it through macOS"]
+    async fn built_app_reports_tcc_readiness_over_the_real_host_ipc() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("mj-core has a workspace parent");
+        let bundle = workspace.join("target/debug/Mjolnir Computer.app");
+        let host = MacosComputerHost::launch(&bundle, HostSessionId::generate().unwrap())
+            .await
+            .expect("launch local Mjolnir Computer.app");
+        let readiness = host
+            .permission_readiness(CancellationToken::new())
+            .await
+            .expect("read readiness through the real host IPC");
+        eprintln!("real Mjolnir Computer readiness: {readiness:?}");
+        host.shutdown().await.expect("shut down real host");
     }
 }

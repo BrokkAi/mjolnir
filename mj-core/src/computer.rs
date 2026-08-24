@@ -132,7 +132,7 @@ pub struct SourceRegion {
 
 /// The display geometry currently reported by a backend. A later policy layer
 /// compares it to an observation before allowing an input action.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CurrentDisplay {
     pub display_id: DisplayId,
     pub origin: DesktopPoint,
@@ -232,6 +232,18 @@ impl ObservationMetadata {
         now_unix_ms: u64,
         current_display: &CurrentDisplay,
     ) -> Result<(f64, f64), ComputerError> {
+        self.validate_current(now_unix_ms, current_display)?;
+        self.map_image_point(point)
+    }
+
+    /// Reject an observation that is expired or whose source display changed.
+    /// Text and key input use this too: they have no image coordinate but must
+    /// still be tied to the current observation.
+    pub fn validate_current(
+        &self,
+        now_unix_ms: u64,
+        current_display: &CurrentDisplay,
+    ) -> Result<(), ComputerError> {
         if now_unix_ms >= self.expires_at_unix_ms {
             return Err(ComputerError::ObservationExpired);
         }
@@ -243,7 +255,7 @@ impl ObservationMetadata {
         {
             return Err(ComputerError::DisplayChanged);
         }
-        self.map_image_point(point)
+        Ok(())
     }
 }
 
@@ -434,6 +446,9 @@ pub enum NamedKey {
 /// transformation. Policy and MCP transport remain outside the backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BackendAction {
+    /// Post a mouse-moved event at the pointer's current location. This is the
+    /// setup panel's non-destructive proof that the host can inject input.
+    Verify,
     Move {
         x: f64,
         y: f64,
@@ -486,6 +501,13 @@ pub struct PermissionReadiness {
     pub accessibility: PermissionState,
 }
 
+impl PermissionReadiness {
+    pub fn is_ready(self) -> bool {
+        self.screen_recording == PermissionState::Granted
+            && self.accessibility == PermissionState::Granted
+    }
+}
+
 /// A permission prompt owned by the dedicated platform host. The terminal and
 /// MCP service may request this through the authenticated host channel, but
 /// never call the OS permission API themselves.
@@ -534,6 +556,14 @@ pub trait ComputerBackend: Send + Sync {
         ))
     }
 
+    /// Return the display geometry used to reject input that was targeted
+    /// against an expired or changed observation.
+    async fn current_display(
+        &self,
+        display_id: DisplayId,
+        cancellation: CancellationToken,
+    ) -> Result<CurrentDisplay, ComputerError>;
+
     async fn host_lock_state(
         &self,
         cancellation: CancellationToken,
@@ -559,6 +589,9 @@ pub enum ComputerError {
     ObservationExpired,
     DisplayChanged,
     ObservationNotFound,
+    WaitDurationExceeded,
+    ControlDisabled,
+    ActionNotApproved,
     ScreenRecordingPermission(PermissionState),
     AccessibilityPermission(PermissionState),
     HostLocked,
@@ -585,6 +618,13 @@ impl fmt::Display for ComputerError {
             Self::ObservationExpired => f.write_str("computer observation has expired"),
             Self::DisplayChanged => f.write_str("computer display changed since observation"),
             Self::ObservationNotFound => f.write_str("computer observation was not found"),
+            Self::WaitDurationExceeded => {
+                f.write_str("computer wait duration exceeds the session safety limit")
+            }
+            Self::ControlDisabled => f.write_str(
+                "Computer Control is disabled; enable it in Mjolnir's /mjconfig Computer tab",
+            ),
+            Self::ActionNotApproved => f.write_str("computer action was not approved"),
             Self::ScreenRecordingPermission(state) => {
                 write!(f, "screen recording permission is not ready: {state:?}")
             }

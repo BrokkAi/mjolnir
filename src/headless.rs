@@ -348,6 +348,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 apply_session_update(&mut state, update, prompt_sent, &mut collecting_turn_output);
             }
             UiEvent::ContextCompacted => {}
+            UiEvent::ComputerControlStatus(_) => {}
             UiEvent::WorkspaceDiff(_) | UiEvent::WorkspaceHeadDiff(_) => {}
             UiEvent::TerminalOutput(snapshot) => apply_terminal_output(&mut state, &snapshot),
             UiEvent::SessionConfigOptions { .. } => {}

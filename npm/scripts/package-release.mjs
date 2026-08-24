@@ -19,6 +19,7 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
+    computerBundle: true,
     description: "Native universal macOS bundle for @brokkai/mjolnir",
     os: ["darwin"],
     cpu: ["x64", "arm64"],
@@ -179,6 +180,14 @@ async function stagePlatform(platform, version, source, stagingRoot) {
     const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
     await cp(path.join(source, worker), path.join(destination, "bin", worker));
     await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");
+  }
+  if (platform.computerBundle) {
+    const bundle = "Mjolnir Computer.app";
+    await cp(path.join(source, bundle), path.join(destination, "bin", bundle), { recursive: true });
+    await ensureBinary(
+      path.join(destination, "bin", bundle, "Contents", "MacOS", "mj-computer-host"),
+      true,
+    );
   }
   await ensureBinary(path.join(destination, "bin", platform.binary), platform.binary !== "mj.exe");
   await writeManifest(destination, platformManifest(platform, version));

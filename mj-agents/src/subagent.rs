@@ -2767,6 +2767,7 @@ async fn run(
                         }
                         UiEvent::ClaudeUsage(_)
                         | UiEvent::CodexUsage(_)
+                        | UiEvent::ComputerControlStatus(_)
                         | UiEvent::AgentUsage(_)
                         | UiEvent::SubagentPoolModelChanged { .. }
                         | UiEvent::RemotePermissionDecision { .. }

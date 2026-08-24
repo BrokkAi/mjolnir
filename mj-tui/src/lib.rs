@@ -35,6 +35,9 @@ pub mod claude_usage {
 pub mod codex_usage {
     pub use mj_core::codex_usage::*;
 }
+pub mod computer {
+    pub use mj_core::computer::*;
+}
 pub mod config {
     pub use mj_core::config::*;
 }

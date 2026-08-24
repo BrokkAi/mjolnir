@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::config::{
     AcpServerPolicy, Config, InterfaceMode, ModelsConfig, TeamPreset, ThoughtOutput,
 };
+use crate::event::{ComputerControlAction, ComputerControlStatus};
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
@@ -40,10 +41,23 @@ pub enum SettingsTab {
     Reviewer,
     Subagents,
     AcpServers,
+    Computer,
     Appearance,
 }
 
 impl SettingsTab {
+    #[cfg(target_os = "macos")]
+    const ALL: [Self; 7] = [
+        Self::Team,
+        Self::Agents,
+        Self::Reviewer,
+        Self::Subagents,
+        Self::AcpServers,
+        Self::Computer,
+        Self::Appearance,
+    ];
+
+    #[cfg(not(target_os = "macos"))]
     const ALL: [Self; 6] = [
         Self::Team,
         Self::Agents,
@@ -60,6 +74,7 @@ impl SettingsTab {
             Self::Reviewer => "Reviewer",
             Self::Subagents => "Subagents",
             Self::AcpServers => "ACP Servers",
+            Self::Computer => "Computer",
             Self::Appearance => "Appearance",
         }
     }
@@ -70,6 +85,7 @@ pub enum SettingsAction {
     None,
     Changed,
     Authenticate(crate::auth::AuthVendor),
+    Computer(ComputerControlAction),
     Save,
     Cancel,
 }
@@ -107,6 +123,9 @@ pub struct SettingsEditor {
     active_models: Option<ModelsConfig>,
     active_session_config: Vec<SessionConfigOption>,
     inventory: AcpInventory,
+    computer_tab_available: bool,
+    computer_status: ComputerControlStatus,
+    computer_working: bool,
 }
 
 impl SettingsEditor {
@@ -122,6 +141,9 @@ impl SettingsEditor {
             active_models: None,
             active_session_config: Vec::new(),
             inventory,
+            computer_tab_available: false,
+            computer_status: ComputerControlStatus::disabled(),
+            computer_working: false,
         }
     }
 
@@ -140,6 +162,17 @@ impl SettingsEditor {
     pub fn with_active_session_config(mut self, options: Vec<SessionConfigOption>) -> Self {
         self.active_session_config = options;
         self
+    }
+
+    pub fn with_computer_status(mut self, status: ComputerControlStatus) -> Self {
+        self.computer_tab_available = true;
+        self.computer_status = status;
+        self
+    }
+
+    pub fn set_computer_status(&mut self, status: ComputerControlStatus) {
+        self.computer_status = status;
+        self.computer_working = false;
     }
 
     /// Replace the model and ACP catalog without discarding staged settings.
@@ -167,6 +200,17 @@ impl SettingsEditor {
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
         match code {
             KeyCode::Esc => SettingsAction::Cancel,
+            KeyCode::Char('s') | KeyCode::Char('S') => SettingsAction::Save,
+            KeyCode::Enter if self.tab == SettingsTab::Computer => self.computer_action(),
+            KeyCode::Char(' ') if self.tab == SettingsTab::Computer => self.computer_action(),
+            KeyCode::Char('r') | KeyCode::Char('R') if self.tab == SettingsTab::Computer => {
+                self.start_computer_action(ComputerControlAction::Refresh)
+            }
+            KeyCode::Char('d') | KeyCode::Char('D')
+                if self.tab == SettingsTab::Computer && self.computer_status.enabled =>
+            {
+                self.start_computer_action(ComputerControlAction::Disable)
+            }
             KeyCode::Enter
                 if self.tab == SettingsTab::AcpServers && self.selected < ACCOUNT_COUNT =>
             {
@@ -197,14 +241,63 @@ impl SettingsEditor {
     }
 
     fn change_tab(&mut self, delta: i32) {
-        let current = SettingsTab::ALL
-            .iter()
-            .position(|tab| *tab == self.tab)
-            .unwrap_or(0);
-        let next = (current as i32 + delta).rem_euclid(SettingsTab::ALL.len() as i32) as usize;
-        self.tab = SettingsTab::ALL[next];
+        let tabs = self.tabs();
+        let current = tabs.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        let next = (current as i32 + delta).rem_euclid(tabs.len() as i32) as usize;
+        self.tab = tabs[next];
         self.selected = 0;
         self.notice = None;
+    }
+
+    fn tabs(&self) -> &'static [SettingsTab] {
+        #[cfg(target_os = "macos")]
+        {
+            if self.computer_tab_available {
+                &SettingsTab::ALL
+            } else {
+                &[
+                    SettingsTab::Team,
+                    SettingsTab::Agents,
+                    SettingsTab::Reviewer,
+                    SettingsTab::Subagents,
+                    SettingsTab::AcpServers,
+                    SettingsTab::Appearance,
+                ]
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            &SettingsTab::ALL
+        }
+    }
+
+    fn computer_action(&mut self) -> SettingsAction {
+        if self.computer_working {
+            return SettingsAction::None;
+        }
+        let action = if !self.computer_status.enabled {
+            ComputerControlAction::Enable
+        } else if self.computer_status.readiness.is_none() {
+            ComputerControlAction::Refresh
+        } else if self
+            .computer_status
+            .readiness
+            .is_some_and(|readiness| readiness.is_ready())
+        {
+            ComputerControlAction::Verify
+        } else {
+            ComputerControlAction::Enable
+        };
+        self.start_computer_action(action)
+    }
+
+    fn start_computer_action(&mut self, action: ComputerControlAction) -> SettingsAction {
+        if self.computer_working {
+            SettingsAction::None
+        } else {
+            self.computer_working = true;
+            SettingsAction::Computer(action)
+        }
     }
 
     fn row_count(&self) -> usize {
@@ -214,6 +307,7 @@ impl SettingsEditor {
                 self.settings_rows(self.tab).len()
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
+            SettingsTab::Computer => 1,
             SettingsTab::Appearance => 6,
         }
     }
@@ -284,6 +378,7 @@ impl SettingsEditor {
                 self.config.set_acp_server_policy(&id, choices[next]);
                 self.refresh_inventory();
             }
+            SettingsTab::Computer => return SettingsAction::None,
             SettingsTab::Appearance if self.selected == 0 => {
                 let current = TerminalThemeKind::ALL
                     .iter()
@@ -378,6 +473,7 @@ impl SettingsEditor {
                 self.config.set_acp_server_policy(&id, policy);
                 self.refresh_inventory();
             }
+            SettingsTab::Computer => return SettingsAction::None,
             _ => return SettingsAction::None,
         }
         self.notice = None;
@@ -849,6 +945,7 @@ pub fn draw_settings_panel(
         SettingsTab::Reviewer => draw_reviewer(frame, rows[1], editor, theme),
         SettingsTab::Subagents => draw_subagents(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
+        SettingsTab::Computer => draw_computer(frame, rows[1], editor, theme),
         SettingsTab::Appearance => draw_appearance(frame, rows[1], editor, theme),
     }
     if let Some(notice) = &editor.notice {
@@ -859,7 +956,13 @@ pub fn draw_settings_panel(
             rows[2],
         );
     }
-    let footer = if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT {
+    let footer = if editor.tab == SettingsTab::Computer {
+        if editor.computer_status.enabled {
+            "Enter action · r restart & recheck · d disable · s save · Tab view · Esc cancel"
+        } else {
+            "Enter enable · s save · Tab view · Esc cancel"
+        }
+    } else if editor.tab == SettingsTab::AcpServers && editor.selected < ACCOUNT_COUNT {
         "Enter sign in · ↑/↓ select · Tab view · Esc cancel"
     } else {
         "Tab view · ↑/↓ select · ←/→ change · Space toggle · Enter save · Esc cancel"
@@ -1012,7 +1115,7 @@ fn draw_tabs(
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
-    let tabs = SettingsTab::ALL.into_iter().flat_map(|tab| {
+    let tabs = editor.tabs().iter().copied().flat_map(|tab| {
         let active = tab == editor.tab;
         let style = if active {
             Style::default()
@@ -1522,6 +1625,156 @@ fn draw_servers(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+fn draw_computer(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &SettingsEditor,
+    theme: TerminalTheme,
+) {
+    let status = &editor.computer_status;
+    let mut lines = vec![Line::styled(
+        if !status.enabled {
+            "Computer Control is off. Mjolnir has not started an automation host."
+        } else if status.readiness.is_none() {
+            "Computer Control is enabled, but Mjolnir Computer must restart."
+        } else {
+            "Computer Control is enabled."
+        },
+        Style::default()
+            .ink(theme.text)
+            .add_modifier(Modifier::BOLD),
+    )];
+    lines.push(Line::raw(""));
+    if let Some(readiness) = status.readiness {
+        lines.push(Line::styled(
+            "Mjolnir Computer.app: running for this session",
+            Style::default().ink(theme.success),
+        ));
+        lines.push(computer_permission_line(
+            "Screen Recording",
+            readiness.screen_recording,
+            theme,
+        ));
+        lines.push(computer_permission_line(
+            "Accessibility",
+            readiness.accessibility,
+            theme,
+        ));
+        for instruction in computer_settings_instructions(readiness) {
+            lines.push(Line::styled(instruction, Style::default().ink(theme.muted)));
+        }
+    } else {
+        lines.push(Line::styled(
+            if status.enabled {
+                "Mjolnir Computer.app: starting or unavailable"
+            } else {
+                "Mjolnir Computer.app: not started"
+            },
+            Style::default().ink(theme.muted),
+        ));
+    }
+    if let Some(detail) = &status.detail {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            detail.clone(),
+            Style::default().ink(theme.muted),
+        ));
+    }
+    lines.push(Line::raw(""));
+    let action = if editor.computer_working {
+        "Working…"
+    } else if !status.enabled {
+        "Enter to enable and request permissions"
+    } else if status.readiness.is_none() {
+        "Enter or r to restart Mjolnir Computer and recheck permissions"
+    } else if status
+        .readiness
+        .is_some_and(|readiness| readiness.is_ready())
+    {
+        "Enter to run the safe verification"
+    } else {
+        match status.readiness.and_then(next_missing_permission_label) {
+            Some("Screen Recording") => "Enter to request Screen Recording",
+            Some("Accessibility") => "Enter to request Accessibility",
+            _ => "Enter to recheck permissions",
+        }
+    };
+    lines.push(Line::styled(
+        action,
+        Style::default()
+            .ink(if editor.computer_working {
+                theme.muted
+            } else {
+                theme.selection_fg
+            })
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0)),
+        area,
+    );
+}
+
+fn computer_permission_line(
+    label: &str,
+    state: crate::computer::PermissionState,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let (text, style) = match state {
+        crate::computer::PermissionState::Granted => (
+            "granted",
+            Style::default()
+                .ink(theme.success)
+                .add_modifier(Modifier::BOLD),
+        ),
+        crate::computer::PermissionState::NotGranted
+        | crate::computer::PermissionState::NotDetermined => {
+            ("needs approval", Style::default().ink(theme.permission))
+        }
+        crate::computer::PermissionState::Denied => (
+            "denied in macOS settings",
+            Style::default().ink(theme.error),
+        ),
+        crate::computer::PermissionState::Unsupported => {
+            ("unavailable", Style::default().ink(theme.muted))
+        }
+    };
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().ink(theme.text)),
+        Span::styled(text, style),
+    ])
+}
+
+fn computer_settings_instructions(
+    readiness: crate::computer::PermissionReadiness,
+) -> Vec<&'static str> {
+    let mut instructions = Vec::new();
+    if readiness.screen_recording != crate::computer::PermissionState::Granted {
+        instructions.push(
+            "System Settings → Privacy & Security → Screen Recording: enable Mjolnir Computer, then press r to restart and recheck.",
+        );
+    }
+    if readiness.accessibility != crate::computer::PermissionState::Granted {
+        instructions.push(
+            "System Settings → Privacy & Security → Accessibility: enable Mjolnir Computer, then press r to restart and recheck.",
+        );
+    }
+    instructions
+}
+
+fn next_missing_permission_label(
+    readiness: crate::computer::PermissionReadiness,
+) -> Option<&'static str> {
+    (readiness.screen_recording != crate::computer::PermissionState::Granted)
+        .then_some("Screen Recording")
+        .or_else(|| {
+            (readiness.accessibility != crate::computer::PermissionState::Granted)
+                .then_some("Accessibility")
+        })
+}
+
 fn draw_appearance(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -1743,6 +1996,101 @@ mod tests {
             .draw(|frame| draw_settings_panel(frame, frame.area(), editor, "mj config"))
             .expect("draw");
         terminal.backend().to_string()
+    }
+
+    #[test]
+    fn computer_tab_names_the_exact_mac_settings_for_each_missing_permission() {
+        let instructions = computer_settings_instructions(crate::computer::PermissionReadiness {
+            screen_recording: crate::computer::PermissionState::NotGranted,
+            accessibility: crate::computer::PermissionState::NotGranted,
+        });
+        assert_eq!(
+            instructions,
+            vec![
+                "System Settings → Privacy & Security → Screen Recording: enable Mjolnir Computer, then press r to restart and recheck.",
+                "System Settings → Privacy & Security → Accessibility: enable Mjolnir Computer, then press r to restart and recheck.",
+            ]
+        );
+    }
+
+    #[test]
+    fn computer_tab_sends_enable_then_verification_actions() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Computer;
+        assert_eq!(
+            editor.handle_key(KeyCode::Enter),
+            SettingsAction::Computer(ComputerControlAction::Enable)
+        );
+        editor.set_computer_status(ComputerControlStatus {
+            enabled: true,
+            readiness: Some(crate::computer::PermissionReadiness {
+                screen_recording: crate::computer::PermissionState::Granted,
+                accessibility: crate::computer::PermissionState::Granted,
+            }),
+            detail: None,
+        });
+        assert_eq!(
+            editor.handle_key(KeyCode::Enter),
+            SettingsAction::Computer(ComputerControlAction::Verify)
+        );
+    }
+
+    #[test]
+    fn computer_tab_recovers_a_broken_host_with_a_restart() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Computer;
+        editor.set_computer_status(ComputerControlStatus {
+            enabled: true,
+            readiness: None,
+            detail: Some("computer host connection: Broken pipe".to_string()),
+        });
+
+        assert_eq!(
+            editor.handle_key(KeyCode::Enter),
+            SettingsAction::Computer(ComputerControlAction::Refresh)
+        );
+    }
+
+    #[test]
+    fn entering_the_computer_tab_does_not_restart_the_host() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None)
+            .with_computer_status(ComputerControlStatus {
+                enabled: true,
+                readiness: Some(crate::computer::PermissionReadiness {
+                    screen_recording: crate::computer::PermissionState::Granted,
+                    accessibility: crate::computer::PermissionState::Granted,
+                }),
+                detail: None,
+            });
+        editor.tab = SettingsTab::AcpServers;
+
+        assert_eq!(editor.handle_key(KeyCode::Tab), SettingsAction::None);
+        assert_eq!(editor.tab, SettingsTab::Computer);
+    }
+
+    #[test]
+    fn computer_tab_keeps_staged_settings_saveable() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.config.agent.model = "a-staged-model".to_string();
+        editor.tab = SettingsTab::Computer;
+
+        assert_eq!(editor.handle_key(KeyCode::Char('s')), SettingsAction::Save);
+        assert_eq!(editor.config.agent.model, "a-staged-model");
+    }
+
+    #[test]
+    fn computer_tab_is_only_available_to_a_running_macos_session() {
+        let onboarding = SettingsEditor::new(Config::default(), Vec::new(), None);
+        assert!(
+            !onboarding.tabs().contains(&SettingsTab::Computer),
+            "onboarding cannot own or revoke a session host"
+        );
+        let session = SettingsEditor::new(Config::default(), Vec::new(), None)
+            .with_computer_status(ComputerControlStatus::disabled());
+        #[cfg(target_os = "macos")]
+        assert!(session.tabs().contains(&SettingsTab::Computer));
+        #[cfg(not(target_os = "macos"))]
+        assert!(!session.tabs().contains(&SettingsTab::Computer));
     }
 
     #[test]

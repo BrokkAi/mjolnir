@@ -17,6 +17,12 @@ const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
 const VOICE_WORKER_NAME: &str = "mj-voice-worker";
 const WINDOWS_VOICE_WORKER_NAME: &str = "mj-voice-worker.exe";
+#[cfg(target_os = "macos")]
+const COMPUTER_BUNDLE_NAME: &str = "Mjolnir Computer.app";
+#[cfg(target_os = "macos")]
+const COMPUTER_BUNDLE_INFO_PATH: &str = "Mjolnir Computer.app/Contents/Info.plist";
+#[cfg(target_os = "macos")]
+const COMPUTER_BUNDLE_HOST_PATH: &str = "Mjolnir Computer.app/Contents/MacOS/mj-computer-host";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupUpdateResult {
@@ -165,6 +171,11 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
     let new_binary =
         extract_mj_binary(&update.asset.name, &archive).context("extract mj binary")?;
     let current_exe = std::env::current_exe().context("resolve current executable")?;
+    #[cfg(target_os = "macos")]
+    let bundle = extract_computer_bundle(&update.asset.name, &archive)
+        .context("extract Mjolnir Computer.app")?;
+    #[cfg(target_os = "macos")]
+    install_computer_bundle(&current_exe, &bundle).context("install Mjolnir Computer.app")?;
     if !cfg!(target_os = "android")
         && let Some(worker) = extract_optional_voice_worker(&update.asset.name, &archive)
     {
@@ -309,6 +320,99 @@ fn extract_named_binary_from_zip(archive_bytes: &[u8], expected_name: &str) -> R
         return Ok(bytes);
     }
     anyhow::bail!("archive did not contain expected binary: {expected_name}");
+}
+
+#[cfg(target_os = "macos")]
+struct ComputerBundle {
+    info_plist: Vec<u8>,
+    host_binary: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+fn extract_computer_bundle(archive_name: &str, archive_bytes: &[u8]) -> Result<ComputerBundle> {
+    if archive_name.ends_with(".zip") {
+        anyhow::bail!("macOS computer bundle is available only in a tar.gz release archive");
+    }
+    let gz = GzDecoder::new(archive_bytes);
+    let mut archive = tar::Archive::new(gz);
+    let mut info_plist = None;
+    let mut host_binary = None;
+    for entry in archive.entries().context("read tar entries")? {
+        let mut entry = entry.context("read tar entry")?;
+        let path = entry.path().context("read tar entry path")?;
+        let target = if path.ends_with(Path::new(COMPUTER_BUNDLE_INFO_PATH)) {
+            &mut info_plist
+        } else if path.ends_with(Path::new(COMPUTER_BUNDLE_HOST_PATH)) {
+            &mut host_binary
+        } else {
+            continue;
+        };
+        if target.is_some() {
+            anyhow::bail!("archive contains a duplicate Mjolnir Computer bundle entry");
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .context("read Mjolnir Computer bundle entry")?;
+        if bytes.is_empty() {
+            anyhow::bail!("archive contains an empty Mjolnir Computer bundle entry");
+        }
+        *target = Some(bytes);
+    }
+    Ok(ComputerBundle {
+        info_plist: info_plist
+            .context("archive did not contain Mjolnir Computer.app Info.plist")?,
+        host_binary: host_binary
+            .context("archive did not contain Mjolnir Computer.app host executable")?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn install_computer_bundle(current_exe: &Path, bundle: &ComputerBundle) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current_exe = current_exe
+        .canonicalize()
+        .with_context(|| format!("resolve executable target {}", current_exe.display()))?;
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", current_exe.display()))?;
+    let target = parent.join(COMPUTER_BUNDLE_NAME);
+    let temporary = parent.join(format!(
+        ".{COMPUTER_BUNDLE_NAME}.self-update.{}.tmp",
+        std::process::id()
+    ));
+    let backup = parent.join(format!(
+        ".{COMPUTER_BUNDLE_NAME}.self-update.{}.backup",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(temporary.join("Contents/MacOS"))
+        .with_context(|| format!("create {}", temporary.display()))?;
+    let info = temporary.join("Contents/Info.plist");
+    let host = temporary.join("Contents/MacOS/mj-computer-host");
+    std::fs::write(&info, &bundle.info_plist)
+        .with_context(|| format!("write {}", info.display()))?;
+    std::fs::write(&host, &bundle.host_binary)
+        .with_context(|| format!("write {}", host.display()))?;
+    std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod {}", host.display()))?;
+
+    let replaced = target.exists();
+    if replaced {
+        std::fs::rename(&target, &backup)
+            .with_context(|| format!("stage old {}", target.display()))?;
+    }
+    if let Err(error) = std::fs::rename(&temporary, &target) {
+        if replaced {
+            let _ = std::fs::rename(&backup, &target);
+        }
+        return Err(error).with_context(|| format!("install {}", target.display()));
+    }
+    if replaced {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    strip_quarantine(&target);
+    Ok(())
 }
 
 fn install_voice_worker(current_exe: &Path, bytes: &[u8]) -> Result<()> {
@@ -631,19 +735,24 @@ mod tests {
     }
 
     fn make_tar_gz(file_name: &str, content: &[u8]) -> Vec<u8> {
+        make_tar_gz_entries(&[(file_name, content)])
+    }
+
+    fn make_tar_gz_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
         use flate2::Compression;
         use flate2::write::GzEncoder;
-
-        let mut header = tar::Header::new_gnu();
-        header.set_path(file_name).expect("path");
-        header.set_size(content.len() as u64);
-        header.set_mode(0o755);
-        header.set_cksum();
 
         let mut tar_bytes: Vec<u8> = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut tar_bytes);
-            builder.append(&header, content).expect("append");
+            for (file_name, content) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(file_name).expect("path");
+                header.set_size(content.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append(&header, *content).expect("append");
+            }
             builder.finish().expect("finish");
         }
 
@@ -867,6 +976,50 @@ mod tests {
         );
 
         assert!(binary.is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extract_and_install_computer_bundle_beside_mj() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let archive = make_tar_gz_entries(&[
+            (
+                "brokk-mjolnir/Mjolnir Computer.app/Contents/Info.plist",
+                b"plist",
+            ),
+            (
+                "brokk-mjolnir/Mjolnir Computer.app/Contents/MacOS/mj-computer-host",
+                b"host",
+            ),
+        ]);
+        let bundle = extract_computer_bundle(
+            "brokk-mjolnir-v0.5.0-universal-apple-darwin.tar.gz",
+            &archive,
+        )
+        .expect("extract bundle");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mj = dir.path().join("mj");
+        std::fs::write(&mj, b"main").expect("write mj");
+        std::fs::set_permissions(&mj, std::fs::Permissions::from_mode(0o755)).expect("chmod mj");
+
+        install_computer_bundle(&mj, &bundle).expect("install bundle");
+
+        let installed = dir.path().join(COMPUTER_BUNDLE_NAME);
+        assert_eq!(
+            std::fs::read(installed.join("Contents/Info.plist")).expect("read plist"),
+            b"plist"
+        );
+        let host = installed.join("Contents/MacOS/mj-computer-host");
+        assert_eq!(std::fs::read(&host).expect("read host"), b"host");
+        assert_ne!(
+            std::fs::metadata(host)
+                .expect("host metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
     }
 
     #[cfg(unix)]

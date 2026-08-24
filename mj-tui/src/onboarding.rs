@@ -111,6 +111,10 @@ impl State {
             SettingsAction::Save => Action::Resolve,
             SettingsAction::Cancel => Action::Cancel,
             SettingsAction::Authenticate(vendor) => Action::Authenticate(vendor),
+            // Computer Control belongs to a running primary session, where
+            // the host can be owned and revoked. Onboarding never exposes
+            // the tab, but retain this arm for defensive exhaustiveness.
+            SettingsAction::Computer(_) => Action::None,
             SettingsAction::None | SettingsAction::Changed => Action::None,
         }
     }

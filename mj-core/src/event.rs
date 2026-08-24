@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
+use crate::computer::PermissionReadiness;
+
 /// Image block submitted by the UI with a prompt.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PromptImage {
@@ -168,6 +170,9 @@ pub enum UiEvent {
     /// `session/request_permission` from the agent. The UI is expected to
     /// render a modal and answer through `responder` exactly once.
     PermissionRequest(PermissionPrompt),
+    /// Current local Computer Control state. This is produced by Mjolnir's
+    /// `/mjconfig` Computer tab, never by an agent-facing MCP tool.
+    ComputerControlStatus(ComputerControlStatus),
     /// Changes observed in the local workspace after a prompt turn. This is
     /// Mjolnir-native state, not an ACP tool call or transcript entry. It
     /// answers "what did this turn touch", which is the status-line and
@@ -439,6 +444,9 @@ pub enum UiCommand {
         enabled: bool,
         tier: crate::config::ReviewTier,
     },
+    /// Run one user-initiated operation from Mjolnir's `/mjconfig` Computer
+    /// tab. The main session owns the host and intercepts this before ACP.
+    ComputerControl { action: ComputerControlAction },
     /// Run one Mjolnir-owned findings-only review while the primary is idle.
     RunReview { target: ReviewTarget },
     /// Recompute the worktree-versus-`HEAD` diff for the Ctrl-G reader. Sent
@@ -482,6 +490,37 @@ pub enum UiCommand {
     CancelPrompt,
     /// Tear down: kill the agent child and exit.
     Shutdown,
+}
+
+/// A deliberate action in the built-in `/mjconfig` Computer tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputerControlAction {
+    Refresh,
+    Enable,
+    Disable,
+    Verify,
+}
+
+/// The complete user-visible setup state for a primary session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerControlStatus {
+    /// The saved Mjolnir choice for this user. `false` means no host is
+    /// available to the model or session.
+    pub enabled: bool,
+    /// Present once the Mjolnir Computer.app host is running.
+    pub readiness: Option<PermissionReadiness>,
+    /// A failure or the successful result of the safe verification.
+    pub detail: Option<String>,
+}
+
+impl ComputerControlStatus {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            readiness: None,
+            detail: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -17,8 +17,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::computer::{
-    BackendAction, ComputerBackend, ComputerError, ComputerPermission, HostLockState, Observation,
-    ObserveArgs, PermissionReadiness,
+    BackendAction, ComputerBackend, ComputerError, ComputerPermission, CurrentDisplay, DisplayId,
+    HostLockState, Observation, ObserveArgs, PermissionReadiness,
 };
 
 /// Protocol version for the Mjolnir-to-host IPC. Bump this only for an
@@ -37,6 +37,13 @@ const MAX_SESSION_ID_BYTES: usize = 512;
 pub struct HostSessionId(pub String);
 
 impl HostSessionId {
+    pub fn generate() -> Result<Self, HostProtocolError> {
+        let mut bytes = [0_u8; CAPABILITY_BYTES];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| HostProtocolError::Random(error.to_string()))?;
+        Ok(Self(URL_SAFE_NO_PAD.encode(bytes)))
+    }
+
     pub fn validate(&self) -> Result<(), HostProtocolError> {
         if self.0.is_empty() || self.0.len() > MAX_SESSION_ID_BYTES {
             return Err(HostProtocolError::InvalidSessionId);
@@ -102,6 +109,7 @@ pub enum HostRequest {
     Hello(HostHello),
     PermissionReadiness,
     RequestPermission(ComputerPermission),
+    CurrentDisplay(DisplayId),
     HostLockState,
     Observe(ObserveArgs),
     Execute(BackendAction),
@@ -116,6 +124,7 @@ pub enum HostResponse {
     Hello { protocol_version: u16 },
     PermissionReadiness(PermissionReadiness),
     PermissionRequested(PermissionReadiness),
+    CurrentDisplay(CurrentDisplay),
     HostLockState(HostLockState),
     Observation(Observation),
     Completed,
@@ -294,6 +303,23 @@ impl<B: ComputerBackend> HostService<B> {
                 {
                     Ok(readiness) => match self.completed_while_active(&cancellation).await {
                         Ok(()) => HostResponse::PermissionRequested(readiness),
+                        Err(error) => HostResponse::Error(error),
+                    },
+                    Err(error) => HostResponse::Error(backend_error(error)),
+                }
+            }
+            HostRequest::CurrentDisplay(display_id) => {
+                let cancellation = match self.active_cancellation().await {
+                    Ok(cancellation) => cancellation,
+                    Err(error) => return HostResponse::Error(error),
+                };
+                match self
+                    .backend
+                    .current_display(display_id, cancellation.clone())
+                    .await
+                {
+                    Ok(display) => match self.completed_while_active(&cancellation).await {
+                        Ok(()) => HostResponse::CurrentDisplay(display),
                         Err(error) => HostResponse::Error(error),
                     },
                     Err(error) => HostResponse::Error(backend_error(error)),
@@ -534,6 +560,7 @@ fn response_name(response: &HostResponse) -> &'static str {
         HostResponse::Hello { .. } => "hello",
         HostResponse::PermissionReadiness(_) => "permission_readiness",
         HostResponse::PermissionRequested(_) => "permission_requested",
+        HostResponse::CurrentDisplay(_) => "current_display",
         HostResponse::HostLockState(_) => "host_lock_state",
         HostResponse::Observation(_) => "observation",
         HostResponse::Completed => "completed",
@@ -679,7 +706,9 @@ mod tests {
     use tokio::{io::duplex, sync::Notify};
 
     use super::*;
-    use crate::computer::{HostLockState, PermissionState, PixelSize, SourceRegion};
+    use crate::computer::{
+        CurrentDisplay, DisplayId, HostLockState, PermissionState, PixelSize, SourceRegion,
+    };
 
     #[derive(Default)]
     struct MockBackendState {
@@ -737,6 +766,23 @@ mod tests {
             Ok(PermissionReadiness {
                 screen_recording: PermissionState::Granted,
                 accessibility: PermissionState::Granted,
+            })
+        }
+
+        async fn current_display(
+            &self,
+            display_id: DisplayId,
+            _cancellation: CancellationToken,
+        ) -> Result<CurrentDisplay, ComputerError> {
+            Ok(CurrentDisplay {
+                display_id,
+                origin: crate::computer::DesktopPoint { x: 0, y: 0 },
+                pixel_size: PixelSize {
+                    width: 1,
+                    height: 1,
+                },
+                scale_x: 1.0,
+                scale_y: 1.0,
             })
         }
 
@@ -854,6 +900,39 @@ mod tests {
             HostResponse::Hello { .. }
         ));
         assert!(authenticated.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_can_read_current_display_geometry() {
+        let session_id = HostSessionId("session-a".to_string());
+        let capability = HostCapability::generate().unwrap();
+        let service = HostService::new(
+            MockBackend::default(),
+            session_id.clone(),
+            capability.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            service.handle(hello(&session_id, &capability)).await,
+            HostResponse::Hello { .. }
+        ));
+        assert_eq!(
+            service
+                .handle(HostRequest::CurrentDisplay(DisplayId(
+                    "display".to_string()
+                )))
+                .await,
+            HostResponse::CurrentDisplay(CurrentDisplay {
+                display_id: DisplayId("display".to_string()),
+                origin: crate::computer::DesktopPoint { x: 0, y: 0 },
+                pixel_size: PixelSize {
+                    width: 1,
+                    height: 1,
+                },
+                scale_x: 1.0,
+                scale_y: 1.0,
+            })
+        );
     }
 
     #[tokio::test]
