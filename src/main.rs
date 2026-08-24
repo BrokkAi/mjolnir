@@ -1379,21 +1379,21 @@ struct RuntimeOptions {
 /// The endpoint can replace its launch configuration without replacing the
 /// primary ACP session.
 #[derive(Clone)]
-struct LiveSubagentOptions {
-    agent_stderr: Option<PathBuf>,
-    snapshot_exclusions: Vec<PathBuf>,
-    cwd: PathBuf,
-    additional_directories: Vec<PathBuf>,
-    fs_max_text_bytes: u64,
-    session_tag: String,
-    handoff_counter: Arc<AtomicUsize>,
-    id_allocator: subagent::SubagentIdAllocator,
-    active_workers: subagent::ActiveSubagentWorkers,
-    reports: subagent::SubagentReportBus,
-    runs: subagent::SubagentRegistry,
+pub(crate) struct LiveSubagentOptions {
+    pub(crate) agent_stderr: Option<PathBuf>,
+    pub(crate) snapshot_exclusions: Vec<PathBuf>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) additional_directories: Vec<PathBuf>,
+    pub(crate) fs_max_text_bytes: u64,
+    pub(crate) session_tag: String,
+    pub(crate) handoff_counter: Arc<AtomicUsize>,
+    pub(crate) id_allocator: subagent::SubagentIdAllocator,
+    pub(crate) active_workers: subagent::ActiveSubagentWorkers,
+    pub(crate) reports: subagent::SubagentReportBus,
+    pub(crate) runs: subagent::SubagentRegistry,
 }
 
-fn configured_subagent_service(
+pub(crate) fn configured_subagent_service(
     pool: quota::RolePool,
     options: &LiveSubagentOptions,
     config: &config::SubagentsConfig,
@@ -1420,11 +1420,14 @@ fn configured_subagent_service(
         })
 }
 
-fn primary_source_matches(
+pub(crate) fn primary_route_matches(
     active: &roster::ResolvedAgent,
     candidate: &roster::ResolvedAgent,
 ) -> bool {
     active.launch.source_id == candidate.launch.source_id
+        && active.model.model == candidate.model.model
+        && active.model_value == candidate.model_value
+        && active.reasoning_effort == candidate.reasoning_effort
 }
 
 struct RunSessionResult {
@@ -2643,7 +2646,7 @@ async fn run_session(
                         continue;
                     }
                 };
-                if !primary_source_matches(&command_primary, &updated_roster.primary) {
+                if !primary_route_matches(&command_primary, &updated_roster.primary) {
                     let _ = side_ui_event_tx.send(UiEvent::Info(
                         "primary agent changed; start /new or /clear to apply that route"
                             .to_string(),
@@ -3596,6 +3599,18 @@ mod tests {
             ranked: true,
             reasoning_effort: None,
         }
+    }
+
+    #[test]
+    fn primary_route_match_requires_the_same_resolved_model() {
+        let active = test_roster_agent("gpt-5-6-terra", "codex-acp");
+        let same_source_new_model = test_roster_agent("gpt-5-6-sol", "codex-acp");
+        let mut same_model_new_effort = active.clone();
+        same_model_new_effort.reasoning_effort = Some("high".to_string());
+
+        assert!(!primary_route_matches(&active, &same_source_new_model));
+        assert!(!primary_route_matches(&active, &same_model_new_effort));
+        assert!(primary_route_matches(&active, &active));
     }
 
     fn test_roster(

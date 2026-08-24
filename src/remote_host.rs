@@ -418,6 +418,23 @@ impl RootServerSessionManager {
             session.shutdown().await;
         }
     }
+
+    async fn reload_auxiliary_agents(&self) {
+        let commands = self
+            .sessions
+            .lock()
+            .map(|mut sessions| {
+                sessions.retain(|session| !session.task.is_finished());
+                sessions
+                    .iter()
+                    .map(|session| session.command_tx.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for command_tx in commands {
+            let _ = command_tx.send(UiCommand::ReloadAuxiliaryAgents);
+        }
+    }
 }
 
 fn start_server_agent_session(
@@ -437,6 +454,7 @@ fn start_server_agent_session(
     let side_cwd = cwd.clone();
     let side_additional_directories = additional_directories.clone();
     let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
+    let auxiliary_event_tx = runtime_event_tx.clone();
     let (runtime_cmd_tx, runtime_cmd_rx) = mpsc::unbounded_channel();
     let (server_cmd_tx, mut server_cmd_rx) = mpsc::unbounded_channel();
     let (remote_event_tx, mut remote_event_rx) = mpsc::unbounded_channel();
@@ -513,7 +531,7 @@ fn start_server_agent_session(
     let subagent_pool = (!subagent_roles.is_empty()).then(|| {
         crate::quota::RolePool::new(
             subagent_roles,
-            quota_gate,
+            quota_gate.clone(),
             app_config.subagents.auto_failover,
             "subagents",
             runtime_event_tx.clone(),
@@ -541,28 +559,40 @@ fn start_server_agent_session(
     // into the subagent config and the runtime config respectively.
     let review_workers = subagent_pool.clone();
     let review_additional_directories = additional_directories.clone();
-    let subagents = subagent_pool
-        .map(|subagent_pool| {
-            subagent::Config::new(subagent_pool, None)
-                .with_subagent_handoff_counter(subagent_handoffs.clone())
-                .with_id_allocator(subagent_ids.clone())
-                .with_active_implementation_workers(active_implementation_workers.clone())
-                .with_max_parallel(app_config.subagents.max_parallel)
-                .with_debrief(app_config.subagents.debrief)
-                .with_permission_mode(app_config.subagents.permission)
-                .with_reports(subagent_reports.clone())
-                .with_run_registry(subagent_runs.clone())
-                .with_prewarm(subagent::RunContext {
-                    cwd: cwd.clone(),
-                    additional_directories: additional_directories.clone(),
-                    snapshot_exclusions: snapshot_exclusions.clone(),
-                    fs_max_text_bytes,
-                    access_mode: mj_core::acp::RuntimeAccessMode::Full,
-                })
-        })
-        .map(subagent::runtime_service);
+    let auxiliary_session_tag = format!("remote-{}", std::process::id());
+    let live_subagent_options = crate::LiveSubagentOptions {
+        agent_stderr: None,
+        snapshot_exclusions: snapshot_exclusions.clone(),
+        cwd: cwd.clone(),
+        additional_directories: additional_directories.clone(),
+        fs_max_text_bytes,
+        session_tag: auxiliary_session_tag.clone(),
+        handoff_counter: subagent_handoffs.clone(),
+        id_allocator: subagent_ids.clone(),
+        active_workers: active_implementation_workers.clone(),
+        reports: subagent_reports.clone(),
+        runs: subagent_runs.clone(),
+    };
+    let live_subagent_service = match subagent_pool.clone() {
+        Some(pool) => subagent::LiveRuntimeService::new(crate::configured_subagent_service(
+            pool,
+            &live_subagent_options,
+            &app_config.subagents,
+        )),
+        None => subagent::LiveRuntimeService::unconfigured(),
+    };
+    let subagents = Some(Arc::new(live_subagent_service.clone()) as Arc<dyn acp::RuntimeService>);
     let provenance_primary = roster.as_ref().map(|resolved| resolved.primary.clone());
     let provenance_cwd = cwd.clone();
+    let command_primary = provenance_primary.clone();
+    let command_config_path = config_path.clone();
+    let command_quota_gate = quota_gate;
+    let command_auxiliary_event_tx = auxiliary_event_tx;
+    let command_live_subagent_service = live_subagent_service.clone();
+    let command_live_subagent_options = live_subagent_options.clone();
+    let command_review_additional_directories = side_additional_directories.clone();
+    let command_snapshot_exclusions = snapshot_exclusions.clone();
+    let command_subagent_codex_homes = subagent_codex_home.into_iter().collect::<Vec<_>>();
     let session_memory = mj_core::memory::SessionMemory::from_config(
         &app_config.memory,
         &cwd,
@@ -629,7 +659,7 @@ fn start_server_agent_session(
                         supervisor,
                         cwd: provenance_cwd.clone(),
                         additional_directories: review_additional_directories,
-                        session_tag: Some(format!("remote-{}", std::process::id())),
+                        session_tag: Some(auxiliary_session_tag.clone()),
                         agent_stderr: None,
                         snapshot_exclusions: snapshot_exclusions.clone(),
                         fs_max_text_bytes,
@@ -642,7 +672,6 @@ fn start_server_agent_session(
     let primary_orchestrator = orchestrated.handle.clone();
 
     let task = tokio::spawn(async move {
-        let _subagent_homes = subagent_codex_home;
         if let Some(error) = roster_setup_error {
             // The session never comes up, so nothing it could publish will
             // ever carry this. Tell whoever asked for the launch directly.
@@ -675,6 +704,7 @@ fn start_server_agent_session(
             let handoffs = subagent_handoffs.clone();
             let primary_orchestrator = primary_orchestrator.clone();
             let side_event_tx = side_event_tx.clone();
+            let mut command_subagent_codex_homes = command_subagent_codex_homes;
             // Only the newest read may publish; the refresher enforces that
             // for every session owner.
             let workspace_diff_refresher = mj_core::acp::WorkspaceHeadDiffRefresher::new(
@@ -745,6 +775,7 @@ fn start_server_agent_session(
                     }
                     let (command, force_main) = match command {
                         UiCommand::Main(command) => (*command, true),
+                        command @ UiCommand::ReloadAuxiliaryAgents => (command, true),
                         command => (command, false),
                     };
                     if !force_main && side_runtime.is_some() {
@@ -759,6 +790,110 @@ fn start_server_agent_session(
                             let _ = side.send(command);
                             continue;
                         }
+                    }
+                    if matches!(command, UiCommand::ReloadAuxiliaryAgents) {
+                        let Some(command_primary) = command_primary.as_ref() else {
+                            tracker.observe_event(&UiEvent::Warning(
+                                "the active server session has no resolved primary route"
+                                    .to_string(),
+                            ));
+                            continue;
+                        };
+                        let updated_config = match config::Config::load(&command_config_path) {
+                            Ok(config) => config,
+                            Err(error) => {
+                                tracker.observe_event(&UiEvent::Warning(format!(
+                                    "could not apply the saved reviewer configuration: {error:#}"
+                                )));
+                                continue;
+                            }
+                        };
+                        let updated_roster = match roster::resolve(&updated_config, &side_cwd).await
+                        {
+                            Ok(roster) => roster,
+                            Err(error) => {
+                                tracker.observe_event(&UiEvent::Warning(format!(
+                                    "the primary session kept its current reviewer configuration because the saved configuration could not be resolved: {error:#}"
+                                )));
+                                continue;
+                            }
+                        };
+                        if !crate::primary_route_matches(command_primary, &updated_roster.primary) {
+                            tracker.observe_event(&UiEvent::Info(
+                                "primary agent changed; start a new server session to apply that route"
+                                    .to_string(),
+                            ));
+                            continue;
+                        }
+                        let (roles, codex_home) = match crate::isolated_subagent_roles(
+                            roster::subagent_failover_roles(&updated_roster),
+                            "subagent",
+                        ) {
+                            Ok(result) => result,
+                            Err(error) => {
+                                tracker.observe_event(&UiEvent::Warning(format!(
+                                    "could not prepare the saved subagent configuration: {error:#}"
+                                )));
+                                continue;
+                            }
+                        };
+                        let pool = (!roles.is_empty()).then(|| {
+                            crate::quota::RolePool::new(
+                                roles,
+                                command_quota_gate.clone(),
+                                updated_config.subagents.auto_failover,
+                                "subagents",
+                                command_auxiliary_event_tx.clone(),
+                            )
+                        });
+                        if let Some(pool) = pool.as_ref() {
+                            command_live_subagent_service
+                                .replace(crate::configured_subagent_service(
+                                    pool.clone(),
+                                    &command_live_subagent_options,
+                                    &updated_config.subagents,
+                                ))
+                                .await;
+                        } else {
+                            command_live_subagent_service.clear();
+                        }
+                        if let Some(home) = codex_home {
+                            command_subagent_codex_homes.push(home);
+                        }
+                        let review_fanout = pool.zip(updated_roster.review_supervisor.clone()).map(
+                            |(workers, supervisor)| {
+                                crate::discrete_review::live_spawner(
+                                    crate::discrete_review::FanoutConfig {
+                                        workers,
+                                        supervisor,
+                                        cwd: side_cwd.clone(),
+                                        additional_directories:
+                                            command_review_additional_directories.clone(),
+                                        session_tag: Some(
+                                            command_live_subagent_options.session_tag.clone(),
+                                        ),
+                                        agent_stderr: None,
+                                        snapshot_exclusions: command_snapshot_exclusions.clone(),
+                                        fs_max_text_bytes,
+                                        permission: updated_config.review.permission,
+                                        id_allocator: command_live_subagent_options
+                                            .id_allocator
+                                            .clone(),
+                                    },
+                                )
+                            },
+                        );
+                        primary_orchestrator.set_review_fanout(review_fanout);
+                        primary_orchestrator
+                            .set_review_enabled(updated_config.agent.discrete_review);
+                        primary_orchestrator.set_review_tier(updated_config.agent.review_tier);
+                        primary_orchestrator
+                            .set_correction_threshold(updated_config.agent.correction_threshold);
+                        tracker.observe_event(&UiEvent::Info(
+                            "reviewer and subagent configuration is active for this server session"
+                                .to_string(),
+                        ));
+                        continue;
                     }
                     if let UiCommand::RunReview { request } = command {
                         primary_orchestrator.request_review(request);
@@ -928,6 +1063,9 @@ impl remote::ServerSessionManager for RootServerSessionManager {
     async fn shutdown_all(&self) {
         RootServerSessionManager::shutdown_all(self).await
     }
+    async fn reload_auxiliary_agents(&self) {
+        RootServerSessionManager::reload_auxiliary_agents(self).await
+    }
     async fn refresh_for_config(
         &self,
         config_path: &Path,
@@ -994,6 +1132,37 @@ mod tests {
             }
             other => panic!("expected a failed launch, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn active_server_session_receives_an_auxiliary_route_reload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = unresolved_manager("setup pending", &dir.path().join("config.toml"));
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(std::future::pending::<()>());
+        manager
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .push(ServerAgentSession {
+                session_id: Arc::new(Mutex::new(Some("server-session".to_string()))),
+                command_tx,
+                task,
+            });
+
+        manager.reload_auxiliary_agents().await;
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
+        let session = manager
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .pop()
+            .expect("test session");
+        session.task.abort();
     }
 
     #[tokio::test]

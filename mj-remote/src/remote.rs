@@ -1607,6 +1607,9 @@ pub trait ServerSessionManager: Send + Sync {
     fn resume_session(&self, cwd: PathBuf, session_id: String) -> u64;
     fn owns_session(&self, session_id: &str) -> bool;
     async fn archive_session(&self, session_id: &str) -> bool;
+    /// Re-resolve reviewer and subagent routes for active sessions whose
+    /// primary route still matches their running ACP process.
+    async fn reload_auxiliary_agents(&self);
     async fn refresh_for_config(
         &self,
         config_path: &Path,
@@ -5602,7 +5605,10 @@ async fn mjconfig_apply(
         .refresh_for_config(&state.mjconfig.config_path)
         .await
     {
-        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
+        Ok(Some(roster)) => {
+            state.mjconfig.update_from_roster(&roster);
+            state.session_manager.reload_auxiliary_agents().await;
+        }
         Ok(None) => {}
         Err(error) => warn!("saved configuration does not bind a roster yet: {error}"),
     }
@@ -9672,6 +9678,7 @@ mod tests {
     #[derive(Default)]
     struct TestServerSessionManager {
         roster_refresh_requested: AtomicBool,
+        auxiliary_reloads: AtomicU64,
         roster_refresh_lock: tokio::sync::Mutex<()>,
         launches: Mutex<BTreeMap<u64, ServerSessionLaunchState>>,
         next_launch: AtomicU64,
@@ -9726,6 +9733,9 @@ mod tests {
             true
         }
         async fn shutdown_all(&self) {}
+        async fn reload_auxiliary_agents(&self) {
+            self.auxiliary_reloads.fetch_add(1, Ordering::Release);
+        }
         async fn refresh_for_config(
             &self,
             _config_path: &Path,
@@ -10262,7 +10272,8 @@ mod tests {
         let manager = test_session_manager();
         *manager.refresh_roster.lock().expect("refresh roster") = Some(test_roster("test-model"));
         let token = "mjconfig-token";
-        let app = mjconfig_test_router_with_manager(Arc::clone(&runtime), token, manager);
+        let app =
+            mjconfig_test_router_with_manager(Arc::clone(&runtime), token, Arc::clone(&manager));
 
         let response = app
             .oneshot(mjconfig_request(
@@ -10281,6 +10292,11 @@ mod tests {
         assert!(snapshot["setup"].is_null(), "{}", snapshot["setup"]);
         let discovery = runtime.discovery.lock().expect("discovery lock");
         assert_eq!(discovery.choices.len(), 1);
+        assert_eq!(
+            manager.auxiliary_reloads.load(Ordering::Acquire),
+            1,
+            "a successful mjconfig rebind reloads active server sessions' auxiliary routes"
+        );
     }
 
     #[tokio::test]

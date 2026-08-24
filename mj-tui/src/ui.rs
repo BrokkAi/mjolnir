@@ -5904,7 +5904,7 @@ fn persist_mjconfig_selection(
     let thought_output = config.thought_output;
     let voice_auto_send = config.voice_auto_send;
     let live_session_updates = live_primary_session_config_updates(state, &config);
-    let auxiliary_agents_update_live = primary_source_stays_active(state, &config);
+    let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
     // letting the next /new or restart fail to resolve.
@@ -5962,9 +5962,11 @@ fn persist_mjconfig_selection(
     }
 }
 
-fn primary_source_stays_active(state: &AppState, config: &config::Config) -> bool {
+fn primary_route_stays_active(state: &AppState, config: &config::Config) -> bool {
     state.session_id.is_some()
         && state.active_models.primary_source.as_deref() == config.agent.acp_source.as_deref()
+        && (config.agent.model == "auto" || config.agent.model == state.active_models.primary)
+        && state.primary_reasoning_effort == config.agent.reasoning_effort
 }
 
 fn live_primary_session_config_updates(
@@ -6725,19 +6727,18 @@ fn handle_team_picker_key(
         PickerKeyAction::Accept => {
             match step {
                 TeamPickerStep::Choose => {
-                    if let Some(preset) = state.team_picker_selection() {
-                        let primary_unchanged = state.active_models.primary_source.as_deref()
-                            == Some(preset.sources().0);
-                        if persist_team_picker_selection(state, preset, cmd_tx, primary_unchanged) {
-                            if primary_unchanged {
-                                state.team_picker = None;
-                                state.record_status_message(
-                                    StatusKind::Info,
-                                    "team saved; reviewer and subagent configuration is updating now",
-                                );
-                            } else if let Some(picker) = state.team_picker.as_mut() {
-                                picker.step = TeamPickerStep::StartNewSession;
-                            }
+                    if let Some(preset) = state.team_picker_selection()
+                        && let Some(primary_unchanged) =
+                            persist_team_picker_selection(state, preset, cmd_tx)
+                    {
+                        if primary_unchanged {
+                            state.team_picker = None;
+                            state.record_status_message(
+                                StatusKind::Info,
+                                "team saved; reviewer and subagent configuration is updating now",
+                            );
+                        } else if let Some(picker) = state.team_picker.as_mut() {
+                            picker.step = TeamPickerStep::StartNewSession;
                         }
                     }
                 }
@@ -6776,11 +6777,10 @@ fn persist_team_picker_selection(
     state: &mut AppState,
     preset: config::TeamPreset,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
-    apply_auxiliaries_live: bool,
-) -> bool {
+) -> Option<bool> {
     let Some(path) = state.config_path.as_deref() else {
         state.record_status_message(StatusKind::Warning, "config path is unavailable");
-        return false;
+        return None;
     };
     let mut config = match config::Config::load(path) {
         Ok(config) => config,
@@ -6789,9 +6789,17 @@ fn persist_team_picker_selection(
                 StatusKind::Warning,
                 format!("could not load config: {error:#}"),
             );
-            return false;
+            return None;
         }
     };
+    // A team selection resets its primary model selector to `auto`. When the
+    // active session was pinned to a concrete model, the new automatic choice
+    // may resolve to another model on the same ACP source, so retain the
+    // session boundary instead of silently keeping the old primary process.
+    let apply_auxiliaries_live = state.active_models.primary_source.as_deref()
+        == Some(preset.sources().0)
+        && config.agent.model == "auto"
+        && config.agent.reasoning_effort.is_none();
     preset.apply(&mut config);
     match config::save_user_config_preserving_session_routes(path, &mut config) {
         Ok(()) => {
@@ -6802,14 +6810,14 @@ fn persist_team_picker_selection(
                 let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
             }
             state.record_status_message(StatusKind::Info, format!("{} team saved", preset.label()));
-            true
+            Some(apply_auxiliaries_live)
         }
         Err(error) => {
             state.record_status_message(
                 StatusKind::Warning,
                 format!("team was not saved: {error:#}"),
             );
-            false
+            None
         }
     }
 }
@@ -18455,6 +18463,38 @@ mod tests {
             config::TeamPreset::from_config(&saved),
             Some(config::TeamPreset::Codex)
         );
+    }
+
+    #[test]
+    fn team_change_that_resets_a_pinned_primary_model_keeps_the_new_session_step() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config::TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        config.agent.model = "gpt-5-6-terra".to_string();
+        config.save(&config_path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(config_path);
+        state.active_models.primary = "gpt-5-6-terra".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(
+            state
+                .team_picker
+                .as_ref()
+                .is_some_and(|picker| { picker.step == TeamPickerStep::StartNewSession })
+        );
+        assert!(cmd_rx.try_recv().is_err(), "no live reload is sent");
     }
 
     #[test]
