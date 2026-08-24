@@ -213,9 +213,9 @@ variable. Run the script before granting the two macOS permissions; its ad-hoc
 identity changes whenever it rebuilds the host. After enabling **Mjolnir
 Computer** in System Settings, return to the Computer tab and press `r` once:
 Mjolnir restarts the host and reports the fresh permission state. This is for
-local testing, not the stable release-signed Mjolnir identity required for
-production macOS permission grants. Pass `--release` to build the
-release-profile pair instead.
+local testing, not the Developer ID-signed and notarized Mjolnir Computer.app
+in release archives, which keeps the stable identity used for production macOS
+permission grants. Pass `--release` to build the release-profile pair instead.
 
 ## Documentation
 

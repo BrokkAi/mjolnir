@@ -257,8 +257,41 @@ jobs:
             -output target/universal-apple-darwin/release/mj-voice-worker
           lipo -info target/universal-apple-darwin/release/mj-voice-worker
 
-      - name: Package archive
+      # A stable Developer ID signature is part of Computer.app's macOS TCC
+      # identity. Do not let a release fall back to an ad-hoc-signed bundle.
+      - name: Import Developer ID certificate
+        env:
+          MACOS_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          MACOS_DEVELOPER_ID_IDENTITY: ${{ secrets.MACOS_DEVELOPER_ID_IDENTITY }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
         run: |
+          : "${MACOS_DEVELOPER_ID_CERTIFICATE_BASE64:?missing MACOS_DEVELOPER_ID_CERTIFICATE_BASE64}"
+          : "${MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD:?missing MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD}"
+          : "${MACOS_DEVELOPER_ID_IDENTITY:?missing MACOS_DEVELOPER_ID_IDENTITY}"
+          : "${MACOS_KEYCHAIN_PASSWORD:?missing MACOS_KEYCHAIN_PASSWORD}"
+          certificate_path="$RUNNER_TEMP/mjolnir-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/mjolnir-signing.keychain-db"
+          printf '%s' "$MACOS_DEVELOPER_ID_CERTIFICATE_BASE64" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F -- "$MACOS_DEVELOPER_ID_IDENTITY"
+
+      - name: Package signed and notarized archive
+        env:
+          MACOS_DEVELOPER_ID_IDENTITY: ${{ secrets.MACOS_DEVELOPER_ID_IDENTITY }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_SPECIFIC_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          : "${MACOS_DEVELOPER_ID_IDENTITY:?missing MACOS_DEVELOPER_ID_IDENTITY}"
+          : "${MACOS_NOTARY_APPLE_ID:?missing MACOS_NOTARY_APPLE_ID}"
+          : "${MACOS_NOTARY_APP_SPECIFIC_PASSWORD:?missing MACOS_NOTARY_APP_SPECIFIC_PASSWORD}"
+          : "${MACOS_NOTARY_TEAM_ID:?missing MACOS_NOTARY_TEAM_ID}"
           name="brokk-mjolnir-${GITHUB_REF_NAME}-universal-apple-darwin"
           mkdir "$name"
           cp target/universal-apple-darwin/release/mj "$name/"
@@ -267,6 +300,15 @@ jobs:
           sed "s/@VERSION@/$version/g" assets/macos/Mjolnir\ Computer.app/Contents/Info.plist > "$name/Mjolnir Computer.app/Contents/Info.plist"
           plutil -lint "$name/Mjolnir Computer.app/Contents/Info.plist"
           cp target/universal-apple-darwin/release/mj-computer-host "$name/Mjolnir Computer.app/Contents/MacOS/"
+          bundle="$name/Mjolnir Computer.app"
+          codesign --force --options runtime --timestamp --sign "$MACOS_DEVELOPER_ID_IDENTITY" "$bundle/Contents/MacOS/mj-computer-host"
+          codesign --force --options runtime --timestamp --sign "$MACOS_DEVELOPER_ID_IDENTITY" "$bundle"
+          codesign --verify --deep --strict --verbose=2 "$bundle"
+          notarization_archive="$RUNNER_TEMP/Mjolnir Computer.app.zip"
+          ditto -c -k --keepParent "$bundle" "$notarization_archive"
+          xcrun notarytool submit "$notarization_archive" --apple-id "$MACOS_NOTARY_APPLE_ID" --password "$MACOS_NOTARY_APP_SPECIFIC_PASSWORD" --team-id "$MACOS_NOTARY_TEAM_ID" --wait
+          xcrun stapler staple "$bundle"
+          xcrun stapler validate "$bundle"
           cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"

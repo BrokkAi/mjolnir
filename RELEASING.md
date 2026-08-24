@@ -42,6 +42,16 @@ universal macOS archive. Desktop archives contain `mj` and the voice worker;
 Android omits the voice worker. Every archive includes the applicable licenses
 and notices and is published with a SHA-256 sidecar.
 
+The macOS build also ships `Mjolnir Computer.app`. Before tagging, configure
+these repository Actions secrets: `MACOS_DEVELOPER_ID_CERTIFICATE_BASE64`,
+`MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD`, `MACOS_DEVELOPER_ID_IDENTITY`,
+`MACOS_KEYCHAIN_PASSWORD`, `MACOS_NOTARY_APPLE_ID`,
+`MACOS_NOTARY_APP_SPECIFIC_PASSWORD`, and `MACOS_NOTARY_TEAM_ID`. The workflow
+imports the Developer ID certificate, signs the app with the hardened runtime,
+notarizes and staples it, and refuses to package an unsigned archive. The
+stable Developer ID signature is the app's production macOS privacy-permission
+identity.
+
 Neither registry publish runs off the tag push. Both wait for the release
 workflow to succeed, so the coverage gate and a build failure on any target
 each stop the release before anything reaches crates.io or npm.

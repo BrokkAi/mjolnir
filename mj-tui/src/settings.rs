@@ -82,6 +82,14 @@ impl SettingsTab {
             Self::Appearance => "Appearance",
         }
     }
+
+    fn compact_label(self) -> &'static str {
+        match self {
+            Self::AcpServers => "Servers",
+            Self::Appearance => "Display",
+            _ => self.label(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,7 +208,9 @@ impl SettingsEditor {
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsAction {
         match code {
             KeyCode::Esc => SettingsAction::Cancel,
-            KeyCode::Char('s') | KeyCode::Char('S') => SettingsAction::Save,
+            KeyCode::Char('s') | KeyCode::Char('S') if self.tab == SettingsTab::Computer => {
+                SettingsAction::Save
+            }
             KeyCode::Enter if self.tab == SettingsTab::Computer => self.computer_action(),
             KeyCode::Char(' ') if self.tab == SettingsTab::Computer => self.computer_action(),
             KeyCode::Char('r') | KeyCode::Char('R') if self.tab == SettingsTab::Computer => {
@@ -1139,7 +1149,11 @@ fn draw_tabs(
     editor: &SettingsEditor,
     theme: TerminalTheme,
 ) {
-    let tabs = editor.tabs().iter().copied().flat_map(|tab| {
+    let tabs = editor.tabs();
+    // The normal labels use 83 columns for the macOS session tab set. Keep
+    // every tab reachable at the conventional 80-column terminal width.
+    let compact = tab_row_width(tabs, false) > area.width as usize;
+    let tabs = tabs.iter().copied().enumerate().flat_map(|(index, tab)| {
         let active = tab == editor.tab;
         let style = if active {
             Style::default()
@@ -1149,12 +1163,32 @@ fn draw_tabs(
         } else {
             Style::default().ink(theme.muted)
         };
-        [
-            Span::styled(format!(" {} ", tab.label()), style),
-            Span::raw(" "),
-        ]
+        let label = if compact {
+            tab.compact_label()
+        } else {
+            tab.label()
+        };
+        let mut spans = vec![Span::styled(format!(" {label} "), style)];
+        if index + 1 < tabs.len() {
+            spans.push(Span::raw(" "));
+        }
+        spans
     });
     frame.render_widget(Paragraph::new(Line::from(tabs.collect::<Vec<_>>())), area);
+}
+
+fn tab_row_width(tabs: &[SettingsTab], compact: bool) -> usize {
+    tabs.iter()
+        .map(|tab| {
+            let label = if compact {
+                tab.compact_label()
+            } else {
+                tab.label()
+            };
+            label.len() + 2
+        })
+        .sum::<usize>()
+        + tabs.len().saturating_sub(1)
 }
 
 fn session_options_heading(
@@ -2202,6 +2236,16 @@ mod tests {
     }
 
     #[test]
+    fn save_shortcut_is_reserved_for_the_computer_tab() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+
+        assert_eq!(editor.handle_key(KeyCode::Char('s')), SettingsAction::None);
+
+        editor.tab = SettingsTab::Computer;
+        assert_eq!(editor.handle_key(KeyCode::Char('s')), SettingsAction::Save);
+    }
+
+    #[test]
     fn computer_tab_is_only_available_to_a_running_macos_session() {
         let onboarding = SettingsEditor::new(Config::default(), Vec::new(), None);
         assert!(
@@ -2214,6 +2258,28 @@ mod tests {
         assert!(session.tabs().contains(&SettingsTab::Computer));
         #[cfg(not(target_os = "macos"))]
         assert!(!session.tabs().contains(&SettingsTab::Computer));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_tabs_remain_visible_on_an_eighty_column_terminal() {
+        let editor = SettingsEditor::new(Config::default(), Vec::new(), None)
+            .with_computer_status(ComputerControlStatus::disabled());
+        let rendered = render(&editor, 80, 24);
+
+        for label in [
+            "Team",
+            "Agent",
+            "Reviewer",
+            "Subagents",
+            "Servers",
+            "Input",
+            "Computer",
+            "Display",
+        ] {
+            assert!(rendered.contains(label), "missing {label}:\n{rendered}");
+        }
+        assert!(!rendered.contains("ACP Servers"), "rendered:\n{rendered}");
     }
 
     #[test]
