@@ -31,13 +31,12 @@ jobs:
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
 
-    - name: Cache cargo registry and coverage build
+    - name: Cache cargo registry
       uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          target/llvm-cov-target
         key: coverage-cargo-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
           coverage-cargo-${{ steps.toolchain.outputs.cachekey }}-
@@ -45,12 +44,6 @@ jobs:
 
     - name: Install pinned coverage tool
       run: cargo install --locked cargo-llvm-cov --version 0.8.7
-
-    - name: Remove stale coverage profiles
-      # The cached llvm-cov target retains .profraw files from earlier source
-      # revisions. Keep compiled dependencies, but never merge deleted or
-      # changed source profiles into this revision's report.
-      run: cargo llvm-cov clean --profraw-only --locked
 
     - name: Collect workspace coverage
       run: |
