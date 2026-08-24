@@ -4178,9 +4178,10 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     } else {
         println!("session lifetime: {session_ttl_days} days");
     }
-    if let Err(SetupPending(reason)) = &resolved {
-        println!("setup needed: {reason}");
-        println!("open the viewer above to finish setup: sign in to an agent and choose a team.");
+    if resolved.is_err() {
+        println!(
+            "web setup: open the viewer above, enter the viewer code, then sign in to an agent and choose a team."
+        );
     }
 
     serve_listeners_until_terminated(listeners, tls_config, app, termination, session_manager)
@@ -4733,6 +4734,7 @@ struct MjConfigRuntime {
     config_path: PathBuf,
     discovery: Mutex<MjConfigDiscovery>,
     login: Mutex<Option<MjLoginJob>>,
+    credential_detector: fn(mj_core::auth::AuthVendor) -> mj_core::auth::CredentialSource,
 }
 
 #[derive(Debug)]
@@ -4774,7 +4776,21 @@ impl MjConfigRuntime {
                 refresh_requested: false,
             }),
             login: Mutex::new(None),
+            credential_detector: mj_core::auth::detect,
         }
+    }
+
+    fn credentials(&self, vendor: mj_core::auth::AuthVendor) -> mj_core::auth::CredentialSource {
+        (self.credential_detector)(vendor)
+    }
+
+    #[cfg(test)]
+    fn with_credential_detector(
+        mut self,
+        detector: fn(mj_core::auth::AuthVendor) -> mj_core::auth::CredentialSource,
+    ) -> Self {
+        self.credential_detector = detector;
+        self
     }
 
     /// Sync the editor's model choices and active seat details after a
@@ -4867,6 +4883,7 @@ struct MjLoginJob {
     vendor: mj_core::auth::AuthVendor,
     output: Arc<Mutex<String>>,
     result: Arc<Mutex<Option<std::result::Result<String, String>>>>,
+    input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     abort: tokio::task::AbortHandle,
 }
 
@@ -4891,8 +4908,8 @@ struct MjConfigSnapshot {
     discovery_revision: u64,
     /// One-shot message produced while applying an edit.
     notice: Option<String>,
-    /// What still blocks this server from launching sessions. `None` once a
-    /// team is configured and a launchable model exists.
+    /// What still blocks this server from launching sessions. `None` once the
+    /// required providers are authenticated and a team and model are ready.
     setup: Option<MjSetupPanel>,
 }
 
@@ -4901,6 +4918,9 @@ struct MjConfigSnapshot {
 struct MjSetupPanel {
     /// No team is configured and none is adoptable from local credentials.
     team_selection_required: bool,
+    /// No account is signed in yet, or the selected team still lacks one of
+    /// its providers.
+    authentication_required: bool,
     /// Discovery has not found a launchable model.
     no_launchable_models: bool,
     /// One-line instruction naming the next step.
@@ -4980,6 +5000,13 @@ struct MjAccountEntry {
     enables: String,
     signed_in: bool,
     login_supported: bool,
+    login_modes: Vec<MjLoginModeEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct MjLoginModeEntry {
+    id: String,
+    label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -5037,6 +5064,7 @@ struct MjLoginStatus {
     vendor: String,
     label: String,
     running: bool,
+    accepts_input: bool,
     output: String,
     ok: Option<bool>,
     message: Option<String>,
@@ -5079,6 +5107,12 @@ struct MjConfigApplyRequest {
 #[derive(Debug, Deserialize)]
 struct MjLoginRequest {
     vendor: String,
+    mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MjLoginInputRequest {
+    input: String,
 }
 
 fn mjconfig_load(state: &ServerState) -> config::Config {
@@ -5175,6 +5209,7 @@ fn mjconfig_login_status(state: &ServerState) -> Option<MjLoginStatus> {
         vendor: job.vendor.id().to_string(),
         label: job.vendor.label().to_string(),
         running: result.is_none(),
+        accepts_input: job.input.is_some(),
         output,
         ok: result.as_ref().map(|result| result.is_ok()),
         message: result
@@ -5240,14 +5275,22 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let accounts = mj_core::auth::AuthVendor::ALL
         .into_iter()
         .map(|vendor| {
-            let credentials = mj_core::auth::detect(vendor);
+            let credentials = state.mjconfig.credentials(vendor);
             MjAccountEntry {
                 vendor: vendor.id().to_string(),
                 label: vendor.label().to_string(),
                 status: credentials.status(),
                 enables: vendor.enables().to_string(),
                 signed_in: credentials.available(),
-                login_supported: vendor.supports_headless_login(),
+                login_supported: vendor.supports_web_login(),
+                login_modes: vendor
+                    .web_login_modes()
+                    .iter()
+                    .map(|mode| MjLoginModeEntry {
+                        id: mode.id().to_string(),
+                        label: mode.label().to_string(),
+                    })
+                    .collect(),
             }
         })
         .collect();
@@ -5352,11 +5395,12 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
 
     let team_selection_required = !config::has_valid_team(config);
     let no_launchable_models = !editor.any_model_launchable();
-    let setup = (team_selection_required || no_launchable_models).then(|| MjSetupPanel {
+    let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
+    let setup = mjconfig_setup_panel(
         team_selection_required,
         no_launchable_models,
-        message: mjconfig_setup_message(team_selection_required, no_launchable_models),
-    });
+        &missing_authentication,
+    );
 
     // A registered platform adapter (e.g. Anvil on Android) is the only
     // team: show it as the fixed selection instead of offering built-in
@@ -5427,16 +5471,94 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
 /// The next setup step, named concretely. Sign-in is listed before install
 /// because the ACP adapters launch through npx: a machine that can run this
 /// server can download them, so missing credentials are the usual blocker.
-fn mjconfig_setup_message(team_selection_required: bool, no_launchable_models: bool) -> String {
-    match (no_launchable_models, team_selection_required) {
-        (true, true) => {
-            "Sign in to Codex or Claude Code under ACP Servers, then choose a team.".to_string()
-        }
-        (true, false) => {
-            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers.".to_string()
-        }
-        _ => "Choose a team to finish setup.".to_string(),
+fn missing_setup_authentication(
+    runtime: &MjConfigRuntime,
+    config: &config::Config,
+) -> Vec<mj_core::auth::AuthVendor> {
+    if roster::external_adapter().is_some() {
+        return Vec::new();
     }
+    missing_setup_authentication_with(config, |vendor| runtime.credentials(vendor).available())
+}
+
+fn missing_setup_authentication_with(
+    config: &config::Config,
+    signed_in: impl Fn(mj_core::auth::AuthVendor) -> bool,
+) -> Vec<mj_core::auth::AuthVendor> {
+    match config::TeamPreset::from_config(config) {
+        Some(team) => {
+            let (coder, reviewer) = team.sources();
+            mj_core::auth::AuthVendor::ALL
+                .into_iter()
+                .filter(|vendor| {
+                    [coder, reviewer].contains(&vendor.acp_source()) && !signed_in(*vendor)
+                })
+                .collect()
+        }
+        None if mj_core::auth::AuthVendor::ALL.into_iter().any(signed_in) => Vec::new(),
+        None => mj_core::auth::AuthVendor::ALL.to_vec(),
+    }
+}
+
+fn mjconfig_setup_panel(
+    team_selection_required: bool,
+    no_launchable_models: bool,
+    missing_authentication: &[mj_core::auth::AuthVendor],
+) -> Option<MjSetupPanel> {
+    let authentication_required = !missing_authentication.is_empty();
+    (team_selection_required || authentication_required || no_launchable_models).then(|| {
+        MjSetupPanel {
+            team_selection_required,
+            authentication_required,
+            no_launchable_models,
+            message: mjconfig_setup_message(
+                team_selection_required,
+                no_launchable_models,
+                missing_authentication,
+            ),
+        }
+    })
+}
+
+fn mjconfig_setup_message(
+    team_selection_required: bool,
+    no_launchable_models: bool,
+    missing_authentication: &[mj_core::auth::AuthVendor],
+) -> String {
+    if !missing_authentication.is_empty() {
+        let separator = if team_selection_required {
+            " or "
+        } else {
+            " and "
+        };
+        let providers = missing_authentication
+            .iter()
+            .map(|vendor| vendor.enables())
+            .collect::<Vec<_>>()
+            .join(separator);
+        return if team_selection_required {
+            format!("Sign in to {providers} under ACP Servers. Team selection comes next.")
+        } else {
+            format!("Sign in to {providers} under ACP Servers to finish the selected team.")
+        };
+    }
+    if no_launchable_models {
+        "No model is available yet. Check ACP Servers.".to_string()
+    } else {
+        "Choose a team to finish setup.".to_string()
+    }
+}
+
+fn current_mjconfig_setup(state: &ServerState) -> Option<MjSetupPanel> {
+    let config = mjconfig_load(state);
+    let (editor, _, _) = mjconfig_editor(state, config);
+    let config = &editor.config;
+    let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
+    mjconfig_setup_panel(
+        !config::has_valid_team(config),
+        !editor.any_model_launchable(),
+        &missing_authentication,
+    )
 }
 
 fn refresh_mjconfig_discovery_if_needed(state: &ServerState) {
@@ -5678,15 +5800,14 @@ async fn mjconfig_login_start(
         StatusCode::UNPROCESSABLE_ENTITY,
         format!("unknown vendor: {}", request.vendor),
     ))?;
-    if !vendor.supports_headless_login() {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "{} sign-in requires an interactive terminal; run mj locally and use the ACP Servers account row",
-                vendor.label()
-            ),
-        ));
-    }
+    let mode = vendor
+        .web_login_mode(request.mode.as_deref())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unsupported {} sign-in mode", vendor.label()),
+            )
+        })?;
     {
         let guard = state.mjconfig.login.lock().expect("mjconfig login lock");
         if guard
@@ -5706,8 +5827,14 @@ async fn mjconfig_login_start(
     let task_result = Arc::clone(&result);
     let discovery = Arc::clone(&state.mjconfig);
     let session_manager = Arc::clone(&state.session_manager);
+    let (input, task_input) = if vendor.web_login_accepts_input() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        (Some(sender), Some(receiver))
+    } else {
+        (None, None)
+    };
     let task = tokio::spawn(async move {
-        let outcome = mjconfig_run_login(vendor, task_output).await;
+        let outcome = mjconfig_run_login(vendor, mode, task_output, task_input).await;
         let outcome = complete_mjconfig_login(outcome, &discovery, session_manager.as_ref());
         *task_result.lock().expect("login result") =
             Some(outcome.map_err(|error| format!("{error:#}")));
@@ -5716,6 +5843,7 @@ async fn mjconfig_login_start(
         vendor,
         output,
         result,
+        input,
         abort: task.abort_handle(),
     });
     Ok(Json(mjconfig_snapshot_response(&state, None)))
@@ -5734,23 +5862,40 @@ fn complete_mjconfig_login(
 }
 
 /// Run a vendor login with output captured for the browser. Mirrors
-/// `auth::run_login` minus the terminal menu: the web flow always prefers the
-/// device-auth variant because the server may not have a usable browser.
+/// `auth::run_login` minus the terminal menu. The selected flow is explicit in
+/// the viewer, while command output and any pasted Claude code stay server-side.
 async fn mjconfig_run_login(
     vendor: mj_core::auth::AuthVendor,
+    mode: mj_core::auth::WebLoginMode,
     output: Arc<Mutex<String>>,
+    mut input: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Result<String> {
-    use tokio::io::AsyncReadExt;
-    let invocation = mj_core::auth::headless_login_invocation(vendor).await?;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let invocation = mj_core::auth::web_login_invocation(vendor, mode).await?;
     let mut child = tokio::process::Command::new(&invocation.command)
         .args(&invocation.args)
         .envs(&invocation.env)
-        .stdin(std::process::Stdio::null())
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("run {} login", vendor.label()))?;
+    let input_task = input.take().map(|mut input| {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        tokio::spawn(async move {
+            while let Some(line) = input.recv().await {
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+            }
+            Ok::<(), std::io::Error>(())
+        })
+    });
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     let stdout_sink = Arc::clone(&output);
@@ -5778,6 +5923,9 @@ async fn mjconfig_run_login(
         }
     });
     let status = child.wait().await?;
+    if let Some(input_task) = input_task {
+        input_task.abort();
+    }
     let _ = stdout_task.await;
     let _ = stderr_task.await;
     if !status.success() {
@@ -5793,6 +5941,49 @@ async fn mjconfig_run_login(
         "Signed in to {}; refreshing models for new sessions",
         vendor.label()
     ))
+}
+
+async fn mjconfig_login_input(
+    State(state): State<ServerState>,
+    Json(request): Json<MjLoginInputRequest>,
+) -> std::result::Result<Json<MjConfigSnapshot>, (StatusCode, String)> {
+    let input = request.input.trim();
+    if input.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "authorization code is required".to_string(),
+        ));
+    }
+    if input.len() > 8192 || input.contains('\r') || input.contains('\n') {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "authorization code must be one line of at most 8192 bytes".to_string(),
+        ));
+    }
+    let sender = {
+        let guard = state.mjconfig.login.lock().expect("mjconfig login lock");
+        let job = guard.as_ref().ok_or((
+            StatusCode::CONFLICT,
+            "no sign-in is waiting for an authorization code".to_string(),
+        ))?;
+        if job.result.lock().expect("login result").is_some() {
+            return Err((
+                StatusCode::CONFLICT,
+                "sign-in has already finished".to_string(),
+            ));
+        }
+        job.input.clone().ok_or((
+            StatusCode::CONFLICT,
+            "this sign-in does not accept an authorization code".to_string(),
+        ))?
+    };
+    sender.send(input.to_string()).map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            "sign-in stopped before it accepted the authorization code".to_string(),
+        )
+    })?;
+    Ok(Json(mjconfig_snapshot_response(&state, None)))
 }
 
 async fn mjconfig_login_cancel(State(state): State<ServerState>) -> Json<MjConfigSnapshot> {
@@ -5891,6 +6082,7 @@ fn build_router_with_cookie_name(config: RouterConfig, cookie_name: &'static str
             "/api/mjconfig/login",
             post(mjconfig_login_start).delete(mjconfig_login_cancel),
         )
+        .route("/api/mjconfig/login/input", post(mjconfig_login_input))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_token,
@@ -6599,6 +6791,42 @@ async fn create_server_owned_session(
     if cwd.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "cwd must not be empty".to_string()));
     }
+    if let Some(setup) = current_mjconfig_setup(&state)
+        && (setup.authentication_required || setup.team_selection_required)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "finish web setup before starting a session: {}",
+                setup.message
+            ),
+        ));
+    }
+    // Credentials can appear without changing the config file. Re-resolve now
+    // so a just-completed web login can make the first session launchable.
+    match state
+        .session_manager
+        .refresh_for_config(&state.mjconfig.config_path)
+        .await
+    {
+        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
+        Ok(None) => {}
+        Err(error) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("saved configuration cannot start a session: {error}"),
+            ));
+        }
+    }
+    if let Some(setup) = current_mjconfig_setup(&state) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "finish web setup before starting a session: {}",
+                setup.message
+            ),
+        ));
+    }
     let roots = Arc::clone(&state.workspace_roots);
     let want_worktree = request.worktree;
     // Path validation and worktree creation shell out to git; both are
@@ -6632,24 +6860,6 @@ async fn create_server_owned_session(
     })
     .await
     .map_err(internal_error)??;
-    // A /mjconfig save (or any config edit) since the last resolve re-binds
-    // the seats now, so this session launches the saved selection. A config
-    // that cannot bind a roster fails the request instead of silently
-    // launching the previous binding.
-    match state
-        .session_manager
-        .refresh_for_config(&state.mjconfig.config_path)
-        .await
-    {
-        Ok(Some(roster)) => state.mjconfig.update_from_roster(&roster),
-        Ok(None) => {}
-        Err(error) => {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("saved configuration cannot start a session: {error}"),
-            ));
-        }
-    }
     let db_path = Arc::clone(&state.db_path);
     let recent_cwd = selected_cwd;
     match tokio::task::spawn_blocking(move || {
@@ -9876,6 +10086,47 @@ mod tests {
         ))
     }
 
+    fn test_credentials_available(
+        _vendor: mj_core::auth::AuthVendor,
+    ) -> mj_core::auth::CredentialSource {
+        mj_core::auth::CredentialSource::Environment("MJOLNIR_TEST_CREDENTIAL")
+    }
+
+    fn test_credentials_missing(
+        _vendor: mj_core::auth::AuthVendor,
+    ) -> mj_core::auth::CredentialSource {
+        mj_core::auth::CredentialSource::Missing
+    }
+
+    fn test_ready_mjconfig_runtime() -> Arc<MjConfigRuntime> {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = DIR.get_or_init(|| tempfile::tempdir().expect("ready mjconfig tempdir"));
+        let config_path = dir.path().join(format!(
+            "config-{}.toml",
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&config_path).expect("save ready config");
+        let roster = test_roster("test-model");
+        Arc::new(
+            MjConfigRuntime::new(
+                config_path,
+                roster.choices.clone(),
+                Some(models_config_from_roster(&roster)),
+                roster.inventory.clone(),
+            )
+            .with_credential_detector(test_credentials_available),
+        )
+    }
+
+    fn test_advertised_unauthenticated_mjconfig_runtime() -> Arc<MjConfigRuntime> {
+        let runtime = test_ready_mjconfig_runtime();
+        let runtime = Arc::try_unwrap(runtime).expect("unshared test runtime");
+        Arc::new(runtime.with_credential_detector(test_credentials_missing))
+    }
+
     fn test_roster(model: &str) -> roster::Roster {
         let launch = roster::AdapterLaunch {
             kind: roster::AdapterKind::Claude,
@@ -10112,6 +10363,7 @@ mod tests {
             vendor: mj_core::auth::AuthVendor::OpenAi,
             output: Arc::new(Mutex::new(String::new())),
             result: Arc::new(Mutex::new(Some(Ok("Signed in".to_string())))),
+            input: None,
             abort: login_task.abort_handle(),
         });
         let manager = Arc::new(TestServerSessionManager {
@@ -10128,6 +10380,54 @@ mod tests {
         assert!(!login.running);
         assert!(snapshot.probing);
         login_task.abort();
+    }
+
+    #[tokio::test]
+    async fn web_login_forwards_claude_authorization_code_to_the_running_cli() {
+        let runtime = test_mjconfig_runtime();
+        let login_task = tokio::spawn(std::future::pending::<()>());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        *runtime.login.lock().expect("login lock") = Some(MjLoginJob {
+            vendor: mj_core::auth::AuthVendor::Anthropic,
+            output: Arc::new(Mutex::new("Open the authorization URL".to_string())),
+            result: Arc::new(Mutex::new(None)),
+            input: Some(sender),
+            abort: login_task.abort_handle(),
+        });
+        let app = mjconfig_test_router(runtime, "mjconfig-token");
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/mjconfig/login/input")
+            .header(axum::http::header::AUTHORIZATION, "Bearer mjconfig-token")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "input": "claude-auth-code" }).to_string(),
+            ))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(receiver.recv().await.as_deref(), Some("claude-auth-code"));
+        login_task.abort();
+    }
+
+    #[tokio::test]
+    async fn web_login_rejects_a_mode_from_the_wrong_provider() {
+        let app = mjconfig_test_router(test_mjconfig_runtime(), "mjconfig-token");
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/mjconfig/login")
+            .header(axum::http::header::AUTHORIZATION, "Bearer mjconfig-token")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "vendor": "openai", "mode": "console" }).to_string(),
+            ))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -10174,8 +10474,11 @@ mod tests {
         assert_eq!(accounts.len(), mj_core::auth::AuthVendor::ALL.len());
         assert_eq!(accounts[0]["vendor"], "openai");
         assert_eq!(accounts[0]["login_supported"], true);
+        assert_eq!(accounts[0]["login_modes"][0]["id"], "device");
         assert_eq!(accounts[1]["vendor"], "anthropic");
-        assert_eq!(accounts[1]["login_supported"], false);
+        assert_eq!(accounts[1]["login_supported"], true);
+        assert_eq!(accounts[1]["login_modes"][0]["id"], "subscription");
+        assert_eq!(accounts[1]["login_modes"][1]["id"], "console");
 
         let themes = snapshot["appearance"]["themes"].as_array().expect("themes");
         assert_eq!(themes.len(), mj_core::theme::TerminalThemeKind::ALL.len());
@@ -10266,8 +10569,8 @@ mod tests {
     #[tokio::test]
     async fn mjconfig_snapshot_reports_setup_while_nothing_is_launchable() {
         let runtime = test_mjconfig_runtime();
-        // A saved team isolates the check from the host's credentials: only
-        // the empty model catalog keeps setup pending.
+        // A saved team makes the team step deterministic. Authentication can
+        // still depend on the host, but an empty model catalog always blocks.
         let mut config = config::Config::default();
         config::TeamPreset::Codex.apply(&mut config);
         config.save(&runtime.config_path).expect("seed config");
@@ -10282,9 +10585,11 @@ mod tests {
         let snapshot = json_body(response).await;
         assert_eq!(snapshot["setup"]["no_launchable_models"], true);
         assert_eq!(snapshot["setup"]["team_selection_required"], false);
-        assert_eq!(
-            snapshot["setup"]["message"],
-            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers."
+        assert!(
+            !snapshot["setup"]["message"]
+                .as_str()
+                .expect("setup message")
+                .is_empty()
         );
     }
 
@@ -10296,36 +10601,68 @@ mod tests {
     /// above exercises the setup panel; this covers the message mapping.
     #[test]
     fn mjconfig_setup_message_names_the_blocking_step() {
+        use mj_core::auth::AuthVendor::{Anthropic, OpenAi};
+
         assert_eq!(
-            mjconfig_setup_message(true, true),
-            "Sign in to Codex or Claude Code under ACP Servers, then choose a team."
+            mjconfig_setup_message(true, true, &[OpenAi, Anthropic]),
+            "Sign in to Codex or Claude under ACP Servers. Team selection comes next."
         );
         assert_eq!(
-            mjconfig_setup_message(false, true),
-            "No model is launchable. Sign in to Codex or Claude Code under ACP Servers."
+            mjconfig_setup_message(false, true, &[OpenAi, Anthropic]),
+            "Sign in to Codex and Claude under ACP Servers to finish the selected team."
         );
         assert_eq!(
-            mjconfig_setup_message(true, false),
+            mjconfig_setup_message(true, false, &[]),
             "Choose a team to finish setup."
+        );
+        assert_eq!(
+            mjconfig_setup_message(false, true, &[]),
+            "No model is available yet. Check ACP Servers."
         );
     }
 
-    #[tokio::test]
-    async fn mjconfig_snapshot_omits_setup_when_teamed_and_launchable() {
-        let runtime = test_mjconfig_runtime();
+    #[test]
+    fn advertised_models_do_not_complete_setup_without_required_authentication() {
+        use mj_core::auth::AuthVendor::{Anthropic, OpenAi};
+
         let mut config = config::Config::default();
         config::TeamPreset::Codex.apply(&mut config);
-        config.save(&runtime.config_path).expect("seed config");
-        runtime.update_from_roster(&test_roster("test-model"));
-        let token = "mjconfig-token";
-        let app = mjconfig_test_router(runtime, token);
+        assert_eq!(
+            missing_setup_authentication_with(&config, |_| false),
+            vec![OpenAi]
+        );
+        let setup = mjconfig_setup_panel(false, false, &[OpenAi]).expect("setup remains pending");
+        assert!(setup.authentication_required);
+        assert!(!setup.no_launchable_models);
 
-        let response = app
-            .oneshot(mjconfig_request("GET", Some(token), None))
-            .await
-            .expect("response");
-        let snapshot = json_body(response).await;
-        assert!(snapshot["setup"].is_null(), "{}", snapshot["setup"]);
+        assert!(mjconfig_setup_panel(false, false, &[]).is_none());
+
+        config::TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        assert_eq!(
+            missing_setup_authentication_with(&config, |vendor| vendor == OpenAi),
+            vec![Anthropic]
+        );
+    }
+
+    #[test]
+    fn first_run_authentication_advances_to_team_then_checks_the_selected_team() {
+        use mj_core::auth::AuthVendor::{Anthropic, OpenAi};
+
+        let mut config = config::Config::default();
+        assert_eq!(
+            missing_setup_authentication_with(&config, |_| false),
+            vec![OpenAi, Anthropic]
+        );
+        assert!(missing_setup_authentication_with(&config, |vendor| vendor == OpenAi).is_empty());
+
+        config::TeamPreset::Claude.apply(&mut config);
+        assert_eq!(
+            missing_setup_authentication_with(&config, |vendor| vendor == OpenAi),
+            vec![Anthropic]
+        );
+        assert!(
+            missing_setup_authentication_with(&config, |vendor| vendor == Anthropic).is_empty()
+        );
     }
 
     #[tokio::test]
@@ -10347,10 +10684,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
         // The re-resolve ran with the save: the returned snapshot already
-        // shows the launchable catalog, so setup is done — no restart, no
-        // extra session launch needed to bind the roster.
+        // shows the launchable catalog — no restart or extra session launch is
+        // needed to bind the roster. Setup may still require host credentials.
         assert_eq!(snapshot["team"]["selected"], "codex");
-        assert!(snapshot["setup"].is_null(), "{}", snapshot["setup"]);
+        if !snapshot["setup"].is_null() {
+            assert_eq!(snapshot["setup"]["no_launchable_models"], false);
+            assert_eq!(snapshot["setup"]["authentication_required"], true);
+        }
         let discovery = runtime.discovery.lock().expect("discovery lock");
         assert_eq!(discovery.choices.len(), 1);
     }
@@ -11036,9 +11376,105 @@ for (const expected of [
         assert!(viewer.contains("function scheduleSessionResumeRetry"));
         assert!(viewer.contains("function retryPendingViewerSession"));
         assert!(viewer.contains("showAuth(`Can't reach Mjolnir."));
+        assert!(
+            !viewer.contains("showAuth(`Can't reach Mjolnir. Reconnecting automatically…`, true)")
+        );
         assert!(viewer.contains("scheduleSessionResumeRetry();"));
         assert!(viewer.contains("window.addEventListener(\"online\", retryPendingViewerSession)"));
         assert!(viewer.contains("showAuth(\"Your session expired."));
+    }
+
+    #[test]
+    fn embedded_viewer_routes_each_onboarding_step_to_its_required_control() {
+        let viewer = include_str!("remote_viewer.html");
+        let start = viewer
+            .find("      let setupState = null;")
+            .expect("setup state");
+        let end = viewer[start..]
+            .find("      function openViewerSettings")
+            .map(|offset| start + offset)
+            .expect("setup flow boundary");
+        let setup_source = &viewer[start..end];
+        let script = format!(
+            r#"
+const mjconfigModalEl = {{ hidden: true }};
+const mjcfg = {{ snapshot: null, tab: null }};
+let opened = null;
+let renders = 0;
+function openMjConfig(tab) {{ opened = tab; }}
+function renderMjConfig() {{ renders += 1; }}
+function renderSessions() {{}}
+{setup_source}
+if (setupStep({{ no_launchable_models: true, authentication_required: false }}) !== "servers") {{
+  throw new Error("missing models must open ACP Servers");
+}}
+if (setupStep({{ no_launchable_models: false, authentication_required: true }}) !== "servers") {{
+  throw new Error("missing authentication must open ACP Servers");
+}}
+if (setupStep({{ no_launchable_models: false, authentication_required: false, team_selection_required: true }}) !== "team") {{
+  throw new Error("configured models must advance to Team");
+}}
+setupState = {{ no_launchable_models: true, authentication_required: true, team_selection_required: true }};
+maybePromptSetup();
+if (opened !== "servers") {{ throw new Error(`opened ${{opened}} instead of servers`); }}
+mjconfigModalEl.hidden = false;
+mjcfg.snapshot = {{}};
+setupState = {{ no_launchable_models: false, authentication_required: false, team_selection_required: true }};
+maybePromptSetup();
+if (mjcfg.tab !== "team" || renders !== 1) {{
+  throw new Error("successful authentication did not advance to team selection");
+}}
+"#,
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer setup behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(viewer.contains("Paste the Claude authorization code"));
+        assert!(viewer.contains("/api/mjconfig/login/input"));
+    }
+
+    #[test]
+    fn embedded_viewer_extracts_a_clean_login_url_from_terminal_output() {
+        let viewer = include_str!("remote_viewer.html");
+        let start = viewer
+            .find("      function mjExtractUrl")
+            .expect("URL helper");
+        let end = viewer[start..]
+            .find("      function renderMjTabs")
+            .map(|offset| start + offset)
+            .expect("URL helper boundary");
+        let source = &viewer[start..end];
+        let script = format!(
+            r#"
+{source}
+const styled = "Open \u001b[34mhttps://example.com/device\u001b[0m now";
+if (mjExtractUrl(styled) !== "https://example.com/device") {{
+  throw new Error(`bad styled URL: ${{mjExtractUrl(styled)}}`);
+}}
+if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/device") {{
+  throw new Error("trailing punctuation was retained");
+}}
+"#,
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer URL extraction failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]
@@ -11129,10 +11565,10 @@ for (const expected of [
     #[test]
     fn embedded_viewer_prompts_first_run_setup() {
         let viewer = include_str!("remote_viewer.html");
-        // Boot captures the server's setup state and opens the Team tab once.
+        // Boot captures setup state and routes to the blocking step.
         assert!(viewer.contains("function maybePromptSetup()"));
-        assert!(viewer.contains("setupPromptShown = true;"));
-        assert!(viewer.contains("void openMjConfig(\"team\");"));
+        assert!(viewer.contains("promptedSetupStep = step;"));
+        assert!(viewer.contains("void openMjConfig(step);"));
         // The sidebar carries the setup card while sessions cannot launch.
         assert!(viewer.contains("function setupRequiredCard()"));
         assert!(viewer.contains("querySelector(\".empty, .setup-card\")"));
@@ -11140,6 +11576,8 @@ for (const expected of [
         // leaves setup unfinished keeps the editor open on it.
         assert!(viewer.contains("mjcfg.snapshot?.setup?.message"));
         assert!(viewer.contains("if (mjcfg.snapshot?.setup) {"));
+        assert!(viewer.contains("newSessionButtonEl.disabled = Boolean(setupState);"));
+        assert!(viewer.contains("if (setupState) {\n          void openMjConfig(setupStep());"));
     }
 
     #[test]
@@ -13812,6 +14250,44 @@ for (const expected of [
     }
 
     #[tokio::test]
+    async fn server_session_endpoint_blocks_launch_until_web_setup_finishes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = "integration-token".to_string();
+        let app = build_router(RouterConfig {
+            db_path: dir.path().join("sessions.sqlite3"),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            // The adapter advertises a model, exactly the state that used to
+            // let setup disappear before the provider was authenticated.
+            mjconfig: test_advertised_unauthenticated_mjconfig_runtime(),
+        });
+
+        let response = app
+            .oneshot(new_session_request(
+                &token,
+                serde_json::json!({ "cwd": dir.path().display().to_string(), "worktree": false }),
+            ))
+            .await
+            .expect("create session");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert!(
+            String::from_utf8_lossy(&body).contains("finish web setup before starting a session")
+        );
+        assert!(String::from_utf8_lossy(&body).contains("Sign in to Codex"));
+    }
+
+    #[tokio::test]
     async fn server_session_endpoint_creates_worktree_when_requested() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("project");
@@ -13827,7 +14303,7 @@ for (const expected of [
             session_ttl: DEFAULT_SESSION_TTL,
             workspace_roots: test_workspace_roots(dir.path()),
             session_manager: test_session_manager(),
-            mjconfig: test_mjconfig_runtime(),
+            mjconfig: test_ready_mjconfig_runtime(),
         });
 
         let response = app
@@ -13882,7 +14358,7 @@ for (const expected of [
             session_ttl: DEFAULT_SESSION_TTL,
             workspace_roots: test_workspace_roots(dir.path()),
             session_manager: test_session_manager(),
-            mjconfig: test_mjconfig_runtime(),
+            mjconfig: test_ready_mjconfig_runtime(),
         });
 
         let response = app

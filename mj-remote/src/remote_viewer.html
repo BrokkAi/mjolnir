@@ -3095,6 +3095,26 @@
         word-break: break-all;
       }
 
+      .mjconfig-login-input {
+        display: flex;
+        gap: 8px;
+
+        & input {
+          flex: 1;
+          min-width: 0;
+          height: 34px;
+          border: 1px solid var(--line-control);
+          background: var(--bg);
+          color: var(--text-control);
+          padding: 0 10px;
+          font: 500 12px/1 var(--font-mono);
+        }
+
+        & button {
+          height: 34px;
+        }
+      }
+
       .mjconfig-foot {
         display: flex;
         align-items: center;
@@ -3872,10 +3892,17 @@
         renderChat();
       }
 
-      /* Server-reported first-run state: what still blocks session launches
-         (no team, no launchable model). Null once setup is complete. */
+      /* Server-reported first-run state: authentication, team, or model work
+         that still blocks session launches. Null once setup is complete. */
       let setupState = null;
-      let setupPromptShown = false;
+      let promptedSetupStep = null;
+
+      function setupStep(setup = setupState) {
+        if (!setup) {
+          return null;
+        }
+        return setup.authentication_required || setup.no_launchable_models ? "servers" : "team";
+      }
 
       function spinnerEntry(snapshot, name = snapshot?.appearance?.spinner) {
         return snapshot?.appearance?.spinners?.find(
@@ -3933,6 +3960,11 @@
         const nextSetup = snapshot?.setup || null;
         const setupChanged = Boolean(setupState) !== Boolean(nextSetup);
         setupState = nextSetup;
+        if (!setupState) {
+          promptedSetupStep = null;
+        }
+        newSessionButtonEl.disabled = Boolean(setupState);
+        mobileNewSessionButtonEl.disabled = Boolean(setupState);
         if (setupChanged) {
           renderSessions();
         }
@@ -3951,14 +3983,20 @@
         }
       }
 
-      /* First connect to a server that cannot launch sessions yet: take the
-         user straight to the Team tab, once per page load. */
+      /* First connect opens the actual blocking step. After browser sign-in
+         makes a model launchable, advance directly to team selection. */
       function maybePromptSetup() {
-        if (!setupState || setupPromptShown) {
+        const step = setupStep();
+        if (!step || promptedSetupStep === step) {
           return;
         }
-        setupPromptShown = true;
-        void openMjConfig("team");
+        promptedSetupStep = step;
+        if (!mjconfigModalEl.hidden && mjcfg.snapshot) {
+          mjcfg.tab = step;
+          renderMjConfig();
+          return;
+        }
+        void openMjConfig(step);
       }
 
       function openViewerSettings() {
@@ -4098,6 +4136,7 @@
               } else {
                 mjPatchJobUi();
               }
+              maybePromptSetup();
             }
           } catch {
             // Poll failures are transient; the next tick retries.
@@ -4126,8 +4165,10 @@
       }
 
       function mjExtractUrl(text) {
-        const match = text.match(/https?:\/\/\S+/);
-        return match ? match[0].replace(/[).,]$/, "") : null;
+        // ANSI styling can be present in captured CLI output. Stop before an
+        // escape sequence so the clickable URL never includes terminal bytes.
+        const match = text.match(/https?:\/\/[^\s\x1b]+/);
+        return match ? match[0].replace(/[).,]+$/, "") : null;
       }
 
       function renderMjTabs() {
@@ -4467,12 +4508,21 @@
                 await mjJobRequest("/api/mjconfig/login", "DELETE");
               }),
             );
-          } else if (account.login_supported) {
-            row.appendChild(
-              mjButton(account.signed_in ? "Sign in again" : "Sign in", async () => {
-                await mjJobRequest("/api/mjconfig/login", "POST", { vendor: account.vendor });
-              }),
-            );
+          } else if (account.login_supported && account.login_modes.length) {
+            for (const mode of account.login_modes) {
+              const label = account.signed_in && account.login_modes.length === 1
+                ? "Sign in again"
+                : mode.label;
+              row.appendChild(
+                mjButton(label, async () => {
+                  await mjJobRequest(
+                    "/api/mjconfig/login",
+                    "POST",
+                    { vendor: account.vendor, mode: mode.id },
+                  );
+                }),
+              );
+            }
           } else {
             row.appendChild(mjDetail("sign in from the local mj terminal"));
           }
@@ -4494,6 +4544,44 @@
               output.dataset.mjLoginOutput = "true";
               mjconfigBodyEl.appendChild(output);
               mjPatchJobUi();
+            }
+            if (login.running && login.accepts_input) {
+              const form = document.createElement("form");
+              form.className = "mjconfig-login-input";
+              const input = document.createElement("input");
+              input.type = "text";
+              input.autocomplete = "one-time-code";
+              input.spellcheck = false;
+              input.placeholder = "Paste the Claude authorization code";
+              input.setAttribute("aria-label", "Claude authorization code");
+              const submit = document.createElement("button");
+              submit.type = "submit";
+              submit.className = "primary";
+              submit.textContent = "Continue";
+              form.addEventListener("submit", async (event) => {
+                event.preventDefault();
+                const value = input.value.trim();
+                if (!value) {
+                  mjSetStatus("Paste the Claude authorization code.", true);
+                  return;
+                }
+                input.disabled = true;
+                submit.disabled = true;
+                const accepted = await mjJobRequest(
+                  "/api/mjconfig/login/input",
+                  "POST",
+                  { input: value },
+                );
+                if (accepted) {
+                  input.value = "";
+                  mjSetStatus("Authorization code sent. Waiting for Claude…");
+                } else {
+                  input.disabled = false;
+                  submit.disabled = false;
+                }
+              });
+              form.append(input, submit);
+              mjconfigBodyEl.appendChild(form);
             }
           }
         }
@@ -4529,13 +4617,15 @@
           if (!response.ok) {
             const text = await response.text();
             mjSetStatus(text || `HTTP ${response.status}`, true);
-            return;
+            return false;
           }
           mjcfg.snapshot = await response.json();
           renderMjConfig();
           mjSchedulePoll();
+          return true;
         } catch (error) {
           mjSetStatus(`Request failed: ${error.message}`, true);
+          return false;
         }
       }
 
@@ -4895,6 +4985,10 @@
 
       function openNewSessionPicker() {
         if (!authenticated) {
+          return;
+        }
+        if (setupState) {
+          void openMjConfig(setupStep());
           return;
         }
         newSessionModalEl.hidden = false;
@@ -5759,8 +5853,7 @@
       }
 
       /* The server is up but cannot launch sessions until setup finishes.
-         The card names the blocking step and opens the editor on the Team
-         tab; red rail because this state needs the user. */
+         The card opens the step that is actually blocking progress. */
       function setupRequiredCard() {
         if (!setupState) {
           return null;
@@ -5779,7 +5872,7 @@
         open.className = "primary";
         open.textContent = "Open setup";
         open.addEventListener("click", () => {
-          void openMjConfig("team");
+          void openMjConfig(setupStep());
         });
         card.append(title, detail, open);
         return card;
@@ -9222,11 +9315,10 @@
           applyRoute();
           await refreshQueuedPrompts();
         } catch (error) {
-          // A suspended iOS PWA can wake before Wi-Fi or its VPN tunnel. A
-          // transport failure says nothing about the cookie, so keep retrying
-          // instead of making the user sign in again. Only the explicit 401
-          // branch above exposes the viewer-code form.
-          showAuth(`Can't reach Mjolnir. Reconnecting automatically…`, true);
+          // Keep retrying an existing cookie, but never hide the viewer-code
+          // form: this can also be a first connection to a setup-pending
+          // server, and hiding the only way forward dead-ends onboarding.
+          showAuth(`Can't reach Mjolnir. Reconnecting automatically…`);
           scheduleSessionResumeRetry();
         }
       }
