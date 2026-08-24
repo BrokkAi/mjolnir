@@ -11669,6 +11669,28 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
     }
 
     #[test]
+    fn embedded_viewer_places_tui_activity_surfaces_around_the_composer() {
+        let viewer = include_str!("remote_viewer.html");
+        let composer = viewer.find("<section id=\"composer\"").expect("composer");
+        let status = viewer.find("<div id=\"status-line\"").expect("status line");
+        let console = viewer.find("<div class=\"console\">").expect("console");
+        let spinner = viewer
+            .find("id=\"working-spinner\"")
+            .expect("working spinner");
+
+        assert!(
+            composer < status,
+            "status rail must follow the composer like the TUI status line"
+        );
+        assert!(
+            console < spinner,
+            "working spinner must live on the composer frame, not the header"
+        );
+        assert!(viewer.contains(".working-badge {\n        position: absolute;"));
+        assert!(viewer.contains("border-top: 1px solid var(--line);"));
+    }
+
+    #[test]
     fn embedded_viewer_only_configures_supported_acp_servers() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("Supported servers"));
