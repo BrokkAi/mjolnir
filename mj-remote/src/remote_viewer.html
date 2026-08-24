@@ -4019,15 +4019,6 @@
       const mjconfigCancelEl = $("mjconfig-cancel");
       const mjconfigSaveEl = $("mjconfig-save");
 
-      const MJ_TABS = [
-        ["team", "Team"],
-        ["agents", "Agent"],
-        ["reviewer", "Reviewer"],
-        ["subagents", "Subagents"],
-        ["servers", "ACP Servers"],
-        ["appearance", "Appearance"],
-      ];
-
       const mjcfg = {
         snapshot: null,
         edits: {},
@@ -4173,7 +4164,7 @@
 
       function renderMjTabs() {
         mjconfigTabsEl.replaceChildren();
-        for (const [id, label] of MJ_TABS) {
+        for (const { id, label } of mjcfg.snapshot?.tabs || []) {
           const tab = document.createElement("button");
           tab.type = "button";
           tab.className = "mjconfig-tab";
@@ -4216,6 +4207,9 @@
             break;
           case "servers":
             renderMjServers();
+            break;
+          case "input":
+            renderMjInput();
             break;
           case "appearance":
             renderMjAppearance();
@@ -4322,6 +4316,33 @@
         return row;
       }
 
+      function mjRolePermissionRow(role, field) {
+        if (!role.permission) {
+          return null;
+        }
+        const value = mjEditedValue(field, role.permission.value);
+        const row = mjRow("Permissions");
+        row.appendChild(
+          mjCombo(
+            role.permission.choices.map((choice) => ({
+              value: choice.value,
+              label: choice.label,
+              description: choice.description,
+            })),
+            value,
+            (next) => {
+              mjcfg.edits[field] = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selected = role.permission.choices.find((choice) => choice.value === value);
+        if (selected) {
+          row.appendChild(mjDetail(selected.description));
+        }
+        return row;
+      }
+
       // Session options for one seat's bound ACP source, staged into that
       // role's session_defaults map.
       function mjSeatOptionRows(group, editsField, seat) {
@@ -4391,6 +4412,10 @@
       function renderMjReviewer() {
         const panel = mjcfg.snapshot.agents;
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[1], "review_model"));
+        const permissionRow = mjRolePermissionRow(panel.roles[1], "review_permission");
+        if (permissionRow) {
+          mjconfigBodyEl.appendChild(permissionRow);
+        }
         for (const row of mjSeatOptionRows(mjcfg.snapshot.review_options, "review_session_defaults", "review")) {
           mjconfigBodyEl.appendChild(row);
         }
@@ -4453,6 +4478,10 @@
       function renderMjSubagents() {
         const panel = mjcfg.snapshot.agents;
         mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[2], "subagents_model"));
+        const permissionRow = mjRolePermissionRow(panel.roles[2], "subagents_permission");
+        if (permissionRow) {
+          mjconfigBodyEl.appendChild(permissionRow);
+        }
         for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults", "subagents")) {
           mjconfigBodyEl.appendChild(row);
         }
@@ -4652,9 +4681,9 @@
       function renderMjAppearance() {
         const panel = mjcfg.snapshot.appearance;
         mjconfigBodyEl.appendChild(
-          mjNote("The web theme is local to this browser. Spinner and thought output apply to web and terminal transcripts."),
+          mjNote("Viewer theme is local to this browser. Terminal appearance and startup settings are shared with /mjconfig in the terminal."),
         );
-        const themeRow = mjRow("Theme");
+        const themeRow = mjRow("Viewer theme");
         const current = themePreference();
         for (const preference of ["light", "dark", "system"]) {
           const button = document.createElement("button");
@@ -4670,6 +4699,24 @@
           themeRow.appendChild(button);
         }
         mjconfigBodyEl.appendChild(themeRow);
+
+        const terminalThemeRow = mjRow("Terminal theme");
+        const terminalTheme = mjEditedValue("theme", panel.theme);
+        terminalThemeRow.appendChild(
+          mjCombo(
+            panel.themes.map((value) => ({
+              value,
+              label: value.charAt(0).toUpperCase() + value.slice(1),
+            })),
+            terminalTheme,
+            (next) => {
+              mjcfg.edits.theme = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        terminalThemeRow.appendChild(mjDetail("applies to terminal sessions"));
+        mjconfigBodyEl.appendChild(terminalThemeRow);
 
         const spinnerRow = mjRow("Spinner");
         const currentSpinner = mjEditedValue("spinner", panel.spinner);
@@ -4728,6 +4775,75 @@
           ),
         );
         mjconfigBodyEl.appendChild(thoughtRow);
+
+        const hintsRow = mjRow("Feature tips");
+        hintsRow.appendChild(
+          mjToggle(mjEditedValue("feature_hints", panel.feature_hints), (next) => {
+            mjcfg.edits.feature_hints = next;
+            renderMjConfig();
+          }),
+        );
+        mjconfigBodyEl.appendChild(hintsRow);
+
+        const awakeRow = mjRow("Keep awake");
+        awakeRow.appendChild(
+          mjToggle(mjEditedValue("keep_awake", panel.keep_awake), (next) => {
+            mjcfg.edits.keep_awake = next;
+            renderMjConfig();
+          }),
+        );
+        awakeRow.appendChild(mjDetail("prevent sleep while the server runs or a turn is in flight"));
+        mjconfigBodyEl.appendChild(awakeRow);
+
+        const interfaceRow = mjRow("Terminal interface");
+        const interfaceMode = mjEditedValue("interface", panel.interface);
+        interfaceRow.appendChild(
+          mjCombo(
+            panel.interfaces.map((entry) => ({
+              value: entry.value,
+              label: entry.label,
+              description: entry.description,
+            })),
+            interfaceMode,
+            (next) => {
+              mjcfg.edits.interface = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selectedInterface = panel.interfaces.find((entry) => entry.value === interfaceMode);
+        if (selectedInterface) {
+          interfaceRow.appendChild(mjDetail(`${selectedInterface.description}; applies when the next terminal session starts`));
+        }
+        mjconfigBodyEl.appendChild(interfaceRow);
+      }
+
+      function renderMjInput() {
+        const panel = mjcfg.snapshot.input;
+        mjconfigBodyEl.appendChild(
+          mjNote("Voice auto-send applies to terminal dictation. Off leaves dictated text in the composer for review."),
+        );
+        const voiceRow = mjRow("Voice auto-send");
+        const voiceAutoSend = mjEditedValue("voice_auto_send", panel.voice_auto_send);
+        voiceRow.appendChild(
+          mjCombo(
+            panel.voice_auto_sends.map((entry) => ({
+              value: entry.value,
+              label: entry.label,
+              description: entry.description,
+            })),
+            voiceAutoSend,
+            (next) => {
+              mjcfg.edits.voice_auto_send = next;
+              renderMjConfig();
+            },
+          ),
+        );
+        const selectedVoice = panel.voice_auto_sends.find((entry) => entry.value === voiceAutoSend);
+        if (selectedVoice) {
+          voiceRow.appendChild(mjDetail(selectedVoice.description));
+        }
+        mjconfigBodyEl.appendChild(voiceRow);
       }
 
       async function saveMjConfig() {

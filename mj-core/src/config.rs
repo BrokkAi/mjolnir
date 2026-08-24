@@ -227,6 +227,16 @@ impl VoiceAutoSend {
         }
     }
 
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::TwoSeconds => "two_seconds",
+            Self::FourSeconds => "four_seconds",
+            Self::SixSeconds => "six_seconds",
+            Self::EightSeconds => "eight_seconds",
+        }
+    }
+
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -240,6 +250,28 @@ impl std::fmt::Display for VoiceAutoSend {
             Self::FourSeconds => f.write_str("4 seconds"),
             Self::SixSeconds => f.write_str("6 seconds"),
             Self::EightSeconds => f.write_str("8 seconds"),
+        }
+    }
+}
+
+impl std::str::FromStr for VoiceAutoSend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "two_seconds" => Ok(Self::TwoSeconds),
+            "four_seconds" => Ok(Self::FourSeconds),
+            "six_seconds" => Ok(Self::SixSeconds),
+            "eight_seconds" => Ok(Self::EightSeconds),
+            _ => Err(format!(
+                "unknown voice auto-send setting {value:?}; expected one of: {}",
+                Self::ALL
+                    .iter()
+                    .map(|setting| setting.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         }
     }
 }
@@ -394,6 +426,22 @@ pub enum PermissionPreset {
 impl PermissionPreset {
     pub const ALL: [Self; 3] = [Self::Manual, Self::Auto, Self::Yolo];
 
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+            Self::Yolo => "yolo",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Manual => "Provider uses its restrictive policy.",
+            Self::Auto => "Codex: Approve for me; Claude Code: Auto.",
+            Self::Yolo => "Provider grants full access.",
+        }
+    }
+
     pub const fn is_default(&self) -> bool {
         matches!(self, Self::Auto)
     }
@@ -414,6 +462,26 @@ impl std::fmt::Display for PermissionPreset {
             Self::Auto => "Auto",
             Self::Yolo => "YOLO",
         })
+    }
+}
+
+impl std::str::FromStr for PermissionPreset {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "manual" => Ok(Self::Manual),
+            "auto" => Ok(Self::Auto),
+            "yolo" => Ok(Self::Yolo),
+            _ => Err(format!(
+                "unknown permission preset {value:?}; expected one of: {}",
+                Self::ALL
+                    .iter()
+                    .map(|preset| preset.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
     }
 }
 
@@ -2351,6 +2419,25 @@ kimi = "disabled"
         let loaded = Config::load(&path).expect("load configured permissions");
         assert_eq!(loaded.review.permission, PermissionPreset::Manual);
         assert_eq!(loaded.subagents.permission, PermissionPreset::Yolo);
+    }
+
+    #[test]
+    fn permission_preset_wire_values_and_descriptions_are_stable() {
+        assert_eq!(PermissionPreset::Manual.as_str(), "manual");
+        assert_eq!(
+            PermissionPreset::Manual.description(),
+            "Provider uses its restrictive policy."
+        );
+        assert_eq!(PermissionPreset::Auto.as_str(), "auto");
+        assert_eq!(
+            PermissionPreset::Auto.description(),
+            "Codex: Approve for me; Claude Code: Auto."
+        );
+        assert_eq!(PermissionPreset::Yolo.as_str(), "yolo");
+        assert_eq!(
+            PermissionPreset::Yolo.description(),
+            "Provider grants full access."
+        );
     }
 
     #[test]
