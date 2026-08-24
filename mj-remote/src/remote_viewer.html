@@ -2261,6 +2261,196 @@
         letter-spacing: 0.06em;
       }
 
+      /* Review output is a first-class session record, not a vague system
+         notice. Keep the current or latest board above the transcript where a
+         finding cannot be lost, and let its reader carry the full evidence
+         without forcing a user to leave the web session. */
+      .review-board {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        padding: 10px 12px 11px;
+        border: 1px solid rgb(235 63 51 / 0.42);
+        border-left: 3px solid var(--red);
+        background:
+          linear-gradient(90deg, rgb(235 63 51 / 0.1), transparent 58%),
+          var(--surface-terminal);
+
+        &:empty {
+          display: none;
+        }
+      }
+
+      .review-board-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 5px 12px;
+      }
+
+      .review-board-title {
+        color: var(--red-hot);
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .review-board-tally {
+        flex: 1 1 220px;
+        color: var(--muted);
+        font: 400 10.5px/1.4 var(--font-mono);
+      }
+
+      .review-board-details {
+        border: 0;
+        background: transparent;
+        padding: 2px 0;
+        color: var(--text-control);
+        cursor: pointer;
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+
+        &:hover {
+          color: var(--button-hover-text);
+        }
+      }
+
+      .review-board-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: baseline;
+        gap: 8px;
+        width: 100%;
+        border: 0;
+        border-top: 1px solid var(--line-row);
+        background: transparent;
+        padding: 7px 0 0;
+        color: var(--text-control);
+        cursor: pointer;
+        font: 400 11.5px/1.45 var(--font-mono);
+        text-align: left;
+
+        &:hover .review-board-summary {
+          color: var(--button-hover-text);
+        }
+      }
+
+      .review-board-glyph {
+        font-weight: 700;
+      }
+
+      .review-board-summary {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .review-board-state {
+        color: var(--dim);
+        font-size: 10px;
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .review-state[data-status="validated"],
+      .review-state[data-status="uncorrected"] {
+        color: var(--user);
+      }
+
+      .review-state[data-status="corrected; verification pending"] {
+        color: var(--primary);
+      }
+
+      .review-state[data-status="verified fixed"] {
+        color: var(--agent);
+      }
+
+      .review-state[data-status="deferred by correction threshold"] {
+        color: var(--tool);
+      }
+
+      .review-state[data-status="invalidated"] {
+        color: var(--red-hot);
+      }
+
+      .review-issues-panel {
+        width: min(980px, 100%);
+      }
+
+      .review-issues-body {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .review-workflow {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .review-workflow-title {
+        margin: 0;
+        color: var(--red-hot);
+        font: 700 10px/1.4 var(--font-mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .review-issue-detail {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px;
+        border: 1px solid var(--line-row);
+        border-left: 3px solid var(--line-strong);
+        background: var(--surface-terminal);
+      }
+
+      .review-issue-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 5px 10px;
+      }
+
+      .review-issue-title {
+        margin: 0;
+        color: var(--text-control);
+        font: 700 12px/1.35 var(--font-mono);
+      }
+
+      .review-issue-status {
+        font: 700 10px/1.35 var(--font-mono);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .review-detail-section {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .review-detail-label {
+        color: var(--dim);
+        font: 700 9.5px/1.3 var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .review-detail-content {
+        color: var(--text);
+        font-size: 13px;
+      }
+
+      .review-detail-content .entry-text,
+      .review-detail-content .code-block {
+        margin: 0;
+      }
+
       /* The frame is a dedicated child (edge bg + gap/fill pseudos) instead of
          layers on .console itself: clip-path on .console would also clip the
          combobox popups that open out of the control strip. */
@@ -3214,6 +3404,7 @@
           <div id="status-fields" class="status-fields"></div>
           <div id="status-quotas" class="status-quotas" hidden></div>
         </div>
+        <section id="review-board" class="review-board" aria-label="Review findings"></section>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
@@ -3271,6 +3462,16 @@
         </header>
         <div id="workspace-diff-notice" class="mjconfig-notice" role="status"></div>
         <div id="workspace-diff-body" class="mjconfig-body"></div>
+      </div>
+    </section>
+
+    <section id="review-issues-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="review-issues-title" hidden>
+      <div class="new-session-panel review-issues-panel">
+        <header class="new-session-head">
+          <h2 id="review-issues-title">Review issues — full evidence</h2>
+          <button id="review-issues-close" class="new-session-close" type="button" aria-label="Close review issues">×</button>
+        </header>
+        <div id="review-issues-body" class="mjconfig-body review-issues-body"></div>
       </div>
     </section>
 
@@ -3423,6 +3624,10 @@
       const workspaceDiffRefreshEl = $("workspace-diff-refresh");
       const workspaceDiffNoticeEl = $("workspace-diff-notice");
       const workspaceDiffBodyEl = $("workspace-diff-body");
+      const reviewBoardEl = $("review-board");
+      const reviewIssuesModalEl = $("review-issues-modal");
+      const reviewIssuesCloseEl = $("review-issues-close");
+      const reviewIssuesBodyEl = $("review-issues-body");
       const settingsModalEl = $("settings-modal");
       const settingsCloseEl = $("settings-close");
       const showDiffsToggleEl = $("show-diffs-toggle");
@@ -6831,6 +7036,263 @@
         void requestWorkspaceDiffRefresh();
       }
 
+      /* ---- review ledger ---- */
+
+      const REVIEW_STATUS = {
+        "validated": {
+          glyph: "●",
+          label: "awaiting correction",
+          explanation: "The review supervisor confirmed this finding. No correction has completed for it.",
+        },
+        "corrected; verification pending": {
+          glyph: "◐",
+          label: "verification pending",
+          explanation: "The workspace changed and correction evidence is recorded below. No later review has returned clean, so this is not presented as fixed.",
+        },
+        "verified fixed": {
+          glyph: "✔",
+          label: "independently verified",
+          explanation: "A later verification review returned clean after the correction.",
+        },
+        "deferred by correction threshold": {
+          glyph: "⏸",
+          label: "deferred by policy",
+          explanation: "The review supervisor validated this finding, but it was below the configured automatic correction threshold. It remains tracked and was not sent for correction.",
+        },
+        "unresolved": {
+          glyph: "!",
+          label: "unresolved",
+          explanation: "The correction turn completed without changing the workspace. This validated finding is not fixed.",
+        },
+        "invalidated": {
+          glyph: "✘",
+          label: "invalidated",
+          explanation: "The review workflow explicitly invalidated this finding; the recorded reason is below.",
+        },
+      };
+
+      function reviewWorkflows(session) {
+        if (!Array.isArray(session?.review_workflows)) {
+          return [];
+        }
+        return [...session.review_workflows]
+          .filter((workflow) => workflow && Array.isArray(workflow.issues))
+          .sort((left, right) => (left.turn_id || 0) - (right.turn_id || 0) || (left.operation || 0) - (right.operation || 0));
+      }
+
+      function reviewStatus(issue) {
+        const status = typeof issue?.status === "string" ? issue.status : "validated";
+        return {
+          status,
+          ...(REVIEW_STATUS[status] || {
+            glyph: "•",
+            label: status || "recorded",
+            explanation: "This review status was recorded by the session.",
+          }),
+        };
+      }
+
+      function reviewSummaryLine(summary) {
+        const first = String(summary || "").split("\n").find((line) => line.trim());
+        return first?.trim() || "Review finding";
+      }
+
+      function reviewIssueTally(issues) {
+        const tally = {
+          found: issues.length,
+          validated: 0,
+          corrected: 0,
+          fixed: 0,
+          deferred: 0,
+          unresolved: 0,
+          invalidated: 0,
+        };
+        for (const issue of issues) {
+          switch (issue?.status) {
+            case "validated": tally.validated += 1; break;
+            case "corrected; verification pending": tally.corrected += 1; break;
+            case "verified fixed": tally.fixed += 1; break;
+            case "deferred by correction threshold": tally.deferred += 1; break;
+            case "unresolved": tally.unresolved += 1; break;
+            case "invalidated": tally.invalidated += 1; break;
+            default: tally.validated += 1; break;
+          }
+        }
+        return tally;
+      }
+
+      function reviewTallyText(issues) {
+        const tally = reviewIssueTally(issues);
+        const parts = [`${tally.found} issue${tally.found === 1 ? "" : "s"}`];
+        for (const [count, label] of [
+          [tally.validated, "open"],
+          [tally.corrected, "unverified"],
+          [tally.fixed, "verified"],
+          [tally.deferred, "deferred"],
+          [tally.unresolved, "unresolved"],
+          [tally.invalidated, "invalidated"],
+        ]) {
+          if (count) {
+            parts.push(`${count} ${label}`);
+          }
+        }
+        return parts.join(" · ");
+      }
+
+      function visibleReviewWorkflow(session) {
+        const workflows = reviewWorkflows(session)
+          .filter((workflow) => workflow.issues.length);
+        const active = workflows.filter((workflow) => !workflow.outcome);
+        return active[active.length - 1] || workflows[workflows.length - 1] || null;
+      }
+
+      function openReviewIssues() {
+        paintReviewIssues(selectedSession());
+        reviewIssuesModalEl.hidden = false;
+        reviewIssuesCloseEl.focus();
+      }
+
+      function closeReviewIssues() {
+        reviewIssuesModalEl.hidden = true;
+      }
+
+      function renderReviewBoard(session) {
+        reviewBoardEl.replaceChildren();
+        const workflow = visibleReviewWorkflow(session);
+        if (!workflow) {
+          return;
+        }
+
+        const head = document.createElement("div");
+        head.className = "review-board-head";
+        const title = document.createElement("span");
+        title.className = "review-board-title";
+        title.textContent = workflow.outcome ? `⚖ Review · ${workflow.outcome}` : "⚖ Review";
+        const tally = document.createElement("span");
+        tally.className = "review-board-tally";
+        tally.textContent = reviewTallyText(workflow.issues);
+        const details = document.createElement("button");
+        details.className = "review-board-details";
+        details.type = "button";
+        details.textContent = "Full evidence";
+        details.addEventListener("click", openReviewIssues);
+        head.append(title, tally, details);
+        reviewBoardEl.appendChild(head);
+
+        const visible = workflow.issues
+          .slice()
+          .sort((left, right) => reviewIssueRank(left) - reviewIssueRank(right) || (left.id || 0) - (right.id || 0));
+        const maxRows = 5;
+        for (const issue of visible.slice(0, maxRows)) {
+          const status = reviewStatus(issue);
+          const row = document.createElement("button");
+          row.className = "review-board-row";
+          row.type = "button";
+          row.setAttribute("aria-label", `Review issue ${issue.id}: ${reviewSummaryLine(issue.summary)} — ${status.label}. Open full evidence.`);
+          row.addEventListener("click", openReviewIssues);
+
+          const glyph = document.createElement("span");
+          glyph.className = "review-board-glyph review-state";
+          glyph.dataset.status = status.status;
+          glyph.setAttribute("aria-hidden", "true");
+          glyph.textContent = status.glyph;
+          const summary = document.createElement("span");
+          summary.className = "review-board-summary";
+          summary.title = issue.summary || "";
+          summary.textContent = `#${issue.id} ${reviewSummaryLine(issue.summary)}`;
+          const state = document.createElement("span");
+          state.className = "review-board-state review-state";
+          state.dataset.status = status.status;
+          state.textContent = status.label;
+          row.append(glyph, summary, state);
+          reviewBoardEl.appendChild(row);
+        }
+        if (visible.length > maxRows) {
+          const more = document.createElement("button");
+          more.className = "review-board-details";
+          more.type = "button";
+          more.textContent = `… ${visible.length - maxRows} more issue${visible.length - maxRows === 1 ? "" : "s"} · full evidence`;
+          more.addEventListener("click", openReviewIssues);
+          reviewBoardEl.appendChild(more);
+        }
+      }
+
+      function reviewIssueRank(issue) {
+        switch (issue?.status) {
+          case "validated": return 0;
+          case "deferred by correction threshold": return 1;
+          case "corrected; verification pending": return 2;
+          case "unresolved": return 3;
+          case "invalidated": return 4;
+          case "verified fixed": return 5;
+          default: return 0;
+        }
+      }
+
+      function appendReviewDetail(parent, label, content, voice = "prose") {
+        if (!content) {
+          return;
+        }
+        const section = document.createElement("section");
+        section.className = "review-detail-section";
+        const heading = document.createElement("div");
+        heading.className = "review-detail-label";
+        heading.textContent = label;
+        const body = document.createElement("div");
+        body.className = "review-detail-content";
+        body.appendChild(renderRichText(content, voice));
+        section.append(heading, body);
+        parent.appendChild(section);
+      }
+
+      function paintReviewIssues(session) {
+        reviewIssuesBodyEl.replaceChildren();
+        const workflows = reviewWorkflows(session);
+        if (!workflows.length) {
+          reviewIssuesBodyEl.appendChild(emptyNote("No review issues recorded yet."));
+          return;
+        }
+
+        for (const workflow of workflows) {
+          const group = document.createElement("section");
+          group.className = "review-workflow";
+          const title = document.createElement("h3");
+          title.className = "review-workflow-title";
+          const outcome = workflow.outcome ? ` · ${workflow.outcome}` : " · active";
+          title.textContent = `⚖ Turn ${workflow.turn_id} · review${outcome} · ${reviewTallyText(workflow.issues)}`;
+          group.appendChild(title);
+
+          const issues = workflow.issues
+            .slice()
+            .sort((left, right) => (left.pass || 0) - (right.pass || 0) || (left.id || 0) - (right.id || 0));
+          if (!issues.length) {
+            group.appendChild(emptyNote("No material findings in this review."));
+          }
+          for (const issue of issues) {
+            const status = reviewStatus(issue);
+            const card = document.createElement("article");
+            card.className = "review-issue-detail";
+            const head = document.createElement("header");
+            head.className = "review-issue-head";
+            const issueTitle = document.createElement("h4");
+            issueTitle.className = "review-issue-title";
+            issueTitle.textContent = `#${issue.id} · review pass ${(issue.pass || 0) + 1}`;
+            const issueStatus = document.createElement("span");
+            issueStatus.className = "review-issue-status review-state";
+            issueStatus.dataset.status = status.status;
+            issueStatus.textContent = `${status.glyph} ${status.label}`;
+            head.append(issueTitle, issueStatus);
+            card.appendChild(head);
+            appendReviewDetail(card, "Finding — validated review evidence", issue.summary || "Review finding");
+            appendReviewDetail(card, "Status", status.explanation);
+            appendReviewDetail(card, "Recorded outcome", issue.resolution_reason);
+            appendReviewDetail(card, "Correction evidence", issue.resolution_details, "mono");
+            group.appendChild(card);
+          }
+          reviewIssuesBodyEl.appendChild(group);
+        }
+      }
+
       function appendToolDiffs(body, entry) {
         if (!showTranscriptDiffs) {
           return;
@@ -8471,9 +8933,13 @@
         renderStatusLine(session);
         renderTranscript(session, archived);
         renderConfig(readOnly || sideActive ? null : session);
+        renderReviewBoard(session);
         renderSubagents(session);
         renderPermissions(readOnly ? null : session);
         renderQueue(readOnly ? null : session);
+        if (!reviewIssuesModalEl.hidden) {
+          paintReviewIssues(session);
+        }
         updateCommandPalette();
       }
 
@@ -8850,6 +9316,12 @@
           workspaceDiffModalEl.hidden = true;
         }
       });
+      reviewIssuesCloseEl.addEventListener("click", closeReviewIssues);
+      reviewIssuesModalEl.addEventListener("click", (event) => {
+        if (event.target === reviewIssuesModalEl) {
+          closeReviewIssues();
+        }
+      });
       settingsCloseEl.addEventListener("click", closeViewerSettings);
       settingsModalEl.addEventListener("click", (event) => {
         if (event.target === settingsModalEl) {
@@ -8896,6 +9368,9 @@
         if (!workspaceDiffModalEl.hidden) {
           event.preventDefault();
           workspaceDiffModalEl.hidden = true;
+        } else if (!reviewIssuesModalEl.hidden) {
+          event.preventDefault();
+          closeReviewIssues();
         } else if (!mjconfigModalEl.hidden) {
           event.preventDefault();
           closeMjConfig();

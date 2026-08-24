@@ -76,6 +76,11 @@ jobs:
       with:
         components: rustfmt, clippy
 
+    - name: Set up Node
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+
     - name: Install Linux native dependencies
       if: runner.os == 'Linux'
       run: |

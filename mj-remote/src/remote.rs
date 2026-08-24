@@ -205,6 +205,11 @@ pub struct SessionRecord {
     pub agent: String,
     #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
+    /// Structured review workflows, including every issue's finding,
+    /// resolution, and correction evidence. Kept apart from the transcript so
+    /// the web viewer can present the same ledger and full reader as the TUI.
+    #[serde(default)]
+    pub review_workflows: Vec<ReviewWorkflowRecord>,
     #[serde(default)]
     pub queued_prompt_count: u64,
     /// True while this session has an ACP prompt turn in flight.
@@ -250,6 +255,34 @@ pub struct SessionRecord {
     /// and the current branch's open pull request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SessionStatusRecord>,
+}
+
+/// A review workflow projected for the remote viewer. The runtime owns the
+/// authoritative reducer; this record is the durable display projection it
+/// publishes to the browser and session archive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewWorkflowRecord {
+    pub turn_id: u64,
+    pub operation: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub issues: Vec<ReviewIssueRecord>,
+}
+
+/// Complete display data for one review finding. Status values use the
+/// canonical `ReviewIssueStatus::as_str` labels so the TUI and web wording
+/// remains aligned without making the remote API depend on core's enum serde.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewIssueRecord {
+    pub id: usize,
+    pub pass: u32,
+    pub summary: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_details: Option<String>,
 }
 
 /// A live session plus viewer-only ownership metadata. Ownership is derived
@@ -2081,10 +2114,9 @@ impl TrackerState {
     /// Mirror one workflow lifecycle transition.
     ///
     /// Reduce it into the tracker's own `WorkflowStore` first, exactly as
-    /// `AppState` does, then render the same notices the TUI writes to its
-    /// transcript. Review workflows are the longest-running thing a session
-    /// does, so without this a remote watcher sees a silent gap where the
-    /// terminal shows the review starting, waiting and finishing.
+    /// `AppState` does. The snapshot publishes that store's review ledger
+    /// separately from the generic lifecycle notices, so the browser has the
+    /// same issue evidence and verification state as the TUI.
     fn observe_workflow_event(&mut self, event: &mj_core::workflow::WorkflowEvent) {
         use mj_core::workflow::{ApplyOutcome, WorkflowActorId, WorkflowState, WorkflowTransition};
 
@@ -2132,8 +2164,9 @@ impl TrackerState {
             // Listed rather than caught by `_` on purpose: a new transition
             // variant should make whoever adds it decide whether the remote
             // transcript wants it, instead of silently defaulting to "no".
-            // Per-actor transitions drive the subagent status rows, and the
-            // issue transitions are status-line only in the TUI too.
+            // Per-actor transitions drive the subagent status rows. Issue
+            // transitions are represented by the snapshot's structured review
+            // ledger rather than duplicated as generic transcript notices.
             WorkflowTransition::PhaseChanged { .. }
             | WorkflowTransition::CoverageChanged { .. }
             | WorkflowTransition::ActorStarted { .. }
@@ -2729,6 +2762,7 @@ impl TrackerState {
             worktree: self.worktree.clone(),
             agent: self.agent.clone(),
             transcript: self.published_transcript(),
+            review_workflows: self.review_workflows(),
             queued_prompt_count: 0,
             prompt_in_flight: if self.side_state == RemoteSideState::Inactive {
                 self.prompt_in_flight && self.prompt_turn_started_at.is_some()
@@ -2746,6 +2780,33 @@ impl TrackerState {
             workspace_head_diff: self.workspace_head_diff.clone(),
             status: Some(self.status_record()),
         })
+    }
+
+    fn review_workflows(&self) -> Vec<ReviewWorkflowRecord> {
+        let mut workflows = self
+            .workflows
+            .iter()
+            .filter(|workflow| workflow.kind == mj_core::workflow::WorkflowKind::Review)
+            .map(|workflow| ReviewWorkflowRecord {
+                turn_id: workflow.id.turn_id,
+                operation: workflow.id.operation,
+                outcome: workflow.outcome.map(|outcome| outcome.as_str().to_string()),
+                issues: workflow
+                    .issues
+                    .iter()
+                    .map(|issue| ReviewIssueRecord {
+                        id: issue.id,
+                        pass: issue.pass,
+                        summary: issue.summary.clone(),
+                        status: issue.status.as_str().to_string(),
+                        resolution_reason: issue.resolution_reason.clone(),
+                        resolution_details: issue.resolution_details.clone(),
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        workflows.sort_by_key(|workflow| (workflow.turn_id, workflow.operation));
+        workflows
     }
 
     fn status_record(&self) -> SessionStatusRecord {
@@ -7847,6 +7908,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "subagents_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
+    ensure_sessions_column(&conn, "review_workflows_json", "text not null default '[]'")?;
     ensure_table_column(
         &conn,
         "queued_prompts",
@@ -7923,6 +7985,8 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
         .map(serde_json::to_string)
         .transpose()
         .context("serialize remote-control workspace diff")?;
+    let review_workflows_json = serde_json::to_string(&session.review_workflows)
+        .context("serialize remote-control review workflows")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     let prompt_images_supported = if session.prompt_images_supported {
@@ -7958,9 +8022,10 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             subagents_json,
             status_json,
             workspace_diff_json,
+            review_workflows_json,
             lease_id,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -7985,6 +8050,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             subagents_json = excluded.subagents_json,
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
+            review_workflows_json = excluded.review_workflows_json,
             lease_id = excluded.lease_id,
             connected = 1
         where excluded.last_update >= sessions.last_update
@@ -8019,6 +8085,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             subagents_json,
             status_json,
             workspace_diff_json,
+            review_workflows_json,
             session.lease_id,
         ],
     )
@@ -8256,7 +8323,8 @@ const SESSION_RECORD_SELECT: &str = "select
     worktree,
     subagents_json,
     status_json,
-    workspace_diff_json
+    workspace_diff_json,
+    review_workflows_json
 from sessions";
 
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
@@ -8408,7 +8476,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 worktree,
                 subagents_json,
                 status_json,
-                workspace_diff_json
+                workspace_diff_json,
+                review_workflows_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -8438,12 +8507,14 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let subagents_json: String = row.get(17)?;
     let status_json: Option<String> = row.get(18)?;
     let workspace_diff_json: Option<String> = row.get(19)?;
+    let review_workflows_json: String = row.get(20)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
     let session_config = serde_json::from_str(&session_config_json).unwrap_or_default();
     let available_commands = serde_json::from_str(&available_commands_json).unwrap_or_default();
     let subagents = serde_json::from_str(&subagents_json).unwrap_or_default();
+    let review_workflows = serde_json::from_str(&review_workflows_json).unwrap_or_default();
     let last_prompt_at: Option<String> = row
         .get::<_, Option<String>>(4)?
         .filter(|value| !value.is_empty())
@@ -8460,6 +8531,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         worktree: row.get::<_, Option<String>>(16)?,
         agent: row.get(7)?,
         transcript,
+        review_workflows,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
         prompt_in_flight: prompt_in_flight != 0,
         prompt_images_supported: prompt_images_supported != 0,
@@ -10623,6 +10695,136 @@ mod tests {
     }
 
     #[test]
+    fn embedded_viewer_renders_the_review_ledger_and_full_evidence_reader() {
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("id=\"review-board\""));
+        assert!(viewer.contains("id=\"review-issues-modal\""));
+
+        let review_start = viewer
+            .find("      const REVIEW_STATUS = {")
+            .expect("embedded viewer review ledger");
+        let review_end = viewer
+            .find("      function appendToolDiffs")
+            .expect("review ledger boundary");
+        let review_source = &viewer[review_start..review_end];
+
+        // Execute the exact browser rendering functions with a deliberately
+        // small DOM shim. This verifies the visible board and the evidence
+        // reader instead of merely checking that their source text exists.
+        let mut script = String::from(
+            r##"
+class FixtureNode {
+  constructor(tag = "div") {
+    this.tagName = tag;
+    this.children = [];
+    this.className = "";
+    this.dataset = {};
+    this.hidden = false;
+    this.textContent = "";
+    this.title = "";
+    this.type = "";
+    this.attributes = {};
+    this.listeners = {};
+  }
+  append(...nodes) { this.children.push(...nodes); }
+  appendChild(node) { this.children.push(node); return node; }
+  replaceChildren(...nodes) { this.children = [...nodes]; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+  click() { this.listeners.click?.({ target: this }); }
+  focus() {}
+  get innerText() {
+    return `${this.textContent}${this.children.map((child) => child.innerText ?? child.textContent ?? "").join("")}`;
+  }
+}
+
+globalThis.document = {
+  createElement(tag) { return new FixtureNode(tag); },
+  createDocumentFragment() { return new FixtureNode("#fragment"); },
+};
+
+const reviewBoardEl = new FixtureNode("section");
+const reviewIssuesBodyEl = new FixtureNode("div");
+const reviewIssuesModalEl = new FixtureNode("section");
+reviewIssuesModalEl.hidden = true;
+const reviewIssuesCloseEl = new FixtureNode("button");
+const fixtureSession = {
+  review_workflows: [{
+    turn_id: 7,
+    operation: 1,
+    outcome: "completed",
+    issues: [{
+      id: 1,
+      pass: 0,
+      summary: "P1 mj-remote/src/remote.rs: browser must expose this finding",
+      status: "corrected; verification pending",
+      resolution_reason: "the correction changed the workspace",
+      resolution_details: "cargo test -p brokk-mj-remote\n\ndiff --git a/mj-remote/src/remote.rs",
+    }],
+  }],
+};
+function selectedSession() { return fixtureSession; }
+function emptyNote(text) {
+  const note = new FixtureNode("p");
+  note.textContent = text;
+  return note;
+}
+function renderRichText(text) {
+  const rendered = new FixtureNode("div");
+  rendered.textContent = text;
+  return rendered;
+}
+"##,
+        );
+        script.push_str(review_source);
+        script.push_str(
+            r##"
+renderReviewBoard(fixtureSession);
+if (!reviewBoardEl.innerText.includes("Review · completed")) {
+  throw new Error(`review board did not render completed workflow: ${reviewBoardEl.innerText}`);
+}
+if (!reviewBoardEl.innerText.includes("#1 P1 mj-remote/src/remote.rs")) {
+  throw new Error(`review board did not render finding summary: ${reviewBoardEl.innerText}`);
+}
+if (!reviewBoardEl.innerText.includes("verification pending")) {
+  throw new Error(`review board did not render finding status: ${reviewBoardEl.innerText}`);
+}
+const fullEvidence = reviewBoardEl.children[0].children.find((child) => child.textContent === "Full evidence");
+if (!fullEvidence) {
+  throw new Error("review board did not render full evidence action");
+}
+fullEvidence.click();
+if (reviewIssuesModalEl.hidden) {
+  throw new Error("full evidence action did not open the evidence reader");
+}
+const evidence = reviewIssuesBodyEl.innerText;
+for (const expected of [
+  "Finding — validated review evidence",
+  "browser must expose this finding",
+  "Correction evidence",
+  "diff --git a/mj-remote/src/remote.rs",
+]) {
+  if (!evidence.includes(expected)) {
+    throw new Error(`evidence reader omitted ${expected}: ${evidence}`);
+  }
+}
+"##,
+        );
+
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer review behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
     fn embedded_viewer_keeps_session_actions_in_wrapping_mobile_header() {
         let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
         assert!(viewer.contains("id=\"mobile-new-session-button\""));
@@ -12092,6 +12294,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tracker_publishes_full_review_issue_evidence() {
+        use mj_core::workflow::{
+            ReviewIssueStatus, WorkflowCoverage, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = started_session_tracker();
+        let workflow_id = WorkflowId::review(7);
+        for transition in [
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+            WorkflowTransition::IssuesValidated {
+                pass: 0,
+                summaries: vec!["P1 src/lib.rs: stale state escapes the correction".to_string()],
+            },
+            WorkflowTransition::IssuesResolved {
+                pass: 0,
+                summaries: None,
+                status: ReviewIssueStatus::Corrected,
+                reason: Some("updated the transition and added a focused test".to_string()),
+                details: Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string()),
+            },
+            WorkflowTransition::Terminal {
+                outcome: WorkflowOutcome::Completed,
+                coverage: WorkflowCoverage::Complete,
+            },
+        ] {
+            state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+                workflow_id,
+                transition,
+            )));
+        }
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.review_workflows.len(), 1);
+        let workflow = &snapshot.review_workflows[0];
+        assert_eq!(workflow.turn_id, 7);
+        assert_eq!(workflow.outcome.as_deref(), Some("completed"));
+        assert_eq!(workflow.issues.len(), 1);
+        assert_eq!(
+            workflow.issues[0].summary,
+            "P1 src/lib.rs: stale state escapes the correction"
+        );
+        assert_eq!(workflow.issues[0].status, "corrected; verification pending");
+        assert_eq!(
+            workflow.issues[0].resolution_reason.as_deref(),
+            Some("updated the transition and added a focused test")
+        );
+        assert_eq!(
+            workflow.issues[0].resolution_details.as_deref(),
+            Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs")
+        );
+    }
+
     /// The upsert route refuses to move `last_update` backwards, so a fold
     /// that mutates state without touching the timestamp produces a snapshot
     /// the server rejects. Workflow transitions used to do exactly that.
@@ -12859,6 +13118,19 @@ mod tests {
                     tool_diffs: Vec::new(),
                 },
             ],
+            review_workflows: vec![ReviewWorkflowRecord {
+                turn_id: 4,
+                operation: 1,
+                outcome: Some("completed".to_string()),
+                issues: vec![ReviewIssueRecord {
+                    id: 1,
+                    pass: 0,
+                    summary: "P1 src/lib.rs: stale state escapes the correction".to_string(),
+                    status: "verified fixed".to_string(),
+                    resolution_reason: Some("verified by a later clean review".to_string()),
+                    resolution_details: Some("cargo test -p mj-core".to_string()),
+                }],
+            }],
             queued_prompt_count: 0,
             prompt_in_flight: true,
             prompt_images_supported: true,
@@ -12902,6 +13174,21 @@ mod tests {
         };
 
         upsert_session_record(&db_path, &session).expect("insert");
+        let updated_review_workflows = vec![ReviewWorkflowRecord {
+            turn_id: 4,
+            operation: 1,
+            outcome: Some("completed".to_string()),
+            issues: vec![ReviewIssueRecord {
+                id: 1,
+                pass: 1,
+                summary: "P1 src/lib.rs: stale state escapes the correction".to_string(),
+                status: "corrected; verification pending".to_string(),
+                resolution_reason: Some("the correction changed the workspace".to_string()),
+                resolution_details: Some(
+                    "cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string(),
+                ),
+            }],
+        }];
         upsert_session_record(
             &db_path,
             &SessionRecord {
@@ -12929,6 +13216,7 @@ mod tests {
                         tool_diffs: Vec::new(),
                     },
                 ],
+                review_workflows: updated_review_workflows.clone(),
                 ..session.clone()
             },
         )
@@ -12948,6 +13236,8 @@ mod tests {
             Some("2026-06-03T10:00:05Z")
         );
         assert_eq!(sessions[0].transcript.len(), 2);
+        assert_eq!(sessions[0].review_workflows, updated_review_workflows);
+        assert_ne!(sessions[0].review_workflows, session.review_workflows);
         assert_eq!(sessions[0].transcript[0].kind, "user");
         assert_eq!(sessions[0].transcript[0].text, "hello");
         assert_eq!(sessions[0].transcript[1].kind, "agent");
@@ -13404,6 +13694,7 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
@@ -14406,6 +14697,7 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
@@ -15510,6 +15802,7 @@ mod tests {
             worktree: None,
             agent: "opencode".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
@@ -16862,6 +17155,7 @@ mod tests {
             worktree: None,
             agent: "agent".to_string(),
             transcript: Vec::new(),
+            review_workflows: Vec::new(),
             queued_prompt_count: 0,
             prompt_in_flight: false,
             prompt_images_supported: false,
