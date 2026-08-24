@@ -1440,6 +1440,18 @@ struct RemoteConnection {
     base_urls: Arc<Vec<String>>,
 }
 
+impl RemoteConnection {
+    /// Preserve the shared TLS client and bearer token while refreshing the
+    /// live listener list from SQLite.
+    fn with_base_urls(&self, base_urls: Vec<String>) -> Self {
+        Self {
+            client: self.client.clone(),
+            token: Arc::clone(&self.token),
+            base_urls: Arc::new(base_urls),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteSessionTracker {
     remote_dir: Arc<PathBuf>,
@@ -3005,7 +3017,6 @@ impl RemoteSessionTracker {
         attached_ui: bool,
     ) -> Self {
         let dir = remote_control_dir();
-        let connection = build_connection(&dir);
         let mut state = TrackerState::new(project, agent);
         state.side_coordinator_supported = ui_event_tx.is_some();
         state.worktree = worktree;
@@ -3014,7 +3025,10 @@ impl RemoteSessionTracker {
         state.cwd = status.cwd.clone();
         let tracker = Self {
             remote_dir: Arc::new(dir),
-            connection: Arc::new(Mutex::new(connection)),
+            // Connecting opens the shared SQLite registry and builds the
+            // pinned HTTPS client. Do that in the async connector rather than
+            // while constructing the TUI tracker on its caller's thread.
+            connection: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(state)),
             publisher: Arc::new(Mutex::new(None)),
             publish_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3355,7 +3369,7 @@ impl RemoteSessionTracker {
             handle.abort();
             let _ = handle.await;
         }
-        let Some(connection) = self.reload_connection() else {
+        let Some(connection) = self.reload_connection().await else {
             return;
         };
         let (snapshot, mut sessions_to_disconnect, lease_id) = match self.state.lock() {
@@ -3443,14 +3457,48 @@ impl RemoteSessionTracker {
         self.connection.lock().ok().and_then(|guard| guard.clone())
     }
 
-    fn reload_connection(&self) -> Option<RemoteConnection> {
-        let connection = build_connection(&self.remote_dir);
+    async fn reload_connection(&self) -> Option<RemoteConnection> {
+        let connection = match self.connection() {
+            Some(existing) => {
+                let db_path = self.remote_dir.join("sessions.sqlite3");
+                let base_urls =
+                    match tokio::task::spawn_blocking(move || load_live_server_base_urls(&db_path))
+                        .await
+                    {
+                        Ok(Ok(base_urls)) => base_urls,
+                        Ok(Err(error)) => {
+                            debug!("remote-control: load live server instances failed: {error:#}");
+                            return None;
+                        }
+                        Err(error) => {
+                            warn!("remote-control: live-server lookup task panicked: {error}");
+                            return None;
+                        }
+                    };
+                if base_urls.is_empty() {
+                    return None;
+                }
+                existing.with_base_urls(base_urls)
+            }
+            None => {
+                let remote_dir = Arc::clone(&self.remote_dir);
+                match tokio::task::spawn_blocking(move || build_connection(&remote_dir)).await {
+                    Ok(Some(connection)) => connection,
+                    Ok(None) => return None,
+                    Err(error) => {
+                        warn!("remote-control: connection setup task panicked: {error}");
+                        return None;
+                    }
+                }
+            }
+        };
         if let Ok(mut guard) = self.connection.lock() {
-            *guard = connection.clone();
+            *guard = Some(connection.clone());
         }
-        connection
+        Some(connection)
     }
 
+    #[cfg(test)]
     fn set_connection_once(&self, connection: RemoteConnection) -> bool {
         let Ok(mut guard) = self.connection.lock() else {
             return false;
@@ -3483,17 +3531,15 @@ impl RemoteSessionTracker {
                 if tracker.shutting_down.load(Ordering::Relaxed) || tracker.connection().is_some() {
                     break;
                 }
-                let Some(connection) = build_connection(&tracker.remote_dir) else {
+                if tracker.reload_connection().await.is_none() {
                     tokio::time::sleep(retry_interval).await;
                     retry_interval = REMOTE_CONNECT_RETRY_INTERVAL;
                     continue;
-                };
+                }
                 if tracker.shutting_down.load(Ordering::Relaxed) {
                     break;
                 }
-                if tracker.set_connection_once(connection)
-                    && !tracker.shutting_down.load(Ordering::Relaxed)
-                {
+                if !tracker.shutting_down.load(Ordering::Relaxed) {
                     tracker.ensure_publisher();
                     tracker.ensure_queue_poller(command_tx.clone(), ui_event_tx.clone());
                     tracker.request_flush();
@@ -3507,7 +3553,7 @@ impl RemoteSessionTracker {
         if self.shutting_down.load(Ordering::Relaxed) {
             return;
         }
-        if self.connection().is_none() && self.reload_connection().is_none() {
+        if self.connection().is_none() {
             return;
         }
         let Ok(mut slot) = self.publisher.lock() else {
@@ -3546,17 +3592,17 @@ impl RemoteSessionTracker {
                 let Some(snapshot) = snapshot else {
                     continue;
                 };
-                let Some(connection) = tracker.reload_connection() else {
+                let Some(connection) = tracker.reload_connection().await else {
                     continue;
                 };
                 if let Err(error) = send_snapshot(connection.clone(), snapshot).await {
                     publish_failures.record_failure(&error);
-                    tracker.reload_connection();
+                    tracker.reload_connection().await;
                     continue;
                 }
                 publish_failures.record_success();
                 for old_session_id in sessions_to_disconnect {
-                    let Some(connection) = tracker.reload_connection() else {
+                    let Some(connection) = tracker.reload_connection().await else {
                         break;
                     };
                     if let Err(error) = send_finish(
@@ -3570,7 +3616,7 @@ impl RemoteSessionTracker {
                     .await
                     {
                         debug!("remote-control stale-session disconnect failed: {error:#}");
-                        tracker.reload_connection();
+                        tracker.reload_connection().await;
                     }
                 }
             }
@@ -3606,7 +3652,7 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.prompt_cancel_claim());
                 if let Some((session_id, prompt_started_at)) = cancel_claim {
-                    let Some(connection) = tracker.reload_connection() else {
+                    let Some(connection) = tracker.reload_connection().await else {
                         continue;
                     };
                     match claim_remote_prompt_cancel(
@@ -3637,7 +3683,7 @@ impl RemoteSessionTracker {
                                         debug!(
                                             "remote queued-prompt claim for Stop steering failed: {error:#}"
                                         );
-                                        tracker.reload_connection();
+                                        tracker.reload_connection().await;
                                         UiCommand::CancelPrompt
                                     }
                                 }
@@ -3652,7 +3698,7 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote prompt-cancel poll failed: {error:#}");
-                            tracker.reload_connection();
+                            tracker.reload_connection().await;
                             continue;
                         }
                     }
@@ -3669,7 +3715,7 @@ impl RemoteSessionTracker {
                         .ok()
                         .and_then(|guard| guard.permission_claim_session());
                     if let Some(session_id) = claim_session {
-                        let Some(connection) = tracker.reload_connection() else {
+                        let Some(connection) = tracker.reload_connection().await else {
                             continue;
                         };
                         match claim_remote_permission_decision(connection.clone(), &session_id)
@@ -3684,7 +3730,7 @@ impl RemoteSessionTracker {
                             Ok(None) => {}
                             Err(error) => {
                                 debug!("remote permission-decision poll failed: {error:#}");
-                                tracker.reload_connection();
+                                tracker.reload_connection().await;
                             }
                         }
                     }
@@ -3700,7 +3746,7 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
-                    let Some(connection) = tracker.reload_connection() else {
+                    let Some(connection) = tracker.reload_connection().await else {
                         continue;
                     };
                     match claim_remote_config_change(connection.clone(), &session_id).await {
@@ -3732,7 +3778,7 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote config-change poll failed: {error:#}");
-                            tracker.reload_connection();
+                            tracker.reload_connection().await;
                         }
                     }
                 }
@@ -3747,7 +3793,7 @@ impl RemoteSessionTracker {
                     continue;
                 };
 
-                let Some(connection) = tracker.reload_connection() else {
+                let Some(connection) = tracker.reload_connection().await else {
                     if let Ok(mut guard) = state.lock() {
                         guard.release_remote_prompt_slot();
                     }
@@ -3980,7 +4026,7 @@ impl RemoteSessionTracker {
                     }
                     Err(error) => {
                         debug!("remote queued-prompt poll failed: {error:#}");
-                        tracker.reload_connection();
+                        tracker.reload_connection().await;
                         if let Ok(mut guard) = state.lock() {
                             guard.release_remote_prompt_slot();
                         }
@@ -3997,25 +4043,20 @@ impl RemoteSessionTracker {
 fn build_connection(dir: &Path) -> Option<RemoteConnection> {
     let token = read_token(&dir.join("token")).map(Arc::new)?;
     let client = build_client(&dir.join("local-tls.pem"))?;
-    let instances = match load_live_server_instances(&dir.join("sessions.sqlite3")) {
-        Ok(instances) => instances,
+    let base_urls = match load_live_server_base_urls(&dir.join("sessions.sqlite3")) {
+        Ok(base_urls) => base_urls,
         Err(error) => {
             debug!("remote-control: load live server instances failed: {error:#}");
             return None;
         }
     };
-    if instances.is_empty() {
+    if base_urls.is_empty() {
         return None;
     }
     Some(RemoteConnection {
         client,
         token,
-        base_urls: Arc::new(
-            instances
-                .into_iter()
-                .map(|instance| local_server_base_url(instance.port))
-                .collect(),
-        ),
+        base_urls: Arc::new(base_urls),
     })
 }
 
@@ -8301,6 +8342,13 @@ fn load_live_server_instances_at(db_path: &Path, now: i64) -> Result<Vec<LiveSer
 
 fn load_live_server_instances(db_path: &Path) -> Result<Vec<LiveServerInstance>> {
     load_live_server_instances_at(db_path, server_instance_now()?)
+}
+
+fn load_live_server_base_urls(db_path: &Path) -> Result<Vec<String>> {
+    Ok(load_live_server_instances(db_path)?
+        .into_iter()
+        .map(|instance| local_server_base_url(instance.port))
+        .collect())
 }
 
 /// Register a bound listener immediately, then keep its discovery row live
@@ -17836,6 +17884,38 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         register_server_instance(&paths.db_path, "app-a", ServerInstanceKind::App, 11922)
             .expect("register app");
         assert!(build_connection(dir.path()).is_some());
+    }
+
+    #[tokio::test]
+    async fn tracker_refreshes_live_endpoints_without_rebuilding_shared_credentials() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = ensure_server_paths_in(dir.path(), None).expect("paths");
+        ensure_token(&paths.token_path).expect("token");
+        register_server_instance(&paths.db_path, "app-a", ServerInstanceKind::App, 11922)
+            .expect("register app");
+        let tracker = RemoteSessionTracker {
+            remote_dir: Arc::new(dir.path().to_path_buf()),
+            ..RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string())
+        };
+
+        let first = tracker
+            .reload_connection()
+            .await
+            .expect("initial connection");
+        assert_eq!(first.base_urls.as_ref(), &[local_server_base_url(11922)]);
+
+        register_server_instance(&paths.db_path, "server", ServerInstanceKind::Server, 11921)
+            .expect("register primary");
+        let refreshed = tracker
+            .reload_connection()
+            .await
+            .expect("refreshed connection");
+
+        assert!(Arc::ptr_eq(&first.token, &refreshed.token));
+        assert_eq!(
+            refreshed.base_urls.as_ref(),
+            &[local_server_base_url(11921), local_server_base_url(11922)]
+        );
     }
 
     #[test]
