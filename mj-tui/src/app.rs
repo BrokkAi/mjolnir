@@ -251,7 +251,10 @@ fn builtin_compact_command() -> AvailableCommand {
 }
 
 fn builtin_load_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_LOAD_COMMAND, "load a previous session")
+    AvailableCommand::new(
+        BUILTIN_LOAD_COMMAND,
+        "load a previous session into the current primary",
+    )
 }
 
 fn builtin_fork_command() -> AvailableCommand {
@@ -443,6 +446,9 @@ pub enum UiExitReason {
     /// Replace the primary route and give the new session the durable
     /// transcript from the session that just ended.
     TransferSession,
+    /// Replay a session through its owning agent, then give that durable
+    /// transcript to the unchanged primary route.
+    ImportSession,
 }
 
 /// One entry in the scrolling transcript.
@@ -785,7 +791,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::TeamChoice,
     },
     FeatureHint {
-        text: "Use /new for another workspace, /clear for a fresh thread, /load to resume, and /export to save this transcript.",
+        text: "Use /new for another workspace, /clear for a fresh thread, /load to load a session into this primary, and /export to save this transcript.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -10667,7 +10673,7 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[3].description,
-            "load a previous session"
+            "load a previous session into the current primary"
         );
         assert_eq!(
             s.available_commands[4].description,

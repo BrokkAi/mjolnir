@@ -1638,6 +1638,15 @@ pub(crate) fn primary_route_matches(
         && active.reasoning_effort == candidate.reasoning_effort
 }
 
+fn session_import_roster(
+    active: &roster::Roster,
+    source: &roster::ResolvedAgent,
+) -> roster::Roster {
+    let mut import = active.clone();
+    import.primary = source.clone();
+    import
+}
+
 struct RunSessionResult {
     reason: UiExitReason,
     session_id: Option<String>,
@@ -1845,12 +1854,18 @@ async fn run_app(
     let mut pending_models_boundary = None;
     let mut pending_primary_session_handoff = None;
     let mut pending_session_title = None;
+    let mut pending_session_import = None;
     loop {
         let resume = initial_resume.take();
         let primary_session_handoff = pending_primary_session_handoff.take();
+        let session_import_source = pending_session_import.take();
         let agent = initial_agent
             .take()
             .unwrap_or_else(|| primary_agent.clone());
+        let session_roster = session_import_source
+            .as_ref()
+            .map(|source| session_import_roster(&roster, source))
+            .unwrap_or_else(|| roster.clone());
 
         let session_boundary = pending_models_boundary.take().or_else(|| {
             new_session_boundary_for_agent(
@@ -1874,11 +1889,12 @@ async fn run_app(
             },
             resume.as_ref().map(|target| target.session_id.clone()),
             primary_session_handoff,
+            session_import_source.is_some(),
             mode,
             cfg.theme,
             cfg.spinner,
             session_boundary,
-            roster.clone(),
+            session_roster,
             cfg.agent.clone(),
             cfg.review.clone(),
             cfg.subagents.clone(),
@@ -1939,9 +1955,32 @@ async fn run_app(
                 });
                 continue;
             }
+            UiExitReason::ImportSession => {
+                let source = session_import_source
+                    .as_ref()
+                    .expect("session import exits only from a staged source route");
+                let handoff_loaded = session_result.primary_session_handoff.is_some();
+                initial_agent = Some(primary_agent.clone());
+                pending_primary_session_handoff = session_result.primary_session_handoff;
+                pending_session_title = session_result.session_title;
+                pending_models_boundary = Some(if handoff_loaded {
+                    format!(
+                        "Loaded the {} session transcript into {}.",
+                        source.launch.kind.display_name(),
+                        roster.primary.launch.kind.display_name(),
+                    )
+                } else {
+                    format!(
+                        "The selected {} session had no durable transcript to load into {}.",
+                        source.launch.kind.display_name(),
+                        roster.primary.launch.kind.display_name(),
+                    )
+                });
+                continue;
+            }
             UiExitReason::SwitchSession => {
                 if let Some(session_id) = session_result.session_id {
-                    let resume_agent = mj_core::session_provenance::find(&session_id, &cwd)
+                    let resume_role = mj_core::session_provenance::find(&session_id, &cwd)
                         .and_then(|record| {
                             roster.available.iter().find(|role| {
                                 role.model.model == record.model
@@ -1949,8 +1988,16 @@ async fn run_app(
                                     && role.launch.source_id == record.adapter_source_id
                             })
                         })
+                        .cloned();
+                    let resume_agent = resume_role
+                        .as_ref()
                         .map(selected_agent_for_role)
                         .unwrap_or(agent);
+                    if let Some(source) =
+                        resume_role.filter(|source| !primary_route_matches(&roster.primary, source))
+                    {
+                        pending_session_import = Some(source);
+                    }
                     initial_resume = Some(ResumeTarget {
                         session_id,
                         title: session_result.session_title,
@@ -2376,6 +2423,7 @@ async fn run_session(
     header_labels: HeaderLabels,
     resume_session: Option<String>,
     mut primary_session_handoff: Option<String>,
+    import_resumed_session: bool,
     mode: UiMode,
     mut theme_kind: theme::TerminalThemeKind,
     mut spinner_style: spinner::SpinnerStyle,
@@ -3091,6 +3139,7 @@ async fn run_session(
                 keep_awake_enabled: ui_config.keep_awake,
                 session_boundary: session_boundary.take(),
                 primary_session_handoff: primary_session_handoff.take(),
+                import_resumed_session,
                 session_cwd: cwd.clone(),
                 additional_workspace_roots: runtime_options.additional_directories.clone(),
                 model_choices: roster.choices.clone(),
@@ -3889,6 +3938,19 @@ mod tests {
         assert!(!primary_route_matches(&active, &same_source_new_model));
         assert!(!primary_route_matches(&active, &same_model_new_effort));
         assert!(primary_route_matches(&active, &active));
+    }
+
+    #[test]
+    fn session_import_uses_the_source_route_without_replacing_the_active_primary() {
+        let claude = test_roster_agent("claude-fable-5", "claude-acp");
+        let codex = test_roster_agent("gpt-5-6-sol", "codex-acp");
+        let active = test_roster(claude.clone(), vec![claude.clone(), codex.clone()]);
+
+        let import = session_import_roster(&active, &codex);
+
+        assert!(primary_route_matches(&import.primary, &codex));
+        assert!(primary_route_matches(&active.primary, &claude));
+        assert!(!primary_route_matches(&import.primary, &active.primary));
     }
 
     fn test_roster(

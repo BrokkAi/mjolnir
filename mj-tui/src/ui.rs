@@ -1224,6 +1224,8 @@ pub struct UiRunOptions<'a> {
     /// Conversation context to send as the first prompt of a fresh primary
     /// session after its route changed.
     pub primary_session_handoff: Option<String>,
+    /// Exit with an import handoff after a resumed session finishes replaying.
+    pub import_resumed_session: bool,
     /// The ACP session working directory.
     pub session_cwd: PathBuf,
     /// Additional directories registered with the ACP session.
@@ -1264,6 +1266,7 @@ struct UiInitialState {
     keep_awake_enabled: bool,
     session_boundary: Option<String>,
     primary_session_handoff: Option<String>,
+    import_resumed_session: bool,
     session_cwd: PathBuf,
     additional_workspace_roots: Vec<PathBuf>,
     model_choices: Vec<crate::roster::ModelChoice>,
@@ -1348,6 +1351,7 @@ pub async fn run(
             keep_awake_enabled: options.keep_awake_enabled,
             session_boundary: options.session_boundary,
             primary_session_handoff: options.primary_session_handoff,
+            import_resumed_session: options.import_resumed_session,
             session_cwd: options.session_cwd,
             additional_workspace_roots: options.additional_workspace_roots,
             model_choices: options.model_choices,
@@ -1514,6 +1518,16 @@ fn ui_event_redraw_cause(event: &UiEvent) -> RedrawCause {
     }
 }
 
+fn mark_session_import_complete(
+    state: &mut AppState,
+    import_resumed_session: bool,
+    event: &UiEvent,
+) {
+    if import_resumed_session && matches!(event, UiEvent::SessionStarted { resumed: true, .. }) {
+        state.exit_reason = Some(UiExitReason::ImportSession);
+    }
+}
+
 fn side_main_notice(event: &UiEvent) -> Option<&'static str> {
     match event {
         UiEvent::PermissionRequest(_) | UiEvent::ElicitationRequest(_) => Some("Main needs input"),
@@ -1586,6 +1600,7 @@ async fn ui_loop(
     mode: UiMode,
     termination: CancellationToken,
 ) -> Result<UiLoopOutcome> {
+    let import_resumed_session = initial.import_resumed_session;
     let mut state = AppState::new();
     state.set_prompt_history(initial.history);
     state.project_label = initial.header_labels.project;
@@ -1864,6 +1879,7 @@ async fn ui_loop(
                             UiEvent::PromptDone { stop_reason, .. }
                                 if *stop_reason != StopReason::Cancelled
                         );
+                        mark_session_import_complete(&mut state, import_resumed_session, &ev);
                         state.apply_event(ev);
                         if completed_turn {
                             state.maybe_record_feature_hint(crate::app::FeatureHintCapabilities {
@@ -2099,9 +2115,12 @@ async fn ui_loop(
                 theme_kind: state.theme_kind,
                 spinner_style: state.spinner_style,
                 history: outcome_state.prompt_history(),
-                primary_session_handoff: (reason == UiExitReason::TransferSession)
-                    .then(|| primary_session_handoff_prompt(outcome_state))
-                    .flatten(),
+                primary_session_handoff: matches!(
+                    reason,
+                    UiExitReason::TransferSession | UiExitReason::ImportSession
+                )
+                .then(|| primary_session_handoff_prompt(outcome_state))
+                .flatten(),
             });
         }
 
@@ -14848,7 +14867,7 @@ fn help_modal_lines(
         help_blank_line(),
         help_command_line(
             "Built-in commands:",
-            "/exit quits Mjolnir (or returns from side); /clear keeps model; /new applies saved models; /load opens session picker; /export full includes nested agents",
+            "/exit quits Mjolnir (or returns from side); /clear keeps model; /new applies saved models; /load loads a session into the current primary; /export full includes nested agents",
             theme,
         ),
     ]);
@@ -19003,6 +19022,48 @@ mod tests {
         let mut boundary_only = AppState::new();
         boundary_only.push_session_boundary("Primary switched from Codex to Claude.");
         assert!(primary_session_handoff_prompt(&boundary_only).is_none());
+    }
+
+    #[test]
+    fn imported_session_exits_after_replay_with_a_durable_handoff() {
+        let mut state = AppState::new();
+        state.agent_label = "gpt-test via codex-acp".to_string();
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UserMessageChunk(
+            text_chunk("replayed request"),
+        )));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("replayed answer"),
+        )));
+        let replay_complete = UiEvent::SessionStarted {
+            session_id: "codex-session".to_string(),
+            resumed: true,
+        };
+
+        mark_session_import_complete(&mut state, true, &replay_complete);
+        state.apply_event(replay_complete);
+
+        assert_eq!(state.exit_reason, Some(UiExitReason::ImportSession));
+        let handoff = primary_session_handoff_prompt(&state).expect("import handoff");
+        assert!(handoff.contains("replayed request"));
+        assert!(handoff.contains("replayed answer"));
+    }
+
+    #[test]
+    fn ordinary_resumes_do_not_exit_as_session_imports() {
+        let resumed = UiEvent::SessionStarted {
+            session_id: "claude-session".to_string(),
+            resumed: true,
+        };
+        let fresh = UiEvent::SessionStarted {
+            session_id: "claude-session".to_string(),
+            resumed: false,
+        };
+
+        let mut state = AppState::new();
+        mark_session_import_complete(&mut state, false, &resumed);
+        assert_eq!(state.exit_reason, None);
+        mark_session_import_complete(&mut state, true, &fresh);
+        assert_eq!(state.exit_reason, None);
     }
 
     #[test]
