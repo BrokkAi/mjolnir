@@ -4726,7 +4726,7 @@ mod tests {
     #[tokio::test]
     async fn app_rejects_invalid_workspace_before_starting_a_desktop_shell() {
         let cwd = tempfile::tempdir().expect("tempdir");
-        let result = run_desktop_app(
+        let error = run_desktop_app(
             AppArgs { history_days: 30 },
             cwd.path().to_path_buf(),
             vec![PathBuf::from("relative")],
@@ -4734,9 +4734,13 @@ mod tests {
             acp::DEFAULT_FS_TEXT_BYTES,
             CancellationToken::new(),
         )
-        .await;
+        .await
+        .expect_err("relative workspace roots must be rejected");
 
-        assert!(result.is_err(), "relative workspace roots must be rejected");
+        assert!(
+            format!("{error:#}").contains("additional workspace directory must be absolute"),
+            "app must reject the additional workspace root before desktop startup: {error:#}"
+        );
     }
 
     #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
@@ -4760,6 +4764,30 @@ mod tests {
             manager.launch_state(launch_id),
             Some(remote::ServerSessionLaunchState::Failed { error }) if error == "no model is launchable"
         ));
+    }
+
+    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    #[tokio::test]
+    async fn desktop_session_manager_binds_a_resolved_roster() {
+        use remote::ServerSessionManager;
+
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let primary = test_roster_agent("test-model", "test-agent");
+        let manager = desktop_session_manager(
+            &Ok(test_roster(primary.clone(), vec![primary])),
+            None,
+            cwd.path(),
+            &[],
+            &[],
+            acp::DEFAULT_FS_TEXT_BYTES,
+        );
+
+        let launch_id = manager.start_session(cwd.path().to_path_buf());
+        assert!(matches!(
+            manager.launch_state(launch_id),
+            Some(remote::ServerSessionLaunchState::Starting)
+        ));
+        manager.shutdown_all().await;
     }
 
     #[test]
