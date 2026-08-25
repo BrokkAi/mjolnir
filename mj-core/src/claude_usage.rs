@@ -115,6 +115,23 @@ pub async fn query_fresh(
     query_shared(cwd, env, Duration::ZERO).await
 }
 
+/// Read the shared fact without probing or touching the checkout
+/// lease, returning the stored result and its publish timestamp.
+/// Idle mj clients use this to mirror refreshes that busier processes
+/// publish, so a peek must never spawn a `claude` process no matter
+/// how stale the fact is.
+pub async fn peek() -> Option<(i64, Result<ClaudeUsageReport, ClaudeUsageError>)> {
+    peek_with(UsageFactStore::new(crate::usage_fact::default_store_path())).await
+}
+
+async fn peek_with(
+    store: UsageFactStore,
+) -> Option<(i64, Result<ClaudeUsageReport, ClaudeUsageError>)> {
+    let fact = read_fact(&store).await?;
+    let result = decode_fact(&fact)?;
+    Some((fact.fetched_at, result))
+}
+
 async fn query_shared(
     cwd: PathBuf,
     env: HashMap<String, String>,
@@ -899,6 +916,29 @@ mod tests {
 
         let result = query_shared_with(store, SHARED_FACT_TTL, failing_probe).await;
         assert_eq!(result, Ok(sample_report()));
+    }
+
+    #[tokio::test]
+    async fn peek_returns_the_stored_fact_without_probing() {
+        let (_dir, store) = shared_store();
+        assert_eq!(peek_with(store.clone()).await, None);
+
+        let payload = serde_json::to_string(&Ok::<_, ClaudeUsageError>(sample_report()))
+            .expect("serialize fact");
+        store
+            .publish(SHARED_FACT_PROVIDER, &payload, "seed", 1234)
+            .expect("publish");
+        assert_eq!(
+            peek_with(store.clone()).await,
+            Some((1234, Ok(sample_report())))
+        );
+
+        // A payload from an incompatible mj version reads as no fact;
+        // only query() may overwrite it, never a peek.
+        store
+            .publish(SHARED_FACT_PROVIDER, "not-json", "seed", 1235)
+            .expect("publish undecodable");
+        assert_eq!(peek_with(store).await, None);
     }
 
     #[tokio::test]

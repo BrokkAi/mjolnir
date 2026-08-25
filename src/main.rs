@@ -2545,12 +2545,18 @@ async fn run_session(
         let usage_cwd = cwd.clone();
         let _ = tx.send(UsageRefreshTrigger::Startup);
         let handle = tokio::spawn(async move {
-            let mut completed_turns = 0_u64;
             let mut codex_client = None;
             // Pushes the steward's next attempt out when a refresh does
             // not take (e.g. signed out) so the timer cannot spin while
             // the token sits inside the refresh window.
             let mut steward_not_before = tokio::time::Instant::now();
+            // Idle mirror: other mj processes refresh the shared Claude
+            // usage fact on their own turns; this client re-reads the
+            // store (never probes) so an idle TUI converges on the fact
+            // instead of displaying its own last turn forever.
+            let mut idle_tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut published_fact_at = 0_i64;
             loop {
                 let claude_steward_at = claude_usage_env
                     .as_ref()
@@ -2569,9 +2575,6 @@ async fn run_session(
                     _ = shutdown_rx.recv() => break,
                     trigger = rx.recv() => {
                         let Some(trigger) = trigger else { break; };
-                        if matches!(trigger, UsageRefreshTrigger::CompletedTurn) {
-                            completed_turns = completed_turns.saturating_add(1);
-                        }
                         trigger
                     },
                     // Proactive token steward: rotate the Claude and codex
@@ -2591,6 +2594,21 @@ async fn run_session(
                             + std::time::Duration::from_secs(10 * 60);
                         continue;
                     },
+                    _ = idle_tick.tick() => {
+                        if claude_usage_env.is_some()
+                            && let Some((fetched_at, status)) =
+                                idle_usage_update(claude_usage::peek().await, published_fact_at)
+                        {
+                            published_fact_at = fetched_at;
+                            if usage_ui_tx
+                                .send(crate::event::UiEvent::ClaudeUsage(status))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        continue;
+                    },
                 };
                 if let Some(env) = codex_usage_env.as_ref() {
                     let status =
@@ -2603,7 +2621,7 @@ async fn run_session(
                         break;
                     }
                 }
-                if should_refresh_claude_usage(trigger, completed_turns)
+                if should_refresh_claude_usage(trigger)
                     && let Some(env) = claude_usage_env.as_ref()
                 {
                     let status = match claude_usage::query(usage_cwd.clone(), env.clone()).await {
@@ -2620,6 +2638,12 @@ async fn run_session(
                         .is_err()
                     {
                         break;
+                    }
+                    // The query just read or refreshed the shared fact;
+                    // remember its stamp so the idle mirror does not
+                    // re-emit the same fact on the next tick.
+                    if let Some((fetched_at, _)) = claude_usage::peek().await {
+                        published_fact_at = published_fact_at.max(fetched_at);
                     }
                 }
             }
@@ -3762,10 +3786,34 @@ enum UsageRefreshTrigger {
     CodexOnly,
 }
 
-fn should_refresh_claude_usage(trigger: UsageRefreshTrigger, completed_turns: u64) -> bool {
-    matches!(trigger, UsageRefreshTrigger::Startup)
-        || (matches!(trigger, UsageRefreshTrigger::CompletedTurn)
-            && completed_turns.is_multiple_of(2))
+fn should_refresh_claude_usage(trigger: UsageRefreshTrigger) -> bool {
+    matches!(
+        trigger,
+        UsageRefreshTrigger::Startup | UsageRefreshTrigger::CompletedTurn
+    )
+}
+
+/// The idle mirror's emission rule: publish the stored shared fact only
+/// when it is newer than what this process last showed, so an idle
+/// client converges on other processes' refreshes without re-emitting
+/// an unchanged fact every tick.
+fn idle_usage_update(
+    peeked: Option<(
+        i64,
+        Result<claude_usage::ClaudeUsageReport, claude_usage::ClaudeUsageError>,
+    )>,
+    published_fact_at: i64,
+) -> Option<(i64, claude_usage::ClaudeUsageStatus)> {
+    let (fetched_at, result) = peeked?;
+    (fetched_at > published_fact_at).then(|| {
+        let status = match result {
+            Ok(report) => claude_usage::ClaudeUsageStatus::Available(report),
+            Err(error) => {
+                claude_usage::ClaudeUsageStatus::Unavailable(error.user_reason().to_string())
+            }
+        };
+        (fetched_at, status)
+    })
 }
 
 #[cfg(test)]
@@ -5736,24 +5784,45 @@ mod tests {
     }
 
     #[test]
-    fn claude_usage_refreshes_at_startup_then_every_second_completed_turn() {
-        let triggers = [
-            (UsageRefreshTrigger::Startup, 0),
-            (UsageRefreshTrigger::CodexOnly, 0),
-            (UsageRefreshTrigger::CompletedTurn, 1),
-            (UsageRefreshTrigger::CodexOnly, 1),
-            (UsageRefreshTrigger::CompletedTurn, 2),
-            (UsageRefreshTrigger::CompletedTurn, 3),
-            (UsageRefreshTrigger::CompletedTurn, 4),
-        ];
-        let refreshes = triggers
-            .into_iter()
-            .filter_map(|(trigger, completed_turns)| {
-                should_refresh_claude_usage(trigger, completed_turns).then_some(completed_turns)
-            })
-            .collect::<Vec<_>>();
+    fn claude_usage_refreshes_at_startup_and_every_completed_turn() {
+        assert!(should_refresh_claude_usage(UsageRefreshTrigger::Startup));
+        assert!(should_refresh_claude_usage(
+            UsageRefreshTrigger::CompletedTurn
+        ));
+        assert!(!should_refresh_claude_usage(UsageRefreshTrigger::CodexOnly));
+    }
 
-        assert_eq!(refreshes, vec![0, 2, 4]);
+    #[test]
+    fn idle_mirror_emits_only_newer_shared_facts() {
+        use claude_usage::{
+            ClaudeUsageError, ClaudeUsageReport, ClaudeUsageStatus, ClaudeUsageWindow,
+        };
+        let report = ClaudeUsageReport {
+            five_hour: Some(ClaudeUsageWindow {
+                remaining_percent: 88,
+                reset_context: None,
+            }),
+            week: None,
+        };
+
+        // No stored fact yet: nothing to mirror.
+        assert_eq!(idle_usage_update(None, 0), None);
+
+        // A newer fact is emitted and advances the watermark.
+        assert_eq!(
+            idle_usage_update(Some((10, Ok(report.clone()))), 0),
+            Some((10, ClaudeUsageStatus::Available(report.clone())))
+        );
+
+        // An unchanged or older fact must not re-emit on later ticks.
+        assert_eq!(idle_usage_update(Some((10, Ok(report.clone()))), 10), None);
+        assert_eq!(idle_usage_update(Some((9, Ok(report))), 10), None);
+
+        // Stored probe errors mirror as Unavailable, same as a query.
+        assert_eq!(
+            idle_usage_update(Some((11, Err(ClaudeUsageError::NotSignedIn))), 10),
+            Some((11, ClaudeUsageStatus::Unavailable("not signed in".into())))
+        );
     }
 
     #[test]
