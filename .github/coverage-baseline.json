@@ -33,6 +33,10 @@
       "minimum": 6.5,
       "reason": "Headless execution is covered through subprocess tests whose child-process profiles are not attributed to this module in the workspace report."
     },
+    "src/bin/mj-computer-host.rs": {
+      "minimum": 0.0,
+      "reason": "This macOS-only Computer.app host cannot run in the Ubuntu LLVM coverage job; its bundle and descriptor behavior is tested on macOS."
+    },
     "mj-core/src/pull_request.rs": {
       "minimum": 0.0,
       "reason": "This boundary shells out to an authenticated GitHub CLI and needs a hermetic integration harness."
