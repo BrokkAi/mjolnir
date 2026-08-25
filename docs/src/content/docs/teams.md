@@ -29,13 +29,16 @@ offer the same four configurations:
 | **Codex** | Codex handles primary, subagents, and review |
 | **Claude** | Claude handles primary, subagents, and review |
 | **Codex coder + Claude reviewer** | Codex is primary; Claude handles subagents and review |
-| **Claude coder + Codex reviewer** | Claude is primary; Codex handles subagents and review |
+| **Claude coder + Codex reviewer** | Extended review; Luna xhigh handles review and subagents; Claude is primary |
 
-Choosing a team keeps every model selection on Auto, pins the primary seat to
-the coder's adapter and the review and subagent seats to the reviewer's,
-enables discrete review and subagent failover, and enables the built-in ACP
-routes its seats use — both routes for a mixed team, only that provider's
-route for a single-provider team. Team changes apply to a new session; after saving from **Shift+Tab**,
+Choosing a team pins the primary seat to the coder's adapter and the review
+and subagent seats to the reviewer's, enables discrete review and subagent
+failover, and enables the built-in ACP routes its seats use — both routes for
+a mixed team, only that provider's route for a single-provider team. All teams
+except **Claude coder + Codex reviewer** reset models to Auto and preserve the
+selected review tier (Quick by default). That team defaults its review and
+subagent seats to `gpt-5-6-luna` at extra-high effort and selects extended
+review. Team changes apply to a new session; after saving from **Shift+Tab**,
 start the offered session to use the new team immediately.
 
 A single-provider team still gets discrete review — the reviewer is an
@@ -70,7 +73,7 @@ the selected providers under their own terms; see
 Review depth is controlled by the review tier on the **Reviewer** tab of
 `/mjconfig`:
 
-- **Quick** (default) sends one general reviewer over the change, then
+- **Quick** (the default except for Claude coder + Codex reviewer) sends one general reviewer over the change, then
   validates its findings before anything reaches the coder.
 - **Extended** runs an adversarial supervisor that forms a risk map and
   launches read-only specialist lanes on demand. It is more thorough and

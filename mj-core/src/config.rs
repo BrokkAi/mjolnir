@@ -534,7 +534,9 @@ impl Default for ModelsConfig {
 /// One of the supported primary/review provider combinations.
 ///
 /// A team pins the primary seat to its coder and the subagent and discrete
-/// review seats to its reviewer. Models remain automatic within those sources.
+/// review seats to its reviewer. The Claude-coder/Codex-reviewer team defaults
+/// its reviewer and subagents to Luna for extended review; other selections
+/// remain automatic within their sources and preserve a chosen review tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamPreset {
     Codex,
@@ -577,7 +579,7 @@ impl TeamPreset {
                 "Codex is primary; Claude handles subagents and review"
             }
             Self::ClaudeWithCodexReviewer => {
-                "Claude is primary; Codex handles subagents and review"
+                "Extended review; Luna xhigh handles review and subagents; Claude is primary"
             }
         }
     }
@@ -618,19 +620,23 @@ impl TeamPreset {
     pub fn apply(self, config: &mut Config) {
         config.team = Some(self.id().to_string());
         let (coder, reviewer) = self.sources();
-        // Seat-level reasoning efforts were picked against the seat's previous
-        // adapter's advertised values ("default" exists on claude-acp but not
-        // codex-acp), so rerouting a seat resets them along with its model.
         config.agent.model = default_auto();
         config.agent.acp_source = Some(coder.to_string());
         config.agent.reasoning_effort = None;
         config.agent.discrete_review = true;
-        config.review.model = default_auto();
+        let (review_model, reviewer_effort) = match self {
+            Self::ClaudeWithCodexReviewer => {
+                config.agent.review_tier = ReviewTier::Extended;
+                ("gpt-5-6-luna", Some("xhigh"))
+            }
+            _ => ("auto", None),
+        };
+        config.review.model = review_model.to_string();
         config.review.acp_source = Some(reviewer.to_string());
-        config.review.reasoning_effort = None;
-        config.subagents.model = default_auto();
+        config.review.reasoning_effort = reviewer_effort.map(str::to_string);
+        config.subagents.model = review_model.to_string();
         config.subagents.acp_source = Some(reviewer.to_string());
-        config.subagents.reasoning_effort = None;
+        config.subagents.reasoning_effort = reviewer_effort.map(str::to_string);
         config.subagents.auto_failover = true;
         for source in [coder, reviewer] {
             config.set_acp_server_policy(source, AcpServerPolicy::Enabled);
@@ -2932,7 +2938,7 @@ mode = "ask"
     }
 
     #[test]
-    fn team_presets_pin_primary_separately_from_subagents_and_reviewer() {
+    fn team_presets_apply_their_model_and_review_defaults() {
         for preset in TeamPreset::ALL {
             let mut config = Config::default();
             config.agent.model = "provider-specific-primary".to_string();
@@ -2945,20 +2951,57 @@ mode = "ask"
             preset.apply(&mut config);
 
             let (coder, reviewer) = preset.sources();
+            let uses_luna_extended_review = preset == TeamPreset::ClaudeWithCodexReviewer;
             assert_eq!(TeamPreset::from_config(&config), Some(preset));
             assert_eq!(config.agent.acp_source.as_deref(), Some(coder));
             assert_eq!(config.subagents.acp_source.as_deref(), Some(reviewer));
             assert_eq!(config.review.acp_source.as_deref(), Some(reviewer));
             assert_eq!(config.agent.model, "auto");
-            assert_eq!(config.review.model, "auto");
-            assert_eq!(config.subagents.model, "auto");
+            assert_eq!(
+                config.review.model,
+                if uses_luna_extended_review {
+                    "gpt-5-6-luna"
+                } else {
+                    "auto"
+                }
+            );
+            assert_eq!(config.subagents.model, config.review.model);
             assert_eq!(config.agent.reasoning_effort, None);
-            assert_eq!(config.review.reasoning_effort, None);
-            assert_eq!(config.subagents.reasoning_effort, None);
+            assert_eq!(
+                config.review.reasoning_effort.as_deref(),
+                uses_luna_extended_review.then_some("xhigh")
+            );
+            assert_eq!(
+                config.subagents.reasoning_effort,
+                config.review.reasoning_effort
+            );
             assert!(config.agent.discrete_review);
+            assert_eq!(
+                config.agent.review_tier,
+                if uses_luna_extended_review {
+                    ReviewTier::Extended
+                } else {
+                    ReviewTier::Quick
+                }
+            );
             assert_eq!(config.acp.policy(coder), AcpServerPolicy::Enabled);
             assert_eq!(config.acp.policy(reviewer), AcpServerPolicy::Enabled);
             assert_eq!(TeamPreset::from_id(preset.id()), Some(preset));
+        }
+    }
+
+    #[test]
+    fn non_extended_review_team_presets_preserve_the_selected_review_tier() {
+        for preset in TeamPreset::ALL {
+            if preset == TeamPreset::ClaudeWithCodexReviewer {
+                continue;
+            }
+            let mut config = Config::default();
+            config.agent.review_tier = ReviewTier::Extended;
+
+            preset.apply(&mut config);
+
+            assert_eq!(config.agent.review_tier, ReviewTier::Extended);
         }
     }
 

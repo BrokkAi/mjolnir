@@ -1479,6 +1479,12 @@ fn draw_team(
             "Mix Codex and Claude, or use one provider. Auto models can reduce review cost.",
             Style::default().ink(theme.muted),
         ),
+        Line::styled(
+            "Featured team: Claude coder + Codex reviewer defaults to extended Luna xhigh review.",
+            Style::default()
+                .ink(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
         Line::raw(""),
         selected_line(true, format!("Team  < {active_label} >"), theme),
         Line::raw(""),
@@ -1488,11 +1494,18 @@ fn draw_team(
         ),
     ];
     for preset in TeamPreset::ALL {
-        let marker = if Some(preset) == active { "*" } else { " " };
+        let featured = preset == TeamPreset::ClaudeWithCodexReviewer;
+        let marker = if Some(preset) == active {
+            "*"
+        } else if featured {
+            "!"
+        } else {
+            " "
+        };
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {marker} {:<31}", preset.label()),
-                Style::default().ink(if Some(preset) == active {
+                Style::default().ink(if Some(preset) == active || featured {
                     theme.primary
                 } else {
                     theme.text
@@ -2640,6 +2653,12 @@ mod tests {
 
         let rendered = terminal.backend().to_string();
         assert!(!rendered.contains("ACP Priority"), "rendered:\n{rendered}");
+        for expected in ["Featured team", "Extended review", "Luna xhigh"] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}:\n{rendered}"
+            );
+        }
         for preset in TeamPreset::ALL {
             assert!(rendered.contains(preset.label()), "rendered:\n{rendered}");
         }
