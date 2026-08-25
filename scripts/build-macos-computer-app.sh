@@ -6,6 +6,13 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+if [[ -z "${MJOLNIR_COMPUTER_SIGNING_IDENTITY:-}" ]]; then
+  echo "MJOLNIR_COMPUTER_SIGNING_IDENTITY must name an Apple Development signing identity." >&2
+  echo "In Xcode: Settings > Accounts > select a team > Manage Certificates > + > Apple Development." >&2
+  echo "Find its exact name with: security find-identity -v -p codesigning" >&2
+  exit 1
+fi
+
 case "${1:-}" in
   "")
     cargo_profile="debug"
@@ -44,12 +51,13 @@ sed "s/@VERSION@/${version}/g" \
 install -m 0755 "target/${cargo_profile}/mj-computer-host" \
   "$contents/MacOS/mj-computer-host"
 plutil -lint "$contents/Info.plist" >/dev/null
-# This makes the app launchable for local development. An ad-hoc signature
-# has a new identity after every rebuild, so macOS may require its privacy
-# switches to be re-enabled after this script changes the host binary.
-codesign --force --sign - --timestamp=none "$bundle"
+# Sign the nested executable before its enclosing bundle. Both signatures use
+# the same Apple Development identity, which keeps TCC grants stable as the
+# source build changes.
+codesign --force --sign "$MJOLNIR_COMPUTER_SIGNING_IDENTITY" --timestamp=none "$contents/MacOS/mj-computer-host"
+codesign --force --sign "$MJOLNIR_COMPUTER_SIGNING_IDENTITY" --timestamp=none "$bundle"
 codesign --verify --deep --strict "$bundle"
 
 echo "built $bundle"
-echo "development-only ad-hoc signature; re-enable Mjolnir Computer in macOS privacy settings after rebuilding if needed"
+echo "signed with $MJOLNIR_COMPUTER_SIGNING_IDENTITY; privacy grants persist across source rebuilds"
 echo "run target/${cargo_profile}/mj, then open /mjconfig and select Computer"

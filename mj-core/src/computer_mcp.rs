@@ -6,6 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    ffi::{OsStr, OsString},
     fs,
     future::Future,
     os::unix::fs::PermissionsExt as _,
@@ -56,6 +57,7 @@ const CONFIG_REVOCATION_POLL_INTERVAL: std::time::Duration = std::time::Duration
 const COMPUTER_BUNDLE_NAME: &str = "Mjolnir Computer.app";
 const COMPUTER_HOST_NAME: &str = "mj-computer-host";
 const CARGO_INSTALL_BUNDLE_MARKER: &str = ".mjolnir-cargo-install";
+const COMPUTER_SIGNING_IDENTITY_ENV: &str = "MJOLNIR_COMPUTER_SIGNING_IDENTITY";
 const COMPUTER_BUNDLE_INFO_TEMPLATE: &str =
     include_str!("../assets/macos/Mjolnir Computer.app/Contents/Info.plist");
 const COMPUTER_TOOL_NAMES: [&str; 9] = [
@@ -1168,8 +1170,9 @@ fn computer_bundle_path_for_executable(executable: &Path) -> Result<PathBuf> {
 }
 
 /// `cargo install` can install the two executables but cannot install an app
-/// bundle. Refresh the development bundle next to an installed `mj`, while
-/// preserving a preexisting release bundle and its Developer ID signature.
+/// bundle. Source builds require an Apple Development signing identity so
+/// macOS can retain TCC grants across rebuilds. A preexisting Developer
+/// ID-signed release bundle remains untouched.
 fn materialize_cargo_install_bundle(
     executable: &Path,
     bundle: &Path,
@@ -1330,15 +1333,39 @@ fn is_ad_hoc_signature(details: &str) -> bool {
 }
 
 fn sign_development_bundle(bundle: &Path) -> Result<()> {
-    let status = Command::new("/usr/bin/codesign")
-        .args(["--force", "--sign", "-", "--timestamp=none"])
-        .arg(bundle)
-        .status()
-        .with_context(|| format!("ad-hoc sign Mjolnir Computer.app at {}", bundle.display()))?;
-    if !status.success() {
+    let identity = development_signing_identity(std::env::var_os(COMPUTER_SIGNING_IDENTITY_ENV))?;
+    let host = bundle.join("Contents/MacOS").join(COMPUTER_HOST_NAME);
+    sign_code_path(&host, &identity)?;
+    sign_code_path(bundle, &identity)
+}
+
+fn development_signing_identity(identity: Option<OsString>) -> Result<OsString> {
+    identity.filter(|identity| !identity.is_empty()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Computer Control from a source or cargo install needs an Apple Development signing identity. \
+             In Xcode, open Settings > Accounts > select your team > Manage Certificates > + > Apple Development. \
+             Then set {COMPUTER_SIGNING_IDENTITY_ENV} to the identity shown by `security find-identity -v -p codesigning`, \
+             reinstall with `cargo install --path . --locked`, and enable Computer Control again. \
+             Signed release installations do not need this setting."
+        )
+    })
+}
+
+fn sign_code_path(code: &Path, identity: &OsStr) -> Result<()> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign"])
+        .arg(identity)
+        .arg("--timestamp=none")
+        .arg(code)
+        .output()
+        .with_context(|| format!("sign Mjolnir Computer code at {}", code.display()))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "ad-hoc sign Mjolnir Computer.app at {} exited with {status}",
-            bundle.display()
+            "sign Mjolnir Computer code at {} exited with {}: {}",
+            code.display(),
+            output.status,
+            detail.trim()
         );
     }
     Ok(())
@@ -2050,32 +2077,15 @@ mod tests {
     }
 
     #[test]
-    fn cargo_install_bundle_materialization_creates_a_verifiable_app_signature() {
-        let temporary = tempfile::tempdir().unwrap();
-        let executable = temporary.path().join("mj");
-        let host = temporary.path().join(COMPUTER_HOST_NAME);
-        fs::write(&executable, []).unwrap();
-        fs::copy(std::env::current_exe().unwrap(), &host).unwrap();
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
-        let bundle = computer_bundle_path_for_executable(&executable).unwrap();
-
-        materialize_cargo_install_bundle(&executable, &bundle, sign_development_bundle).unwrap();
-
-        assert!(
-            Command::new("/usr/bin/codesign")
-                .args(["--verify", "--deep", "--strict"])
-                .arg(&bundle)
-                .status()
-                .unwrap()
-                .success()
+    fn cargo_install_requires_an_explicit_signing_identity() {
+        let error = development_signing_identity(None).unwrap_err().to_string();
+        assert!(error.contains(COMPUTER_SIGNING_IDENTITY_ENV));
+        assert!(error.contains("Apple Development"));
+        assert_eq!(
+            development_signing_identity(Some(OsString::from("Apple Development: Mjolnir")))
+                .unwrap(),
+            OsString::from("Apple Development: Mjolnir")
         );
-        fs::remove_file(
-            bundle
-                .join("Contents/Resources")
-                .join(CARGO_INSTALL_BUNDLE_MARKER),
-        )
-        .unwrap();
-        assert!(cargo_install_bundle_needs_refresh(&bundle).unwrap());
     }
 
     #[test]

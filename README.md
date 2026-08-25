@@ -198,28 +198,41 @@ expired screenshots and changed displays, and asks you to approve every input
 action before the app receives it. Disabling control, ending the session, or
 cancelling it revokes the app's private control capability.
 
-macOS release installs place `Mjolnir Computer.app` beside `mj`, including the
-release installer, self-update, and the platform npm package. From a source
-checkout on macOS, build the same sibling app bundle with:
+macOS release installs place a Developer ID-signed `Mjolnir Computer.app`
+beside `mj`, including the release installer, self-update, and the platform
+npm package. That is the supported user installation: its macOS privacy grants
+survive releases.
+
+Source builds need an Apple Development signing identity; ad-hoc signing makes
+macOS treat every rebuild as a new app and drops its privacy grants. In Xcode,
+open **Settings → Accounts**, select your Apple Developer team, choose
+**Manage Certificates**, and add **Apple Development**. Confirm the identity
+and export it for the shell that runs Mjolnir:
+
+```bash
+security find-identity -v -p codesigning
+export MJOLNIR_COMPUTER_SIGNING_IDENTITY='Apple Development: Your Name (TEAMID)'
+```
+
+Then build a source checkout with:
 
 ```bash
 bash scripts/build-macos-computer-app.sh
 cargo run
 ```
 
-The script places an ad-hoc-signed development bundle beside
-`target/debug/mj`, so the Computer tab works without a flag or environment
-variable. Run the script before granting the two macOS permissions; its ad-hoc
-identity changes whenever it rebuilds the host. After enabling **Mjolnir
-Computer** in System Settings, return to the Computer tab and press `r` once:
-Mjolnir restarts the host and reports the fresh permission state. This is for
-local testing, not the Developer ID-signed and notarized Mjolnir Computer.app
-in release archives, which keeps the stable identity used for production macOS
-permission grants. A macOS `cargo install` includes the sibling
-`mj-computer-host`; on first enable, Mjolnir materializes and ad-hoc-signs the
-development bundle beside the installed `mj`, then refreshes that development
-bundle after later Cargo reinstalls. Pass `--release` to build the
-release-profile pair instead.
+The script signs the bundle with that identity, so grants persist after source
+rebuilds. A source `cargo install` needs the same exported identity; on first
+enable, Mjolnir creates or refreshes the sibling app bundle with it:
+
+```bash
+cargo install --path . --locked
+mj
+```
+
+After enabling **Mjolnir Computer** in System Settings, return to the Computer
+tab and press `r` once to restart the host and recheck permissions. Pass
+`--release` to build the release-profile pair instead.
 
 ## Documentation
 
