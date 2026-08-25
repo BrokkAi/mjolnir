@@ -20,9 +20,12 @@ pub struct PullRequest {
 /// One probe result. `gh_succeeded == false` means the PR state is unknown
 /// (gh missing, not authenticated, no remote); callers should keep their
 /// previous answer for the same branch rather than clearing the badge.
+/// `dirty` is `None` when `git status` itself failed (not a git repository,
+/// git missing), never as a stand-in for "clean".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchProbe {
     pub branch: Option<String>,
+    pub dirty: Option<bool>,
     pub gh_succeeded: bool,
     pub pull_request: Option<PullRequest>,
 }
@@ -48,6 +51,17 @@ pub async fn probe_current_branch(cwd: &Path) -> BranchProbe {
         .map(|branch| branch.trim().to_string())
         .filter(|branch| !branch.is_empty());
 
+    let dirty = tokio::process::Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["status", "--porcelain"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| !output.stdout.is_empty());
+
     let gh_output = tokio::process::Command::new("gh")
         .current_dir(cwd)
         .env("GH_PROMPT_DISABLED", "1")
@@ -72,6 +86,7 @@ pub async fn probe_current_branch(cwd: &Path) -> BranchProbe {
 
     BranchProbe {
         branch,
+        dirty,
         gh_succeeded,
         pull_request,
     }

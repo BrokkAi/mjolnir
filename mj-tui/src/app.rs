@@ -1549,6 +1549,9 @@ pub struct AppState {
     /// Branch used for the latest pull-request probe. Kept separately so a
     /// branch switch immediately retires the previous branch's result.
     pub(crate) current_branch_pull_request_branch: Option<String>,
+    /// Whether the working tree had uncommitted changes at the last branch
+    /// probe. `None` until a probe succeeds (or when `cwd` is not a repo).
+    pub current_branch_dirty: Option<bool>,
     /// True while the local microphone dictation helper is running.
     pub voice_input_active: bool,
     /// Prompt buffer range currently owned by live voice dictation.
@@ -2320,6 +2323,7 @@ impl AppState {
             status_line: None,
             current_branch_pull_request: None,
             current_branch_pull_request_branch: None,
+            current_branch_dirty: None,
             voice_input_active: false,
             voice_input_range: None,
             voice_input_level: None,
@@ -2386,6 +2390,7 @@ impl AppState {
         side.primary_reasoning_effort = self.primary_reasoning_effort.clone();
         side.current_branch_pull_request = self.current_branch_pull_request.clone();
         side.current_branch_pull_request_branch = self.current_branch_pull_request_branch.clone();
+        side.current_branch_dirty = self.current_branch_dirty;
         side.transcript_export_dir = self.transcript_export_dir.clone();
         side.prompt_images_supported = self.prompt_images_supported;
         side.side_main_notice = Some(

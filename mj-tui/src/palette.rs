@@ -10,6 +10,19 @@
 //! Rich colors are always derived rather than assumed: diff backgrounds and
 //! the scan-light intensity ramp blend from the terminal's measured background
 //! toward a hue. When that is unavailable, both fall back to ANSI-safe roles.
+//!
+//! # The emphasis budget
+//!
+//! In the transcript, brightness and color mean "this still needs the user's
+//! eyes" — they are spent on *state*, not on *category*. In steady state the
+//! scroll shows at most two accents outside the status line: one for running
+//! work, one for failures — plus the role glyphs. Everything settled (a tool
+//! that exited 0, a finished plan step, turn scaffolding like the duration
+//! header) drops to the dim layer, so the transcript reads as bright prose
+//! over gray context. Bold is reserved for structural labels and failures.
+//! A feature that wants a new always-on accent must take it from state, not
+//! add a category color; otherwise emphasis re-accumulates until nothing
+//! stands out.
 
 use ratatui::style::Color;
 

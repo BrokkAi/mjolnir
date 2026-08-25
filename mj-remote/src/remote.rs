@@ -349,6 +349,12 @@ pub struct SessionStatusRecord {
     /// Open pull request on the session's current branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<PullRequestRecord>,
+    /// Current git branch of the session cwd, mirroring the TUI status line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Whether the working tree had uncommitted changes at the last probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_dirty: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -875,6 +881,13 @@ pub struct TranscriptEntry {
     /// the terminal-only one-line summary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_diffs: Vec<TranscriptDiff>,
+    /// Presentation status for `tool` entries: `pending`, `running`,
+    /// `completed`, or `failed`. Mirrors the TUI's attention rule — a call
+    /// that ACP reports `Completed` but whose terminal exited nonzero (or
+    /// died to a signal) publishes `failed`, because that is the state the
+    /// viewer should style it as. Absent for non-tool entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_status: Option<String>,
 }
 
 /// Workspace changes captured around one prompt turn.
@@ -1511,6 +1524,9 @@ struct TrackerState {
     /// Open pull request on the session's current branch, maintained by the
     /// tracker's own branch probe.
     pull_request: Option<PullRequestRecord>,
+    /// Current git branch and working-tree dirtiness from the same probe.
+    branch: Option<String>,
+    branch_dirty: Option<bool>,
     open_agent_actors: HashSet<String>,
     prompt_in_flight: bool,
     prompt_turn_started_at: Option<String>,
@@ -1732,6 +1748,8 @@ impl TrackerState {
             codex_quota: None,
             claude_quota: None,
             pull_request: None,
+            branch: None,
+            branch_dirty: None,
             open_agent_actors: HashSet::new(),
             prompt_in_flight: false,
             prompt_turn_started_at: None,
@@ -2572,6 +2590,7 @@ impl TrackerState {
             tool_title: None,
             tool_body: None,
             tool_diffs: Vec::new(),
+            tool_status: None,
         });
         index
     }
@@ -2749,6 +2768,8 @@ impl TrackerState {
         entry.tool_title = Some(tool_entry.title.clone());
         entry.tool_body = tool_body;
         entry.tool_diffs = transcript_diffs(&tool_entry.content);
+        entry.tool_status =
+            Some(tool_presentation_status(tool_entry, terminal_outputs).to_string());
     }
 
     /// The transcript as it goes on the wire: the newest entries that fit in
@@ -2801,6 +2822,7 @@ impl TrackerState {
                 tool_title: None,
                 tool_body: None,
                 tool_diffs: Vec::new(),
+                tool_status: None,
             });
         }
         let first_kept = published.len();
@@ -2893,29 +2915,35 @@ impl TrackerState {
                 .flatten()
                 .collect(),
             pull_request: self.pull_request.clone(),
+            branch: self.branch.clone(),
+            branch_dirty: self.branch_dirty,
         }
     }
 
     /// Apply one branch-PR probe result. Mirrors the TUI: a branch change
     /// clears the badge immediately, while a failed `gh` lookup keeps the
     /// previous answer for the same branch. Returns true when the visible
-    /// pull request changed.
+    /// branch state or pull request changed.
     fn observe_pull_request_probe(
         &mut self,
         previous_branch: &Option<String>,
         probe: &mj_core::pull_request::BranchProbe,
     ) -> bool {
         let previous = self.pull_request.clone();
+        let previous_branch_state = (self.branch.clone(), self.branch_dirty);
         if *previous_branch != probe.branch {
             self.pull_request = None;
         }
+        self.branch = probe.branch.clone();
+        self.branch_dirty = probe.dirty;
         if probe.gh_succeeded {
             self.pull_request = probe.pull_request.as_ref().map(|pr| PullRequestRecord {
                 number: pr.number,
                 url: pr.url.clone(),
             });
         }
-        let changed = previous != self.pull_request;
+        let changed = previous != self.pull_request
+            || previous_branch_state != (self.branch.clone(), self.branch_dirty);
         if changed {
             self.touch();
         }
@@ -9714,6 +9742,33 @@ fn format_diff_summary(diff: &Diff) -> String {
     format!("diff: {}", diff.path.display())
 }
 
+/// Presentation status for a tool entry, mirroring the TUI's attention rule:
+/// `Completed` with a nonzero terminal exit (or a signal) publishes `failed`,
+/// so the viewer styles it as the failure it is.
+fn tool_presentation_status(
+    tool_entry: &ToolTranscriptEntry,
+    terminal_outputs: &HashMap<String, TerminalOutputSnapshot>,
+) -> &'static str {
+    match tool_entry.status {
+        ToolCallStatus::Pending => "pending",
+        ToolCallStatus::InProgress => "running",
+        ToolCallStatus::Failed => "failed",
+        ToolCallStatus::Completed => {
+            let bad_exit = tool_entry.content.iter().any(|item| {
+                let ToolCallContent::Terminal(terminal) = item else {
+                    return false;
+                };
+                terminal_outputs
+                    .get(&terminal.terminal_id.to_string())
+                    .and_then(|snapshot| snapshot.exit_status.as_ref())
+                    .is_some_and(|status| status.exit_code != Some(0) || status.signal.is_some())
+            });
+            if bad_exit { "failed" } else { "completed" }
+        }
+        _ => "running",
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -12556,6 +12611,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             &None,
             &mj_core::pull_request::BranchProbe {
                 branch: Some("feature".to_string()),
+                dirty: None,
                 gh_succeeded: true,
                 pull_request: Some(mj_core::pull_request::PullRequest {
                     number: 7,
@@ -12589,6 +12645,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             &Some("feature".to_string()),
             &mj_core::pull_request::BranchProbe {
                 branch: Some("feature".to_string()),
+                dirty: None,
                 gh_succeeded: false,
                 pull_request: None,
             },
@@ -12598,6 +12655,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             &Some("feature".to_string()),
             &mj_core::pull_request::BranchProbe {
                 branch: Some("main".to_string()),
+                dirty: None,
                 gh_succeeded: false,
                 pull_request: None,
             },
@@ -12954,6 +13012,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             tool_title: None,
             tool_body: None,
             tool_diffs: Vec::new(),
+            tool_status: None,
         }
     }
 
@@ -14162,6 +14221,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                     tool_title: None,
                     tool_body: None,
                     tool_diffs: Vec::new(),
+                    tool_status: None,
                 },
                 TranscriptEntry {
                     kind: "agent".to_string(),
@@ -14172,6 +14232,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                     tool_title: None,
                     tool_body: None,
                     tool_diffs: Vec::new(),
+                    tool_status: None,
                 },
             ],
             review_workflows: vec![ReviewWorkflowRecord {
@@ -14227,6 +14288,8 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                     number: 42,
                     url: "https://example.invalid/pr/42".to_string(),
                 }),
+                branch: Some("feature".to_string()),
+                branch_dirty: Some(false),
             }),
         };
 
@@ -14262,6 +14325,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                         tool_title: None,
                         tool_body: None,
                         tool_diffs: Vec::new(),
+                        tool_status: None,
                     },
                     TranscriptEntry {
                         kind: "agent".to_string(),
@@ -14272,6 +14336,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                         tool_title: None,
                         tool_body: None,
                         tool_diffs: Vec::new(),
+                        tool_status: None,
                     },
                 ],
                 review_workflows: updated_review_workflows.clone(),

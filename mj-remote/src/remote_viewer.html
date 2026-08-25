@@ -1550,6 +1550,10 @@
           color: var(--thought);
         }
 
+        &[data-role="branch"] {
+          color: var(--tool);
+        }
+
         &[data-role="primary"] {
           color: var(--agent);
         }
@@ -1650,6 +1654,27 @@
         &[data-actor="primary"] { --kind-color: var(--primary); }
         &[data-actor="side"] { --kind-color: var(--thought); }
         &[data-actor="subagent"], &[data-actor="subagents"] { --kind-color: var(--subagent); }
+
+        /* Turn boundaries: a user prompt opens a new chapter, mirroring the
+           TUI's full-width rule before every prompt. */
+        &[data-kind="user"]:not(:first-child) {
+          border-top: 2px solid var(--line-strong);
+          margin-top: 14px;
+        }
+
+        /* Tool attention, mirroring the TUI's emphasis budget: the rail
+           color follows state (running, failed), and a call that completed
+           cleanly goes quiet — faded rail, dim-layer content, only the
+           program name kept at full foreground. */
+        &[data-kind="tool"][data-tool-status="running"] { --kind-color: var(--primary); }
+        &[data-kind="tool"][data-tool-status="failed"] { --kind-color: var(--red-hot); }
+        &[data-kind="tool"][data-tool-status="completed"] {
+          &::before { opacity: 0.25; }
+          .entry-kind { color: var(--dim); }
+          .entry-body { color: var(--dim); }
+          .entry-text span:not(.cmd-program) { color: inherit; }
+          .entry-text .cmd-program { color: var(--text); }
+        }
       }
 
       @keyframes entry-in {
@@ -7595,6 +7620,7 @@
           entry.tool_kind || "",
           entry.tool_title || "",
           entry.tool_body || "",
+          entry.tool_status || "",
           entry.actor || "",
           JSON.stringify(entryToolDiffs(entry)),
           showTranscriptDiffs ? "diffs-on" : "diffs-off",
@@ -7624,6 +7650,13 @@
           }
         });
         refs.body.replaceChildren();
+        // Tool attention status drives the rail color and the quiet
+        // (dim-layer) styling for cleanly completed calls.
+        if (refs.kind === "tool" && typeof entry.tool_status === "string") {
+          refs.el.dataset.toolStatus = entry.tool_status;
+        } else {
+          delete refs.el.dataset.toolStatus;
+        }
         const voice = refs.kind === "agent" || refs.kind === "thought" ? "prose" : "mono";
         let text = entry.text || "";
         if (refs.kind === "thought" && thoughtOutput === "default") {
@@ -9140,6 +9173,10 @@
           "model",
         ));
         fields.push(statusField(`effort: ${status.reasoning_effort || "default"}`, "effort"));
+        if (status.branch) {
+          const dirty = status.branch_dirty === true ? "*" : "";
+          fields.push(statusField(`${status.branch}${dirty}`, "branch"));
+        }
         fields.push(statusField(`primary: ${compactTokenCount(status.primary_tokens)}`, "primary"));
         fields.push(statusField(`review: ${compactTokenCount(status.review_tokens)}`, "review"));
         if (status.subagent_tokens) {

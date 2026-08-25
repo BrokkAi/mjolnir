@@ -131,6 +131,7 @@ fn turn_projection_entries() -> usize {
 struct CurrentBranchPrProbe {
     cwd: PathBuf,
     branch: Option<String>,
+    dirty: Option<bool>,
     gh_succeeded: bool,
     pull_request: Option<CurrentBranchPullRequest>,
 }
@@ -140,6 +141,7 @@ async fn probe_current_branch_pull_request(cwd: PathBuf) -> CurrentBranchPrProbe
     CurrentBranchPrProbe {
         cwd,
         branch: probe.branch,
+        dirty: probe.dirty,
         gh_succeeded: probe.gh_succeeded,
         pull_request: probe
             .pull_request
@@ -157,16 +159,19 @@ fn apply_current_branch_pr_probe(state: &mut AppState, probe: CurrentBranchPrPro
 
     let previous_branch = state.current_branch_pull_request_branch.clone();
     let previous_pull_request = state.current_branch_pull_request.clone();
+    let previous_dirty = state.current_branch_dirty;
     if previous_branch != probe.branch {
         state.current_branch_pull_request_branch = probe.branch;
         state.current_branch_pull_request = None;
     }
+    state.current_branch_dirty = probe.dirty;
     if probe.gh_succeeded {
         state.current_branch_pull_request = probe.pull_request;
     }
 
     previous_branch != state.current_branch_pull_request_branch
         || previous_pull_request != state.current_branch_pull_request
+        || previous_dirty != state.current_branch_dirty
 }
 
 /// Do not wait for a source newline forever. ACP prose chunks are arbitrary
@@ -6648,56 +6653,50 @@ fn plan_status_label(status: &agent_client_protocol::schema::v1::PlanEntryStatus
     }
 }
 
-fn plan_status_style(
-    status: &agent_client_protocol::schema::v1::PlanEntryStatus,
-    theme: TerminalTheme,
-) -> Style {
-    let color = match status {
-        agent_client_protocol::schema::v1::PlanEntryStatus::Pending => theme.muted,
-        agent_client_protocol::schema::v1::PlanEntryStatus::InProgress => theme.primary,
-        agent_client_protocol::schema::v1::PlanEntryStatus::Completed => theme.success,
-        _ => theme.error,
-    };
-    Style::default().ink(color)
-}
-
+/// Status glyphs keep the plan scannable at a glance: the eye finds the one
+/// `▸` (the active step, the only full-contrast row) without reading any
+/// bracketed words. Everything settled — done or not yet started — sits in
+/// the dim layer.
 fn plan_row(
     entry: &agent_client_protocol::schema::v1::PlanEntry,
     theme: TerminalTheme,
 ) -> Line<'static> {
     use agent_client_protocol::schema::v1::{PlanEntryPriority, PlanEntryStatus};
 
+    let (glyph, glyph_style, content_style) = match entry.status {
+        PlanEntryStatus::Pending => (
+            "◻",
+            Style::default().ink(theme.muted),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        PlanEntryStatus::InProgress => (
+            "▸",
+            Style::default()
+                .ink(theme.primary)
+                .add_modifier(Modifier::BOLD),
+            Style::default(),
+        ),
+        PlanEntryStatus::Completed => (
+            "✔",
+            Style::default()
+                .ink(theme.success)
+                .add_modifier(Modifier::DIM),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        _ => ("?", Style::default().ink(theme.error), Style::default()),
+    };
     let mut spans = vec![
         Span::raw("  "),
-        Span::styled(
-            format!("[{}]", plan_status_label(&entry.status)),
-            plan_status_style(&entry.status, theme),
-        ),
+        Span::styled(glyph.to_string(), glyph_style),
+        Span::raw(" "),
+        Span::styled(entry.content.clone(), content_style),
     ];
-    match entry.priority {
-        PlanEntryPriority::Medium => {}
-        PlanEntryPriority::High => spans.push(Span::styled(
-            format!(" [{}]", plan_priority_label(&entry.priority)),
-            Style::default()
-                .ink(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )),
-        PlanEntryPriority::Low => spans.push(Span::styled(
-            format!(" [{}]", plan_priority_label(&entry.priority)),
+    if !matches!(entry.priority, PlanEntryPriority::Medium) {
+        spans.push(Span::styled(
+            format!(" · {}", plan_priority_label(&entry.priority)),
             Style::default().ink(theme.muted),
-        )),
-        _ => spans.push(Span::styled(
-            format!(" [{}]", plan_priority_label(&entry.priority)),
-            Style::default().ink(theme.error),
-        )),
+        ));
     }
-    let content_style = if matches!(entry.status, PlanEntryStatus::Completed) {
-        Style::default().add_modifier(Modifier::DIM)
-    } else {
-        Style::default()
-    };
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(entry.content.clone(), content_style));
     Line::from(spans)
 }
 
@@ -8542,6 +8541,9 @@ fn render_nested_agent_lines(
     for (entry_index, entry) in actor.transcript.iter().enumerate() {
         match entry {
             Entry::UserPrompt(text) => {
+                if entry_index > 0 {
+                    push_turn_rule(&mut out, width, state.theme);
+                }
                 push_role_plain_message(
                     &mut out,
                     USER_GLYPH,
@@ -8585,7 +8587,7 @@ fn render_nested_agent_lines(
                 out.push(Line::from(Span::styled(
                     "plan",
                     Style::default()
-                        .ink(state.theme.tool)
+                        .ink(state.theme.muted)
                         .add_modifier(Modifier::BOLD),
                 )));
                 for entry in entries {
@@ -8595,14 +8597,8 @@ fn render_nested_agent_lines(
             }
             Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
-                    let color = tool_status_ink(view.status, state.theme);
-                    let terminal_exit_status = view.body.iter().rev().find_map(|output| {
-                        if let ToolCallOutput::Terminal { exit_status, .. } = output {
-                            exit_status.as_ref()
-                        } else {
-                            None
-                        }
-                    });
+                    let rail = tool_attention_ink(view, state.theme);
+                    let terminal_exit_status = last_terminal_exit_status(view);
                     let status = match (view.status, terminal_exit_status) {
                         (ToolCallStatus::Completed, _) | (_, Some(_)) => String::new(),
                         _ => format!("[{}] ", tool_status_label(view.status)),
@@ -8626,11 +8622,12 @@ fn render_nested_agent_lines(
                         view.status,
                         content_width,
                         collapse_limit,
+                        rail.is_none(),
                         state.theme,
                     );
                     for line in block {
                         for row in wrap_tool_line(line, content_width as usize) {
-                            out.push(with_tool_gutter(row, color));
+                            out.push(with_tool_margin(row, rail));
                         }
                     }
                     let next_is_tool = actor.transcript.get(entry_index + 1).is_some_and(|next| {
@@ -9247,13 +9244,21 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     let review = compact_status_count(state.agent_usage.review.total_tokens);
     let primary_field = format!("primary: {primary}");
     let review_field = format!("review: {review}");
+    let branch_field = status_branch_field(state);
+    let context_field = status_context_field(state);
     let mut full_fields = vec![
         (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
         (project.to_string(), state.theme.secondary),
-        (primary_field.clone(), state.theme.success),
-        (review_field.clone(), state.theme.error),
     ];
+    if let Some(branch) = branch_field.clone() {
+        full_fields.push((branch, state.theme.accent));
+    }
+    if let Some(context) = context_field.clone() {
+        full_fields.push(context);
+    }
+    full_fields.push((primary_field.clone(), state.theme.success));
+    full_fields.push((review_field.clone(), state.theme.error));
     if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
         full_fields.push((format!("PR #{}", pull_request.number), state.theme.accent));
     }
@@ -9267,9 +9272,15 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         (model_name.to_string(), state.theme.primary),
         (format!("effort: {effort}"), state.theme.warning),
         (String::new(), state.theme.secondary),
-        (primary_field.clone(), state.theme.success),
-        (review_field.clone(), state.theme.error),
     ];
+    if let Some(branch) = branch_field {
+        medium_fields.push((branch, state.theme.accent));
+    }
+    if let Some(context) = context_field.clone() {
+        medium_fields.push(context);
+    }
+    medium_fields.push((primary_field.clone(), state.theme.success));
+    medium_fields.push((review_field.clone(), state.theme.error));
     if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
         medium_fields.push((format!("PR #{}", pull_request.number), state.theme.accent));
     }
@@ -9281,6 +9292,9 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         }
     }
 
+    // The branch is the first field sacrificed on narrow terminals: context
+    // pressure and token spend still decide "can I keep going", the branch
+    // name rarely does.
     let mut narrow_fields = vec![
         (model_name.to_string(), state.theme.primary),
         (effort.to_string(), state.theme.warning),
@@ -9288,9 +9302,12 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
             project.rsplit('/').next().unwrap_or(project).to_string(),
             state.theme.secondary,
         ),
-        (format!("p: {primary}"), state.theme.success),
-        (format!("r: {review}"), state.theme.error),
     ];
+    if let Some(context) = context_field {
+        narrow_fields.push(context);
+    }
+    narrow_fields.push((format!("p: {primary}"), state.theme.success));
+    narrow_fields.push((format!("r: {review}"), state.theme.error));
     if let Some(pull_request) = state.current_branch_pull_request.as_ref() {
         narrow_fields.push((format!("PR #{}", pull_request.number), state.theme.accent));
     }
@@ -9329,6 +9346,37 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
         )],
         state.theme.muted,
     )
+}
+
+/// Current git branch for the status line, with a trailing `*` when the
+/// working tree has uncommitted changes. `None` while no probe has resolved
+/// (or when the session cwd is not a git repository).
+fn status_branch_field(state: &AppState) -> Option<String> {
+    let branch = state.current_branch_pull_request_branch.as_deref()?.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    Some(if state.current_branch_dirty == Some(true) {
+        format!("{branch}*")
+    } else {
+        branch.to_string()
+    })
+}
+
+/// Context-window pressure as `ctx: N%`, colored only when it starts to
+/// decide whether the session can keep going: warning at 70%, error at 90%.
+fn status_context_field(state: &AppState) -> Option<(String, Ink)> {
+    let used = state.token_usage.context_used?;
+    let size = state.token_usage.context_size.filter(|size| *size > 0)?;
+    let percent = ((used as f64 / size as f64) * 100.0).round().min(100.0) as u64;
+    let ink = if percent >= 90 {
+        state.theme.error
+    } else if percent >= 70 {
+        state.theme.warning
+    } else {
+        state.theme.muted
+    };
+    Some((format!("ctx: {percent}%"), ink))
 }
 
 fn status_fields_width(fields: &[(String, Ink)]) -> usize {
@@ -10179,6 +10227,17 @@ fn render_transcript_entry_range_with_turns(
         }
         match entry {
             Entry::UserPrompt(text) => {
+                // A full-width dim rule before every prompt chunks the scroll
+                // into turns, so the eye can skip whole chapters. A session
+                // boundary just above already drew its own labeled rule.
+                let after_boundary = entry_index > 0
+                    && matches!(
+                        state.transcript.get(entry_index - 1),
+                        Some(Entry::SessionBoundary(_))
+                    );
+                if entry_index > 0 && !after_boundary {
+                    push_turn_rule(&mut out, width, theme);
+                }
                 // The user's own words are as durable as the answers they
                 // produce: never abbreviate them behind a collapse hint.
                 push_role_plain_message(
@@ -10279,14 +10338,14 @@ fn render_transcript_entry_range_with_turns(
                     heading.push(Span::styled(
                         "subagent plan",
                         Style::default()
-                            .ink(theme.tool)
+                            .ink(theme.muted)
                             .add_modifier(Modifier::BOLD),
                     ));
                 } else {
                     heading.push(Span::styled(
                         "plan",
                         Style::default()
-                            .ink(theme.tool)
+                            .ink(theme.muted)
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
@@ -10298,14 +10357,8 @@ fn render_transcript_entry_range_with_turns(
             }
             Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
                 if let Some(view) = state.tool_calls.get(id) {
-                    let color = tool_status_ink(view.status, theme);
-                    let terminal_exit_status = view.body.iter().rev().find_map(|output| {
-                        if let ToolCallOutput::Terminal { exit_status, .. } = output {
-                            exit_status.as_ref()
-                        } else {
-                            None
-                        }
-                    });
+                    let rail = tool_attention_ink(view, theme);
+                    let terminal_exit_status = last_terminal_exit_status(view);
                     let status = match (view.status, terminal_exit_status) {
                         (agent_client_protocol::schema::v1::ToolCallStatus::Completed, _) => {
                             String::new()
@@ -10327,13 +10380,14 @@ fn render_transcript_entry_range_with_turns(
                     }
                     // Render the whole tool call — header plus outputs — into a
                     // temporary buffer, wrap each line to the width left of the
-                    // gutter, then frame every resulting row with a colored left
-                    // rail so the block reads as one unit, visually distinct from
-                    // the role-marked agent prose around it. Wrapping here — rather
-                    // than letting the transcript Paragraph wrap — keeps the rail
-                    // on continuation rows; a rail prepended to a single logical
-                    // line would land only on the first wrapped row. The rail
-                    // color carries the tool status. See issue #257.
+                    // gutter, then frame every resulting row with the left
+                    // margin so the block reads as one unit, visually distinct
+                    // from the role-marked agent prose around it. Wrapping here —
+                    // rather than letting the transcript Paragraph wrap — keeps
+                    // the margin on continuation rows; a prefix prepended to a
+                    // single logical line would land only on the first wrapped
+                    // row (issue #257). Blocks that still demand attention get
+                    // a colored rail; quiet blocks get plain spaces.
                     let content_width = width.saturating_sub(TOOL_GUTTER_WIDTH);
                     let mut block: Vec<Line<'static>> = vec![Line::from(spans)];
                     let tool_collapse_limit = match state.tool_detail_expanded(id) {
@@ -10369,12 +10423,13 @@ fn render_transcript_entry_range_with_turns(
                             view.status,
                             content_width,
                             tool_collapse_limit,
+                            rail.is_none(),
                             theme,
                         );
                     }
                     for line in block {
                         for row in wrap_tool_line(line, content_width as usize) {
-                            out.push(with_tool_gutter(row, color));
+                            out.push(with_tool_margin(row, rail));
                         }
                     }
                     out.push(Line::from(""));
@@ -10416,14 +10471,26 @@ fn tool_entry_is_successful(state: &AppState, entry: &Entry) -> bool {
         .is_some_and(|view| view.status == ToolCallStatus::Completed)
 }
 
+/// Full-width dim rule marking an outer-turn boundary — the chapter break
+/// that lets the eye skip whole turns while scrolling.
+fn push_turn_rule(out: &mut Vec<Line<'static>>, width: u16, theme: TerminalTheme) {
+    out.push(Line::from(Span::styled(
+        "─".repeat(usize::from(width).max(1)),
+        Style::default().ink(theme.muted),
+    )));
+    out.push(Line::from(""));
+}
+
 fn push_turn_header(out: &mut Vec<Line<'static>>, elapsed: Option<Duration>, theme: TerminalTheme) {
     let label = elapsed
         .map(|elapsed| format!("agent · {}", format_duration(elapsed)))
         .unwrap_or_else(|| "agent".to_string());
+    // Turn scaffolding stays in the dim layer: bold for shape, muted so the
+    // turn's prose and failures keep the contrast.
     out.push(Line::from(Span::styled(
         label,
         Style::default()
-            .ink(theme.primary)
+            .ink(theme.muted)
             .add_modifier(Modifier::BOLD),
     )));
 }
@@ -10462,7 +10529,7 @@ fn push_turn_final_response_label(out: &mut Vec<Line<'static>>, theme: TerminalT
     out.push(Line::from(Span::styled(
         "└─ final response",
         Style::default()
-            .ink(theme.primary)
+            .ink(theme.muted)
             .add_modifier(Modifier::BOLD),
     )));
 }
@@ -10829,7 +10896,16 @@ fn push_markdown_lines(
     width: u16,
     theme: TerminalTheme,
 ) {
-    push_markdown_lines_limited_inner(out, text, indent, width, None, theme, false);
+    push_markdown_lines_limited_inner(out, text, indent, width, None, theme, None);
+}
+
+/// Rendering voice for tool-output text inside the markdown renderer.
+/// `Active` keeps the error/warning line promotion for blocks that still
+/// demand attention; `Quiet` renders everything in the dim layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolVoice {
+    Active,
+    Quiet,
 }
 
 fn push_tool_markdown_lines_limited(
@@ -10838,15 +10914,30 @@ fn push_tool_markdown_lines_limited(
     indent: usize,
     width: u16,
     collapse_limit: Option<usize>,
+    quiet: bool,
     theme: TerminalTheme,
 ) {
-    let (_, hidden) = tool_output_preview(&text, collapse_limit);
-    if let Some(ToolOutputHidden::Lines(lines)) = hidden {
-        push_tool_collapse_hint(out, indent, ToolOutputHidden::Lines(lines), theme);
-        push_markdown_lines_limited_inner(out, text, indent, width, collapse_limit, theme, true);
+    let voice = if quiet {
+        ToolVoice::Quiet
     } else {
-        let (preview, hidden) = tool_output_preview(&text, collapse_limit);
-        push_markdown_lines_limited_inner(out, preview, indent, width, None, theme, true);
+        ToolVoice::Active
+    };
+    let (preview, hidden) = tool_output_preview(&text, collapse_limit);
+    if let Some(ToolOutputHidden::Lines(_)) = hidden {
+        // Line-based collapse is handled inside the renderer, which places
+        // the anchor line and the hint while replaying parser state across
+        // the elided head.
+        push_markdown_lines_limited_inner(
+            out,
+            text,
+            indent,
+            width,
+            collapse_limit,
+            theme,
+            Some(voice),
+        );
+    } else {
+        push_markdown_lines_limited_inner(out, preview, indent, width, None, theme, Some(voice));
         if let Some(ToolOutputHidden::Details) = hidden {
             push_tool_collapse_hint(out, indent, ToolOutputHidden::Details, theme);
         }
@@ -10911,24 +11002,38 @@ fn tool_output_preview(
     (preview, Some(hidden))
 }
 
+/// Collapse terminal output to (anchor, tail, hidden). The tail is where the
+/// signal lives (the error, the test summary, the exit status), so that is
+/// what stays visible; the anchor is the first output line, kept above the
+/// hint so a skimmed block still says what it *is* ("Compiling …", the test
+/// runner banner) and not just how it ended.
 fn terminal_output_preview(
     text: &str,
     collapse_limit: Option<usize>,
-) -> (String, Option<ToolOutputHidden>) {
+) -> (Option<String>, String, Option<ToolOutputHidden>) {
     let Some(line_limit) = collapse_limit else {
-        return (text.to_string(), None);
+        return (None, text.to_string(), None);
     };
     let lines = text.split('\n').collect::<Vec<_>>();
     let first_visible = lines.len().saturating_sub(line_limit);
     let tail = lines[first_visible..].join("\n");
     let tail_chars = tail.chars().count();
     if first_visible == 0 && tail_chars <= TOOL_OUTPUT_COLLAPSED_CHARS {
-        return (tail, None);
+        return (None, tail, None);
     }
     if tail_chars <= TOOL_OUTPUT_COLLAPSED_CHARS {
-        return (tail, Some(ToolOutputHidden::Lines(first_visible)));
+        // Showing the single hidden line costs the same row the hint would.
+        if first_visible == 1 {
+            return (None, text.to_string(), None);
+        }
+        let anchor = collapse_anchor(&lines[..first_visible]);
+        let hidden = first_visible - usize::from(anchor.is_some());
+        return (anchor, tail, Some(ToolOutputHidden::Lines(hidden)));
     }
 
+    let anchor = (first_visible >= 2)
+        .then(|| collapse_anchor(&lines[..first_visible]))
+        .flatten();
     let mut preview = tail
         .chars()
         .rev()
@@ -10936,9 +11041,24 @@ fn terminal_output_preview(
         .collect::<Vec<_>>();
     preview.reverse();
     (
+        anchor,
         preview.into_iter().collect(),
         Some(ToolOutputHidden::EarlierTerminalOutput),
     )
+}
+
+/// Maximum characters of the anchor line kept above a collapse hint.
+const COLLAPSE_ANCHOR_CHARS: usize = 160;
+
+/// First non-blank line of a collapsed head, truncated so one enormous
+/// logical line cannot undo the collapse.
+fn collapse_anchor(head: &[&str]) -> Option<String> {
+    let line = head.iter().find(|line| !line.trim().is_empty())?;
+    let mut anchor: String = line.chars().take(COLLAPSE_ANCHOR_CHARS).collect();
+    if line.chars().count() > COLLAPSE_ANCHOR_CHARS {
+        anchor.push('…');
+    }
+    Some(anchor)
 }
 
 fn push_markdown_lines_limited_inner(
@@ -10948,7 +11068,7 @@ fn push_markdown_lines_limited_inner(
     width: u16,
     collapse_limit: Option<usize>,
     theme: TerminalTheme,
-    use_tool_output_style: bool,
+    voice: Option<ToolVoice>,
 ) {
     let prefix = " ".repeat(indent);
     let mut code_fence: Option<(char, usize)> = None;
@@ -10957,9 +11077,14 @@ fn push_markdown_lines_limited_inner(
     let lines: Vec<&str> = text.split('\n').collect();
     // Collapse keeps the *tail*: for tool output the end is where the signal
     // lives (the error, the test summary, the exit status), so hiding the head
-    // keeps exactly the lines the user wanted. The hint sits on top, standing
-    // in for the elided head.
-    let hidden = collapsed_head_len(lines.len(), collapse_limit);
+    // keeps exactly the lines the user wanted. The first line of the elided
+    // head stays visible as an anchor — it is what says what the block *is* —
+    // with the hint below it standing in for the rest.
+    let mut hidden = collapsed_head_len(lines.len(), collapse_limit);
+    if hidden == 1 {
+        // Showing the single hidden line costs the same row the hint would.
+        hidden = 0;
+    }
     // Replay parser state across the hidden head so a tail that starts inside
     // a code block or HTML comment renders consistently with the full text.
     for raw in &lines[..hidden] {
@@ -10976,7 +11101,15 @@ fn push_markdown_lines_limited_inner(
         }
     }
     if hidden > 0 {
-        push_collapse_hint(out, indent, hidden, theme);
+        let anchor = collapse_anchor(&lines[..hidden]);
+        let hint_count = hidden - usize::from(anchor.is_some());
+        if let Some(anchor) = anchor {
+            out.push(Line::from(Span::styled(
+                format!("{prefix}{anchor}"),
+                Style::default().ink(theme.subtle),
+            )));
+        }
+        push_collapse_hint(out, indent, hint_count, theme);
     }
     let mut line_index = hidden;
     while line_index < lines.len() {
@@ -10992,7 +11125,11 @@ fn push_markdown_lines_limited_inner(
             }
             out.push(Line::from(Span::styled(
                 format!("{prefix}  {original}"),
-                Style::default().ink(theme.quote),
+                Style::default().ink(if voice == Some(ToolVoice::Quiet) {
+                    theme.subtle
+                } else {
+                    theme.quote
+                }),
             )));
             line_index += 1;
             continue;
@@ -11029,10 +11166,10 @@ fn push_markdown_lines_limited_inner(
             continue;
         }
 
-        let base_style = if use_tool_output_style {
-            tool_output_line_style(raw, theme)
-        } else {
-            Style::default()
+        let base_style = match voice {
+            Some(ToolVoice::Active) => tool_output_line_style(raw, theme),
+            Some(ToolVoice::Quiet) => Style::default().ink(theme.subtle),
+            None => Style::default(),
         };
 
         if let Some(header) = markdown_table_header(raw, lines.get(line_index + 1)) {
@@ -11050,8 +11187,7 @@ fn push_markdown_lines_limited_inner(
 
         if let Some((level, heading)) = markdown_heading(raw) {
             let marker = "#".repeat(level);
-            let heading_style =
-                markdown_heading_style(level, theme, base_style, use_tool_output_style);
+            let heading_style = markdown_heading_style(level, theme, base_style, voice.is_some());
             out.push(Line::from(vec![
                 Span::styled(format!("{prefix}{marker} "), heading_style),
                 Span::styled(heading.to_string(), heading_style),
@@ -11066,7 +11202,7 @@ fn push_markdown_lines_limited_inner(
                     "{prefix}{}",
                     "─".repeat(usize::from(width).saturating_sub(indent).max(1))
                 ),
-                base_style.ink(if use_tool_output_style {
+                base_style.ink(if voice.is_some() {
                     theme.subtle
                 } else {
                     theme.muted
@@ -11432,6 +11568,22 @@ fn with_tool_gutter(line: Line<'static>, ink: Ink) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Frame one row of a tool block. Blocks that still demand attention
+/// (running, pending, failed, nonzero exit) carry the colored rail; quiet
+/// blocks swap it for plain spaces of the same width, so the rail's presence
+/// alone marks where live work and failures sit in the scroll.
+fn with_tool_margin(line: Line<'static>, rail: Option<Ink>) -> Line<'static> {
+    match rail {
+        Some(ink) => with_tool_gutter(line, ink),
+        None => {
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(Span::raw(" ".repeat(TOOL_GUTTER_WIDTH as usize)));
+            spans.extend(line.spans);
+            Line::from(spans)
+        }
+    }
+}
+
 /// Word-wrap a rendered tool-call line to `width` display cells, preserving
 /// each span's style, and return one `Line` per visual row. Doing the wrap
 /// here — instead of relying on the transcript `Paragraph`'s own wrapping —
@@ -11596,13 +11748,20 @@ fn push_tool_outputs(
     tool_status: agent_client_protocol::schema::v1::ToolCallStatus,
     width: u16,
     collapse_limit: Option<usize>,
+    quiet: bool,
     theme: TerminalTheme,
 ) {
     for output in outputs {
         match output {
-            ToolCallOutput::Text(text) => {
-                push_tool_markdown_lines_limited(out, text.clone(), 2, width, collapse_limit, theme)
-            }
+            ToolCallOutput::Text(text) => push_tool_markdown_lines_limited(
+                out,
+                text.clone(),
+                2,
+                width,
+                collapse_limit,
+                quiet,
+                theme,
+            ),
             ToolCallOutput::Diff {
                 path,
                 old_text,
@@ -11634,6 +11793,7 @@ fn push_tool_outputs(
                         output.trim_end_matches(['\r', '\n']).to_string(),
                         2,
                         collapse_limit,
+                        quiet,
                         theme,
                     );
                 } else if exit_status.is_some() {
@@ -11708,19 +11868,30 @@ fn push_tool_text_lines(
     text: String,
     indent: usize,
     collapse_limit: Option<usize>,
+    quiet: bool,
     theme: TerminalTheme,
 ) {
-    let (preview, hidden) = terminal_output_preview(&text, collapse_limit);
+    let (anchor, preview, hidden) = terminal_output_preview(&text, collapse_limit);
     let prefix = " ".repeat(indent);
+    let line_style = |raw: &str| {
+        if quiet {
+            Style::default().ink(theme.subtle)
+        } else {
+            tool_output_line_style(raw, theme)
+        }
+    };
+    if let Some(anchor) = anchor {
+        out.push(Line::from(Span::styled(
+            format!("{prefix}{anchor}"),
+            line_style(&anchor),
+        )));
+    }
     if let Some(hidden) = hidden {
         push_tool_collapse_hint(out, indent, hidden, theme);
     }
     for raw in preview.split('\n') {
-        let line = format!("{prefix}{raw}");
-        out.push(Line::from(Span::styled(
-            line,
-            tool_output_line_style(raw, theme),
-        )));
+        let style = line_style(raw);
+        out.push(Line::from(Span::styled(format!("{prefix}{raw}"), style)));
     }
 }
 
@@ -11764,9 +11935,9 @@ fn collapsed_head_len(total_lines: usize, collapse_limit: Option<usize>) -> usiz
     }
 }
 
-/// Leading "K earlier lines hidden" hint shown above collapsed tool outputs
-/// so the user can tell the head was elided rather than assuming the output
-/// started there.
+/// "K lines hidden" hint shown between the anchor line and the visible tail
+/// of a collapsed tool output, so the user can tell the middle was elided
+/// rather than assuming the output started at the tail.
 fn push_collapse_hint(
     out: &mut Vec<Line<'static>>,
     indent: usize,
@@ -11775,9 +11946,7 @@ fn push_collapse_hint(
 ) {
     let prefix = " ".repeat(indent);
     out.push(Line::from(Span::styled(
-        format!(
-            "{prefix}... {hidden} earlier lines hidden · Ctrl-T full transcript · Alt-T latest tool"
-        ),
+        format!("{prefix}… {hidden} lines hidden · Ctrl-T full transcript · Alt-T latest tool"),
         Style::default()
             .ink(theme.muted)
             .add_modifier(Modifier::ITALIC),
@@ -11793,22 +11962,12 @@ fn tool_output_line_style(raw: &str, theme: TerminalTheme) -> Style {
         || trimmed.starts_with("error[")
         || trimmed.starts_with("fatal:")
         || lower.contains("panicked at");
-    let success = contains_word(&lower, "success")
-        || contains_word(&lower, "successful")
-        || contains_word(&lower, "passed") && !failed
-        || lower == "ok"
-        || lower.ends_with(" ok")
-        || lower.contains("test result: ok");
     if error || failed {
         Style::default()
             .ink(theme.error)
             .add_modifier(Modifier::BOLD)
     } else if contains_word(&lower, "warning") || contains_word(&lower, "warn") {
         Style::default().ink(theme.warning)
-    } else if success {
-        Style::default().ink(theme.success)
-    } else if raw.trim_start().starts_with('$') {
-        Style::default().ink(theme.primary)
     } else {
         Style::default().ink(theme.subtle)
     }
@@ -12492,7 +12651,36 @@ fn tool_header_spans(
     subagent: bool,
     theme: TerminalTheme,
 ) -> Vec<Span<'static>> {
-    let color = tool_status_ink(view.status, theme);
+    if tool_block_is_quiet(view) {
+        // A tool that finished cleanly is context, not signal: its whole
+        // header drops to the dim layer (no bold "tool" word, no accent
+        // colors) so the running and failed blocks — the only ones that
+        // still need the user's eyes — keep their contrast.
+        let mut spans = Vec::new();
+        if subagent {
+            spans.push(Span::styled("subagent ", Style::default().ink(theme.muted)));
+        }
+        spans.push(Span::styled(
+            format!("{} ", tool_kind_label(view.kind)),
+            Style::default().ink(theme.muted),
+        ));
+        if matches!(
+            view.kind,
+            agent_client_protocol::schema::v1::ToolKind::Execute
+        ) {
+            spans.extend(highlight_command_with(
+                &view.title,
+                quiet_command_inks(theme),
+            ));
+        } else {
+            spans.push(Span::styled(
+                view.title.clone(),
+                Style::default().ink(theme.subtle),
+            ));
+        }
+        return spans;
+    }
+    let color = tool_attention_ink(view, theme).unwrap_or(theme.warning);
     let mut spans = Vec::new();
     if subagent {
         spans.push(Span::styled(
@@ -12526,6 +12714,48 @@ fn tool_header_spans(
     spans
 }
 
+/// The most recent terminal exit status attached to a tool call, if any.
+fn last_terminal_exit_status(
+    view: &crate::app::ToolCallView,
+) -> Option<&agent_client_protocol::schema::v1::TerminalExitStatus> {
+    view.body.iter().rev().find_map(|output| {
+        if let ToolCallOutput::Terminal { exit_status, .. } = output {
+            exit_status.as_ref()
+        } else {
+            None
+        }
+    })
+}
+
+/// A quiet tool block completed cleanly: nothing about it needs the user's
+/// attention anymore, so the emphasis budget spends nothing on it — no rail,
+/// no bold, no accent color. A completed call whose terminal exited nonzero
+/// (or died to a signal) is NOT quiet even though ACP reports it `Completed`.
+fn tool_block_is_quiet(view: &crate::app::ToolCallView) -> bool {
+    view.status == agent_client_protocol::schema::v1::ToolCallStatus::Completed
+        && match last_terminal_exit_status(view) {
+            Some(status) => status.exit_code == Some(0) && status.signal.is_none(),
+            None => true,
+        }
+}
+
+/// Rail and header ink for a tool block that still demands attention;
+/// `None` means the block is quiet and renders railless in the dim layer.
+fn tool_attention_ink(view: &crate::app::ToolCallView, theme: TerminalTheme) -> Option<Ink> {
+    use agent_client_protocol::schema::v1::ToolCallStatus;
+    if tool_block_is_quiet(view) {
+        return None;
+    }
+    Some(match view.status {
+        ToolCallStatus::Failed => theme.error,
+        // Completed here means "completed but the terminal exited nonzero".
+        ToolCallStatus::Completed => theme.error,
+        ToolCallStatus::InProgress => theme.primary,
+        ToolCallStatus::Pending => theme.muted,
+        _ => theme.warning,
+    })
+}
+
 fn is_shell_operator(token: &str) -> bool {
     matches!(
         token,
@@ -12533,17 +12763,55 @@ fn is_shell_operator(token: &str) -> bool {
     )
 }
 
+/// Per-token styles for command highlighting in tool headers.
+struct CommandInks {
+    program: Style,
+    subcommand: Style,
+    flag: Style,
+    operator: Style,
+    arg: Style,
+}
+
+/// Full-color token styles for commands that still demand attention
+/// (running, pending, failed).
+fn active_command_inks(theme: TerminalTheme) -> CommandInks {
+    CommandInks {
+        program: Style::default()
+            .ink(theme.primary)
+            .add_modifier(Modifier::BOLD),
+        subcommand: Style::default().ink(theme.secondary),
+        flag: Style::default().ink(theme.accent),
+        operator: Style::default().ink(theme.muted),
+        arg: Style::default().ink(theme.text),
+    }
+}
+
+/// Dim-layer token styles for quiet (cleanly completed) commands: the
+/// program keeps the plain terminal foreground so the command is still
+/// identifiable while skimming, everything else recedes.
+fn quiet_command_inks(theme: TerminalTheme) -> CommandInks {
+    CommandInks {
+        program: Style::default().ink(theme.text),
+        subcommand: Style::default().ink(theme.subtle),
+        flag: Style::default().ink(theme.subtle),
+        operator: Style::default().ink(theme.muted),
+        arg: Style::default().ink(theme.subtle),
+    }
+}
+
 /// Lightweight syntax highlighting for commands displayed in tool headers.
 /// It deliberately preserves spacing and only distinguishes the program,
 /// first subcommand, flags, operators, and ordinary arguments.
 fn highlight_command(cmd: &str, theme: TerminalTheme) -> Vec<Span<'static>> {
-    let program_style = Style::default()
-        .ink(theme.primary)
-        .add_modifier(Modifier::BOLD);
-    let subcommand_style = Style::default().ink(theme.secondary);
-    let flag_style = Style::default().ink(theme.accent);
-    let operator_style = Style::default().ink(theme.muted);
-    let arg_style = Style::default().ink(theme.text);
+    highlight_command_with(cmd, active_command_inks(theme))
+}
+
+fn highlight_command_with(cmd: &str, inks: CommandInks) -> Vec<Span<'static>> {
+    let program_style = inks.program;
+    let subcommand_style = inks.subcommand;
+    let flag_style = inks.flag;
+    let operator_style = inks.operator;
+    let arg_style = inks.arg;
     let mut spans = Vec::new();
     let mut expect_program = true;
     let mut subcommand_seen = false;
@@ -12619,19 +12887,6 @@ fn tool_status_label(status: agent_client_protocol::schema::v1::ToolCallStatus) 
         agent_client_protocol::schema::v1::ToolCallStatus::Completed => "done",
         agent_client_protocol::schema::v1::ToolCallStatus::Failed => "failed",
         _ => "?",
-    }
-}
-
-fn tool_status_ink(
-    status: agent_client_protocol::schema::v1::ToolCallStatus,
-    theme: TerminalTheme,
-) -> Ink {
-    match status {
-        agent_client_protocol::schema::v1::ToolCallStatus::Failed => theme.error,
-        agent_client_protocol::schema::v1::ToolCallStatus::Completed => theme.success,
-        agent_client_protocol::schema::v1::ToolCallStatus::InProgress => theme.primary,
-        agent_client_protocol::schema::v1::ToolCallStatus::Pending => theme.muted,
-        _ => theme.warning,
     }
 }
 
@@ -16091,11 +16346,18 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert!(!before.iter().any(|line| line.contains("OLDER_HIDDEN_HEAD")));
+        // The first hidden-head line stays visible as the collapse anchor;
+        // the rest of the head stays hidden.
+        assert!(before.iter().any(|line| line.contains("OLDER_HIDDEN_HEAD")));
         assert!(
             !before
                 .iter()
-                .any(|line| line.contains("LATEST_HIDDEN_HEAD"))
+                .any(|line| line.contains("OLDER_HIDDEN_HEAD_SECOND"))
+        );
+        assert!(
+            !before
+                .iter()
+                .any(|line| line.contains("LATEST_HIDDEN_HEAD_SECOND"))
         );
         assert!(
             before
@@ -16121,8 +16383,16 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        assert!(!after.iter().any(|line| line.contains("OLDER_HIDDEN_HEAD")));
-        assert!(after.iter().any(|line| line.contains("LATEST_HIDDEN_HEAD")));
+        assert!(
+            !after
+                .iter()
+                .any(|line| line.contains("OLDER_HIDDEN_HEAD_SECOND"))
+        );
+        assert!(
+            after
+                .iter()
+                .any(|line| line.contains("LATEST_HIDDEN_HEAD_SECOND"))
+        );
         assert!(after.iter().any(|line| line.contains("OLDER_VISIBLE_TAIL")));
         assert!(
             after
@@ -16181,12 +16451,19 @@ mod tests {
         assert!(
             after
                 .iter()
-                .any(|line| line.contains("INLINE_OLDER_HIDDEN_HEAD"))
+                .any(|line| line.contains("INLINE_OLDER_HIDDEN_HEAD_SECOND"))
+        );
+        // The collapsed tool keeps its first head line as the anchor but
+        // hides the rest of the head.
+        assert!(
+            after
+                .iter()
+                .any(|line| line.contains("INLINE_LATEST_HIDDEN_HEAD"))
         );
         assert!(
             !after
                 .iter()
-                .any(|line| line.contains("INLINE_LATEST_HIDDEN_HEAD"))
+                .any(|line| line.contains("INLINE_LATEST_HIDDEN_HEAD_SECOND"))
         );
         assert!(
             after
@@ -16363,43 +16640,54 @@ mod tests {
 
         let expected = vec![
             "plan",
-            "  [pending] write tests",
-            "  [running] [high] render output",
-            "  [done] [low] document behavior",
+            "  ◻ write tests",
+            "  ▸ render output · high",
+            "  ✔ document behavior · low",
             "",
         ];
         let normal = render_transcript_lines(&state, 80);
         let full = render_full_transcript_lines(&state, 80);
         assert_eq!(normal.iter().map(line_text).collect::<Vec<_>>(), expected);
         assert_eq!(full.iter().map(line_text).collect::<Vec<_>>(), expected);
-        assert!(!normal.iter().any(|line| line_text(line).contains("[!]")));
-        assert!(!normal.iter().any(|line| line_text(line).contains("[*]")));
 
+        // Glyph colors carry the state: pending muted, running primary
+        // (the only bold row), done success.
         assert_eq!(normal[1].spans[1].style.fg, Some(state.theme.muted.color()));
         assert_eq!(
             normal[2].spans[1].style.fg,
             Some(state.theme.primary.color())
         );
-        assert_eq!(
-            normal[3].spans[1].style.fg,
-            Some(state.theme.success.color())
-        );
-        assert_eq!(
-            normal[2].spans[2].style.fg,
-            Some(state.theme.warning.color())
-        );
         assert!(
-            normal[2].spans[2]
+            normal[2].spans[1]
                 .style
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
-        assert_eq!(normal[3].spans[2].style.fg, Some(state.theme.muted.color()));
+        assert_eq!(
+            normal[3].spans[1].style.fg,
+            Some(state.theme.success.color())
+        );
+        // Non-medium priorities append a muted suffix, never a second accent.
+        assert_eq!(
+            normal[2].spans.last().expect("priority suffix").style.fg,
+            Some(state.theme.muted.color())
+        );
+        // Settled rows (pending and done) sit in the dim layer; the active
+        // row's content keeps full contrast.
         assert!(
-            normal[3]
-                .spans
-                .last()
-                .expect("completed content")
+            normal[1].spans[3]
+                .style
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
+        assert!(
+            normal[3].spans[3]
+                .style
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
+        assert!(
+            !normal[2].spans[3]
                 .style
                 .add_modifier
                 .contains(Modifier::DIM)
@@ -16419,7 +16707,7 @@ mod tests {
 
         let normal = render_transcript_lines(&state, 80);
         let full = render_full_transcript_lines(&state, 80);
-        let expected = vec!["◆ subagent plan", "  [running] inspect the renderer", ""];
+        let expected = vec!["◆ subagent plan", "  ▸ inspect the renderer", ""];
         assert_eq!(normal.iter().map(line_text).collect::<Vec<_>>(), expected);
         assert_eq!(full.iter().map(line_text).collect::<Vec<_>>(), expected);
         assert_eq!(
@@ -16432,7 +16720,7 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
-        assert_eq!(normal[0].spans[1].style.fg, Some(state.theme.tool.color()));
+        assert_eq!(normal[0].spans[1].style.fg, Some(state.theme.muted.color()));
     }
 
     #[test]
@@ -16454,7 +16742,7 @@ mod tests {
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         paragraph.render(area, &mut buffer);
         let rendered = buffer_lines(&buffer).join("\n");
-        for word in ["running", "high", "narrow", "content", "stays", "readable"] {
+        for word in ["▸", "high", "narrow", "content", "stays", "readable"] {
             assert!(rendered.contains(word), "missing {word:?} in {rendered:?}");
         }
     }
@@ -16627,6 +16915,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn status_line_shows_branch_and_context_pressure() {
+        let mut state = AppState::new();
+        state.active_models.primary = "gpt-5-6-terra".to_string();
+        state.primary_reasoning_effort = Some("high".to_string());
+        state.project_label = "~/code/mjolnir".to_string();
+        state.agent_usage.primary.total_tokens = 68_000;
+        state.agent_usage.review.total_tokens = 311_000;
+        state.current_branch_pull_request_branch = Some("transcript-restyle".to_string());
+        state.current_branch_dirty = Some(true);
+        state.token_usage.context_used = Some(140_000);
+        state.token_usage.context_size = Some(200_000);
+
+        let line = status_line(&state, 220);
+        assert_eq!(
+            line_text(&line),
+            "gpt-5-6-terra · effort: high · ~/code/mjolnir · transcript-restyle* · ctx: 70% · primary: 68k · review: 311k"
+        );
+        let ctx_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("ctx: 70%"))
+            .expect("ctx field");
+        assert_eq!(ctx_span.style, state.theme.warning.style());
+
+        // A clean tree drops the dirty star, and light context pressure
+        // renders muted rather than spending an accent.
+        state.current_branch_dirty = Some(false);
+        state.token_usage.context_used = Some(20_000);
+        let line = status_line(&state, 220);
+        assert!(line_text(&line).contains(" transcript-restyle · "));
+        let ctx_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("ctx: 10%"))
+            .expect("ctx field");
+        assert_eq!(ctx_span.style, state.theme.muted.style());
     }
 
     #[test]
@@ -17370,6 +17697,7 @@ mod tests {
             CurrentBranchPrProbe {
                 cwd: PathBuf::from("/repo"),
                 branch: Some("feature".to_string()),
+                dirty: Some(false),
                 gh_succeeded: true,
                 pull_request: Some(CurrentBranchPullRequest {
                     number: 487,
@@ -17390,6 +17718,7 @@ mod tests {
             CurrentBranchPrProbe {
                 cwd: PathBuf::from("/repo"),
                 branch: Some("other".to_string()),
+                dirty: Some(false),
                 gh_succeeded: false,
                 pull_request: None,
             },
@@ -21186,6 +21515,8 @@ mod tests {
                 "",
                 "● first result",
                 "",
+                "─".repeat(80).as_str(),
+                "",
                 "❯ second prompt",
                 "",
             ]
@@ -22315,7 +22646,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok", ""]);
+        assert_eq!(rendered, vec!["  exec cargo test", "    ok", ""]);
         assert!(sink.pending_lines(&state, 80).is_empty());
 
         // Nothing further is owed once the turn ends.
@@ -22369,10 +22700,7 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(
-            rendered,
-            vec!["│ tool exec cargo test · exit 0", "│   ok", ""]
-        );
+        assert_eq!(rendered, vec!["  exec cargo test · exit 0", "    ok", ""]);
     }
 
     #[test]
@@ -22420,7 +22748,10 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert_eq!(next_prompt, vec!["❯ next prompt", ""]);
+        assert_eq!(
+            next_prompt,
+            vec!["─".repeat(80).as_str(), "", "❯ next prompt", ""]
+        );
     }
 
     #[test]
@@ -24670,29 +25001,31 @@ mod tests {
             .map(line_text)
             .collect();
 
-        // The last TOOL_OUTPUT_COLLAPSED_LINES lines are visible (framed by
-        // the tool gutter) — the tail is where errors and summaries live.
+        // The last TOOL_OUTPUT_COLLAPSED_LINES lines are visible — the tail
+        // is where errors and summaries live. A cleanly completed tool is
+        // quiet: plain-space margin, no rail.
         let hidden = 20 - TOOL_OUTPUT_COLLAPSED_LINES;
         assert!(
             rendered
                 .iter()
-                .any(|line| line == &format!("│   line {}", hidden + 1))
+                .any(|line| line == &format!("    line {}", hidden + 1))
         );
-        assert!(rendered.iter().any(|line| line == "│   line 20"));
-        // Everything before the tail is hidden.
+        assert!(rendered.iter().any(|line| line == "    line 20"));
+        // Everything between the anchor and the tail is hidden.
         assert!(
             !rendered
                 .iter()
-                .any(|line| line == &format!("│   line {hidden}"))
+                .any(|line| line == &format!("    line {hidden}"))
         );
-        // And a leading hint tells the user the head was elided.
+        // The first line stays visible as the anchor…
+        assert!(rendered.iter().any(|line| line == "    line 1"));
+        // …with the hint below it standing in for the rest of the head.
         assert!(
-            rendered
-                .iter()
-                .any(|line| line
-                    == &format!(
-                        "│   ... {hidden} earlier lines hidden · Ctrl-T full transcript · Alt-T latest tool"
-                    )),
+            rendered.iter().any(|line| line
+                == &format!(
+                    "    … {} lines hidden · Ctrl-T full transcript · Alt-T latest tool",
+                    hidden - 1
+                )),
             "missing collapse hint, got: {rendered:?}"
         );
 
@@ -24702,8 +25035,8 @@ mod tests {
             .iter()
             .map(line_text)
             .collect();
-        assert!(expanded.iter().any(|line| line == "│   line 1"));
-        assert!(expanded.iter().any(|line| line == "│   line 20"));
+        assert!(expanded.iter().any(|line| line == "    line 2"));
+        assert!(expanded.iter().any(|line| line == "    line 20"));
         assert!(!expanded.iter().any(|line| line.contains("lines hidden")));
     }
 
@@ -24753,9 +25086,11 @@ mod tests {
         state.expand_transcript_details = true;
         let expanded_lines = render_transcript_lines(&state, 80);
         let expanded = expanded_lines.iter().collect::<Vec<_>>();
+        // Quiet (cleanly completed) tool rows carry a plain two-space margin
+        // rather than the rail.
         let expanded_tool_content = expanded
             .iter()
-            .filter(|line| line_text(line).starts_with(TOOL_GUTTER))
+            .filter(|line| line_text(line).starts_with("  "))
             .flat_map(|line| line.spans.iter().skip(1))
             .map(|span| span.content.as_ref())
             .collect::<String>();
@@ -24777,18 +25112,23 @@ mod tests {
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let (line_preview, hidden) =
+        let (anchor, line_preview, hidden) =
             terminal_output_preview(&lines, Some(TOOL_OUTPUT_COLLAPSED_LINES));
+        assert_eq!(anchor.as_deref(), Some("line 1"));
         assert!(!line_preview.contains("line 1\n"));
         assert!(line_preview.ends_with("line 20"));
+        // The anchor line stands in for one of the hidden lines.
         assert_eq!(
             hidden,
-            Some(ToolOutputHidden::Lines(20 - TOOL_OUTPUT_COLLAPSED_LINES))
+            Some(ToolOutputHidden::Lines(
+                20 - TOOL_OUTPUT_COLLAPSED_LINES - 1
+            ))
         );
 
         let one_line = format!("{}LATEST_SUFFIX", "x".repeat(900));
-        let (char_preview, hidden) =
+        let (anchor, char_preview, hidden) =
             terminal_output_preview(&one_line, Some(TOOL_OUTPUT_COLLAPSED_LINES));
+        assert_eq!(anchor, None, "single-line output has no separate anchor");
         assert_eq!(char_preview.chars().count(), TOOL_OUTPUT_COLLAPSED_CHARS);
         assert!(char_preview.ends_with("LATEST_SUFFIX"));
         assert_eq!(hidden, Some(ToolOutputHidden::EarlierTerminalOutput));
@@ -24803,8 +25143,9 @@ mod tests {
         terminal.push(repaint_stream.as_bytes());
         terminal.finish();
         let normalized = terminal.render();
-        let (preview, hidden) =
+        let (anchor, preview, hidden) =
             terminal_output_preview(&normalized, Some(TOOL_OUTPUT_COLLAPSED_LINES));
+        assert_eq!(anchor, None);
         assert_eq!(preview, "complete FINAL_REPAINT");
         assert_eq!(hidden, None);
     }
@@ -25758,26 +26099,24 @@ mod tests {
             assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
         }
 
+        // Both tools completed cleanly, so their headers are quiet: no rail,
+        // no bold "tool" word, but the kind label and subagent provenance
+        // stay readable in the dim layer. (Adjacent dim spans may merge
+        // during wrapping, so assert on prefixes rather than span borders.)
         let primary_tool = rendered
             .iter()
-            .find(|line| line_text(line) == "│ tool other call a subagent")
+            .find(|line| line_text(line) == "  other call a subagent")
             .expect("primary tool header");
-        assert_eq!(primary_tool.spans[1].content.as_ref(), "tool ");
+        assert!(primary_tool.spans[1].content.starts_with("other "));
 
         let subagent_tool = rendered
             .iter()
-            .find(|line| line_text(line) == "│ subagent tool edit edit file")
+            .find(|line| line_text(line) == "  subagent edit edit file")
             .expect("subagent tool header");
-        assert_eq!(subagent_tool.spans[1].content.as_ref(), "subagent ");
+        assert!(subagent_tool.spans[1].content.starts_with("subagent "));
         assert_eq!(
             subagent_tool.spans[1].style.fg,
-            Some(state.theme.secondary.color())
-        );
-        assert!(
-            subagent_tool.spans[1]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
+            Some(state.theme.muted.color())
         );
     }
 
@@ -25823,12 +26162,13 @@ mod tests {
 
         let mut state = AppState::new();
         state.theme = theme;
+        // A still-running command keeps the full syntax colors.
         state.tool_calls.insert(
             "execute".to_string(),
             crate::app::ToolCallView {
                 title: "FOO=bar cargo test --all | grep failed".to_string(),
                 kind: ToolKind::Execute,
-                status: ToolCallStatus::Completed,
+                status: ToolCallStatus::InProgress,
                 body: Vec::new(),
             },
         );
@@ -25839,7 +26179,9 @@ mod tests {
         let rendered = render_transcript_lines(&state, 80);
         let header = rendered
             .iter()
-            .find(|line| line_text(line) == "│ tool exec FOO=bar cargo test --all | grep failed")
+            .find(|line| {
+                line_text(line) == "│ tool [running] exec FOO=bar cargo test --all | grep failed"
+            })
             .expect("rendered execute tool header");
         let rendered_spans = header
             .spans
@@ -25867,6 +26209,27 @@ mod tests {
             *command_style(&rendered_spans, "grep"),
             theme.primary.with_bold().style()
         );
+
+        // Once the command completes cleanly it goes quiet: railless, the
+        // program in plain foreground, the rest in the dim layer.
+        state
+            .tool_calls
+            .get_mut("execute")
+            .expect("tool call")
+            .status = ToolCallStatus::Completed;
+        let rendered = render_transcript_lines(&state, 80);
+        let header = rendered
+            .iter()
+            .find(|line| line_text(line) == "  exec FOO=bar cargo test --all | grep failed")
+            .expect("rendered quiet execute tool header");
+        let quiet_spans = header
+            .spans
+            .iter()
+            .map(|span| (span.content.to_string(), span.style))
+            .collect::<Vec<_>>();
+        assert_eq!(*command_style(&quiet_spans, "cargo"), theme.text.style());
+        assert_eq!(*command_style(&quiet_spans, "test"), theme.subtle.style());
+        assert_eq!(*command_style(&quiet_spans, "--all"), theme.subtle.style());
     }
 
     #[test]
@@ -25901,20 +26264,20 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "│ tool exec run checks"));
-        assert!(rendered.iter().any(|line| line == "│   ## Output"));
-        assert!(rendered.iter().any(|line| line == "│   ok"));
+        assert!(rendered.iter().any(|line| line == "  exec run checks"));
+        assert!(rendered.iter().any(|line| line == "    ## Output"));
+        assert!(rendered.iter().any(|line| line == "    ok"));
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│   diff src/main.rs  +1 -1")
+                .any(|line| line == "    diff src/main.rs  +1 -1")
         );
-        assert!(rendered.iter().any(|line| line.trim_end() == "│   1 - old"));
-        assert!(rendered.iter().any(|line| line.trim_end() == "│   1 + new"));
+        assert!(rendered.iter().any(|line| line.trim_end() == "    1 - old"));
+        assert!(rendered.iter().any(|line| line.trim_end() == "    1 + new"));
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│   no terminal output received")
+                .any(|line| line == "    no terminal output received")
         );
         assert!(
             !rendered.iter().any(|line| line.contains("term-1")),
@@ -26062,19 +26425,19 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│   Auto permissions approved this tool call."),
+                .any(|line| line == "    Auto permissions approved this tool call."),
             "rendered lines: {rendered:?}"
         );
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│   Reason: read/search/fetch"),
+                .any(|line| line == "    Reason: read/search/fetch"),
             "rendered lines: {rendered:?}"
         );
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│   - visible from the agent"),
+                .any(|line| line == "    - visible from the agent"),
             "rendered lines: {rendered:?}"
         );
     }
@@ -26148,18 +26511,20 @@ mod tests {
         let width = 16;
         let lines = render_transcript_lines(&state, width);
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        // A cleanly completed tool renders railless: the same hanging indent,
+        // carried by a plain two-space margin.
         let body: Vec<&Line<'static>> = lines
             .iter()
             .filter(|line| {
                 matches!(
                     line_text(line).as_str(),
-                    "│   - bold" | "│     italic" | "│     code tail"
+                    "    - bold" | "      italic" | "      code tail"
                 )
             })
             .collect();
         assert_eq!(
             body.iter().map(|line| line_text(line)).collect::<Vec<_>>(),
-            ["│   - bold", "│     italic", "│     code tail"],
+            ["    - bold", "      italic", "      code tail"],
             "rendered tool rows: {rendered:?}"
         );
         for row in &body {
@@ -26302,9 +26667,10 @@ mod tests {
         let width = 24u16;
         let lines = render_transcript_lines(&state, width);
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        // A cleanly completed tool renders railless behind a two-space margin.
         let tool_content = lines
             .iter()
-            .filter(|line| line_text(line).starts_with(TOOL_GUTTER))
+            .filter(|line| line_text(line).starts_with("    "))
             .map(line_text)
             .collect::<String>();
         assert!(
@@ -26313,12 +26679,12 @@ mod tests {
                 && tool_content.contains("path)"),
             "wrapped tool rows lost link content: {rendered:?}"
         );
-        assert!(rendered.iter().any(|line| line == "│   key | value"));
-        assert!(rendered.iter().any(|line| line == "│     - nested"));
-        for line in lines.iter().filter(|line| {
-            let text = line_text(line);
-            text.starts_with(TOOL_GUTTER) && !text.starts_with("│ tool ")
-        }) {
+        assert!(rendered.iter().any(|line| line == "    key | value"));
+        assert!(rendered.iter().any(|line| line == "      - nested"));
+        for line in lines
+            .iter()
+            .filter(|line| line_text(line).starts_with("    "))
+        {
             assert!(
                 line_text(line).width() <= width as usize,
                 "too wide: {line:?}"
@@ -26361,12 +26727,12 @@ mod tests {
             .map(line_text)
             .collect();
 
-        assert!(rendered.iter().any(|line| line == "│   src/my_file.rs"));
-        assert!(rendered.iter().any(|line| line == "│   foo_bar_baz"));
+        assert!(rendered.iter().any(|line| line == "    src/my_file.rs"));
+        assert!(rendered.iter().any(|line| line == "    foo_bar_baz"));
         assert!(
             rendered
                 .iter()
-                .any(|line| line == "│   Auto permissions approved."),
+                .any(|line| line == "    Auto permissions approved."),
             "rendered lines: {rendered:?}"
         );
     }
@@ -26375,12 +26741,14 @@ mod tests {
     fn transcript_tool_markdown_output_uses_semantic_status_color() {
         let mut state = AppState::new();
         let theme = state.theme;
+        // A failed tool keeps the semantic line promotion; a quiet
+        // (cleanly completed) tool renders everything in the dim layer.
         state.tool_calls.insert(
             "call-1".to_string(),
             crate::app::ToolCallView {
                 title: "log".to_string(),
                 kind: ToolKind::Execute,
-                status: ToolCallStatus::Completed,
+                status: ToolCallStatus::Failed,
                 body: vec![ToolCallOutput::Text(
                     "warning: **check**\ntest result: ok. 1324 passed; 0 failed; 0 ignored\nerror: test failed"
                         .to_string(),
@@ -26426,8 +26794,8 @@ mod tests {
                 .spans
                 .iter()
                 .skip(1)
-                .all(|span| span.style.fg == Some(theme.success.color())),
-            "zero failures must not override a successful summary: {success_line:?}"
+                .all(|span| span.style.fg == Some(theme.subtle.color())),
+            "passing summaries are context, not signal — they stay in the dim layer: {success_line:?}"
         );
 
         let error_line = lines
@@ -26476,36 +26844,34 @@ mod tests {
             crate::app::ToolCallView {
                 title: "cargo test".to_string(),
                 kind: ToolKind::Execute,
-                status: ToolCallStatus::Completed,
-                body: vec![ToolCallOutput::Text("ok".to_string())],
+                status: ToolCallStatus::InProgress,
+                body: vec![ToolCallOutput::Text("running".to_string())],
             },
         );
         state.transcript.push(Entry::ToolCall("call-1".to_string()));
 
         let lines = render_transcript_lines(&state, 80);
 
-        // Both the tool header and its output are framed by the gutter rail.
+        // While the call still demands attention, header and output are
+        // framed by the status-colored gutter rail.
         let call_line = lines
             .iter()
-            .find(|line| line_text(line) == "│ tool exec cargo test")
+            .find(|line| line_text(line) == "│ tool [running] exec cargo test")
             .expect("tool call line");
-        assert_eq!(call_line.spans[1].style.fg, Some(theme.success.color()));
+        assert_eq!(call_line.spans[1].style.fg, Some(theme.primary.color()));
         assert!(
             call_line.spans[1]
                 .style
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
-        assert!(lines.iter().any(|l| line_text(l) == "│   ok"));
-
-        // The rail on every framed line carries the status color — success
-        // here, because the call completed.
+        assert!(lines.iter().any(|l| line_text(l) == "│   running"));
         for line in lines
             .iter()
             .filter(|l| line_text(l).starts_with(TOOL_GUTTER))
         {
             assert_eq!(line.spans[0].content.as_ref(), TOOL_GUTTER);
-            assert_eq!(line.spans[0].style.fg, Some(theme.success.color()));
+            assert_eq!(line.spans[0].style.fg, Some(theme.primary.color()));
         }
 
         // Agent prose uses its own role gutter rather than the tool rail.
@@ -26514,6 +26880,20 @@ mod tests {
             !lines
                 .iter()
                 .any(|l| line_text(l).starts_with(TOOL_GUTTER) && line_text(l).contains("hi there"))
+        );
+
+        // Once the call completes cleanly the rail disappears: the block goes
+        // quiet behind a plain margin, so the rail's presence alone marks
+        // live work and failures.
+        let view = state.tool_calls.get_mut("call-1").expect("tool call");
+        view.status = ToolCallStatus::Completed;
+        view.body = vec![ToolCallOutput::Text("ok".to_string())];
+        let lines = render_transcript_lines(&state, 80);
+        assert!(lines.iter().any(|l| line_text(l) == "  exec cargo test"));
+        assert!(lines.iter().any(|l| line_text(l) == "    ok"));
+        assert!(
+            !lines.iter().any(|l| line_text(l).starts_with(TOOL_GUTTER)),
+            "quiet tool blocks must not carry the rail"
         );
     }
 
@@ -26537,14 +26917,12 @@ mod tests {
         let lines = render_transcript_lines(&state, width);
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
 
-        // Every non-blank row of the tool block must keep the gutter rail (so
+        // Every non-blank row of the tool block must keep its left margin (so
         // wrapped continuation rows never read as flush-left agent prose) and
         // must fit inside the render width (so the transcript Paragraph does
-        // not re-wrap it and strip the rail). See issue #257.
-        assert_eq!(
-            rendered.first().map(String::as_str),
-            Some("│ tool exec log")
-        );
+        // not re-wrap it and strip the margin). See issue #257. A cleanly
+        // completed tool carries the plain two-space margin, not the rail.
+        assert_eq!(rendered.first().map(String::as_str), Some("  exec log"));
         let block_rows: Vec<&String> = rendered.iter().filter(|line| !line.is_empty()).collect();
         assert!(
             block_rows.len() > 2,
@@ -26552,8 +26930,8 @@ mod tests {
         );
         for row in &block_rows {
             assert!(
-                row.starts_with(TOOL_GUTTER),
-                "row lost the gutter rail: {row:?}"
+                row.starts_with("  ") && !row.starts_with(TOOL_GUTTER),
+                "row lost the quiet-tool margin: {row:?}"
             );
             assert!(
                 row.width() <= width as usize,
@@ -26589,8 +26967,8 @@ mod tests {
 
         assert!(rendered.iter().any(|line| line == "❯ # literal"));
         assert!(rendered.iter().any(|line| line == "  `code` and **bold**"));
-        assert!(rendered.iter().any(|line| line == "│   # stdout"));
-        assert!(rendered.iter().any(|line| line == "│   ok and bold"));
+        assert!(rendered.iter().any(|line| line == "    # stdout"));
+        assert!(rendered.iter().any(|line| line == "    ok and bold"));
     }
 
     #[test]
@@ -26811,24 +27189,33 @@ mod tests {
         state.transcript.push(Entry::ToolCall("call-1".to_string()));
 
         let lines = render_transcript_lines(&state, 80);
+        // "intro 1" surfaces as the anchor; the hint covers the rest of the
+        // hidden head.
+        let anchor_idx = lines
+            .iter()
+            .position(|l| line_text(l).contains("intro 1"))
+            .expect("anchor line above the hint");
         let hint_idx = lines
             .iter()
-            .position(|l| line_text(l).contains("4 earlier lines hidden"))
+            .position(|l| line_text(l).contains("3 lines hidden"))
             .expect("collapse hint above the tail");
         let code_idx = lines
             .iter()
             .position(|l| line_text(l).contains("code line 1"))
             .expect("code row");
+        assert!(anchor_idx < hint_idx, "anchor must lead the hint");
         assert!(hint_idx < code_idx, "hint must lead the visible tail");
         let code_row = &lines[code_idx];
-        // The tail starts inside the fence, so it still renders as code.
+        // The tail starts inside the fence, so it still renders with the
+        // fence-body ink — the quiet (cleanly completed) tool keeps it in
+        // the dim layer.
         assert!(
             code_row
                 .spans
                 .iter()
-                .any(|span| span.style.fg == Some(theme.quote.color())
+                .any(|span| span.style.fg == Some(theme.subtle.color())
                     && span.content.contains("code line 1")),
-            "tail must keep the code-block style: {code_row:?}"
+            "tail must keep the code-block state: {code_row:?}"
         );
     }
 
