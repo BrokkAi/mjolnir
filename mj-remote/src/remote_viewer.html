@@ -1449,20 +1449,18 @@
       }
 
       .working-badge {
-        flex: 0 0 auto;
-        display: inline-flex;
-        align-items: center;
-        gap: 7px;
+        position: absolute;
+        top: 0;
+        left: 26px;
+        z-index: 2;
+        transform: translateY(-50%);
+        padding: 0 6px;
+        background: var(--surface-chrome);
         color: var(--red-hot);
-        font: 700 10px/1 var(--font-mono);
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
+        font: 700 11px/1 var(--font-mono);
       }
 
       .working-spinner {
-        font: 700 11px/1 var(--font-mono);
-        letter-spacing: 0;
-        text-transform: none;
         white-space: pre;
       }
 
@@ -1525,7 +1523,8 @@
         gap: 2px;
         padding: 5px 18px 6px;
         padding-right: calc(18px + env(safe-area-inset-right));
-        border-bottom: 1px solid var(--line);
+        padding-bottom: calc(6px + env(safe-area-inset-bottom));
+        border-top: 1px solid var(--line);
         background: var(--surface-chrome);
       }
 
@@ -2067,7 +2066,7 @@
       .composer {
         border-top: 1px solid var(--line);
         background: var(--surface-chrome);
-        padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+        padding: 12px 16px;
         display: flex;
         flex-direction: column;
         gap: 10px;
@@ -3293,14 +3292,13 @@
         .connection-badge,
         .archive-badge,
         .side-badge,
-        .approval-badge,
-        .working-badge {
+        .approval-badge {
           order: 1;
         }
 
         .composer {
           gap: 8px;
-          padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+          padding: 8px 10px;
         }
 
         .console-strip {
@@ -3438,10 +3436,6 @@
           <span id="archive-badge" class="archive-badge" hidden>archived</span>
           <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
-          <span id="working-badge" class="working-badge" hidden>
-            <span id="working-spinner" class="working-spinner" aria-hidden="true"></span>
-            <span>working</span>
-          </span>
           <div class="mobile-chat-actions">
             <button id="mobile-new-session-button" class="primary sidebar-new-button" type="button">New</button>
             <button id="mobile-logout-button" class="ghost-danger" type="button">Log out</button>
@@ -3449,10 +3443,6 @@
           <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show uncommitted changes">±</button>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
-        <div id="status-line" class="status-line" hidden>
-          <div id="status-fields" class="status-fields"></div>
-          <div id="status-quotas" class="status-quotas" hidden></div>
-        </div>
         <section id="review-board" class="review-board" aria-label="Review findings"></section>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
@@ -3464,6 +3454,9 @@
           <div id="queue-list" class="queue-list"></div>
           <div class="console">
             <span class="console-frame" aria-hidden="true"></span>
+            <span id="working-badge" class="working-badge" role="status" aria-label="Working" hidden>
+              <span id="working-spinner" class="working-spinner" aria-hidden="true"></span>
+            </span>
             <div id="queue-input" class="composer-input" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Message the agent" enterkeyhint="send" spellcheck="true" aria-label="Message the agent"></div>
             <div id="attachment-list" class="attachment-list" aria-label="Attached images"></div>
             <div id="command-palette" class="command-palette" role="listbox" aria-label="Slash commands" hidden></div>
@@ -3478,6 +3471,10 @@
             </div>
           </div>
         </section>
+        <div id="status-line" class="status-line" hidden>
+          <div id="status-fields" class="status-fields"></div>
+          <div id="status-quotas" class="status-quotas" hidden></div>
+        </div>
       </main>
     </div>
 

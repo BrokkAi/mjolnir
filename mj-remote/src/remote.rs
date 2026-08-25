@@ -11882,6 +11882,37 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
     }
 
     #[test]
+    fn embedded_viewer_places_tui_activity_surfaces_around_the_composer() {
+        let viewer = include_str!("remote_viewer.html").replace("\r\n", "\n");
+        let composer = viewer.find("<section id=\"composer\"").expect("composer");
+        let status = viewer.find("<div id=\"status-line\"").expect("status line");
+        let console = viewer.find("<div class=\"console\">").expect("console");
+        let spinner = viewer
+            .find("id=\"working-spinner\"")
+            .expect("working spinner");
+        let status_rule = viewer
+            .split_once("      .status-line {")
+            .and_then(|(_, rest)| rest.split_once("      }"))
+            .map(|(rule, _)| rule)
+            .expect("status line rule");
+
+        assert!(
+            composer < status,
+            "status rail must follow the composer like the TUI status line"
+        );
+        assert!(
+            console < spinner,
+            "working spinner must live on the composer frame, not the header"
+        );
+        assert!(viewer.contains(".working-badge {\n        position: absolute;"));
+        assert!(status_rule.contains("border-top: 1px solid var(--line);"));
+        assert!(status_rule.contains("padding-bottom: calc(6px + env(safe-area-inset-bottom));"));
+        assert!(viewer.contains(
+            "id=\"working-badge\" class=\"working-badge\" role=\"status\" aria-label=\"Working\""
+        ));
+    }
+
+    #[test]
     fn embedded_viewer_only_configures_supported_acp_servers() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("Supported servers"));
