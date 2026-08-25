@@ -55,6 +55,7 @@ const MAX_WAIT_MILLISECONDS: u64 = 10_000;
 const CONFIG_REVOCATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 const COMPUTER_BUNDLE_NAME: &str = "Mjolnir Computer.app";
 const COMPUTER_HOST_NAME: &str = "mj-computer-host";
+const CARGO_INSTALL_BUNDLE_MARKER: &str = ".mjolnir-cargo-install";
 const COMPUTER_BUNDLE_INFO_TEMPLATE: &str =
     include_str!("../assets/macos/Mjolnir Computer.app/Contents/Info.plist");
 const COMPUTER_TOOL_NAMES: [&str; 9] = [
@@ -1167,23 +1168,40 @@ fn computer_bundle_path_for_executable(executable: &Path) -> Result<PathBuf> {
 }
 
 /// `cargo install` can install the two executables but cannot install an app
-/// bundle. Build the development bundle next to an installed `mj` exactly
-/// once, preserving a preexisting release bundle and its Developer ID
-/// signature.
+/// bundle. Refresh the development bundle next to an installed `mj`, while
+/// preserving a preexisting release bundle and its Developer ID signature.
 fn materialize_cargo_install_bundle(
     executable: &Path,
     bundle: &Path,
     sign_bundle: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
-    if bundle.is_dir() {
-        return Ok(());
-    }
-    if bundle.exists() {
+    materialize_cargo_install_bundle_with_policy(
+        executable,
+        bundle,
+        cargo_install_bundle_needs_refresh,
+        sign_bundle,
+    )
+}
+
+fn materialize_cargo_install_bundle_with_policy(
+    executable: &Path,
+    bundle: &Path,
+    should_refresh_existing: impl FnOnce(&Path) -> Result<bool>,
+    sign_bundle: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let replace_existing = if bundle.is_dir() {
+        if !should_refresh_existing(bundle)? {
+            return Ok(());
+        }
+        true
+    } else if bundle.exists() {
         anyhow::bail!(
             "Mjolnir Computer.app is not a directory at {}; remove the invalid path before enabling Computer Control",
             bundle.display()
         );
-    }
+    } else {
+        false
+    };
 
     let parent = executable.parent().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1212,8 +1230,15 @@ fn materialize_cargo_install_bundle(
     let staged_bundle = staging.path().join(COMPUTER_BUNDLE_NAME);
     let contents = staged_bundle.join("Contents");
     let macos = contents.join("MacOS");
+    let resources = contents.join("Resources");
     fs::create_dir_all(&macos)
         .with_context(|| format!("create Mjolnir Computer.app at {}", staged_bundle.display()))?;
+    fs::create_dir_all(&resources).with_context(|| {
+        format!(
+            "create Mjolnir Computer resources at {}",
+            staged_bundle.display()
+        )
+    })?;
     fs::write(
         contents.join("Info.plist"),
         COMPUTER_BUNDLE_INFO_TEMPLATE.replace("@VERSION@", env!("CARGO_PKG_VERSION")),
@@ -1238,15 +1263,70 @@ fn materialize_cargo_install_bundle(
             staged_host.display()
         )
     })?;
-    sign_bundle(&staged_bundle)?;
-    fs::rename(&staged_bundle, bundle).with_context(|| {
+    fs::write(resources.join(CARGO_INSTALL_BUNDLE_MARKER), []).with_context(|| {
         format!(
-            "install Mjolnir Computer.app from {} to {}",
-            staged_bundle.display(),
-            bundle.display()
+            "mark cargo-installed Mjolnir Computer.app at {}",
+            staged_bundle.display()
         )
     })?;
+    sign_bundle(&staged_bundle)?;
+    if replace_existing {
+        let backup = staging.path().join("previous-Mjolnir Computer.app");
+        fs::rename(bundle, &backup).with_context(|| {
+            format!(
+                "stage stale Mjolnir Computer.app from {} to {}",
+                bundle.display(),
+                backup.display()
+            )
+        })?;
+        if let Err(error) = fs::rename(&staged_bundle, bundle) {
+            let _ = fs::rename(&backup, bundle);
+            return Err(error).with_context(|| {
+                format!(
+                    "replace stale Mjolnir Computer.app from {} to {}",
+                    staged_bundle.display(),
+                    bundle.display()
+                )
+            });
+        }
+    } else {
+        fs::rename(&staged_bundle, bundle).with_context(|| {
+            format!(
+                "install Mjolnir Computer.app from {} to {}",
+                staged_bundle.display(),
+                bundle.display()
+            )
+        })?;
+    }
     Ok(())
+}
+
+fn cargo_install_bundle_needs_refresh(bundle: &Path) -> Result<bool> {
+    if bundle
+        .join("Contents/Resources")
+        .join(CARGO_INSTALL_BUNDLE_MARKER)
+        .is_file()
+    {
+        return Ok(true);
+    }
+
+    // Bundles created before the marker was introduced were ad-hoc signed.
+    // Keep them upgradeable without replacing a Developer ID-signed release.
+    let output = Command::new("/usr/bin/codesign")
+        .args(["-d", "--verbose=4"])
+        .arg(bundle)
+        .output()
+        .with_context(|| {
+            format!(
+                "inspect Mjolnir Computer.app signature at {}",
+                bundle.display()
+            )
+        })?;
+    Ok(output.status.success() && is_ad_hoc_signature(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn is_ad_hoc_signature(details: &str) -> bool {
+    details.contains("Signature=adhoc")
 }
 
 fn sign_development_bundle(bundle: &Path) -> Result<()> {
@@ -1878,11 +1958,16 @@ mod tests {
         fs::write(&host, b"installed computer host").unwrap();
         let bundle = computer_bundle_path_for_executable(&executable).unwrap();
 
-        materialize_cargo_install_bundle(&executable, &bundle, |staged| {
-            assert!(staged.join("Contents/Info.plist").is_file());
-            assert!(staged.join("Contents/MacOS/mj-computer-host").is_file());
-            Ok(())
-        })
+        materialize_cargo_install_bundle_with_policy(
+            &executable,
+            &bundle,
+            |_| Ok(true),
+            |staged| {
+                assert!(staged.join("Contents/Info.plist").is_file());
+                assert!(staged.join("Contents/MacOS/mj-computer-host").is_file());
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert_eq!(
@@ -1892,19 +1977,76 @@ mod tests {
         let info = fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
         assert!(info.contains(env!("CARGO_PKG_VERSION")));
         assert!(!info.contains("@VERSION@"));
+        assert!(
+            bundle
+                .join("Contents/Resources")
+                .join(CARGO_INSTALL_BUNDLE_MARKER)
+                .is_file()
+        );
+        assert!(cargo_install_bundle_needs_refresh(&bundle).unwrap());
     }
 
     #[test]
-    fn cargo_install_bundle_materialization_preserves_an_existing_bundle() {
+    fn cargo_install_bundle_materialization_preserves_a_release_bundle() {
         let temporary = tempfile::tempdir().unwrap();
         let executable = temporary.path().join("mj");
         let bundle = computer_bundle_path_for_executable(&executable).unwrap();
         fs::create_dir(&bundle).unwrap();
 
-        materialize_cargo_install_bundle(&executable, &bundle, |_| {
-            panic!("existing release bundle must not be replaced")
-        })
+        materialize_cargo_install_bundle_with_policy(
+            &executable,
+            &bundle,
+            |_| Ok(false),
+            |_| panic!("existing release bundle must not be replaced"),
+        )
         .unwrap();
+        assert!(!cargo_install_bundle_needs_refresh(&bundle).unwrap());
+    }
+
+    #[test]
+    fn cargo_install_bundle_materialization_refreshes_a_marked_development_bundle() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("mj");
+        let host = temporary.path().join(COMPUTER_HOST_NAME);
+        let bundle = computer_bundle_path_for_executable(&executable).unwrap();
+        fs::write(&executable, []).unwrap();
+        fs::write(&host, b"first host").unwrap();
+
+        materialize_cargo_install_bundle_with_policy(
+            &executable,
+            &bundle,
+            |_| Ok(true),
+            |_| Ok(()),
+        )
+        .unwrap();
+        fs::write(&host, b"updated host").unwrap();
+
+        materialize_cargo_install_bundle_with_policy(
+            &executable,
+            &bundle,
+            |existing| {
+                assert!(
+                    existing
+                        .join("Contents/Resources")
+                        .join(CARGO_INSTALL_BUNDLE_MARKER)
+                        .is_file()
+                );
+                Ok(true)
+            },
+            |staged| {
+                assert_eq!(
+                    fs::read(staged.join("Contents/MacOS/mj-computer-host")).unwrap(),
+                    b"updated host"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(bundle.join("Contents/MacOS/mj-computer-host")).unwrap(),
+            b"updated host"
+        );
     }
 
     #[test]
@@ -1927,5 +2069,20 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        fs::remove_file(
+            bundle
+                .join("Contents/Resources")
+                .join(CARGO_INSTALL_BUNDLE_MARKER),
+        )
+        .unwrap();
+        assert!(cargo_install_bundle_needs_refresh(&bundle).unwrap());
+    }
+
+    #[test]
+    fn ad_hoc_signature_detection_does_not_match_a_developer_id_signature() {
+        assert!(is_ad_hoc_signature("Signature=adhoc"));
+        assert!(!is_ad_hoc_signature(
+            "Authority=Developer ID Application: Brokk AI, Inc. (TEAMID)\nTeamIdentifier=TEAMID"
+        ));
     }
 }

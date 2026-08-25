@@ -216,9 +216,10 @@ Mjolnir restarts the host and reports the fresh permission state. This is for
 local testing, not the Developer ID-signed and notarized Mjolnir Computer.app
 in release archives, which keeps the stable identity used for production macOS
 permission grants. A macOS `cargo install` includes the sibling
-`mj-computer-host`; on the first enable, Mjolnir materializes and ad-hoc-signs
-the same development bundle beside the installed `mj`. Pass `--release` to
-build the release-profile pair instead.
+`mj-computer-host`; on first enable, Mjolnir materializes and ad-hoc-signs the
+development bundle beside the installed `mj`, then refreshes that development
+bundle after later Cargo reinstalls. Pass `--release` to build the
+release-profile pair instead.
 
 ## Documentation
 
