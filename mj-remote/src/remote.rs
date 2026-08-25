@@ -14044,6 +14044,85 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
     }
 
     #[test]
+    fn tool_transcript_entry_publishes_attention_status() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let mut tool_call = ToolCall::new("call-1", "cargo test");
+        tool_call.kind = ToolKind::Execute;
+        tool_call.content = vec![ToolCallContent::Terminal(Terminal::new(TerminalId::new(
+            "term-1",
+        )))];
+        state.observe_session_update(&SessionUpdate::ToolCall(tool_call));
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.transcript[0].tool_status.as_deref(),
+            Some("pending")
+        );
+
+        let mut fields = ToolCallUpdateFields::default();
+        fields.status = Some(ToolCallStatus::InProgress);
+        state.observe_session_update(&SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-1", fields,
+        )));
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.transcript[0].tool_status.as_deref(),
+            Some("running")
+        );
+
+        // ACP reports the call Completed, but its terminal exited nonzero:
+        // the published status must be `failed` so the viewer styles the
+        // block as the failure it is instead of dimming it as a success.
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "error: test failed\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(1)),
+        }));
+        let mut fields = ToolCallUpdateFields::default();
+        fields.status = Some(ToolCallStatus::Completed);
+        state.observe_session_update(&SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-1", fields,
+        )));
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.transcript[0].tool_status.as_deref(),
+            Some("failed")
+        );
+
+        // A clean exit snapshot re-renders the entry in place and lets the
+        // call go quiet.
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "ok\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
+        }));
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.transcript[0].tool_status.as_deref(),
+            Some("completed")
+        );
+
+        // A signalled exit is never quiet, even with exit code 0 absent.
+        state.observe_event(&UiEvent::TerminalOutput(TerminalOutputSnapshot {
+            terminal_id: "term-1".to_string(),
+            output: "killed\n".to_string(),
+            truncated: false,
+            exit_status: Some(TerminalExitStatus::new().signal("SIGTERM")),
+        }));
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.transcript[0].tool_status.as_deref(),
+            Some("failed")
+        );
+    }
+
+    #[test]
     fn tool_transcript_preserves_multiline_execute_title_boundary() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
