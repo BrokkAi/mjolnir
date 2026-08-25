@@ -505,7 +505,14 @@ pub enum UiCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadSessionResult {
     Switched,
-    Fallback { message: String },
+    /// The requested session was rejected, but the current session remains
+    /// active (or was restored after the failed attempt).
+    Rejected {
+        message: String,
+    },
+    Fallback {
+        message: String,
+    },
 }
 
 /// Convenience: pull plain text out of a content block for rendering.

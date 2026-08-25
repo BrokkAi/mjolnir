@@ -263,8 +263,11 @@ fn draw_session_picker(f: &mut ratatui::Frame, state: &SessionPickerState, theme
         .split(f.area());
 
     // Header
-    let header = Paragraph::new(format!(" {} | resume a session ", mjolnir_version_label()))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+    let header = Paragraph::new(format!(
+        " {} | load a session into the current agent ",
+        mjolnir_version_label()
+    ))
+    .style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_widget(header, chunks[0]);
 
     // Session list

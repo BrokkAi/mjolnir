@@ -5171,7 +5171,7 @@
       function renderLoadSessionHistory(history) {
         loadSessionListEl.replaceChildren();
         if (!history.length) {
-          loadSessionListEl.appendChild(emptyNote("No compatible disconnected sessions."));
+          loadSessionListEl.appendChild(emptyNote("No disconnected sessions in this working directory."));
           return;
         }
         for (const session of history) {
@@ -5236,14 +5236,12 @@
           const history = allSessions.filter((candidate) =>
             candidate.session_id !== current.session_id
               && !liveIds.has(candidate.session_id)
-              && candidate.status?.cwd === cwd
-              && candidate.agent === current.agent
-              && (candidate.status?.model_source || "") === (current.status?.model_source || ""),
+              && candidate.status?.cwd === cwd,
           );
           renderLoadSessionHistory(history);
           loadSessionStatusEl.textContent = history.length
-            ? "Choose a session to load into this agent."
-            : "Only disconnected sessions from the same agent and working directory are shown.";
+            ? "Choose a session to load into this agent. Sessions from another agent may be rejected by the target agent."
+            : "Only disconnected sessions from this working directory are shown.";
         } catch (error) {
           if (error.message !== "HTTP 401") {
             loadSessionListEl.replaceChildren();

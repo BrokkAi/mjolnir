@@ -14441,7 +14441,7 @@ fn help_modal_lines(
         help_blank_line(),
         help_command_line(
             "Built-in commands:",
-            "/exit quits Mjolnir (or returns from side); /clear keeps model; /new applies saved models; /load opens session picker; /export full includes nested agents",
+            "/exit quits Mjolnir (or returns from side); /clear keeps model; /new applies saved models; /load opens a session picker for the current agent; /export full includes nested agents",
             theme,
         ),
     ]);

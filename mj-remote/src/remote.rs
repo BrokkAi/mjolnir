@@ -461,7 +461,7 @@ fn remote_builtin_command_records(include_fork: bool, include_load: bool) -> Vec
     if include_load {
         commands.push(command_record(
             REMOTE_BUILTIN_LOAD_COMMAND,
-            "load a previous session",
+            "load a previous session into the current agent",
             None,
             "mjolnir",
         ));
@@ -1280,6 +1280,14 @@ fn finish_remote_session_action(
 ) {
     match result {
         Ok(LoadSessionResult::Switched) => {
+            if let Ok(mut guard) = state.lock() {
+                guard.release_remote_prompt_slot_for(claimed_session_id);
+            }
+        }
+        Ok(LoadSessionResult::Rejected { .. }) => {
+            // The ACP runtime already emitted the rejection warning after
+            // keeping or restoring this session. Only release the claimed
+            // prompt slot here so the remote transcript does not duplicate it.
             if let Ok(mut guard) = state.lock() {
                 guard.release_remote_prompt_slot_for(claimed_session_id);
             }
@@ -11929,6 +11937,13 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(viewer.contains("queueSessionAction(\"/clear\""));
         assert!(viewer.contains("`/load ${session.session_id}`"));
         assert!(viewer.contains("candidate.status?.cwd === cwd"));
+        assert!(!viewer.contains("candidate.agent === current.agent"));
+        assert!(!viewer.contains(
+            "candidate.status?.model_source || \"\") === (current.status?.model_source || \"\")"
+        ));
+        assert!(
+            viewer.contains("Sessions from another agent may be rejected by the target agent.")
+        );
     }
 
     #[test]

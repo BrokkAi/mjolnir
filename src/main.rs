@@ -406,8 +406,8 @@ struct ServerArgs {
 
 #[derive(Debug, clap::Args)]
 struct ResumeArgs {
-    /// Session ID to resume from the chosen agent. When omitted, opens an
-    /// interactive picker that fetches the chosen agent's session list.
+    /// Session ID to load into the configured primary agent. When omitted,
+    /// opens an interactive picker that lists sessions from all agents.
     session_id: Option<String>,
 
     /// List available sessions and exit (headless, no TUI). Optionally
@@ -958,8 +958,8 @@ fn role_for_session_entry<'a>(
         })
 }
 
-/// Handle the `mj resume` subcommand: pick the agent to resume from, list
-/// sessions, pick one interactively, or resume directly by ID.
+/// Handle the `mj resume` subcommand: list sessions from all configured
+/// agents, then load the selected session into the configured primary agent.
 async fn run_resume(
     args: ResumeArgs,
     fs_max_text_bytes: u64,
@@ -981,35 +981,16 @@ async fn run_resume(
     let project_label = project_label(&cwd);
     let cfg = Config::load(&config::default_config_path())?;
     let mode = effective_ui_mode(args.fullscreen_tui, &cfg);
-    let mut resume_roster = if args.list {
+    let resume_roster = if args.list {
         roster::resolve(&cfg, &cwd).await?
     } else {
         with_startup_spinner(roster::resolve(&cfg, &cwd)).await?
     };
-    let mut agent = selected_agent_for_role(&resume_roster.primary);
+    let agent = selected_agent_for_role(&resume_roster.primary);
+    let mut direct_session_entry = None;
     if let Some(session_id) = args.session_id.as_deref()
-        && let Some(record) = mj_core::session_provenance::find(session_id, &cwd)
+        && mj_core::session_provenance::find(session_id, &cwd).is_none()
     {
-        let pinned = resume_roster
-            .available
-            .iter()
-            .find(|role| {
-                role.model.model == record.model
-                    && role.model_value == record.model_value
-                    && role.launch.source_id == record.adapter_source_id
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "session {session_id} belongs to {} via {}, which is not currently launchable",
-                    record.model,
-                    record.adapter_source_id
-                )
-            })?
-            .clone();
-        resume_roster.primary = pinned.clone();
-        crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
-        agent = selected_agent_for_role(&pinned);
-    } else if let Some(session_id) = args.session_id.as_deref() {
         let matches = list_agent_sessions(&resume_roster, &cwd, args.agent_stderr.as_deref())
             .await
             .into_iter()
@@ -1020,6 +1001,7 @@ async fn run_resume(
                 let role = role_for_session_entry(&resume_roster, entry)
                     .ok_or_else(|| anyhow::anyhow!("session {session_id} has no launchable route"))?
                     .clone();
+                direct_session_entry = Some(entry.clone());
                 mj_core::session_provenance::record(mj_core::session_provenance::Record {
                     session_id: session_id.to_string(),
                     cwd: entry.cwd.clone(),
@@ -1027,9 +1009,6 @@ async fn run_resume(
                     model: role.model.model.clone(),
                     model_value: role.model_value.clone(),
                 });
-                agent = selected_agent_for_role(&role);
-                resume_roster.primary = role;
-                crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
             }
             [] => {}
             _ => anyhow::bail!(
@@ -1067,23 +1046,20 @@ async fn run_resume(
         return Ok(());
     }
 
-    // Direct ID: launch the TUI with the chosen agent and session.
+    // Direct ID: launch the TUI with the configured primary agent and session.
     if let Some(session_id) = args.session_id.clone() {
-        // Look up the chosen session's title so the resumed header shows it
+        // Look up the selected session's title so the resumed header shows it
         // immediately rather than waiting for the agent's first
         // SessionInfoUpdate. A failed lookup is non-fatal — resume proceeds
         // with no title and the agent fills it in shortly after.
-        let title =
-            match session::list_sessions(&agent, cwd.clone(), args.agent_stderr.as_deref()).await {
-                Ok(sessions) => sessions
-                    .into_iter()
-                    .find(|entry| entry.session_id == session_id)
-                    .and_then(|entry| entry.title),
-                Err(e) => {
-                    tracing::warn!("list sessions for title lookup failed: {e:#}");
-                    None
-                }
-            };
+        let title = match direct_session_entry {
+            Some(entry) => entry.title,
+            None => list_agent_sessions(&resume_roster, &cwd, args.agent_stderr.as_deref())
+                .await
+                .into_iter()
+                .find(|entry| entry.session_id == session_id)
+                .and_then(|entry| entry.title),
+        };
         let result = run_app(
             cwd,
             RuntimeOptions {
@@ -1125,10 +1101,9 @@ async fn run_resume(
 
     let mut notice = None;
     loop {
-        // Interactive picker: fetch sessions from the chosen agent first (agent is
-        // killed after listing), then set up the TUI to show the session picker,
-        // then launch the chosen session with a fresh process for the same agent.
-        eprintln!("Fetching sessions from agent...");
+        // Interactive picker: collect every configured agent's sessions, then
+        // load the selected ID into the configured primary agent.
+        eprintln!("Fetching sessions from agents...");
         let sessions =
             list_agent_sessions(&resume_roster, &cwd, args.agent_stderr.as_deref()).await;
         if sessions.is_empty() {
@@ -1175,9 +1150,13 @@ async fn run_resume(
                 let role = role_for_session_entry(&resume_roster, &entry)
                     .ok_or_else(|| anyhow::anyhow!("selected session route is unavailable"))?
                     .clone();
-                agent = selected_agent_for_role(&role);
-                resume_roster.primary = role;
-                crate::roster::rebind_auto_review_for_primary(&mut resume_roster, &cfg);
+                mj_core::session_provenance::record(mj_core::session_provenance::Record {
+                    session_id: entry.session_id.clone(),
+                    cwd: entry.cwd.clone(),
+                    adapter_source_id: role.launch.source_id.clone(),
+                    model: role.model.model.clone(),
+                    model_value: role.model_value.clone(),
+                });
                 let result = run_app(
                     cwd,
                     RuntimeOptions {
@@ -1692,21 +1671,17 @@ async fn run_app(
             }
             UiExitReason::SwitchSession => {
                 if let Some(session_id) = session_result.session_id {
-                    let resume_agent = mj_core::session_provenance::find(&session_id, &cwd)
-                        .and_then(|record| {
-                            roster.available.iter().find(|role| {
-                                role.model.model == record.model
-                                    && role.model_value == record.model_value
-                                    && role.launch.source_id == record.adapter_source_id
-                            })
-                        })
-                        .map(selected_agent_for_role)
-                        .unwrap_or(agent);
+                    // A `/load` always targets the active agent, including
+                    // when the selected session was listed by another ACP
+                    // adapter. ACP session IDs are adapter-owned, so the
+                    // target agent may reject a foreign ID; that response is
+                    // intentional and must not silently switch us back to
+                    // the session's original agent.
                     initial_resume = Some(ResumeTarget {
                         session_id,
                         title: session_result.session_title,
                     });
-                    initial_agent = Some(resume_agent);
+                    initial_agent = Some(agent);
                     continue;
                 }
                 return Ok(None);
@@ -1872,14 +1847,14 @@ async fn run_session_picker_action_for_roster(
     current_session_title: Option<String>,
     theme: palette::TerminalTheme,
     termination: CancellationToken,
-) -> Result<(SessionPickerAction, Option<roster::ResolvedAgent>)> {
+) -> Result<SessionPickerAction> {
     let mut notice = None;
     loop {
         let sessions = list_agent_sessions(roster, &cwd, agent_stderr).await;
         if sessions.is_empty() {
-            return Ok((
-                session_picker_empty_action(current_session_id, current_session_title),
-                None,
+            return Ok(session_picker_empty_action(
+                current_session_id,
+                current_session_title,
             ));
         }
         let outcome =
@@ -1887,14 +1862,11 @@ async fn run_session_picker_action_for_roster(
                 .await?;
         match outcome {
             session::ResumeOutcome::Cancelled => {
-                return Ok((
-                    session_picker_action(
-                        session::ResumeOutcome::Cancelled,
-                        current_session_id,
-                        current_session_title,
-                    )?,
-                    None,
-                ));
+                return session_picker_action(
+                    session::ResumeOutcome::Cancelled,
+                    current_session_id,
+                    current_session_title,
+                );
             }
             session::ResumeOutcome::DeleteRequested(entry) => {
                 if current_session_id.as_deref() == Some(entry.session_id.as_str()) {
@@ -1926,13 +1898,10 @@ async fn run_session_picker_action_for_roster(
                     model: role.model.model.clone(),
                     model_value: role.model_value.clone(),
                 });
-                return Ok((
-                    SessionPickerAction::Resume {
-                        session_id: entry.session_id,
-                        title: entry.title,
-                    },
-                    Some(role),
-                ));
+                return Ok(SessionPickerAction::Resume {
+                    session_id: entry.session_id,
+                    title: entry.title,
+                });
             }
         }
     }
@@ -2878,7 +2847,7 @@ async fn run_session(
         let current_session_id = result.session_id;
         let current_session_title = result.session_title;
 
-        let (action, selected_role) = match run_session_picker_action_for_roster(
+        let action = match run_session_picker_action_for_roster(
             &roster,
             cwd.clone(),
             runtime_options.agent_stderr.as_deref(),
@@ -2910,20 +2879,6 @@ async fn run_session(
             });
         };
 
-        if selected_role.as_ref().is_some_and(|role| {
-            role.launch.source_id != roster.primary.launch.source_id
-                || role.model.model != roster.primary.model.model
-        }) {
-            let _ = cmd_tx.send(UiCommand::Shutdown);
-            break Ok(RunSessionResult {
-                reason: UiExitReason::SwitchSession,
-                session_id: Some(target_session_id),
-                session_title: target_title,
-                theme_kind,
-                spinner_style,
-            });
-        }
-
         match request_inline_session_load(
             &cmd_tx,
             target_session_id.clone(),
@@ -2941,6 +2896,18 @@ async fn run_session(
                 }
                 // A fresh terminal starts unrestored, so the exit path will
                 // restore it again — no manual bookkeeping needed.
+                terminal = match SessionTerminal::fresh(mode) {
+                    Ok(terminal) => terminal,
+                    Err(e) => {
+                        let _ = cmd_tx.send(UiCommand::Shutdown);
+                        break Err(e);
+                    }
+                };
+                continue;
+            }
+            LoadSessionResult::Rejected { .. } => {
+                // The ACP runtime kept (or restored) the active session and
+                // queued its warning for the fresh UI instance below.
                 terminal = match SessionTerminal::fresh(mode) {
                     Ok(terminal) => terminal,
                     Err(e) => {

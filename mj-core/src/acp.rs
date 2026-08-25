@@ -2917,9 +2917,11 @@ async fn drive_session(
                             session_has_history = true;
                         }
                         Err(launch_err) => {
-                            let _ = responder.send(LoadSessionResult::Fallback {
-                                message: launch_err.to_string(),
-                            });
+                            let message = format!(
+                                "could not reload the current session: {launch_err}; the current session remains active"
+                            );
+                            let _ = ui_tx.send(UiEvent::Warning(message.clone()));
+                            let _ = responder.send(LoadSessionResult::Rejected { message });
                         }
                     }
                     continue;
@@ -2930,11 +2932,11 @@ async fn drive_session(
                     .close
                     .is_none()
                 {
-                    let _ = responder.send(LoadSessionResult::Fallback {
-                        message:
-                            "agent does not advertise ACP capability sessionCapabilities.close"
-                                .to_string(),
-                    });
+                    let message =
+                        "agent does not advertise ACP capability sessionCapabilities.close; the current session remains active"
+                            .to_string();
+                    let _ = ui_tx.send(UiEvent::Warning(message.clone()));
+                    let _ = responder.send(LoadSessionResult::Rejected { message });
                     continue;
                 }
 
@@ -2957,11 +2959,14 @@ async fn drive_session(
                 )
                 .await
                 {
-                    Ok(switched_session_id) => {
+                    Ok(SessionSwitchOutcome::Switched(switched_session_id)) => {
                         session_id = switched_session_id;
                         context_usage.reset_for_session();
                         session_has_history = true;
                         let _ = responder.send(LoadSessionResult::Switched);
+                    }
+                    Ok(SessionSwitchOutcome::PreviousSessionRestored { message }) => {
+                        let _ = responder.send(LoadSessionResult::Rejected { message });
                     }
                     Err(launch_err) => {
                         let _ = responder.send(LoadSessionResult::Fallback {
@@ -3163,6 +3168,14 @@ async fn reload_active_session(
             source,
             stdio_mcp_servers: Box::default(),
         })?;
+    // Agents can replay notifications before replying to `session/load`.
+    // Publish the restored session first so every consumer assigns that replay
+    // to the restored session rather than to the just-rejected target.
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: session_id.to_string(),
+        resumed: true,
+    });
     let loaded_config = load_existing_session(
         conn,
         session_id.clone(),
@@ -3179,11 +3192,6 @@ async fn reload_active_session(
             options: Vec::new(),
             targets: Vec::new(),
         });
-    emit_connected(ui_tx, connected_fields);
-    let _ = ui_tx.send(UiEvent::SessionStarted {
-        session_id: session_id.to_string(),
-        resumed: true,
-    });
     let _ = ui_tx.send(UiEvent::SessionConfigOptions {
         options: session_config.options.clone(),
         targets: session_config.targets.clone(),
@@ -3198,6 +3206,11 @@ async fn reload_active_session(
         crate::event::SESSION_LOADED_NOTICE.to_string(),
     ));
     Ok(())
+}
+
+enum SessionSwitchOutcome {
+    Switched(SessionId),
+    PreviousSessionRestored { message: String },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3217,7 +3230,7 @@ async fn switch_existing_session(
     hidden_config_ids: &[String],
     connected_fields: &ConnectedEventFields,
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
-) -> std::result::Result<SessionId, LaunchError> {
+) -> std::result::Result<SessionSwitchOutcome, LaunchError> {
     require_interactive_load_session(capabilities)?;
     close_session(conn, current_session_id.clone(), auth_methods).await?;
     session_state
@@ -3249,7 +3262,45 @@ async fn switch_existing_session(
         capabilities,
         auth_methods,
     )
-    .await?;
+    .await;
+
+    let loaded_config = match loaded_config {
+        Ok(config) => config,
+        Err(target_error) => {
+            session_state.clear_active_session().await;
+            match reload_active_session(
+                conn,
+                current_session_id.clone(),
+                cwd,
+                additional_directories,
+                mcp_servers,
+                None,
+                capabilities,
+                auth_methods,
+                session_config,
+                session_state,
+                hidden_config_ids,
+                connected_fields,
+                ui_tx,
+            )
+            .await
+            {
+                Ok(()) => {
+                    let message = format!(
+                        "could not load session {target_session_id}: {target_error}; restored the previous session"
+                    );
+                    let _ = ui_tx.send(UiEvent::Warning(message.clone()));
+                    return Ok(SessionSwitchOutcome::PreviousSessionRestored { message });
+                }
+                Err(restore_error) => {
+                    let _ = ui_tx.send(UiEvent::Warning(format!(
+                        "could not load session {target_session_id}: {target_error}; restoring the previous session also failed: {restore_error}"
+                    )));
+                    return Err(restore_error);
+                }
+            }
+        }
+    };
 
     *session_config = loaded_config
         .map(|(options, targets)| SessionConfigCache { options, targets })
@@ -3270,7 +3321,7 @@ async fn switch_existing_session(
     let _ = ui_tx.send(UiEvent::Info(
         crate::event::SESSION_LOADED_NOTICE.to_string(),
     ));
-    Ok(target_session_id)
+    Ok(SessionSwitchOutcome::Switched(target_session_id))
 }
 
 async fn close_session(
@@ -9835,6 +9886,82 @@ mod tests {
             .await;
     }
 
+    async fn run_mock_agent_rejects_foreign_load_and_restores_current(
+        stream: tokio::io::DuplexStream,
+        load_requests: Arc<std::sync::Mutex<Vec<String>>>,
+        prompt_sessions: Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let load_requests_for_load = load_requests.clone();
+        let prompt_sessions_for_prompt = prompt_sessions.clone();
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                            AgentCapabilities::new()
+                                .load_session(true)
+                                .session_capabilities(
+                                    SessionCapabilities::new()
+                                        .close(SessionCloseCapabilities::new()),
+                                ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("old-session")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: CloseSessionRequest, responder, _cx| {
+                    assert_eq!(req.session_id.to_string(), "old-session");
+                    responder.respond(CloseSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: LoadSessionRequest, responder, _cx| {
+                    let session_id = req.session_id.to_string();
+                    load_requests_for_load
+                        .lock()
+                        .expect("load request log")
+                        .push(session_id.clone());
+                    if session_id == "foreign-session" {
+                        responder.respond_with_internal_error("foreign session is unknown")
+                    } else {
+                        assert_eq!(session_id, "old-session");
+                        responder.respond(LoadSessionResponse::new())
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: PromptRequest, responder, _cx| {
+                    prompt_sessions_for_prompt
+                        .lock()
+                        .expect("prompt session log")
+                        .push(req.session_id.to_string());
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
     async fn run_mock_agent_fresh_session(
         stream: tokio::io::DuplexStream,
         new_session_calls: Arc<AtomicUsize>,
@@ -13988,6 +14115,74 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejected_foreign_session_load_restores_the_current_session() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let load_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prompt_sessions = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let agent_task = tokio::spawn(run_mock_agent_rejects_foreign_load_and_restores_current(
+            agent_side,
+            load_requests.clone(),
+            prompt_sessions.clone(),
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::LoadSession {
+                session_id: "foreign-session".to_string(),
+                cwd: std::env::temp_dir(),
+                title: None,
+                responder,
+            })
+            .expect("send foreign load session");
+
+        wait_for_session_started(&mut ui_rx, "foreign-session").await;
+        wait_for_session_started(&mut ui_rx, "old-session").await;
+        match response.await.expect("load response") {
+            LoadSessionResult::Rejected { message } => {
+                assert!(message.contains("foreign-session"));
+                assert!(message.contains("restored the previous session"));
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+
+        cmd_tx
+            .send(UiCommand::SendPrompt {
+                text: "still here".to_string(),
+                images: Vec::new(),
+                resources: Vec::new(),
+            })
+            .expect("send prompt to restored session");
+        wait_for_prompt_count(&prompt_sessions, 1).await;
+        assert_eq!(
+            *load_requests.lock().expect("load request log"),
+            ["foreign-session", "old-session"]
+        );
+        assert_eq!(
+            *prompt_sessions.lock().expect("prompt session log"),
+            ["old-session"]
+        );
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn load_session_command_replays_current_session() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
@@ -14036,7 +14231,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn load_session_command_falls_back_without_close_capability() {
+    async fn load_session_command_keeps_current_session_without_close_capability() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
         let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
@@ -14067,10 +14262,11 @@ mod tests {
             .expect("send load session");
 
         match response.await.expect("load response") {
-            LoadSessionResult::Fallback { message } => {
+            LoadSessionResult::Rejected { message } => {
                 assert!(message.contains("sessionCapabilities.close"));
+                assert!(message.contains("current session remains active"));
             }
-            other => panic!("expected fallback, got {other:?}"),
+            other => panic!("expected rejection, got {other:?}"),
         }
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");

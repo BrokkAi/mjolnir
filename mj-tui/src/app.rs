@@ -249,7 +249,10 @@ fn builtin_compact_command() -> AvailableCommand {
 }
 
 fn builtin_load_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_LOAD_COMMAND, "load a previous session")
+    AvailableCommand::new(
+        BUILTIN_LOAD_COMMAND,
+        "load a previous session into the current agent",
+    )
 }
 
 fn builtin_fork_command() -> AvailableCommand {
@@ -758,7 +761,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::TeamChoice,
     },
     FeatureHint {
-        text: "Use /new for another workspace, /clear for a fresh thread, /load to resume, and /export to save this transcript.",
+        text: "Use /new for another workspace, /clear for a fresh thread, /load to load a session into this agent, and /export to save this transcript.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -10613,7 +10616,7 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[3].description,
-            "load a previous session"
+            "load a previous session into the current agent"
         );
         assert_eq!(
             s.available_commands[4].description,
