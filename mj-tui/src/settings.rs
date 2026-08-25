@@ -684,7 +684,7 @@ impl SettingsEditor {
             .position(|tier| *tier == self.config.agent.review_tier)
             .unwrap_or(0);
         let next = (current as i32 + delta).rem_euclid(tiers.len() as i32) as usize;
-        self.config.agent.review_tier = tiers[next];
+        self.config.agent.set_review_tier(tiers[next]);
     }
 
     fn cycle_correction_threshold(&mut self, delta: i32) {
@@ -724,7 +724,24 @@ impl SettingsEditor {
             choices.push(crate::config::DISABLED_MODEL.to_string());
             seen.insert(crate::config::DISABLED_MODEL.to_string());
         }
-        for choice in self.choices.iter().filter(|choice| choice.available) {
+        // Keep the primary model row on the source selected in this editor.
+        // In particular, selecting a Team before choosing a model must not
+        // re-pin the Team to the adapter of the currently running session.
+        let primary_source = (role == 0 && self.active_models.is_some())
+            .then(|| {
+                self.config
+                    .agent
+                    .acp_source
+                    .clone()
+                    .or_else(|| self.selected_session_source(SessionDefaultsSeat::Primary))
+            })
+            .flatten();
+        for choice in self.choices.iter().filter(|choice| {
+            choice.available
+                && primary_source
+                    .as_deref()
+                    .is_none_or(|source| choice.adapter.as_deref() == Some(source))
+        }) {
             if seen.insert(choice.model.clone()) {
                 choices.push(choice.model.clone());
             }
@@ -1462,6 +1479,12 @@ fn draw_team(
             "Mix Codex and Claude, or use one provider. Auto models can reduce review cost.",
             Style::default().ink(theme.muted),
         ),
+        Line::styled(
+            "Featured team: Claude coder + Codex reviewer defaults to extended Luna xhigh review.",
+            Style::default()
+                .ink(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
         Line::raw(""),
         selected_line(true, format!("Team  < {active_label} >"), theme),
         Line::raw(""),
@@ -1471,11 +1494,18 @@ fn draw_team(
         ),
     ];
     for preset in TeamPreset::ALL {
-        let marker = if Some(preset) == active { "*" } else { " " };
+        let featured = preset == TeamPreset::ClaudeWithCodexReviewer;
+        let marker = if Some(preset) == active {
+            "*"
+        } else if featured {
+            "!"
+        } else {
+            " "
+        };
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {marker} {:<31}", preset.label()),
-                Style::default().ink(if Some(preset) == active {
+                Style::default().ink(if Some(preset) == active || featured {
                     theme.primary
                 } else {
                     theme.text
@@ -2072,7 +2102,8 @@ mod tests {
             "Reasoning effort",
             "value",
             choice(),
-        );
+        )
+        .category(SessionConfigOptionCategory::Model);
         let fast = SessionConfigOption::select("fast_mode", "Fast mode", "value", choice())
             .category(SessionConfigOptionCategory::ModelConfig);
         let service =
@@ -2519,6 +2550,51 @@ mod tests {
     }
 
     #[test]
+    fn primary_model_choices_follow_the_team_selected_source() {
+        let choices = vec![
+            ModelChoice {
+                model: "gpt-5-6-sol".to_string(),
+                pass_at_1: 0.7,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            },
+            ModelChoice {
+                model: "claude-opus-4-8".to_string(),
+                pass_at_1: 0.7,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("claude-acp".to_string()),
+                ranked: true,
+            },
+        ];
+        let mut editor = SettingsEditor::new(Config::default(), choices, None).with_active_models(
+            ModelsConfig {
+                primary: "gpt-5-6-sol".to_string(),
+                primary_source: Some("codex-acp".to_string()),
+                ..ModelsConfig::default()
+            },
+        );
+        TeamPreset::Claude.apply(&mut editor.config);
+
+        assert_eq!(editor.model_choices(0), vec!["auto", "claude-opus-4-8"]);
+        assert_eq!(
+            editor.model_choices(1),
+            vec!["auto", "gpt-5-6-sol", "claude-opus-4-8"]
+        );
+
+        editor.cycle_model(0, 1);
+        assert_eq!(editor.config.agent.model, "claude-opus-4-8");
+        assert_eq!(
+            editor.config.agent.acp_source.as_deref(),
+            Some("claude-acp")
+        );
+    }
+
+    #[test]
     fn optional_model_selection_can_disable_subagents() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Subagents;
@@ -2577,6 +2653,12 @@ mod tests {
 
         let rendered = terminal.backend().to_string();
         assert!(!rendered.contains("ACP Priority"), "rendered:\n{rendered}");
+        for expected in ["Featured team", "Extended review", "Luna xhigh"] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}:\n{rendered}"
+            );
+        }
         for preset in TeamPreset::ALL {
             assert!(rendered.contains(preset.label()), "rendered:\n{rendered}");
         }

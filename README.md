@@ -118,6 +118,9 @@ brew install brokkai/tap/mjolnir
 **npm or npx:** macOS, Linux, Windows, and Android with Node.js 18 or later:
 
 ```bash
+# Linux: install the WebKitGTK 4.1 runtime first.
+# Ubuntu/Debian: sudo apt-get install libwebkit2gtk-4.1-0
+# Fedora: sudo dnf install webkit2gtk4.1
 npm install -g @brokkai/mjolnir
 # Or run without a global install:
 npx -y @brokkai/mjolnir
@@ -126,6 +129,9 @@ npx -y @brokkai/mjolnir
 **crates.io:** install the terminal client and desktop voice worker with Rust:
 
 ```bash
+# Linux: install WebKitGTK 4.1 development files first for `mj app`.
+# Ubuntu/Debian: sudo apt-get install libwebkit2gtk-4.1-dev libasound2-dev
+# Fedora: sudo dnf install webkit2gtk4.1-devel alsa-lib-devel
 cargo install --locked brokk-mjolnir brokk-mj-voice-worker
 ```
 
@@ -156,8 +162,11 @@ mj
 First launch discovers available provider credentials and opens setup on the
 team those credentials support: **Claude coder + Codex reviewer** with both
 providers signed in, or that provider's own team with one. Press **Shift+Tab**
-to switch teams later, or open the **Team** tab in `/mjconfig`. Team, model,
-and adapter changes apply to a new session.
+to switch teams later, or open the **Team** tab in `/mjconfig`. Team and
+adapter route changes apply to a new session. In an active session, `/model`,
+`/effort`, and their `/mjconfig` entries change the model or reasoning effort
+without restarting when the connected ACP agent advertises the corresponding
+control; choices made during a turn apply after that turn completes.
 
 ## Try it
 

@@ -136,7 +136,7 @@ pub struct Handle {
     correction_threshold: Arc<AtomicU8>,
     /// The reviewer and worker launch plan. Unlike the primary ACP session,
     /// these agents are created per review and can be replaced live.
-    review_fanout: Arc<RwLock<Option<ReviewSpawner>>>,
+    review_fanout: Arc<RwLock<ReviewFanout>>,
     runtime_commands: mpsc::UnboundedSender<UiCommand>,
     events: mpsc::UnboundedSender<UiEvent>,
     review_requests: mpsc::UnboundedSender<ReviewRequest>,
@@ -182,7 +182,7 @@ impl Handle {
 
     /// Apply a newly resolved reviewer/subagent route to reviews that start
     /// after this call. An already-running review retains its own snapshot.
-    pub fn set_review_fanout(&self, review_fanout: Option<ReviewSpawner>) {
+    pub fn set_review_fanout(&self, review_fanout: ReviewFanout) {
         *self
             .review_fanout
             .write()
@@ -404,10 +404,9 @@ pub struct Config {
     /// per-model usage breakdown can attribute them.
     pub primary_model: Option<String>,
     pub review_root: PathBuf,
-    /// Multi-specialist review fan-out. `None` keeps the single-prompt
-    /// discrete review exactly as today -- used when no subagent pool / no
-    /// resolved roster exists.
-    pub review_fanout: Option<ReviewSpawner>,
+    /// Multi-specialist review plan. An unavailable plan carries the source
+    /// error that must be shown if the primary fallback is used.
+    pub review_fanout: ReviewFanout,
 }
 
 /// A discrete review the fan-out is currently running. Everything the
@@ -480,7 +479,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
     let review_enabled = Arc::new(AtomicBool::new(config.discrete_review));
     let review_tier = Arc::new(AtomicU8::new(config.review_tier.as_index()));
     let correction_threshold = Arc::new(AtomicU8::new(config.correction_threshold.as_index()));
-    let review_fanout = Arc::new(RwLock::new(config.review_fanout.take()));
+    let review_fanout = Arc::new(RwLock::new(config.review_fanout.clone()));
     let handle = Handle {
         turn: turn.clone(),
         user_messages: user_messages.clone(),
@@ -972,6 +971,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                         workflow_id,
                                         WorkflowTransition::CoverageChanged {
                                             coverage: WorkflowCoverage::Degraded,
+                                            error: Some(reason.clone()),
                                         },
                                     ),
                                 );
@@ -1009,7 +1009,10 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 "discrete review · findings validated".to_string()
                             }
                             (_, WorkflowOutcome::Degraded) => {
-                                "discrete review · completed with degraded coverage".to_string()
+                                format!(
+                                    "discrete review · incomplete verification: {}",
+                                    workflow_coverage_error(&workflow, workflow_id)
+                                )
                             }
                             (_, WorkflowOutcome::Completed) => {
                                 "discrete review · findings validated".to_string()
@@ -1137,23 +1140,25 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 if let Some(saved_turn) = saved_turn {
                                     last_changed_turn = Some(saved_turn);
                                 }
+                                let review_outcome = match coverage {
+                                    WorkflowCoverage::Complete => {
+                                        "Automatic review completed with validated findings deferred by the selected correction threshold. State that disposition plainly; do not claim no material findings were found.".to_string()
+                                    }
+                                    WorkflowCoverage::Degraded => format!(
+                                        "Automatic review completed with validated findings deferred by the selected correction threshold. Root error: {}. State both facts plainly; do not call the review clean.",
+                                        workflow_coverage_error(&workflow, workflow_id)
+                                    ),
+                                    WorkflowCoverage::Unknown => unreachable!(
+                                        "a completed discrete review must establish its coverage"
+                                    ),
+                                };
                                 let prompt = post_review_recap_prompt(
                                     &turn.lock().await.task,
                                     original_review_result.as_deref().unwrap_or(&reviewed_result),
                                     &reviewed_result,
                                     &review_findings,
                                     &deferred_review_findings,
-                                    match coverage {
-                                        WorkflowCoverage::Complete => {
-                                            "Automatic review completed with validated findings deferred by the selected correction threshold. State that disposition plainly; do not claim no material findings were found."
-                                        }
-                                        WorkflowCoverage::Degraded => {
-                                            "Automatic review completed with degraded coverage and validated findings deferred by the selected correction threshold. State both facts plainly; do not call the review clean."
-                                        }
-                                        WorkflowCoverage::Unknown => {
-                                            "Automatic review ended before coverage was established, with validated findings deferred by the selected correction threshold. State both facts plainly; do not call the review clean."
-                                        }
-                                    },
+                                    &review_outcome,
                                 );
                                 emit_internal(
                                     &events_tx,
@@ -1284,30 +1289,35 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                     },
                                 ),
                             );
-                            let _ = events_tx.send(UiEvent::Info(if matches!(
-                                workflow_outcome,
-                                WorkflowOutcome::Clean
-                            ) {
-                                "discrete review · no material findings".to_string()
-                            } else {
-                                "discrete review · completed with degraded coverage".to_string()
-                            }));
+                            let _ = events_tx.send(UiEvent::Info(
+                                if matches!(workflow_outcome, WorkflowOutcome::Clean) {
+                                    "discrete review · no material findings".to_string()
+                                } else {
+                                    format!(
+                                        "discrete review · incomplete verification: {}",
+                                        workflow_coverage_error(&workflow, workflow_id)
+                                    )
+                                },
+                            ));
                             if let Some(saved_turn) = saved_turn {
                                 last_changed_turn = Some(saved_turn);
                             }
                             let review_outcome = match coverage {
                                 WorkflowCoverage::Complete if review_findings.is_empty() => {
                                     "Automatic review completed cleanly and found no material findings."
+                                        .to_string()
                                 }
                                 WorkflowCoverage::Complete => {
                                     "Automatic review completed cleanly after the listed findings were corrected."
+                                        .to_string()
                                 }
-                                WorkflowCoverage::Degraded => {
-                                    "Automatic review completed with degraded coverage. State that limitation plainly; do not call the review clean."
-                                }
-                                WorkflowCoverage::Unknown => {
-                                    "Automatic review ended before coverage was established. State that limitation plainly; do not call the review clean."
-                                }
+                                WorkflowCoverage::Degraded => format!(
+                                    "Automatic review completed with degraded coverage. Root error: {}",
+                                    workflow_coverage_error(&workflow, workflow_id)
+                                ),
+                                WorkflowCoverage::Unknown => unreachable!(
+                                    "a completed discrete review must establish its coverage"
+                                ),
                             };
                             let prompt = post_review_recap_prompt(
                                 &turn.lock().await.task,
@@ -1315,7 +1325,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 &reviewed_result,
                                 &review_findings,
                                 &deferred_review_findings,
-                                review_outcome,
+                                &review_outcome,
                             );
                             emit_internal(
                                 &events_tx,
@@ -1343,6 +1353,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                     workflow_id,
                                     WorkflowTransition::CoverageChanged {
                                         coverage: WorkflowCoverage::Degraded,
+                                        error: Some(reason.clone()),
                                     },
                                 ),
                             );
@@ -1368,7 +1379,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                 &reviewed_result,
                                 &review_findings,
                                 &deferred_review_findings,
-                                "Automatic review failed. State the failure and its limitation plainly; do not claim the review passed or found no problems.",
+                                &format!(
+                                    "Automatic review failed. Root error: {reason}. State the failure and its limitation plainly; do not claim the review passed or found no problems."
+                                ),
                             );
                             emit_internal(
                                 &events_tx,
@@ -1478,17 +1491,18 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         ));
                         continue;
                     }
-                    let spawner = {
+                    let review_plan = {
                         review_fanout
                             .read()
                             .expect("review fanout lock poisoned")
                             .clone()
                     };
-                    let Some(spawner) = spawner else {
-                        let _ = events_tx.send(UiEvent::Warning(
-                            "the configured discrete reviewer is unavailable".to_string(),
-                        ));
-                        continue;
+                    let spawner = match review_plan {
+                        ReviewFanout::Available(spawner) => spawner,
+                        ReviewFanout::Unavailable(error) => {
+                            let _ = events_tx.send(UiEvent::Warning(error));
+                            continue;
+                        }
                     };
                     let tier = review_request
                         .tier
@@ -1766,6 +1780,21 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 correction_rounds,
                 max_correction_rounds,
             );
+            if correction_review_base.is_some() && correction_changed && !correction_rearm {
+                let error = format!(
+                    "Automatic verification did not run because the correction-round limit is {max_correction_rounds}; {correction_rounds} verification pass(es) had already run."
+                );
+                emit_workflow(
+                    &workflow,
+                    WorkflowEvent::new(
+                        WorkflowId::review(active.epoch),
+                        WorkflowTransition::CoverageChanged {
+                            coverage: WorkflowCoverage::Degraded,
+                            error: Some(error),
+                        },
+                    ),
+                );
+            }
             if correction_review_base.is_some()
                 && correction_changed
                 && max_correction_rounds > 0
@@ -1778,10 +1807,10 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     max_correction_rounds,
                     "correction round budget exhausted; releasing the turn without another pass"
                 );
-                let _ = events_tx.send(UiEvent::Info(
-                    "discrete review · correction round limit reached; accepting corrections"
-                        .to_string(),
-                ));
+                let _ = events_tx.send(UiEvent::Info(format!(
+                    "discrete review · incomplete verification: {}",
+                    workflow_coverage_error(&workflow, WorkflowId::review(active.epoch))
+                )));
             }
             if should_start_discrete_review(
                 review,
@@ -1817,13 +1846,13 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 original_review_result.get_or_insert_with(|| initial_result.clone());
                 let review_trajectory = trajectory.review_trajectory();
                 let context = discrete_review_context(delta.as_ref(), review_trajectory.clone());
-                let spawner = {
+                let review_plan = {
                     review_fanout
                         .read()
                         .expect("review fanout lock poisoned")
                         .clone()
                 };
-                if let Some(spawner) = spawner {
+                if let ReviewFanout::Available(spawner) = review_plan {
                     let completion = held_completion.take().expect("completion held");
                     discrete_review_started = true;
                     let diff = review_diff(delta.as_ref());
@@ -1939,6 +1968,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     primary_review_prompt_active = false;
                     continue;
                 }
+                let ReviewFanout::Unavailable(error) = review_plan else {
+                    unreachable!("available review fan-out returned after dispatch")
+                };
                 held_completion = None;
                 discrete_review_started = true;
                 trajectory.reset_attempt();
@@ -1958,6 +1990,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         workflow_id,
                         WorkflowTransition::CoverageChanged {
                             coverage: WorkflowCoverage::Degraded,
+                            error: Some(error.clone()),
                         },
                     ),
                 );
@@ -1973,6 +2006,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     ),
                 );
                 active_primary_review_actor = Some((actor_id, true));
+                let _ = events_tx.send(UiEvent::Warning(format!(
+                    "specialist review did not start: {error}"
+                )));
                 let _ = events_tx.send(UiEvent::Info("reviewing the completed work…".to_string()));
                 emit_internal(
                     &events_tx,
@@ -1999,13 +2035,32 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             .to_string(),
                     );
                 }
+                let coverage = workflow
+                    .state(WorkflowId::review(active.epoch))
+                    .map(|state| state.coverage)
+                    .expect("discrete review workflow exists before its final recap");
+                let review_outcome = match coverage {
+                    WorkflowCoverage::Degraded => {
+                        let coverage_error = workflow
+                            .state(WorkflowId::review(active.epoch))
+                            .and_then(|state| state.coverage_error())
+                            .expect("degraded review coverage must preserve the root error");
+                        format!(
+                            "Automatic review completed with incomplete verification. Root error: {coverage_error}. State that limitation plainly; do not call the review clean."
+                        )
+                    }
+                    WorkflowCoverage::Complete => "Automatic review completed. The recorded review findings and their dispositions remain authoritative; do not call this review clean unless every finding is independently verified fixed or invalidated.".to_string(),
+                    WorkflowCoverage::Unknown => unreachable!(
+                        "a completed discrete review must establish its coverage before the final recap"
+                    ),
+                };
                 let prompt = post_review_recap_prompt(
                     &active.task,
                     original_review_result.as_deref().unwrap_or(&final_result),
                     &final_result,
                     &review_findings,
                     &deferred_review_findings,
-                    "Fallback review completed with degraded coverage. State that limitation plainly; do not call the review clean.",
+                    &review_outcome,
                 );
                 emit_internal(
                     &events_tx,
@@ -2263,9 +2318,9 @@ fn emit_workflow(workflow: &WorkflowEmitter, event: WorkflowEvent) {
 }
 
 fn workflow_coverage(workflow: &WorkflowEmitter, workflow_id: WorkflowId) -> WorkflowCoverage {
-    let Some(state) = workflow.state(workflow_id) else {
-        return WorkflowCoverage::Degraded;
-    };
+    let state = workflow
+        .state(workflow_id)
+        .expect("review coverage requires an active workflow");
     if state.coverage == WorkflowCoverage::Degraded
         || state.actors.values().any(|actor| {
             matches!(
@@ -2279,6 +2334,13 @@ fn workflow_coverage(workflow: &WorkflowEmitter, workflow_id: WorkflowId) -> Wor
     } else {
         WorkflowCoverage::Complete
     }
+}
+
+fn workflow_coverage_error(workflow: &WorkflowEmitter, workflow_id: WorkflowId) -> String {
+    workflow
+        .state(workflow_id)
+        .and_then(|state| state.coverage_error())
+        .expect("degraded review coverage must preserve the root error")
 }
 
 fn terminal_completed_review_workflow(workflow: &WorkflowEmitter, workflow_id: WorkflowId) {
@@ -2960,10 +3022,10 @@ mod tests {
             "reviewed",
             &[],
             &[],
-            "Automatic review completed with degraded coverage. State that limitation plainly; do not call the review clean.",
+            "Automatic review completed with incomplete verification. Root error: reviewer timed out. State that limitation plainly; do not call the review clean.",
         );
 
-        assert!(prompt.contains("completed with degraded coverage"));
+        assert!(prompt.contains("Root error: reviewer timed out"));
         assert!(prompt.contains("do not call the review clean"));
         assert!(!prompt.contains("No material findings survived review."));
     }
@@ -3162,8 +3224,84 @@ mod tests {
             max_correction_rounds: None,
             primary_model: None,
             review_root: PathBuf::from("."),
-            review_fanout: Some(spawner),
+            review_fanout: ReviewFanout::available(spawner),
         }
+    }
+
+    fn unavailable_fanout_config(
+        command_tx: mpsc::UnboundedSender<UiCommand>,
+        error: &str,
+    ) -> Config {
+        let (bus, reports) = SubagentReportBus::channel();
+        Config {
+            runtime_commands: command_tx,
+            active_subagent_workers: ActiveSubagentWorkers::default(),
+            subagent_reports: reports,
+            subagent_report_bus: bus,
+            subagent_runs: SubagentProgressService::new(TestProgress::default()),
+            progress_wake: None,
+            discrete_review: true,
+            review_tier: ReviewTier::Extended,
+            correction_threshold: ReviewCorrectionThreshold::default(),
+            max_correction_rounds: None,
+            primary_model: None,
+            review_root: PathBuf::from("."),
+            review_fanout: ReviewFanout::unavailable(error),
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_fanout_surfaces_its_original_error_before_fallback_review() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let root_error = "claude-acp: authentication expired";
+        let mut running = spawn(
+            runtime_rx,
+            unavailable_fanout_config(command_tx, root_error),
+        );
+        running
+            .handle
+            .begin_turn(1, "add a retry".to_string(), Vec::new(), snapshot)
+            .await;
+        runtime_tx.send(completion()).expect("send completion");
+
+        let mut warning_seen = false;
+        let mut coverage_error_seen = false;
+        while !(warning_seen && coverage_error_seen) {
+            let event = tokio::time::timeout(Duration::from_secs(5), running.events.recv())
+                .await
+                .expect("fallback root error was surfaced")
+                .expect("orchestrated event");
+            match event {
+                UiEvent::Warning(message) => warning_seen |= message.contains(root_error),
+                UiEvent::Workflow(WorkflowEvent {
+                    transition:
+                        WorkflowTransition::CoverageChanged {
+                            coverage: WorkflowCoverage::Degraded,
+                            error: Some(message),
+                        },
+                    ..
+                }) => coverage_error_seen |= message == root_error,
+                _ => {}
+            }
+        }
+        let prompt = next_prompt(&mut command_rx).await;
+        assert!(!prompt.is_empty(), "fallback review prompt was dispatched");
+        runtime_tx
+            .send(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                text_chunk("fallback review completed"),
+            )))
+            .expect("send fallback review result");
+        runtime_tx
+            .send(completion())
+            .expect("complete fallback review");
+        let recap = next_prompt(&mut command_rx).await;
+        assert!(recap.contains(root_error), "{recap}");
+
+        drop(runtime_tx);
+        running.task.await.expect("orchestrator task");
     }
 
     fn report(subagent_id: u64, label: &str, outcome: SubagentOutcome) -> SubagentReport {
@@ -4088,15 +4226,15 @@ mod tests {
                 event,
                 UiEvent::Workflow(WorkflowEvent {
                     transition: WorkflowTransition::Terminal {
-                        outcome: WorkflowOutcome::Completed,
-                        coverage: WorkflowCoverage::Complete,
+                        outcome: WorkflowOutcome::Degraded,
+                        coverage: WorkflowCoverage::Degraded,
                     },
                     ..
                 })
             ) {
                 workflow_completed = true;
             }
-            if matches!(&event, UiEvent::Info(text) if text.contains("correction round limit reached"))
+            if matches!(&event, UiEvent::Info(text) if text.contains("correction-round limit is 1; 1 verification pass(es) had already run"))
             {
                 cap_announced = true;
             }
@@ -4820,7 +4958,7 @@ mod tests {
                 max_correction_rounds: Some(1),
                 primary_model: None,
                 review_root: PathBuf::from("."),
-                review_fanout: None,
+                review_fanout: ReviewFanout::unavailable("review disabled in test"),
             },
         );
 
@@ -4882,7 +5020,7 @@ mod tests {
             max_correction_rounds: Some(1),
             primary_model: None,
             review_root: PathBuf::from("."),
-            review_fanout: None,
+            review_fanout: ReviewFanout::unavailable("review disabled in test"),
         }
     }
 

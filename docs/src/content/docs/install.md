@@ -14,7 +14,7 @@ using a private repository.
 
 | Method | Platforms | Installs |
 | --- | --- | --- |
-| npm / npx | macOS universal; Linux x86-64 or ARM64 glibc; Windows x86-64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker`; no first-run Mjolnir download |
+| npm / npx | macOS universal; Linux x86-64 or ARM64 glibc with WebKitGTK 4.1; Windows x86-64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker`; no first-run Mjolnir download |
 | Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` in the formula's `libexec` |
 | Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker` |
 | crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name |
@@ -44,7 +44,19 @@ npx -y @brokkai/mjolnir --version
 
 The package contains the native Mjolnir release bundle for your platform. It
 does not download a product binary on first run. On macOS, Linux, and Windows,
-the bundle keeps `mj-voice-worker` beside `mj`; Android omits voice support. Linux npm packages require glibc.
+the bundle keeps `mj-voice-worker` beside `mj`; Android omits voice support.
+
+Linux npm packages require glibc and the WebKitGTK 4.1 runtime because the
+default `mj` binary includes `mj app`:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-0
+
+# Fedora
+sudo dnf install webkit2gtk4.1
+```
 
 Upgrade or remove a global install with:
 
@@ -106,6 +118,19 @@ archive or Cargo.
 
 ### crates.io
 
+On Linux, Cargo installations need WebKitGTK 4.1 development files for the
+default `mj app` desktop shell. Installing the voice worker also needs ALSA
+development files:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev libasound2-dev
+
+# Fedora
+sudo dnf install webkit2gtk4.1-devel alsa-lib-devel
+```
+
 Install the terminal client and voice worker together on desktop:
 
 ```bash
@@ -124,9 +149,8 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-The default terminal build needs no WebView development package. To compile
-the optional `desktop-app` feature used for native desktop-shell development
-on macOS, install Apple's Command Line Tools. The shell uses the WebKit
+The default desktop build includes the native WebView shell. On macOS, install
+Apple's Command Line Tools. The shell uses the WebKit
 framework included in the macOS SDK:
 
 ```bash
@@ -149,12 +173,13 @@ expected by Wry; `webkitgtk6.0-devel` is the incompatible GTK 4 API. Build the
 feature with:
 
 ```bash
-cargo build --release --features desktop-app
+cargo build --release
 ```
 
-The default terminal client only needs Rust. On Linux, the optional desktop
-shell needs WebKitGTK and the voice worker needs ALSA development files. On
-macOS, both use frameworks from the SDK installed with the Command Line Tools.
+On Linux, the desktop shell needs WebKitGTK and the voice worker needs ALSA
+development files. On macOS, both use frameworks from the SDK installed with
+the Command Line Tools. On Windows, the desktop shell uses the system WebView2
+runtime.
 See
 [CONTRIBUTING.md](https://github.com/BrokkAi/mjolnir/blob/master/CONTRIBUTING.md)
 for voice prerequisites and the full validation matrix.

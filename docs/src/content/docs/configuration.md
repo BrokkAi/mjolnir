@@ -93,8 +93,11 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |
 | `voice_auto_send` | `off` (default), `two_seconds`, `four_seconds`, `six_seconds`, or `eight_seconds`; submit a recognized voice prompt after that much detected silence |
 
-Explicit model IDs can be selected in `/mjconfig`; availability is checked
-when the next session starts. A `max_parallel` above 16 is a configuration
+In an active primary session, model and reasoning-effort entries in `/mjconfig`
+and the `/model` and `/effort` commands update the current ACP session without
+a restart when the connected agent advertises the corresponding selectors;
+changes made during a turn apply after it finishes. Team and ACP routing changes
+still apply to a new session. A `max_parallel` above 16 is a configuration
 error, not a silently clamped value.
 
 Onboarding, the **Team** tab in `/mjconfig`, and **Shift+Tab** during a session
@@ -107,12 +110,15 @@ all offer the same four configurations:
 | **Codex coder + Claude reviewer** | Codex | Claude |
 | **Claude coder + Codex reviewer** | Claude | Codex |
 
-Choosing a team keeps all three model selections on Auto, pins the primary
-seat to the coder, pins the subagent and review seats to the reviewer, enables
-discrete review and subagent failover, and enables the required built-in ACP
-routes. After saving from **Shift+Tab**, you can switch primary agents
-immediately; Mjolnir starts the new provider-native session with the complete
-durable session transcript as context. See [Teams and adversarial review](/teams/).
+Choosing a team pins the primary seat to the coder, pins the subagent and
+review seats to the reviewer, enables discrete review and subagent failover,
+and enables the required built-in ACP routes. **Claude coder + Codex reviewer**
+defaults review and subagents to `gpt-5-6-luna` at `xhigh` effort and selects
+the extended review tier. Every other team keeps model selection on Auto and
+preserves the selected review tier (Quick by default). When a team change
+replaces the primary agent, **Shift+Tab** offers to switch immediately;
+Mjolnir starts the new provider-native session with the complete durable
+session transcript as context. See [Teams and adversarial review](/teams/).
 
 ACP priority lists default to `codex-acp`, then `claude-acp`,
 preserving the automatic behavior of earlier configurations. When a source is

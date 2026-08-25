@@ -42,6 +42,11 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
+      - name: Install Linux WebKitGTK runtime for smoke test
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-0
+
       - name: Confirm the tag owns the Cargo release version
         run: |
           version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"

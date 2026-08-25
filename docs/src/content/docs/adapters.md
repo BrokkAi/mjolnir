@@ -46,7 +46,10 @@ enabled adapter, and reports the available model count. Normal startup and
 Onboarding, `/mjconfig`, and **Shift+Tab** expose four first-class teams: Codex,
 Claude, Codex coder + Claude reviewer, and Claude coder + Codex reviewer. A
 team pins the primary route to its coder and the review and subagent routes to
-its reviewer while leaving model selection on Auto.
+its reviewer. **Claude coder + Codex reviewer** defaults the review and
+subagent seats to `gpt-5-6-luna` at `xhigh` effort and selects extended
+review; the other teams leave model selection on Auto and preserve the
+selected review tier (Quick by default).
 
 - The primary prefers the strongest launchable eligible row.
 - The review supervisor and default subagent model exclude the primary first,

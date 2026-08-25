@@ -107,8 +107,10 @@ npx --yes --package=@agentclientprotocol/codex-acp codex login
 Onboarding's **Team** tab (later: the same tab in `/mjconfig`) offers four
 configurations: **Codex**, **Claude**, **Codex coder + Claude reviewer**, and
 **Claude coder + Codex reviewer**. A team pins the primary seat to its coder
-and the review and subagent seats to its reviewer while keeping all three
-models on Auto.
+and the review and subagent seats to its reviewer. **Claude coder + Codex
+reviewer** defaults review and subagents to `gpt-5-6-luna` at `xhigh` effort
+and selects extended review; the other teams keep all three models on Auto and
+preserve the selected review tier (Quick by default).
 
 <figure class="shot">
   <a class="shot__zoom" href={shotOnboardingTeam.src} aria-label="Open the full-size screenshot: onboarding's Team tab">

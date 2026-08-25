@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::IsTerminal;
-use std::net::{IpAddr, SocketAddr, TcpListener};
+use std::net::{IpAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -67,6 +67,9 @@ const REMOTE_CONTROL_PUBLIC_HOST: &str = "0.0.0.0";
 /// Port `mj server` listens on unless `--port` overrides it. Local `mj`
 /// processes fall back to it when the running server left no `port` file.
 pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 11921;
+/// First port an `mj app` listener tries. Later app instances increment from
+/// here until they find an available loopback port.
+pub const DEFAULT_DESKTOP_APP_PORT: u16 = 11922;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const REMOTE_INITIAL_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
@@ -77,6 +80,11 @@ const CONNECTED_SESSION_TTL: Duration = Duration::from_secs(75);
 const REMOTE_TOKEN_LEN: usize = 43;
 /// How often `mj server` sweeps dead queue entries out of sqlite.
 const QUEUE_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+/// Each serving process refreshes its discovery row at this cadence. A TUI
+/// treats rows older than two intervals as dead.
+const SERVER_INSTANCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const SERVER_INSTANCE_TTL: Duration = Duration::from_secs(2 * 60);
+const SERVER_INSTANCE_HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// Queued prompts survive disconnects on purpose: `mj resume <session-id>`
 /// re-registers the same session id and claims them. They only become dead
 /// weight once it is clear nobody will resume, so the cap is generous.
@@ -266,6 +274,10 @@ pub struct ReviewWorkflowRecord {
     pub operation: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// The original error that prevented this review from independently
+    /// verifying its corrections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_error: Option<String>,
     #[serde(default)]
     pub issues: Vec<ReviewIssueRecord>,
 }
@@ -1426,9 +1438,22 @@ struct ClaimConfigChangeRequest {
 struct RemoteConnection {
     client: reqwest::Client,
     token: Arc<String>,
-    /// Origin of the local server (`https://localhost:<port>`), read from the
-    /// port the running server published rather than assumed.
-    base_url: Arc<String>,
+    /// Live local endpoints read from the shared registry immediately before
+    /// a TUI request. The primary `mj server` appears first whenever it is
+    /// live; app listeners follow in heartbeat-recency order.
+    base_urls: Arc<Vec<String>>,
+}
+
+impl RemoteConnection {
+    /// Preserve the shared TLS client and bearer token while refreshing the
+    /// live listener list from SQLite.
+    fn with_base_urls(&self, base_urls: Vec<String>) -> Self {
+        Self {
+            client: self.client.clone(),
+            token: Arc::clone(&self.token),
+            base_urls: Arc::new(base_urls),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1542,6 +1567,13 @@ struct ToolTranscriptEntry {
 #[derive(Debug, Clone)]
 struct ServerPaths {
     db_path: PathBuf,
+    /// Stable loopback TLS identity shared by `mj server`, every `mj app`,
+    /// and local TUI clients. Public/Tailscale certificates may rotate, so
+    /// they cannot identify the app fallback listeners.
+    /// A single PEM containing the loopback certificate and its private key.
+    /// Keeping the pair in one atomically replaced file means concurrent first
+    /// `mj app` launches can never observe a mismatched certificate/key pair.
+    local_tls_path: PathBuf,
     cert_path: PathBuf,
     key_path: PathBuf,
     token_path: PathBuf,
@@ -1549,6 +1581,36 @@ struct ServerPaths {
     /// Holds the port the running server listens on, so local `mj` sessions
     /// reach it even when `--port` moved it off the default.
     port_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerInstanceKind {
+    Server,
+    App,
+}
+
+impl ServerInstanceKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::App => "app",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "server" => Some(Self::Server),
+            "app" => Some(Self::App),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveServerInstance {
+    instance_id: String,
+    kind: ServerInstanceKind,
+    port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2794,6 +2856,7 @@ impl TrackerState {
                 turn_id: workflow.id.turn_id,
                 operation: workflow.id.operation,
                 outcome: workflow.outcome.map(|outcome| outcome.as_str().to_string()),
+                coverage_error: workflow.coverage_error(),
                 issues: workflow
                     .issues
                     .iter()
@@ -2959,7 +3022,6 @@ impl RemoteSessionTracker {
         attached_ui: bool,
     ) -> Self {
         let dir = remote_control_dir();
-        let connection = build_connection(&dir);
         let mut state = TrackerState::new(project, agent);
         state.side_coordinator_supported = ui_event_tx.is_some();
         state.worktree = worktree;
@@ -2968,7 +3030,10 @@ impl RemoteSessionTracker {
         state.cwd = status.cwd.clone();
         let tracker = Self {
             remote_dir: Arc::new(dir),
-            connection: Arc::new(Mutex::new(connection)),
+            // Connecting opens the shared SQLite registry and builds the
+            // pinned HTTPS client. Do that in the async connector rather than
+            // while constructing the TUI tracker on its caller's thread.
+            connection: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(state)),
             publisher: Arc::new(Mutex::new(None)),
             publish_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3309,7 +3374,7 @@ impl RemoteSessionTracker {
             handle.abort();
             let _ = handle.await;
         }
-        let Some(connection) = self.connection() else {
+        let Some(connection) = self.reload_connection().await else {
             return;
         };
         let (snapshot, mut sessions_to_disconnect, lease_id) = match self.state.lock() {
@@ -3397,14 +3462,48 @@ impl RemoteSessionTracker {
         self.connection.lock().ok().and_then(|guard| guard.clone())
     }
 
-    fn reload_connection(&self) -> Option<RemoteConnection> {
-        let connection = build_connection(&self.remote_dir);
+    async fn reload_connection(&self) -> Option<RemoteConnection> {
+        let connection = match self.connection() {
+            Some(existing) => {
+                let db_path = self.remote_dir.join("sessions.sqlite3");
+                let base_urls =
+                    match tokio::task::spawn_blocking(move || load_live_server_base_urls(&db_path))
+                        .await
+                    {
+                        Ok(Ok(base_urls)) => base_urls,
+                        Ok(Err(error)) => {
+                            debug!("remote-control: load live server instances failed: {error:#}");
+                            return None;
+                        }
+                        Err(error) => {
+                            warn!("remote-control: live-server lookup task panicked: {error}");
+                            return None;
+                        }
+                    };
+                if base_urls.is_empty() {
+                    return None;
+                }
+                existing.with_base_urls(base_urls)
+            }
+            None => {
+                let remote_dir = Arc::clone(&self.remote_dir);
+                match tokio::task::spawn_blocking(move || build_connection(&remote_dir)).await {
+                    Ok(Some(connection)) => connection,
+                    Ok(None) => return None,
+                    Err(error) => {
+                        warn!("remote-control: connection setup task panicked: {error}");
+                        return None;
+                    }
+                }
+            }
+        };
         if let Ok(mut guard) = self.connection.lock() {
-            *guard = connection.clone();
+            *guard = Some(connection.clone());
         }
-        connection
+        Some(connection)
     }
 
+    #[cfg(test)]
     fn set_connection_once(&self, connection: RemoteConnection) -> bool {
         let Ok(mut guard) = self.connection.lock() else {
             return false;
@@ -3437,17 +3536,15 @@ impl RemoteSessionTracker {
                 if tracker.shutting_down.load(Ordering::Relaxed) || tracker.connection().is_some() {
                     break;
                 }
-                let Some(connection) = build_connection(&tracker.remote_dir) else {
+                if tracker.reload_connection().await.is_none() {
                     tokio::time::sleep(retry_interval).await;
                     retry_interval = REMOTE_CONNECT_RETRY_INTERVAL;
                     continue;
-                };
+                }
                 if tracker.shutting_down.load(Ordering::Relaxed) {
                     break;
                 }
-                if tracker.set_connection_once(connection)
-                    && !tracker.shutting_down.load(Ordering::Relaxed)
-                {
+                if !tracker.shutting_down.load(Ordering::Relaxed) {
                     tracker.ensure_publisher();
                     tracker.ensure_queue_poller(command_tx.clone(), ui_event_tx.clone());
                     tracker.request_flush();
@@ -3461,11 +3558,7 @@ impl RemoteSessionTracker {
         if self.shutting_down.load(Ordering::Relaxed) {
             return;
         }
-        if self
-            .connection()
-            .or_else(|| self.reload_connection())
-            .is_none()
-        {
+        if self.connection().is_none() {
             return;
         }
         let Ok(mut slot) = self.publisher.lock() else {
@@ -3504,20 +3597,17 @@ impl RemoteSessionTracker {
                 let Some(snapshot) = snapshot else {
                     continue;
                 };
-                let Some(connection) = tracker.connection().or_else(|| tracker.reload_connection())
-                else {
+                let Some(connection) = tracker.reload_connection().await else {
                     continue;
                 };
                 if let Err(error) = send_snapshot(connection.clone(), snapshot).await {
                     publish_failures.record_failure(&error);
-                    tracker.reload_connection();
+                    tracker.reload_connection().await;
                     continue;
                 }
                 publish_failures.record_success();
                 for old_session_id in sessions_to_disconnect {
-                    let Some(connection) =
-                        tracker.connection().or_else(|| tracker.reload_connection())
-                    else {
+                    let Some(connection) = tracker.reload_connection().await else {
                         break;
                     };
                     if let Err(error) = send_finish(
@@ -3531,7 +3621,7 @@ impl RemoteSessionTracker {
                     .await
                     {
                         debug!("remote-control stale-session disconnect failed: {error:#}");
-                        tracker.reload_connection();
+                        tracker.reload_connection().await;
                     }
                 }
             }
@@ -3543,7 +3633,7 @@ impl RemoteSessionTracker {
         command_tx: Option<tokio::sync::mpsc::UnboundedSender<UiCommand>>,
         ui_event_tx: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
     ) {
-        if self.shutting_down.load(Ordering::Relaxed) || self.connection().is_none() {
+        if self.shutting_down.load(Ordering::Relaxed) {
             return;
         };
         let Some(command_tx) = command_tx else {
@@ -3567,9 +3657,7 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.prompt_cancel_claim());
                 if let Some((session_id, prompt_started_at)) = cancel_claim {
-                    let Some(connection) =
-                        tracker.connection().or_else(|| tracker.reload_connection())
-                    else {
+                    let Some(connection) = tracker.reload_connection().await else {
                         continue;
                     };
                     match claim_remote_prompt_cancel(
@@ -3600,7 +3688,7 @@ impl RemoteSessionTracker {
                                         debug!(
                                             "remote queued-prompt claim for Stop steering failed: {error:#}"
                                         );
-                                        tracker.reload_connection();
+                                        tracker.reload_connection().await;
                                         UiCommand::CancelPrompt
                                     }
                                 }
@@ -3615,7 +3703,7 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote prompt-cancel poll failed: {error:#}");
-                            tracker.reload_connection();
+                            tracker.reload_connection().await;
                             continue;
                         }
                     }
@@ -3632,9 +3720,7 @@ impl RemoteSessionTracker {
                         .ok()
                         .and_then(|guard| guard.permission_claim_session());
                     if let Some(session_id) = claim_session {
-                        let Some(connection) =
-                            tracker.connection().or_else(|| tracker.reload_connection())
-                        else {
+                        let Some(connection) = tracker.reload_connection().await else {
                             continue;
                         };
                         match claim_remote_permission_decision(connection.clone(), &session_id)
@@ -3649,7 +3735,7 @@ impl RemoteSessionTracker {
                             Ok(None) => {}
                             Err(error) => {
                                 debug!("remote permission-decision poll failed: {error:#}");
-                                tracker.reload_connection();
+                                tracker.reload_connection().await;
                             }
                         }
                     }
@@ -3665,9 +3751,7 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
-                    let Some(connection) =
-                        tracker.connection().or_else(|| tracker.reload_connection())
-                    else {
+                    let Some(connection) = tracker.reload_connection().await else {
                         continue;
                     };
                     match claim_remote_config_change(connection.clone(), &session_id).await {
@@ -3699,7 +3783,7 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote config-change poll failed: {error:#}");
-                            tracker.reload_connection();
+                            tracker.reload_connection().await;
                         }
                     }
                 }
@@ -3714,8 +3798,7 @@ impl RemoteSessionTracker {
                     continue;
                 };
 
-                let Some(connection) = tracker.connection().or_else(|| tracker.reload_connection())
-                else {
+                let Some(connection) = tracker.reload_connection().await else {
                     if let Ok(mut guard) = state.lock() {
                         guard.release_remote_prompt_slot();
                     }
@@ -3948,7 +4031,7 @@ impl RemoteSessionTracker {
                     }
                     Err(error) => {
                         debug!("remote queued-prompt poll failed: {error:#}");
-                        tracker.reload_connection();
+                        tracker.reload_connection().await;
                         if let Ok(mut guard) = state.lock() {
                             guard.release_remote_prompt_slot();
                         }
@@ -3959,26 +4042,32 @@ impl RemoteSessionTracker {
     }
 }
 
-/// Build the HTTP client used to report sessions to the local server.
-///
-/// The server uses a self-signed certificate, so rather than disabling
-/// certificate validation we pin that exact certificate. A connection is only
-/// enabled once both the pinned certificate and bearer token exist; otherwise
-/// the tracker keeps retrying so sessions can attach to a server started later.
+/// Build the HTTP client and obtain the current live endpoint list from the
+/// shared database. The loopback certificate and bearer token are shared by
+/// every `mj server` and `mj app` listener; only the bound port varies.
 fn build_connection(dir: &Path) -> Option<RemoteConnection> {
     let token = read_token(&dir.join("token")).map(Arc::new)?;
-    let client = build_client(&dir.join("cert.pem"))?;
-    let base_url = Arc::new(local_server_base_url(read_server_port(&dir.join("port"))));
+    let client = build_client(&dir.join("local-tls.pem"))?;
+    let base_urls = match load_live_server_base_urls(&dir.join("sessions.sqlite3")) {
+        Ok(base_urls) => base_urls,
+        Err(error) => {
+            debug!("remote-control: load live server instances failed: {error:#}");
+            return None;
+        }
+    };
+    if base_urls.is_empty() {
+        return None;
+    }
     Some(RemoteConnection {
         client,
         token,
-        base_url,
+        base_urls: Arc::new(base_urls),
     })
 }
 
 /// The loopback origin local `mj` sessions post to. Always `localhost` (never
-/// the `--hostname` name) so requests keep validating against the pinned
-/// self-signed certificate.
+/// the public/Tailscale hostname) so requests keep validating against the
+/// stable shared loopback certificate.
 fn local_server_base_url(port: u16) -> String {
     format!("https://localhost:{port}")
 }
@@ -3988,7 +4077,8 @@ fn build_client(cert_path: &Path) -> Option<reqwest::Client> {
         Ok(pem) => pem,
         Err(_) => return None,
     };
-    let cert = match reqwest::Certificate::from_pem(&pem) {
+    let certificate_der = first_certificate_der(&pem)?;
+    let cert = match reqwest::Certificate::from_der(&certificate_der) {
         Ok(cert) => cert,
         Err(error) => {
             warn!(
@@ -4116,22 +4206,23 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         mjconfig,
     });
 
-    let tls_config = match &tailscale_tls {
-        Some(ts) => {
-            let resolver = Arc::new(SniCertResolver {
-                default_key: load_certified_key(&paths.cert_path, &paths.key_path)?,
-                tailscale_domain: ts.tailscale.cert_domain.to_ascii_lowercase(),
-                tailscale_key: RwLock::new(load_certified_key(&ts.cert_path, &ts.key_path)?),
-            });
-            spawn_tailscale_cert_renewer(ts.clone(), resolver.clone());
-            sni_rustls_config(resolver)?
-        }
-        None => {
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(&paths.cert_path, &paths.key_path)
-                .await
-                .context("load remote-control TLS certificate")?
-        }
-    };
+    let default_key = load_certified_key(&paths.cert_path, &paths.key_path)?;
+    let resolver = Arc::new(SniCertResolver {
+        default_key: Arc::clone(&default_key),
+        local_key: load_certified_key(&paths.local_tls_path, &paths.local_tls_path)?,
+        tailscale_domain: tailscale_tls
+            .as_ref()
+            .map(|ts| ts.tailscale.cert_domain.to_ascii_lowercase())
+            .unwrap_or_default(),
+        tailscale_key: RwLock::new(match &tailscale_tls {
+            Some(ts) => load_certified_key(&ts.cert_path, &ts.key_path)?,
+            None => default_key,
+        }),
+    });
+    if let Some(ts) = &tailscale_tls {
+        spawn_tailscale_cert_renewer(ts.clone(), resolver.clone());
+    }
+    let tls_config = sni_rustls_config(resolver)?;
 
     let mut remaining_addrs = listen.bind_addrs.iter();
     let primary_addr = remaining_addrs
@@ -4145,11 +4236,17 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         }
     }
 
-    // Local `mj` sessions report to whatever port this server listens on, so
-    // publish it next to the certificate and token they already read. Only
-    // after the bind succeeds: a start that loses the port to another process
-    // must not redirect sessions away from the server that already owns it.
+    // Kept for existing installations that inspect this file. New local TUI
+    // clients resolve live endpoints from SQLite instead.
     publish_server_port(&paths.port_path, listen.port)?;
+
+    let listener_lifetime = termination.child_token();
+    let server_heartbeat = spawn_server_instance_heartbeat(
+        paths.db_path.clone(),
+        ServerInstanceKind::Server,
+        listen.port,
+        listener_lifetime.clone(),
+    )?;
 
     let history_ttl =
         (history_days > 0).then(|| Duration::from_secs(u64::from(history_days) * 24 * 60 * 60));
@@ -4187,14 +4284,18 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
         );
     }
 
-    serve_listeners_until_terminated(listeners, tls_config, app, termination, session_manager)
-        .await
-        .with_context(|| {
-            format!(
-                "serve remote-control API on {}",
-                listen.bind_addrs.join(", ")
-            )
-        })
+    let result =
+        serve_listeners_until_terminated(listeners, tls_config, app, termination, session_manager)
+            .await
+            .with_context(|| {
+                format!(
+                    "serve remote-control API on {}",
+                    listen.bind_addrs.join(", ")
+                )
+            });
+    listener_lifetime.cancel();
+    let _ = server_heartbeat.await;
+    result
 }
 
 /// Serve `app` over TLS on every listener until the first listener task exits
@@ -4631,13 +4732,13 @@ fn tailscale_listen_config(cert_domain: &str, port: u16) -> ServerListenConfig {
     }
 }
 
-/// Serves the tailscale (Let's Encrypt) certificate to clients whose SNI is
-/// the ts.net name, and the self-signed certificate to everyone else — so
-/// local `mj` processes hitting `https://localhost:<port>` keep validating
-/// against the pinned `cert.pem` unchanged.
+/// Serves the stable local certificate to local clients, a Tailscale
+/// certificate to the ts.net name when present, and the requested public
+/// hostname certificate to everyone else.
 #[derive(Debug)]
 struct SniCertResolver {
     default_key: Arc<CertifiedKey>,
+    local_key: Arc<CertifiedKey>,
     /// Lowercase; SNI hostnames are compared case-insensitively.
     tailscale_domain: String,
     /// Behind a lock so the daily renewer can hot-swap the certificate
@@ -4647,7 +4748,14 @@ struct SniCertResolver {
 
 impl ResolvesServerCert for SniCertResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        if sni_matches(client_hello.server_name(), &self.tailscale_domain) {
+        if client_hello
+            .server_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("localhost"))
+        {
+            Some(self.local_key.clone())
+        } else if !self.tailscale_domain.is_empty()
+            && sni_matches(client_hello.server_name(), &self.tailscale_domain)
+        {
             Some(
                 self.tailscale_key
                     .read()
@@ -4673,8 +4781,11 @@ fn load_certified_key(cert_path: &Path, key_path: &Path) -> Result<Arc<Certified
     if certs.is_empty() {
         return Err(anyhow!("no certificates found in {}", cert_path.display()));
     }
-    let key_pem =
-        std::fs::read(key_path).with_context(|| format!("read {}", key_path.display()))?;
+    let key_pem = if cert_path == key_path {
+        cert_pem.clone()
+    } else {
+        std::fs::read(key_path).with_context(|| format!("read {}", key_path.display()))?
+    };
     let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
         .with_context(|| format!("parse private key in {}", key_path.display()))?
         .ok_or_else(|| anyhow!("no private key found in {}", key_path.display()))?;
@@ -5740,9 +5851,10 @@ fn mjconfig_apply_edits(
         config.agent.discrete_review = enabled;
     }
     if let Some(tier) = request.review_tier {
-        config.agent.review_tier = tier
+        let tier = tier
             .parse()
             .map_err(|()| bad_request(format!("unknown review tier: {tier}")))?;
+        config.agent.set_review_tier(tier);
     }
     if let Some(threshold) = request.correction_threshold {
         config.agent.correction_threshold = threshold.parse().map_err(|()| {
@@ -7624,17 +7736,14 @@ fn ensure_server_paths(hostname: Option<&str>) -> Result<ServerPaths> {
 }
 
 fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerPaths> {
-    std::fs::create_dir_all(root)
-        .with_context(|| format!("create remote-control dir {}", root.display()))?;
+    let paths = ensure_shared_local_paths_in(root)?;
 
     let normalized_hostname = normalize_requested_hostname(hostname);
     let normalized_hostname = normalized_hostname.as_deref().unwrap_or("localhost");
-    let cert_path = root.join("cert.pem");
-    let key_path = root.join("key.pem");
     let cert_hostname_path = root.join("cert-hostname");
     let existing_hostname = read_trimmed_file(&cert_hostname_path).unwrap_or_default();
     let hostname_changed = existing_hostname != normalized_hostname;
-    if hostname_changed || !cert_path.exists() || !key_path.exists() {
+    if hostname_changed || !paths.cert_path.exists() || !paths.key_path.exists() {
         let mut names = vec![
             "localhost".to_string(),
             "127.0.0.1".to_string(),
@@ -7645,18 +7754,43 @@ fn ensure_server_paths_in(root: &Path, hostname: Option<&str>) -> Result<ServerP
         }
         let cert = generate_simple_self_signed(names)
             .context("generate remote-control self-signed certificate")?;
-        std::fs::write(&cert_path, cert.cert.pem())
-            .with_context(|| format!("write {}", cert_path.display()))?;
-        std::fs::write(&key_path, cert.key_pair.serialize_pem())
-            .with_context(|| format!("write {}", key_path.display()))?;
+        std::fs::write(&paths.cert_path, cert.cert.pem())
+            .with_context(|| format!("write {}", paths.cert_path.display()))?;
+        std::fs::write(&paths.key_path, cert.key_pair.serialize_pem())
+            .with_context(|| format!("write {}", paths.key_path.display()))?;
         std::fs::write(&cert_hostname_path, normalized_hostname)
             .with_context(|| format!("write {}", cert_hostname_path.display()))?;
-        restrict_permissions(&key_path)?;
+        restrict_permissions(&paths.key_path)?;
         restrict_permissions(&cert_hostname_path)?;
     }
 
+    Ok(paths)
+}
+
+fn ensure_shared_local_paths_in(root: &Path) -> Result<ServerPaths> {
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("create remote-control dir {}", root.display()))?;
+
+    let local_tls_path = root.join("local-tls.pem");
+    if load_certified_key(&local_tls_path, &local_tls_path).is_err() {
+        let cert = generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ])
+        .context("generate local remote-control TLS certificate")?;
+        let mut pem = cert.cert.pem().into_bytes();
+        pem.extend_from_slice(cert.key_pair.serialize_pem().as_bytes());
+        write_private_file_atomically(&local_tls_path, &pem)?;
+    }
+    restrict_permissions(&local_tls_path)?;
+
+    let cert_path = root.join("cert.pem");
+    let key_path = root.join("key.pem");
+
     Ok(ServerPaths {
         db_path: root.join("sessions.sqlite3"),
+        local_tls_path,
         cert_path,
         key_path,
         token_path: root.join("token"),
@@ -7674,6 +7808,7 @@ fn publish_server_port(port_path: &Path, port: u16) -> Result<()> {
 
 /// Port a local `mj` session should report to, falling back to the default
 /// when no server has published one (or the file is unreadable/garbage).
+#[cfg(test)]
 fn read_server_port(port_path: &Path) -> u16 {
     read_trimmed_file(port_path)
         .and_then(|contents| contents.parse::<u16>().ok())
@@ -7729,18 +7864,24 @@ fn valid_remote_token(token: &str) -> bool {
 }
 
 fn write_token_atomically(token_path: &Path, token: &str) -> Result<()> {
-    let tmp_path = token_path.with_file_name(format!(
+    write_private_file_atomically(token_path, token.as_bytes())
+}
+
+/// Atomically replace a private file after applying owner-only permissions to
+/// its temporary inode. Readers see either the previous complete file or the
+/// new complete file, never a partial certificate/key pair.
+fn write_private_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let tmp_path = path.with_file_name(format!(
         ".{}.{}.tmp",
-        token_path
-            .file_name()
+        path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("token"),
         std::process::id()
     ));
-    std::fs::write(&tmp_path, token).with_context(|| format!("write {}", tmp_path.display()))?;
+    std::fs::write(&tmp_path, contents).with_context(|| format!("write {}", tmp_path.display()))?;
     restrict_permissions(&tmp_path)?;
-    std::fs::rename(&tmp_path, token_path)
-        .with_context(|| format!("rename {} to {}", tmp_path.display(), token_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
     Ok(())
 }
 
@@ -7780,269 +7921,11 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 }
 
 // --- `mj app` desktop server runtime ---
-//
-// The desktop app reuses the whole remote-control server (router, API, viewer
-// assets, session manager, cookie signing) but swaps the perimeter: an
-// OS-assigned loopback port instead of the `mj server` port, per-launch
-// in-memory secrets instead of persisted token/cookie-key files, and TLS
-// material plus session history kept in a dedicated per-user directory so a
-// concurrent `mj server` never contends with it.
 
-/// Server-side expiry baked into the desktop bootstrap cookie. Generous on
-/// purpose: the cookie only lives in the webview's in-memory store and the
-/// signing key dies with the process, so the real lifetime is the app run —
-/// this just has to outlast any plausible single run so the viewer never
-/// silently logs out mid-session.
+/// Server-side expiry baked into the in-memory desktop bootstrap cookie. The
+/// WebView uses an incognito store, so closing the desktop window still drops
+/// the cookie even though its shared signing key persists.
 const DESKTOP_SESSION_VALIDITY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-
-/// Per-user directory holding the desktop app's TLS material and session
-/// database, separate from `remote-control/` so `mj app` and `mj server` never
-/// share certificates, secrets, or history.
-fn desktop_app_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("mj")
-        .join("desktop-app")
-}
-
-#[derive(Debug)]
-struct DesktopTls {
-    /// Combined private-key + certificate PEM. The pair lives in one file that
-    /// is published with a single atomic rename, and the server uses these
-    /// in-memory bytes rather than re-reading disk, so concurrent launches can
-    /// never serve a mismatched pair or one that differs from the pinned DER.
-    pem: Vec<u8>,
-    /// DER encoding of the served certificate, pinned by the desktop shell.
-    certificate_der: Vec<u8>,
-}
-
-/// Create or validate the desktop app directory. Fails closed on anything
-/// suspicious (symlink, foreign owner, group/world access) instead of trying
-/// to repair it: silently "fixing" an attacker-created directory would keep
-/// using attacker-chosen inodes.
-fn ensure_desktop_dir(root: &Path) -> Result<()> {
-    if let Some(parent) = root.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create desktop app parent dir {}", parent.display()))?;
-    }
-    let created = create_desktop_dir_owner_only(root)?;
-    let metadata = std::fs::symlink_metadata(root)
-        .with_context(|| format!("inspect desktop app dir {}", root.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!(
-            "desktop app dir {} is a symlink; remove it and retry",
-            root.display()
-        );
-    }
-    if !metadata.is_dir() {
-        bail!(
-            "desktop app path {} is not a directory; remove it and retry",
-            root.display()
-        );
-    }
-    if !created {
-        validate_owner_only(
-            root,
-            &metadata,
-            "run `chmod 700` on it or remove it and retry",
-        )?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_desktop_dir_owner_only(root: &Path) -> Result<bool> {
-    use std::os::unix::fs::DirBuilderExt;
-    match std::fs::DirBuilder::new().mode(0o700).create(root) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => {
-            Err(error).with_context(|| format!("create desktop app dir {}", root.display()))
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn create_desktop_dir_owner_only(root: &Path) -> Result<bool> {
-    match std::fs::create_dir(root) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => {
-            Err(error).with_context(|| format!("create desktop app dir {}", root.display()))
-        }
-    }
-}
-
-/// Unix: require the current user as owner and no group/world permission bits.
-#[cfg(unix)]
-fn validate_owner_only(path: &Path, metadata: &std::fs::Metadata, remedy: &str) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    let current_uid = unsafe { libc::geteuid() };
-    if metadata.uid() != current_uid {
-        bail!(
-            "{} is owned by uid {} instead of the current user (uid {current_uid}); remove it and retry",
-            path.display(),
-            metadata.uid()
-        );
-    }
-    let mode = metadata.mode() & 0o7777;
-    if mode & 0o077 != 0 {
-        bail!(
-            "{} is accessible to other users (mode {mode:o}); {remedy}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-/// Windows: files under the per-user config dir inherit an owner-only DACL
-/// from the profile directory, which is the same boundary the remote-control
-/// token and cookie key already rely on.
-#[cfg(not(unix))]
-fn validate_owner_only(_path: &Path, _metadata: &std::fs::Metadata, _remedy: &str) -> Result<()> {
-    Ok(())
-}
-
-/// Read an existing piece of desktop TLS material without following symlinks,
-/// failing closed (with the remedy in the error) on anything that is not an
-/// owner-only regular file. Returns `Ok(None)` only when the file is absent.
-fn read_desktop_tls_file(path: &Path) -> Result<Option<Vec<u8>>> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(not(unix))]
-    {
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error).with_context(|| format!("inspect {}", path.display()));
-            }
-        };
-        if metadata.file_type().is_symlink() {
-            bail!(
-                "refusing to use {}: it is a symlink; remove it and retry",
-                path.display()
-            );
-        }
-    }
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-            bail!(
-                "refusing to use {}: it is a symlink; remove it and retry",
-                path.display()
-            );
-        }
-        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
-    };
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("inspect {}", path.display()))?;
-    if !metadata.is_file() {
-        bail!(
-            "refusing to use {}: not a regular file; remove it and retry",
-            path.display()
-        );
-    }
-    validate_owner_only(
-        path,
-        &metadata,
-        "run `chmod 600` on it or remove it and retry",
-    )?;
-    let mut contents = Vec::new();
-    {
-        use std::io::Read;
-        let mut file = file;
-        file.read_to_end(&mut contents)
-            .with_context(|| format!("read {}", path.display()))?;
-    }
-    Ok(Some(contents))
-}
-
-/// Atomically create or replace a desktop file with owner-only permissions:
-/// the content is written to a fresh exclusive temp file (never through a
-/// symlink) that is renamed over the destination, so no reader ever observes
-/// lax permissions or partial content.
-fn write_desktop_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
-    let tmp_path = path.with_file_name(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("desktop"),
-        std::process::id()
-    ));
-    // A stale temp file can only be left by a crashed previous run under this
-    // same pid; remove it so the exclusive create below succeeds.
-    let _ = std::fs::remove_file(&tmp_path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    {
-        use std::io::Write;
-        let mut file = options
-            .open(&tmp_path)
-            .with_context(|| format!("create {}", tmp_path.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("write {}", tmp_path.display()))?;
-    }
-    std::fs::rename(&tmp_path, path)
-        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
-    Ok(())
-}
-
-/// Load or mint the desktop TLS material inside `root`. Existing material is
-/// reused only when it passes the fail-closed safety checks and still parses
-/// as a servable certificate/key pair; corrupt-but-safe material is replaced.
-fn ensure_desktop_tls(root: &Path) -> Result<DesktopTls> {
-    ensure_desktop_dir(root)?;
-    let pem_path = root.join("tls.pem");
-    if let Some(pem) = read_desktop_tls_file(&pem_path)? {
-        match parse_desktop_tls(&pem) {
-            Some(tls) => return Ok(tls),
-            None => debug!(
-                "replacing unusable desktop TLS material at {}",
-                pem_path.display()
-            ),
-        }
-    }
-
-    let cert = generate_simple_self_signed(vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-        "::1".to_string(),
-    ])
-    .context("generate desktop self-signed certificate")?;
-    let mut pem = cert.key_pair.serialize_pem().into_bytes();
-    pem.extend_from_slice(cert.cert.pem().as_bytes());
-    write_desktop_file_atomically(&pem_path, &pem)?;
-    Ok(DesktopTls {
-        pem,
-        certificate_der: cert.cert.der().to_vec(),
-    })
-}
-
-/// Split a combined desktop `tls.pem` into a servable pair, or `None` when
-/// either the certificate or the private key is missing or unparseable so the
-/// caller regenerates both.
-fn parse_desktop_tls(pem: &[u8]) -> Option<DesktopTls> {
-    let certificate_der = first_certificate_der(pem)?;
-    rustls_pemfile::private_key(&mut &pem[..]).ok().flatten()?;
-    Some(DesktopTls {
-        pem: pem.to_vec(),
-        certificate_der,
-    })
-}
 
 fn first_certificate_der(cert_pem: &[u8]) -> Option<Vec<u8>> {
     rustls_pemfile::certs(&mut &cert_pem[..])
@@ -8051,57 +7934,38 @@ fn first_certificate_der(cert_pem: &[u8]) -> Option<Vec<u8>> {
         .map(|cert| cert.to_vec())
 }
 
-/// Per-launch, in-memory authentication state for the desktop server. Nothing
-/// is persisted: the cookie signing key dies with the process, so every cookie
-/// minted for this instance stops validating the moment the app exits, and no
-/// secret ever reaches disk, argv, a URL, or the logs.
-struct DesktopAuth {
-    /// Bearer token the shared router requires on the QR/token paths. It is
-    /// never shown or exported anywhere, which leaves those paths inert in
-    /// desktop mode.
-    token: String,
-    /// Full-length random secret in place of the six-digit viewer code, so the
-    /// code-login path is unguessable instead of merely rate-limited.
-    viewer_code: String,
-    cookie_key: String,
-    /// Pre-minted signed session cookie the shell injects into the webview,
-    /// replacing the interactive viewer-code screen.
-    bootstrap_cookie: String,
-}
-
-impl DesktopAuth {
-    fn generate() -> Result<Self> {
-        let cookie_key = generate_token()?;
-        let bootstrap_cookie =
-            sign_session_cookie(&cookie_key, DESKTOP_SESSION_VALIDITY, now_unix());
-        Ok(Self {
-            token: generate_token()?,
-            viewer_code: generate_token()?,
-            cookie_key,
-            bootstrap_cookie,
-        })
+/// Bind the next available app port on every usable loopback family. Requiring
+/// the same port on IPv4 and IPv6 prevents `localhost` from resolving to a
+/// different process on one family.
+fn bind_desktop_listeners() -> Result<(Vec<TcpListener>, u16)> {
+    for port in DEFAULT_DESKTOP_APP_PORT..=u16::MAX {
+        let ipv4 = match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error).context("bind desktop app IPv4 listener"),
+        };
+        let mut listeners = vec![ipv4];
+        match TcpListener::bind(("::1", port)) {
+            Ok(listener) => listeners.push(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error).context("bind desktop app IPv6 listener"),
+        }
+        for listener in &listeners {
+            listener
+                .set_nonblocking(true)
+                .context("set desktop app listener to non-blocking")?;
+        }
+        return Ok((listeners, port));
     }
-}
-
-/// Bind the desktop listener on an OS-assigned IPv4 loopback port, so it never
-/// collides with `mj server`'s port or with another running `mj app`.
-fn bind_desktop_listener() -> Result<(TcpListener, SocketAddr)> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).context("bind desktop app listener")?;
-    listener
-        .set_nonblocking(true)
-        .context("set desktop app listener to non-blocking")?;
-    let local_addr = listener
-        .local_addr()
-        .context("read desktop app listener address")?;
-    Ok((listener, local_addr))
+    bail!("no loopback port available for mj app starting at {DEFAULT_DESKTOP_APP_PORT}")
 }
 
 /// Everything the desktop shell needs to open a window against the app-owned
 /// server: where to point the webview, which certificate to pin, and the
 /// bootstrap cookie that signs the viewer in without the viewer-code screen.
 // Consumed by the `mj app` CLI wiring in #727.
-#[allow(dead_code)]
-pub(crate) struct DesktopServerHandle {
+pub struct DesktopServerHandle {
     pub origin: Url,
     /// DER encoding of the served certificate, for `desktop::DesktopShellOptions`.
     pub certificate_der: Vec<u8>,
@@ -8113,6 +7977,7 @@ pub(crate) struct DesktopServerHandle {
 
 struct DesktopRuntimeConfig {
     /// Directory holding the desktop TLS material and session database.
+    #[allow(dead_code)]
     root: PathBuf,
     history_ttl: Option<Duration>,
     keep_awake: bool,
@@ -8143,16 +8008,17 @@ async fn prepare_desktop_runtime(
         termination,
     } = config;
     install_crypto_provider();
-    let tls = ensure_desktop_tls(&root)?;
-    let db_path = root.join("sessions.sqlite3");
-    init_db(&db_path)?;
-    let auth = DesktopAuth::generate()?;
+    let paths = ensure_shared_local_paths_in(&root)?;
+    init_db(&paths.db_path)?;
+    let token = ensure_token(&paths.token_path)?;
+    let cookie_key = ensure_cookie_key(&paths.cookie_key_path)?;
+    let bootstrap_cookie = sign_session_cookie(&cookie_key, DESKTOP_SESSION_VALIDITY, now_unix());
     let app = build_router_with_cookie_name(
         RouterConfig {
-            db_path: db_path.clone(),
-            token: auth.token,
-            viewer_code: auth.viewer_code,
-            cookie_key: auth.cookie_key,
+            db_path: paths.db_path.clone(),
+            token,
+            viewer_code: generate_viewer_code()?,
+            cookie_key,
             // Ephemeral: any cookie issued by the running server (not just the
             // bootstrap one) omits Max-Age and dies with the webview.
             session_ttl: Duration::ZERO,
@@ -8162,44 +8028,59 @@ async fn prepare_desktop_runtime(
         },
         DESKTOP_SESSION_COOKIE_NAME,
     );
-    // The PEM parsers each pick out their own block type, so the combined
-    // in-memory pair feeds both sides without touching disk again.
-    let tls_config =
-        axum_server::tls_rustls::RustlsConfig::from_pem(tls.pem.clone(), tls.pem.clone())
-            .await
-            .context("load desktop TLS certificate")?;
-    let (listener, local_addr) = bind_desktop_listener()?;
-    let origin = Url::parse(&format!("https://{local_addr}/"))
-        .with_context(|| format!("construct desktop viewer origin for {local_addr}"))?;
-    spawn_queue_pruner(db_path, history_ttl);
+    let local_tls_pem = std::fs::read(&paths.local_tls_path)
+        .with_context(|| format!("read {}", paths.local_tls_path.display()))?;
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
+        local_tls_pem.clone(),
+        local_tls_pem.clone(),
+    )
+    .await
+    .context("load shared local TLS certificate")?;
+    let (listeners, port) = bind_desktop_listeners()?;
+    let origin = Url::parse(&format!("https://localhost:{port}/"))
+        .with_context(|| format!("construct desktop viewer origin for port {port}"))?;
+    let certificate_der =
+        first_certificate_der(&local_tls_pem).context("read shared local TLS certificate")?;
+    let listener_lifetime = termination.child_token();
+    let heartbeat = spawn_server_instance_heartbeat(
+        paths.db_path.clone(),
+        ServerInstanceKind::App,
+        port,
+        listener_lifetime.clone(),
+    )?;
+    spawn_queue_pruner(paths.db_path, history_ttl);
     let serve = async move {
         // Like `mj server`, the desktop server counts as "working" for its
         // whole lifetime so sessions survive the host idling.
         let _keep_awake = mj_core::keep_awake::KeepAwake::hold(keep_awake);
-        serve_listeners_until_terminated(
-            vec![listener],
+        let result = serve_listeners_until_terminated(
+            listeners,
             tls_config,
             app,
             termination,
             session_manager,
         )
         .await
-        .with_context(|| format!("serve desktop app API on {local_addr}"))
+        .with_context(|| format!("serve desktop app API on localhost:{port}"));
+        listener_lifetime.cancel();
+        let _ = heartbeat.await;
+        result
     };
     Ok((
         DesktopServerHandle {
             origin,
-            certificate_der: tls.certificate_der,
+            certificate_der,
             bootstrap_cookie_name: DESKTOP_SESSION_COOKIE_NAME,
-            bootstrap_cookie_value: auth.bootstrap_cookie,
+            bootstrap_cookie_value: bootstrap_cookie,
         },
         serve,
     ))
 }
 
 // Consumed by the `mj app` CLI wiring in #727.
-#[allow(dead_code)]
-pub(crate) struct DesktopServerOptions {
+pub struct DesktopServerOptions {
+    pub config: config::Config,
+    pub roster: std::result::Result<roster::Roster, SetupPending>,
     pub history_days: u32,
     pub cwd: PathBuf,
     pub additional_directories: Vec<PathBuf>,
@@ -8209,18 +8090,18 @@ pub(crate) struct DesktopServerOptions {
     pub termination: CancellationToken,
 }
 
-/// Desktop-mode counterpart of [`run_server`]: same configuration resolution,
-/// workspace roots, and session manager, but bound to an OS-assigned loopback
-/// port with per-launch in-memory secrets and isolated on-disk state.
+/// Desktop-mode counterpart of [`run_server`]: same database, local
+/// credentials, and loopback TLS identity, with its own registered listener.
 // Consumed by the `mj app` CLI wiring in #727.
-#[allow(dead_code)]
-pub(crate) async fn prepare_desktop_server(
+pub async fn prepare_desktop_server(
     options: DesktopServerOptions,
 ) -> Result<(
     DesktopServerHandle,
     impl Future<Output = Result<()>> + Send + 'static,
 )> {
     let DesktopServerOptions {
+        config: cfg,
+        roster: resolved,
         history_days,
         cwd,
         additional_directories,
@@ -8230,22 +8111,26 @@ pub(crate) async fn prepare_desktop_server(
         session_manager,
     } = options;
     let config_path = config::default_config_path();
-    let mut cfg = config::Config::load(&config_path)
-        .with_context(|| format!("load {}", config_path.display()))?;
-    cfg.apply_default_team();
-    let resolved = roster::resolve(&cfg, &cwd).await?;
     let workspace_roots =
         mj_core::paths::WorkspaceRoots::new(&cwd, &additional_directories)?.active_roots();
-    let mjconfig = Arc::new(MjConfigRuntime::new(
-        config_path.clone(),
-        resolved.choices.clone(),
-        Some(models_config_from_roster(&resolved)),
-        resolved.inventory.clone(),
-    ));
+    let mjconfig = Arc::new(match &resolved {
+        Ok(resolved) => MjConfigRuntime::new(
+            config_path.clone(),
+            resolved.choices.clone(),
+            Some(models_config_from_roster(resolved)),
+            resolved.inventory.clone(),
+        ),
+        Err(SetupPending(_)) => MjConfigRuntime::new(
+            config_path.clone(),
+            Vec::new(),
+            None,
+            roster::discover_inventory(&cfg),
+        ),
+    });
     let history_ttl =
         (history_days > 0).then(|| Duration::from_secs(u64::from(history_days) * 24 * 60 * 60));
     prepare_desktop_runtime(DesktopRuntimeConfig {
-        root: desktop_app_dir(),
+        root: remote_control_dir(),
         history_ttl,
         keep_awake: cfg.keep_awake,
         workspace_roots,
@@ -8301,6 +8186,12 @@ fn init_db(db_path: &Path) -> Result<()> {
         create table if not exists recent_filesystem_directories (
             path text primary key,
             selected_at text not null
+        );
+        create table if not exists server_instances (
+            instance_id text primary key,
+            kind text not null check (kind in ('server', 'app')),
+            port integer not null check (port between 1 and 65535),
+            last_heartbeat integer not null
         );",
     )
     .context("create remote-control schema")?;
@@ -8373,7 +8264,160 @@ fn open_db(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path).with_context(|| format!("open {}", db_path.display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("set sqlite journal mode")?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .context("set sqlite busy timeout")?;
     Ok(conn)
+}
+
+fn server_instance_now() -> Result<i64> {
+    i64::try_from(now_unix()).context("remote-control clock exceeds sqlite timestamp range")
+}
+
+fn register_server_instance(
+    db_path: &Path,
+    instance_id: &str,
+    kind: ServerInstanceKind,
+    port: u16,
+) -> Result<()> {
+    init_db(db_path)?;
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "insert into server_instances (instance_id, kind, port, last_heartbeat)
+         values (?1, ?2, ?3, ?4)
+         on conflict(instance_id) do update set
+            kind = excluded.kind,
+            port = excluded.port,
+            last_heartbeat = excluded.last_heartbeat",
+        params![
+            instance_id,
+            kind.as_str(),
+            i64::from(port),
+            server_instance_now()?,
+        ],
+    )
+    .context("register remote-control server instance")?;
+    Ok(())
+}
+
+fn unregister_server_instance(db_path: &Path, instance_id: &str) -> Result<()> {
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "delete from server_instances where instance_id = ?1",
+        params![instance_id],
+    )
+    .context("unregister remote-control server instance")?;
+    Ok(())
+}
+
+fn load_live_server_instances_at(db_path: &Path, now: i64) -> Result<Vec<LiveServerInstance>> {
+    let conn = open_db(db_path)?;
+    let cutoff = now.saturating_sub(
+        i64::try_from(SERVER_INSTANCE_TTL.as_secs())
+            .expect("two-minute server instance TTL fits sqlite timestamp"),
+    );
+    let mut statement = conn
+        .prepare(
+            "select instance_id, kind, port
+             from server_instances
+             where last_heartbeat >= ?1
+             order by case kind when 'server' then 0 else 1 end,
+                      last_heartbeat desc,
+                      instance_id asc",
+        )
+        .context("prepare live remote-control server lookup")?;
+    statement
+        .query_map(params![cutoff], |row| {
+            let kind = row.get::<_, String>(1)?;
+            let port = row.get::<_, u16>(2)?;
+            Ok((row.get::<_, String>(0)?, kind, port))
+        })
+        .context("query live remote-control servers")?
+        .filter_map(|row| match row {
+            Ok((instance_id, kind, port)) => ServerInstanceKind::from_str(&kind).map(|kind| {
+                Ok(LiveServerInstance {
+                    instance_id,
+                    kind,
+                    port,
+                })
+            }),
+            Err(error) => Some(Err(error.into())),
+        })
+        .collect::<Result<Vec<_>>>()
+        .context("decode live remote-control servers")
+}
+
+fn load_live_server_instances(db_path: &Path) -> Result<Vec<LiveServerInstance>> {
+    load_live_server_instances_at(db_path, server_instance_now()?)
+}
+
+fn load_live_server_base_urls(db_path: &Path) -> Result<Vec<String>> {
+    Ok(load_live_server_instances(db_path)?
+        .into_iter()
+        .map(|instance| local_server_base_url(instance.port))
+        .collect())
+}
+
+/// Register a bound listener immediately, then keep its discovery row live
+/// until the listener's lifetime token is cancelled. If a graceful cleanup
+/// loses a database race, the two-minute TTL remains the crash-safe fallback.
+fn spawn_server_instance_heartbeat(
+    db_path: PathBuf,
+    kind: ServerInstanceKind,
+    port: u16,
+    termination: CancellationToken,
+) -> Result<JoinHandle<()>> {
+    let instance_id = generate_token()?;
+    register_server_instance(&db_path, &instance_id, kind, port)?;
+    Ok(tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = termination.cancelled() => {
+                    let instance_id = instance_id.clone();
+                    let db_path = db_path.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        unregister_server_instance(&db_path, &instance_id)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            debug!("remote-control server unregister failed: {error:#}");
+                        }
+                        Err(error) => {
+                            debug!("remote-control server unregister task panicked: {error}");
+                        }
+                    }
+                    break;
+                }
+                _ = tokio::time::sleep(SERVER_INSTANCE_HEARTBEAT_INTERVAL) => {}
+            }
+
+            loop {
+                let instance_id = instance_id.clone();
+                let db_path = db_path.clone();
+                match tokio::task::spawn_blocking(move || {
+                    register_server_instance(&db_path, &instance_id, kind, port)
+                })
+                .await
+                {
+                    Ok(Ok(())) => break,
+                    Ok(Err(error)) => {
+                        warn!("remote-control server heartbeat failed: {error:#}");
+                    }
+                    Err(error) => {
+                        warn!("remote-control server heartbeat task panicked: {error}");
+                    }
+                }
+                tokio::select! {
+                    _ = termination.cancelled() => break,
+                    _ = tokio::time::sleep(SERVER_INSTANCE_HEARTBEAT_RETRY_INTERVAL) => {}
+                }
+                if termination.is_cancelled() {
+                    break;
+                }
+            }
+        }
+    }))
 }
 
 fn upsert_session_record(db_path: &Path, session: &SessionRecord) -> Result<bool> {
@@ -9447,18 +9491,40 @@ async fn flush_final_remote_requests<T, F, Fut>(
     }
 }
 
+async fn send_to_live_server<F>(
+    connection: &RemoteConnection,
+    description: &'static str,
+    mut build_request: F,
+) -> Result<reqwest::Response>
+where
+    F: FnMut(&str) -> reqwest::RequestBuilder,
+{
+    let mut last_error = None;
+    for base_url in connection.base_urls.iter() {
+        match build_request(base_url).send().await {
+            Ok(response) => return response.error_for_status().with_context(|| description),
+            Err(error) => {
+                debug!("{description} via {base_url} failed: {error}");
+                last_error = Some(error);
+            }
+        }
+    }
+    match last_error {
+        Some(error) => Err(error).with_context(|| description),
+        None => bail!("{description}: no live remote-control server"),
+    }
+}
+
 async fn send_snapshot(connection: RemoteConnection, snapshot: SessionRecord) -> Result<()> {
-    let request = connection
-        .client
-        .post(format!("{}/api/sessions", connection.base_url))
-        .bearer_auth(connection.token.as_str())
-        .json(&snapshot);
-    request
-        .send()
-        .await
-        .context("send remote-control update")?
-        .error_for_status()
-        .context("remote-control server returned an error")?;
+    let client = connection.client.clone();
+    let token = Arc::clone(&connection.token);
+    send_to_live_server(&connection, "send remote-control update", move |base_url| {
+        client
+            .post(format!("{base_url}/api/sessions"))
+            .bearer_auth(token.as_str())
+            .json(&snapshot)
+    })
+    .await?;
     Ok(())
 }
 
@@ -9467,21 +9533,23 @@ async fn send_finish(
     session_id: &str,
     request: FinishSessionRequest,
 ) -> Result<()> {
+    let client = connection.client.clone();
+    let token = Arc::clone(&connection.token);
     let encoded_session_id =
         url::form_urlencoded::byte_serialize(session_id.as_bytes()).collect::<String>();
-    connection
-        .client
-        .post(format!(
-            "{}/api/sessions/{encoded_session_id}/finish",
-            connection.base_url
-        ))
-        .bearer_auth(connection.token.as_str())
-        .json(&request)
-        .send()
-        .await
-        .context("send remote-control session finish")?
-        .error_for_status()
-        .context("remote-control session finish returned an error")?;
+    send_to_live_server(
+        &connection,
+        "send remote-control session finish",
+        move |base_url| {
+            client
+                .post(format!(
+                    "{base_url}/api/sessions/{encoded_session_id}/finish"
+                ))
+                .bearer_auth(token.as_str())
+                .json(&request)
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -9489,23 +9557,21 @@ async fn claim_remote_prompt(
     connection: RemoteConnection,
     session_id: &str,
 ) -> Result<Option<QueuedPrompt>> {
-    let request = connection
-        .client
-        .post(format!("{}/api/queued-prompts/claim", connection.base_url))
-        .bearer_auth(connection.token.as_str())
-        .json(&ClaimQueuedPromptRequest {
-            session_id: session_id.to_string(),
-        });
-    let response = request
-        .send()
-        .await
-        .context("claim remote queued prompt")?
-        .error_for_status()
-        .context("remote queued-prompt claim returned an error")?;
-    response
-        .json::<Option<QueuedPrompt>>()
-        .await
-        .context("decode claimed remote queued prompt")
+    let client = connection.client.clone();
+    let token = Arc::clone(&connection.token);
+    let request = ClaimQueuedPromptRequest {
+        session_id: session_id.to_string(),
+    };
+    send_to_live_server(&connection, "claim remote queued prompt", move |base_url| {
+        client
+            .post(format!("{base_url}/api/queued-prompts/claim"))
+            .bearer_auth(token.as_str())
+            .json(&request)
+    })
+    .await?
+    .json::<Option<QueuedPrompt>>()
+    .await
+    .context("decode claimed remote queued prompt")
 }
 
 async fn claim_remote_prompt_cancel(
@@ -9513,73 +9579,68 @@ async fn claim_remote_prompt_cancel(
     session_id: &str,
     prompt_started_at: &str,
 ) -> Result<Option<PromptCancelRequestRecord>> {
-    let request = connection
-        .client
-        .post(format!("{}/api/prompt-cancels/claim", connection.base_url))
-        .bearer_auth(connection.token.as_str())
-        .json(&ClaimPromptCancelRequest {
-            session_id: session_id.to_string(),
-            prompt_started_at: prompt_started_at.to_string(),
-        });
-    let response = request
-        .send()
-        .await
-        .context("claim remote prompt cancel")?
-        .error_for_status()
-        .context("remote prompt-cancel claim returned an error")?;
-    response
-        .json::<Option<PromptCancelRequestRecord>>()
-        .await
-        .context("decode claimed remote prompt cancel")
+    let client = connection.client.clone();
+    let token = Arc::clone(&connection.token);
+    let request = ClaimPromptCancelRequest {
+        session_id: session_id.to_string(),
+        prompt_started_at: prompt_started_at.to_string(),
+    };
+    send_to_live_server(&connection, "claim remote prompt cancel", move |base_url| {
+        client
+            .post(format!("{base_url}/api/prompt-cancels/claim"))
+            .bearer_auth(token.as_str())
+            .json(&request)
+    })
+    .await?
+    .json::<Option<PromptCancelRequestRecord>>()
+    .await
+    .context("decode claimed remote prompt cancel")
 }
 
 async fn claim_remote_permission_decision(
     connection: RemoteConnection,
     session_id: &str,
 ) -> Result<Option<PermissionDecisionRecord>> {
-    let request = connection
-        .client
-        .post(format!(
-            "{}/api/permission-decisions/claim",
-            connection.base_url
-        ))
-        .bearer_auth(connection.token.as_str())
-        .json(&ClaimPermissionDecisionRequest {
-            session_id: session_id.to_string(),
-        });
-    let response = request
-        .send()
-        .await
-        .context("claim remote permission decision")?
-        .error_for_status()
-        .context("remote permission-decision claim returned an error")?;
-    response
-        .json::<Option<PermissionDecisionRecord>>()
-        .await
-        .context("decode claimed remote permission decision")
+    let client = connection.client.clone();
+    let token = Arc::clone(&connection.token);
+    let request = ClaimPermissionDecisionRequest {
+        session_id: session_id.to_string(),
+    };
+    send_to_live_server(
+        &connection,
+        "claim remote permission decision",
+        move |base_url| {
+            client
+                .post(format!("{base_url}/api/permission-decisions/claim"))
+                .bearer_auth(token.as_str())
+                .json(&request)
+        },
+    )
+    .await?
+    .json::<Option<PermissionDecisionRecord>>()
+    .await
+    .context("decode claimed remote permission decision")
 }
 
 async fn claim_remote_config_change(
     connection: RemoteConnection,
     session_id: &str,
 ) -> Result<Option<ConfigChangeRecord>> {
-    let request = connection
-        .client
-        .post(format!("{}/api/config-changes/claim", connection.base_url))
-        .bearer_auth(connection.token.as_str())
-        .json(&ClaimConfigChangeRequest {
-            session_id: session_id.to_string(),
-        });
-    let response = request
-        .send()
-        .await
-        .context("claim remote config change")?
-        .error_for_status()
-        .context("remote config-change claim returned an error")?;
-    response
-        .json::<Option<ConfigChangeRecord>>()
-        .await
-        .context("decode claimed remote config change")
+    let client = connection.client.clone();
+    let token = Arc::clone(&connection.token);
+    let request = ClaimConfigChangeRequest {
+        session_id: session_id.to_string(),
+    };
+    send_to_live_server(&connection, "claim remote config change", move |base_url| {
+        client
+            .post(format!("{base_url}/api/config-changes/claim"))
+            .bearer_auth(token.as_str())
+            .json(&request)
+    })
+    .await?
+    .json::<Option<ConfigChangeRecord>>()
+    .await
+    .context("decode claimed remote config change")
 }
 
 /// Stable machine-readable id for a permission option kind, used by the
@@ -11123,6 +11184,7 @@ mod tests {
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
         assert!(!saved.agent.discrete_review);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
+        assert!(!saved.agent.review_tier_from_team_default);
         assert_eq!(
             saved.agent.correction_threshold,
             config::ReviewCorrectionThreshold::P1
@@ -11488,10 +11550,17 @@ mod tests {
     }
 
     #[test]
-    fn embedded_viewer_renders_the_review_ledger_and_full_evidence_reader() {
+    fn embedded_viewer_moves_review_findings_to_the_full_evidence_reader() {
         let viewer = include_str!("remote_viewer.html");
-        assert!(viewer.contains("id=\"review-board\""));
+        assert!(viewer.contains("id=\"review-issues-button\""));
         assert!(viewer.contains("id=\"review-issues-modal\""));
+        assert!(
+            viewer.contains("reviewIssuesButtonEl.addEventListener(\"click\", openReviewIssues)")
+        );
+        assert!(
+            !viewer.contains("id=\"review-board\""),
+            "review findings must not reserve transcript space"
+        );
 
         let review_start = viewer
             .find("      const REVIEW_STATUS = {")
@@ -11502,8 +11571,8 @@ mod tests {
         let review_source = &viewer[review_start..review_end];
 
         // Execute the exact browser rendering functions with a deliberately
-        // small DOM shim. This verifies the visible board and the evidence
-        // reader instead of merely checking that their source text exists.
+        // small DOM shim. This verifies the compact launcher and the complete
+        // evidence reader instead of merely checking their source text exists.
         let mut script = String::from(
             r##"
 class FixtureNode {
@@ -11536,7 +11605,7 @@ globalThis.document = {
   createDocumentFragment() { return new FixtureNode("#fragment"); },
 };
 
-const reviewBoardEl = new FixtureNode("section");
+const reviewIssuesButtonEl = new FixtureNode("button");
 const reviewIssuesBodyEl = new FixtureNode("div");
 const reviewIssuesModalEl = new FixtureNode("section");
 reviewIssuesModalEl.hidden = true;
@@ -11545,7 +11614,8 @@ const fixtureSession = {
   review_workflows: [{
     turn_id: 7,
     operation: 1,
-    outcome: "completed",
+    outcome: "degraded",
+    coverage_error: "claude-acp: authentication expired",
     issues: [{
       id: 1,
       pass: 0,
@@ -11572,28 +11642,20 @@ function renderRichText(text) {
         script.push_str(review_source);
         script.push_str(
             r##"
-renderReviewBoard(fixtureSession);
-if (!reviewBoardEl.innerText.includes("Review · completed")) {
-  throw new Error(`review board did not render completed workflow: ${reviewBoardEl.innerText}`);
+renderReviewIssuesButton(fixtureSession);
+if (reviewIssuesButtonEl.hidden || reviewIssuesButtonEl.textContent !== "Reviews · 1 issue") {
+  throw new Error(`review launcher did not summarize the ledger: ${reviewIssuesButtonEl.textContent}`);
 }
-if (!reviewBoardEl.innerText.includes("#1 P1 mj-remote/src/remote.rs")) {
-  throw new Error(`review board did not render finding summary: ${reviewBoardEl.innerText}`);
-}
-if (!reviewBoardEl.innerText.includes("verification pending")) {
-  throw new Error(`review board did not render finding status: ${reviewBoardEl.innerText}`);
-}
-const fullEvidence = reviewBoardEl.children[0].children.find((child) => child.textContent === "Full evidence");
-if (!fullEvidence) {
-  throw new Error("review board did not render full evidence action");
-}
-fullEvidence.click();
+openReviewIssues();
 if (reviewIssuesModalEl.hidden) {
-  throw new Error("full evidence action did not open the evidence reader");
+  throw new Error("review launcher did not open the evidence reader");
 }
 const evidence = reviewIssuesBodyEl.innerText;
 for (const expected of [
   "Finding — validated review evidence",
   "browser must expose this finding",
+  "Verification could not complete",
+  "claude-acp: authentication expired",
   "Correction evidence",
   "diff --git a/mj-remote/src/remote.rs",
 ]) {
@@ -11965,6 +12027,23 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(viewer.contains("/unarchive`"));
         assert!(viewer.contains("Exit it in the terminal before it can be archived."));
         assert!(viewer.contains("pendingSessionActions"));
+    }
+
+    #[test]
+    fn embedded_viewer_archiving_preserves_history_disclosure_state() {
+        let viewer = include_str!("remote_viewer.html");
+        let archive_action_start = viewer
+            .find("      async function runSessionCardAction")
+            .expect("archive action");
+        let archive_action_end = viewer
+            .find("      function updateSessionCard")
+            .expect("archive action boundary");
+        let archive_action = &viewer[archive_action_start..archive_action_end];
+
+        assert!(archive_action.contains("await refreshSessions(false);"));
+        assert!(archive_action.contains("await refreshHistory(true, false);"));
+        assert!(!archive_action.contains("historyVisible = true;"));
+        assert!(!archive_action.contains("historyLoaded = false;"));
     }
 
     #[tokio::test]
@@ -13288,9 +13367,13 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                 reason: Some("updated the transition and added a focused test".to_string()),
                 details: Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string()),
             },
+            WorkflowTransition::CoverageChanged {
+                coverage: WorkflowCoverage::Degraded,
+                error: Some("claude-acp: authentication expired".to_string()),
+            },
             WorkflowTransition::Terminal {
-                outcome: WorkflowOutcome::Completed,
-                coverage: WorkflowCoverage::Complete,
+                outcome: WorkflowOutcome::Degraded,
+                coverage: WorkflowCoverage::Degraded,
             },
         ] {
             state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
@@ -13303,7 +13386,11 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert_eq!(snapshot.review_workflows.len(), 1);
         let workflow = &snapshot.review_workflows[0];
         assert_eq!(workflow.turn_id, 7);
-        assert_eq!(workflow.outcome.as_deref(), Some("completed"));
+        assert_eq!(workflow.outcome.as_deref(), Some("degraded"));
+        assert_eq!(
+            workflow.coverage_error.as_deref(),
+            Some("claude-acp: authentication expired")
+        );
         assert_eq!(workflow.issues.len(), 1);
         assert_eq!(
             workflow.issues[0].summary,
@@ -14091,6 +14178,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                 turn_id: 4,
                 operation: 1,
                 outcome: Some("completed".to_string()),
+                coverage_error: None,
                 issues: vec![ReviewIssueRecord {
                     id: 1,
                     pass: 0,
@@ -14147,6 +14235,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             turn_id: 4,
             operation: 1,
             outcome: Some("completed".to_string()),
+            coverage_error: Some("claude-acp: authentication expired".to_string()),
             issues: vec![ReviewIssueRecord {
                 id: 1,
                 pass: 1,
@@ -14206,6 +14295,10 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         );
         assert_eq!(sessions[0].transcript.len(), 2);
         assert_eq!(sessions[0].review_workflows, updated_review_workflows);
+        assert_eq!(
+            sessions[0].review_workflows[0].coverage_error.as_deref(),
+            Some("claude-acp: authentication expired")
+        );
         assert_ne!(sessions[0].review_workflows, session.review_workflows);
         assert_eq!(sessions[0].transcript[0].kind, "user");
         assert_eq!(sessions[0].transcript[0].text, "hello");
@@ -17856,7 +17949,81 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(build_connection(dir.path()).is_none());
 
         ensure_token(&paths.token_path).expect("token");
+        assert!(build_connection(dir.path()).is_none());
+        register_server_instance(&paths.db_path, "app-a", ServerInstanceKind::App, 11922)
+            .expect("register app");
         assert!(build_connection(dir.path()).is_some());
+    }
+
+    #[tokio::test]
+    async fn tracker_refreshes_live_endpoints_without_rebuilding_shared_credentials() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = ensure_server_paths_in(dir.path(), None).expect("paths");
+        ensure_token(&paths.token_path).expect("token");
+        register_server_instance(&paths.db_path, "app-a", ServerInstanceKind::App, 11922)
+            .expect("register app");
+        let tracker = RemoteSessionTracker {
+            remote_dir: Arc::new(dir.path().to_path_buf()),
+            ..RemoteSessionTracker::new_disconnected("proj".to_string(), "agent".to_string())
+        };
+
+        let first = tracker
+            .reload_connection()
+            .await
+            .expect("initial connection");
+        assert_eq!(first.base_urls.as_ref(), &[local_server_base_url(11922)]);
+
+        register_server_instance(&paths.db_path, "server", ServerInstanceKind::Server, 11921)
+            .expect("register primary");
+        let refreshed = tracker
+            .reload_connection()
+            .await
+            .expect("refreshed connection");
+
+        assert!(Arc::ptr_eq(&first.token, &refreshed.token));
+        assert_eq!(
+            refreshed.base_urls.as_ref(),
+            &[local_server_base_url(11921), local_server_base_url(11922)]
+        );
+    }
+
+    #[test]
+    fn live_server_registry_prefers_primary_then_recent_apps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        init_db(&db_path).expect("init db");
+        let conn = open_db(&db_path).expect("open db");
+        conn.execute(
+            "insert into server_instances (instance_id, kind, port, last_heartbeat)
+             values ('old-app', 'app', 11922, 100),
+                    ('new-app', 'app', 11923, 119),
+                    ('primary', 'server', 9443, 101),
+                    ('expired', 'server', 11921, -1)",
+            [],
+        )
+        .expect("seed server instances");
+
+        let live = load_live_server_instances_at(&db_path, 120).expect("load live instances");
+        assert_eq!(
+            live,
+            vec![
+                LiveServerInstance {
+                    instance_id: "primary".to_string(),
+                    kind: ServerInstanceKind::Server,
+                    port: 9443,
+                },
+                LiveServerInstance {
+                    instance_id: "new-app".to_string(),
+                    kind: ServerInstanceKind::App,
+                    port: 11923,
+                },
+                LiveServerInstance {
+                    instance_id: "old-app".to_string(),
+                    kind: ServerInstanceKind::App,
+                    port: 11922,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -17868,6 +18035,8 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = ensure_server_paths_in(dir.path(), None).expect("paths");
         ensure_token(&paths.token_path).expect("token");
+        register_server_instance(&paths.db_path, "app-a", ServerInstanceKind::App, 11922)
+            .expect("register app");
 
         let connection = build_connection(dir.path()).expect("connection");
         assert!(tracker.set_connection_once(connection.clone()));
@@ -17911,6 +18080,35 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             std::fs::read_to_string(dir.path().join("cert-hostname")).expect("read hostname"),
             "example.com"
         );
+    }
+
+    #[test]
+    fn shared_local_tls_is_complete_private_and_stable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ensure_shared_local_paths_in(dir.path()).expect("create local TLS");
+        assert!(first.local_tls_path.ends_with("local-tls.pem"));
+        load_certified_key(&first.local_tls_path, &first.local_tls_path)
+            .expect("local TLS must include a matching certificate and key");
+        let first_pem = std::fs::read(&first.local_tls_path).expect("read local TLS");
+
+        let second = ensure_shared_local_paths_in(dir.path()).expect("reuse local TLS");
+        assert_eq!(
+            first_pem,
+            std::fs::read(&second.local_tls_path).expect("read reused local TLS"),
+            "the shared local TLS identity must not rotate between app launches"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&first.local_tls_path)
+                    .expect("local TLS metadata")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o600
+            );
+        }
     }
 
     #[test]
@@ -18049,6 +18247,8 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         let resolver = Arc::new(SniCertResolver {
             default_key: load_certified_key(&default_cert_path, &default_key_path)
                 .expect("default key"),
+            local_key: load_certified_key(&default_cert_path, &default_key_path)
+                .expect("local key"),
             tailscale_domain: ts_domain.to_string(),
             tailscale_key: RwLock::new(
                 load_certified_key(&ts_cert_path, &ts_key_path).expect("ts key"),
@@ -18546,229 +18746,19 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
     }
 
     #[test]
-    fn desktop_listener_binds_ephemeral_ipv4_loopback_port() {
-        let (first, first_addr) = bind_desktop_listener().expect("bind first desktop listener");
-        let (_second, second_addr) = bind_desktop_listener().expect("bind second desktop listener");
-        assert!(first_addr.ip().is_loopback());
-        assert!(first_addr.is_ipv4());
-        assert_ne!(first_addr.port(), 0);
-        assert_ne!(first_addr.port(), 11921);
-        assert_ne!(second_addr.port(), 11921);
-        // OS-assigned ports let two desktop instances coexist.
-        assert_ne!(first_addr.port(), second_addr.port());
-        drop(first);
-    }
-
-    #[test]
-    fn desktop_tls_material_is_created_owner_only_and_reused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("desktop-app");
-        let first = ensure_desktop_tls(&root).expect("create desktop TLS material");
-        assert!(!first.certificate_der.is_empty());
-        let second = ensure_desktop_tls(&root).expect("reuse desktop TLS material");
-        assert_eq!(
-            first.certificate_der, second.certificate_der,
-            "existing material must be reused, not regenerated"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let dir_mode = std::fs::metadata(&root)
-                .expect("desktop dir metadata")
-                .permissions()
-                .mode()
-                & 0o7777;
-            assert_eq!(dir_mode, 0o700);
-            let key_mode = std::fs::metadata(root.join("tls.pem"))
-                .expect("desktop key metadata")
-                .permissions()
-                .mode()
-                & 0o7777;
-            assert_eq!(key_mode, 0o600);
-        }
-    }
-
-    #[test]
-    fn desktop_tls_replaces_corrupt_material() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("desktop-app");
-        let first = ensure_desktop_tls(&root).expect("create desktop TLS material");
-        write_desktop_file_atomically(&root.join("tls.pem"), b"not a certificate")
-            .expect("corrupt certificate");
-        let second = ensure_desktop_tls(&root).expect("regenerate desktop TLS material");
-        assert_ne!(first.certificate_der, second.certificate_der);
-        // The regenerated pair must be servable again.
-        assert!(parse_desktop_tls(&second.pem).is_some());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn desktop_tls_fails_closed_on_symlinked_key() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("desktop-app");
-        ensure_desktop_tls(&root).expect("create desktop TLS material");
-        let pem_path = root.join("tls.pem");
-        let moved = dir.path().join("moved-tls.pem");
-        std::fs::rename(&pem_path, &moved).expect("move key aside");
-        std::os::unix::fs::symlink(&moved, &pem_path).expect("symlink key");
-        let error = format!(
-            "{:#}",
-            ensure_desktop_tls(&root).expect_err("symlinked key must fail closed")
-        );
-        assert!(error.contains("symlink"), "unexpected error: {error}");
-        assert!(
-            error.contains("tls.pem"),
-            "error must name the offending file: {error}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn desktop_tls_fails_closed_on_group_accessible_key() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("desktop-app");
-        ensure_desktop_tls(&root).expect("create desktop TLS material");
-        std::fs::set_permissions(root.join("tls.pem"), std::fs::Permissions::from_mode(0o640))
-            .expect("loosen key permissions");
-        let error = format!(
-            "{:#}",
-            ensure_desktop_tls(&root).expect_err("group-readable key must fail closed")
-        );
-        assert!(
-            error.contains("accessible to other users"),
-            "unexpected error: {error}"
-        );
-        assert!(
-            error.contains("chmod 600"),
-            "error must carry the remedy: {error}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn desktop_dir_fails_closed_when_accessible_to_other_users() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("desktop-app");
-        ensure_desktop_tls(&root).expect("create desktop TLS material");
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
-            .expect("loosen dir permissions");
-        let error = format!(
-            "{:#}",
-            ensure_desktop_tls(&root).expect_err("shared dir must fail closed")
-        );
-        assert!(
-            error.contains("accessible to other users"),
-            "unexpected error: {error}"
-        );
-    }
-
-    fn desktop_test_router(auth: &DesktopAuth, dir: &Path) -> Router {
-        let db_path = dir.join("desktop-sessions.sqlite3");
-        init_db(&db_path).expect("init desktop test db");
-        build_router_with_cookie_name(
-            RouterConfig {
-                db_path,
-                token: auth.token.clone(),
-                viewer_code: auth.viewer_code.clone(),
-                cookie_key: auth.cookie_key.clone(),
-                session_ttl: Duration::ZERO,
-                workspace_roots: test_workspace_roots(dir),
-                session_manager: test_session_manager(),
-                mjconfig: test_mjconfig_runtime(),
-            },
-            DESKTOP_SESSION_COOKIE_NAME,
-        )
-    }
-
-    async fn sessions_status(app: Router, cookie: Option<String>) -> StatusCode {
-        let mut builder = axum::http::Request::builder()
-            .method("GET")
-            .uri("/sessions");
-        if let Some(cookie) = cookie {
-            builder = builder.header(axum::http::header::COOKIE, cookie);
-        }
-        app.oneshot(builder.body(axum::body::Body::empty()).expect("request"))
-            .await
-            .expect("sessions response")
-            .status()
-    }
-
-    #[tokio::test]
-    async fn desktop_bootstrap_cookie_authenticates_protected_api() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let auth = DesktopAuth::generate().expect("desktop auth");
-        let app = desktop_test_router(&auth, dir.path());
-        assert_eq!(
-            sessions_status(app.clone(), None).await,
-            StatusCode::UNAUTHORIZED
-        );
-        let cookie = format!("{DESKTOP_SESSION_COOKIE_NAME}={}", auth.bootstrap_cookie);
-        assert_eq!(sessions_status(app, Some(cookie)).await, StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn desktop_and_server_cookies_do_not_cross_authenticate() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let auth = DesktopAuth::generate().expect("desktop auth");
-        let desktop_app = desktop_test_router(&auth, dir.path());
-
-        let server_cookie_key = "server-cookie-key";
-        let server_db = dir.path().join("server-sessions.sqlite3");
-        init_db(&server_db).expect("init server test db");
-        let server_app = build_router(RouterConfig {
-            db_path: server_db,
-            token: "server-token".to_string(),
-            viewer_code: "123456".to_string(),
-            cookie_key: server_cookie_key.to_string(),
-            session_ttl: DEFAULT_SESSION_TTL,
-            workspace_roots: test_workspace_roots(dir.path()),
-            session_manager: test_session_manager(),
-            mjconfig: test_mjconfig_runtime(),
-        });
-        let server_cookie =
-            sign_session_cookie(server_cookie_key, Duration::from_secs(3600), now_unix());
-
-        // A normal-server cookie never authenticates the desktop instance,
-        // under either cookie name.
-        for name in [SESSION_COOKIE_NAME, DESKTOP_SESSION_COOKIE_NAME] {
-            assert_eq!(
-                sessions_status(desktop_app.clone(), Some(format!("{name}={server_cookie}"))).await,
-                StatusCode::UNAUTHORIZED
-            );
-        }
-        // And the desktop bootstrap cookie never authenticates `mj server`.
-        for name in [SESSION_COOKIE_NAME, DESKTOP_SESSION_COOKIE_NAME] {
-            assert_eq!(
-                sessions_status(
-                    server_app.clone(),
-                    Some(format!("{name}={}", auth.bootstrap_cookie))
-                )
-                .await,
-                StatusCode::UNAUTHORIZED
-            );
-        }
-        // Each cookie still works against its own server.
-        assert_eq!(
-            sessions_status(
-                desktop_app,
-                Some(format!(
-                    "{DESKTOP_SESSION_COOKIE_NAME}={}",
-                    auth.bootstrap_cookie
-                ))
-            )
-            .await,
-            StatusCode::OK
-        );
-        assert_eq!(
-            sessions_status(
-                server_app,
-                Some(format!("{SESSION_COOKIE_NAME}={server_cookie}"))
-            )
-            .await,
-            StatusCode::OK
-        );
+    fn desktop_listeners_increment_from_the_app_port() {
+        let (first, first_port) = bind_desktop_listeners().expect("bind first desktop listener");
+        let (_second, second_port) =
+            bind_desktop_listeners().expect("bind second desktop listener");
+        assert!(first.iter().all(|listener| {
+            listener
+                .local_addr()
+                .expect("listener address")
+                .ip()
+                .is_loopback()
+        }));
+        assert!(first_port >= DEFAULT_DESKTOP_APP_PORT);
+        assert!(second_port > first_port);
     }
 
     #[tokio::test]
@@ -18788,10 +18778,16 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         .expect("prepare desktop runtime");
 
         assert_eq!(handle.origin.scheme(), "https");
-        assert_eq!(handle.origin.host_str(), Some("127.0.0.1"));
+        assert_eq!(handle.origin.host_str(), Some("localhost"));
         let port = handle.origin.port().expect("origin carries the bound port");
         assert_ne!(port, 11921);
         assert_eq!(handle.bootstrap_cookie_name, DESKTOP_SESSION_COOKIE_NAME);
+        let instances =
+            load_live_server_instances(&dir.path().join("desktop-app/sessions.sqlite3"))
+                .expect("load desktop server registration");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].kind, ServerInstanceKind::App);
+        assert_eq!(instances[0].port, port);
 
         let server = tokio::spawn(serve);
 
@@ -18840,5 +18836,10 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             .expect("desktop server stops within a bounded timeout")
             .expect("join desktop serve task")
             .expect("desktop serve result");
+        assert!(
+            load_live_server_instances(&dir.path().join("desktop-app/sessions.sqlite3"))
+                .expect("load registrations after shutdown")
+                .is_empty()
+        );
     }
 }

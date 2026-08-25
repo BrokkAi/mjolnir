@@ -5293,27 +5293,31 @@ fn select_option_named(
     }
 }
 
-fn select_role_model(
+/// Resolve a configured model identifier to a value advertised by an ACP
+/// session's model selector. `model_value` supplies an adapter-native alias
+/// when startup already resolved one; interactive settings only have the
+/// configured model id and pass `None`.
+pub fn session_config_model_value(
     option: &SessionConfigOption,
-    role: &RuntimeRoleConfig,
+    adapter_source_id: &str,
+    model_id: &str,
+    model_value: Option<&str>,
 ) -> Option<SessionConfigValueId> {
-    if let Some(value) = select_option_named(option, Some(&role.model_value), &role.model_value) {
+    if let Some(value) = select_option_named(option, model_value, model_id) {
         return Some(value);
     }
 
-    let wanted: HashSet<_> = model_resolve::catalog_keys_ranked(
-        &role.model_id,
-        model_resolve::model_provider(&role.model_id),
-    )
-    .into_iter()
-    .map(|(key, _)| key)
-    .collect();
+    let wanted: HashSet<_> =
+        model_resolve::catalog_keys_ranked(model_id, model_resolve::model_provider(model_id))
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
     let SessionConfigKind::Select(select) = &option.kind else {
         return None;
     };
     let matches = |choice: &SessionConfigSelectOption| {
         model_resolve::agent_keys(
-            &role.adapter_source_id,
+            adapter_source_id,
             &choice.value.to_string(),
             &choice.name,
             choice.description.as_deref().unwrap_or_default(),
@@ -5334,6 +5338,18 @@ fn select_role_model(
             .map(|choice| choice.value.clone()),
         _ => None,
     }
+}
+
+fn select_role_model(
+    option: &SessionConfigOption,
+    role: &RuntimeRoleConfig,
+) -> Option<SessionConfigValueId> {
+    session_config_model_value(
+        option,
+        &role.adapter_source_id,
+        &role.model_id,
+        Some(&role.model_value),
+    )
 }
 
 /// Wire id for the ACP reasoning-effort config option, alongside its
