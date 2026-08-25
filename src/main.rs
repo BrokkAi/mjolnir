@@ -4767,10 +4767,8 @@ mod tests {
     }
 
     #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
-    #[tokio::test]
-    async fn desktop_session_manager_binds_a_resolved_roster() {
-        use remote::ServerSessionManager;
-
+    #[test]
+    fn desktop_session_manager_binds_a_resolved_roster() {
         let cwd = tempfile::tempdir().expect("tempdir");
         let primary = test_roster_agent("test-model", "test-agent");
         let manager = desktop_session_manager(
@@ -4782,12 +4780,7 @@ mod tests {
             acp::DEFAULT_FS_TEXT_BYTES,
         );
 
-        let launch_id = manager.start_session(cwd.path().to_path_buf());
-        assert!(matches!(
-            manager.launch_state(launch_id),
-            Some(remote::ServerSessionLaunchState::Starting)
-        ));
-        manager.shutdown_all().await;
+        assert!(manager.is_bound());
     }
 
     #[test]

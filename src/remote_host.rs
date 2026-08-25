@@ -230,6 +230,13 @@ impl RootServerSessionManager {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_bound(&self) -> bool {
+        self.launch
+            .read()
+            .is_ok_and(|launch| launch.binding.is_bound())
+    }
+
     fn with_binding(
         binding: ServerSessionBinding,
         config_hash: Option<u64>,
