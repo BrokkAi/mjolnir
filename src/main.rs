@@ -1007,25 +1007,14 @@ async fn run_desktop_app(
             None => return Err(error),
         },
     };
-    let config_hash = remote_host::config_file_hash(&config_path);
-    let session_manager: Arc<remote_host::RootServerSessionManager> = Arc::new(match &resolved {
-        Ok(roster) => remote_host::RootServerSessionManager::new_roster(
-            roster.clone(),
-            config_hash,
-            cwd.clone(),
-            workspace_roots.additional_directories().to_vec(),
-            snapshot_exclusions.clone(),
-            fs_max_text_bytes,
-        ),
-        Err(remote::SetupPending(reason)) => remote_host::RootServerSessionManager::new_unresolved(
-            reason.clone(),
-            config_hash,
-            cwd.clone(),
-            workspace_roots.additional_directories().to_vec(),
-            snapshot_exclusions.clone(),
-            fs_max_text_bytes,
-        ),
-    });
+    let session_manager = desktop_session_manager(
+        &resolved,
+        remote_host::config_file_hash(&config_path),
+        &cwd,
+        workspace_roots.additional_directories(),
+        &snapshot_exclusions,
+        fs_max_text_bytes,
+    );
 
     let server_stop = termination.child_token();
     let (handle, serve) = remote::prepare_desktop_server(remote::DesktopServerOptions {
@@ -1098,6 +1087,35 @@ async fn run_desktop_app(
         (Err(shell_error), _) => Err(shell_error),
         (Ok(_), Err(serve_error)) => Err(serve_error),
     }
+}
+
+#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+fn desktop_session_manager(
+    resolved: &std::result::Result<roster::Roster, remote::SetupPending>,
+    config_hash: Option<u64>,
+    cwd: &Path,
+    additional_directories: &[PathBuf],
+    snapshot_exclusions: &[PathBuf],
+    fs_max_text_bytes: u64,
+) -> Arc<remote_host::RootServerSessionManager> {
+    Arc::new(match resolved {
+        Ok(roster) => remote_host::RootServerSessionManager::new_roster(
+            roster.clone(),
+            config_hash,
+            cwd.to_path_buf(),
+            additional_directories.to_vec(),
+            snapshot_exclusions.to_vec(),
+            fs_max_text_bytes,
+        ),
+        Err(remote::SetupPending(reason)) => remote_host::RootServerSessionManager::new_unresolved(
+            reason.clone(),
+            config_hash,
+            cwd.to_path_buf(),
+            additional_directories.to_vec(),
+            snapshot_exclusions.to_vec(),
+            fs_max_text_bytes,
+        ),
+    })
 }
 
 /// Handle the `mj resume` subcommand: pick the agent to resume from, list
@@ -4701,6 +4719,46 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Commands::App(AppArgs { history_days: 0 }))
+        ));
+    }
+
+    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    #[tokio::test]
+    async fn app_rejects_invalid_workspace_before_starting_a_desktop_shell() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let result = run_desktop_app(
+            AppArgs { history_days: 30 },
+            cwd.path().to_path_buf(),
+            vec![PathBuf::from("relative")],
+            Vec::new(),
+            acp::DEFAULT_FS_TEXT_BYTES,
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err(), "relative workspace roots must be rejected");
+    }
+
+    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    #[test]
+    fn desktop_session_manager_keeps_setup_pending_reason() {
+        use remote::ServerSessionManager;
+
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let manager = desktop_session_manager(
+            &Err(remote::SetupPending("no model is launchable".to_string())),
+            None,
+            cwd.path(),
+            &[],
+            &[],
+            acp::DEFAULT_FS_TEXT_BYTES,
+        );
+
+        assert_eq!(manager.resolve_cwd().as_deref(), Some(cwd.path()));
+        let launch_id = manager.start_session(cwd.path().to_path_buf());
+        assert!(matches!(
+            manager.launch_state(launch_id),
+            Some(remote::ServerSessionLaunchState::Failed { error }) if error == "no model is launchable"
         ));
     }
 
