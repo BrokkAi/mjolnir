@@ -156,6 +156,8 @@ pub struct WorkflowStreamRecord {
     remaining: Option<usize>,
     requires_user_action: bool,
     coverage: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    coverage_diagnostics: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -702,6 +704,7 @@ fn workflow_stream_record(
         remaining,
         requires_user_action,
         coverage: state.coverage.as_str(),
+        coverage_diagnostics: state.coverage_diagnostics(),
         outcome: state.outcome.map(|outcome| outcome.as_str()),
         actor_id,
         actor_role,
@@ -1261,8 +1264,8 @@ mod tests {
     #[test]
     fn workflow_stream_records_preserve_wait_resume_and_failure_facts() {
         use crate::workflow::{
-            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
-            WorkflowPhase, WorkflowStage, WorkflowStore, WorkflowTransition,
+            WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEvent, WorkflowId,
+            WorkflowKind, WorkflowPhase, WorkflowStage, WorkflowStore, WorkflowTransition,
         };
 
         let workflow_id = WorkflowId::review(9);
@@ -1362,6 +1365,27 @@ mod tests {
         assert_eq!(failed_record["actor_lifecycle"], "failed");
         assert_eq!(failed_record["actor_error"], "adapter exited");
         assert_eq!(failed_record["failed"], 1);
+
+        let coverage_changed = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::CoverageChanged {
+                coverage: WorkflowCoverage::Degraded,
+                reason: Some("reviewer quorum was not reached".to_string()),
+            },
+        );
+        workflows
+            .apply(&coverage_changed)
+            .expect("record degraded coverage");
+        let coverage_record = record_json(
+            &workflow_stream_record(&coverage_changed, &workflows).expect("workflow state exists"),
+        );
+        assert_eq!(
+            coverage_record["coverage_diagnostics"],
+            serde_json::json!([
+                "reviewer quorum was not reached",
+                "review supervisor (subagent 4) failed: adapter exited",
+            ])
+        );
     }
 
     #[test]
@@ -1876,6 +1900,7 @@ mod tests {
             (
                 WorkflowTransition::CoverageChanged {
                     coverage: WorkflowCoverage::Complete,
+                    reason: None,
                 },
                 "coverage_changed",
             ),

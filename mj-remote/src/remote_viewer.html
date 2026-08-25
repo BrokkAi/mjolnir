@@ -7440,7 +7440,7 @@
         "corrected; verification pending": {
           glyph: "◐",
           label: "verification pending",
-          explanation: "The workspace changed and correction evidence is recorded below. No later review has returned clean, so this is not presented as fixed.",
+          explanation: "The workspace changed and correction evidence is recorded below. No later review has returned clean with complete coverage, so this is not presented as fixed.",
         },
         "verified fixed": {
           glyph: "✔",
@@ -7679,6 +7679,20 @@
             appendReviewDetail(card, "Finding — validated review evidence", issue.summary || "Review finding");
             appendReviewDetail(card, "Status", status.explanation);
             appendReviewDetail(card, "Recorded outcome", issue.resolution_reason);
+            if (
+              issue.status === "corrected; verification pending"
+              && Array.isArray(workflow.coverage_diagnostics)
+              && workflow.coverage_diagnostics.length
+            ) {
+              appendReviewDetail(
+                card,
+                "Verification coverage",
+                [
+                  "This correction remains unverified because:",
+                  ...workflow.coverage_diagnostics,
+                ].join("\n"),
+              );
+            }
             appendReviewDetail(card, "Correction evidence", issue.resolution_details, "mono");
             group.appendChild(card);
           }

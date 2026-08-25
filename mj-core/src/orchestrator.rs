@@ -972,6 +972,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                         workflow_id,
                                         WorkflowTransition::CoverageChanged {
                                             coverage: WorkflowCoverage::Degraded,
+                                            reason: Some(format!(
+                                                "The manual review supervisor did not return a verdict: {reason}"
+                                            )),
                                         },
                                     ),
                                 );
@@ -1343,6 +1346,9 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                                     workflow_id,
                                     WorkflowTransition::CoverageChanged {
                                         coverage: WorkflowCoverage::Degraded,
+                                        reason: Some(format!(
+                                            "The verification review did not return a verdict: {reason}"
+                                        )),
                                     },
                                 ),
                             );
@@ -1958,6 +1964,10 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         workflow_id,
                         WorkflowTransition::CoverageChanged {
                             coverage: WorkflowCoverage::Degraded,
+                            reason: Some(
+                                "No specialist review fan-out is configured; the primary fallback reviewer ran, so no independent verification pass was available."
+                                    .to_string(),
+                            ),
                         },
                     ),
                 );

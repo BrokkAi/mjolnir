@@ -337,6 +337,10 @@ pub struct WorkflowState {
     pub actors: BTreeMap<WorkflowActorId, WorkflowActorState>,
     pub waiting: Option<WorkflowWait>,
     pub coverage: WorkflowCoverage,
+    /// Why this workflow cannot claim complete reviewer coverage. The actor
+    /// lifecycle records failures too, but a deliberate fallback has no
+    /// failed actor, so it needs an explicit durable explanation.
+    pub coverage_reason: Option<String>,
     pub outcome: Option<WorkflowOutcome>,
     pub issues: Vec<ReviewIssue>,
 }
@@ -386,6 +390,36 @@ impl WorkflowState {
             .values()
             .filter(|actor| matches!(actor.lifecycle, WorkflowActorLifecycle::Cancelled))
             .count()
+    }
+
+    /// Human-readable causes for incomplete review verification. This is kept
+    /// on the workflow rather than inferred by each UI so terminal, web, and
+    /// stream consumers name the same missing reviewer coverage.
+    pub fn coverage_diagnostics(&self) -> Vec<String> {
+        if self.coverage != WorkflowCoverage::Degraded {
+            return Vec::new();
+        }
+
+        let mut diagnostics = self.coverage_reason.iter().cloned().collect::<Vec<_>>();
+        diagnostics.extend(self.actors.iter().filter_map(|(actor_id, actor)| {
+            let label = coverage_actor_label(actor_id, &actor.role);
+            match &actor.lifecycle {
+                WorkflowActorLifecycle::Failed(message) => {
+                    Some(format!("{label} failed: {message}"))
+                }
+                WorkflowActorLifecycle::Cancelled => Some(format!("{label} was cancelled")),
+                WorkflowActorLifecycle::Running
+                | WorkflowActorLifecycle::Waiting { .. }
+                | WorkflowActorLifecycle::Completed => None,
+            }
+        }));
+        if diagnostics.is_empty() {
+            diagnostics.push(
+                "Review coverage was marked degraded without a recorded reviewer failure."
+                    .to_string(),
+            );
+        }
+        diagnostics
     }
 
     fn unfinished_count(&self) -> usize {
@@ -493,6 +527,19 @@ impl WorkflowState {
     }
 }
 
+fn coverage_actor_label(actor_id: &WorkflowActorId, role: &WorkflowActorRole) -> String {
+    let id = match actor_id {
+        WorkflowActorId::Subagent(id) => format!("subagent {id}"),
+        WorkflowActorId::Named(id) => id.clone(),
+    };
+    match role {
+        WorkflowActorRole::SpecialistReviewer { lane } => {
+            format!("reviewer lane {lane} ({id})")
+        }
+        _ => format!("{} ({id})", role.display_label()),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowEvent {
     pub workflow_id: WorkflowId,
@@ -545,6 +592,9 @@ pub enum WorkflowTransition {
     },
     CoverageChanged {
         coverage: WorkflowCoverage,
+        /// Explicit cause for degraded coverage when no actor itself failed,
+        /// such as switching to the single-agent fallback review.
+        reason: Option<String>,
     },
     IssuesValidated {
         pass: u32,
@@ -647,6 +697,7 @@ impl WorkflowStore {
                     actors: BTreeMap::new(),
                     waiting: None,
                     coverage: WorkflowCoverage::Unknown,
+                    coverage_reason: None,
                     outcome: None,
                     issues: Vec::new(),
                 },
@@ -833,8 +884,8 @@ impl WorkflowStore {
                 }
                 state.waiting = Some(waiting);
             }
-            WorkflowTransition::CoverageChanged { coverage } => {
-                if state.coverage == *coverage {
+            WorkflowTransition::CoverageChanged { coverage, reason } => {
+                if state.coverage == *coverage && state.coverage_reason == *reason {
                     return Ok(ApplyOutcome::Duplicate);
                 }
                 if state.coverage == WorkflowCoverage::Degraded
@@ -846,6 +897,11 @@ impl WorkflowStore {
                     ));
                 }
                 state.coverage = *coverage;
+                state.coverage_reason = if *coverage == WorkflowCoverage::Degraded {
+                    reason.clone()
+                } else {
+                    None
+                };
             }
             WorkflowTransition::IssuesValidated { pass, summaries } => {
                 if summaries.is_empty() {
@@ -1467,6 +1523,7 @@ mod tests {
                 review(),
                 WorkflowTransition::CoverageChanged {
                     coverage: WorkflowCoverage::Degraded,
+                    reason: None,
                 },
             ))
             .unwrap();
@@ -1487,6 +1544,66 @@ mod tests {
             WorkflowCoverage::Degraded
         );
         assert_eq!(store.get(review()).unwrap().outcome, None);
+    }
+
+    #[test]
+    fn degraded_coverage_names_the_fallback_and_each_missing_reviewer() {
+        let mut store = WorkflowStore::default();
+        store.apply(&started()).expect("start review");
+        for (actor_id, lane, outcome) in [
+            (
+                WorkflowActorId::Subagent(13),
+                "security",
+                SubagentOutcome::Failed("agent process exited".to_string()),
+            ),
+            (
+                WorkflowActorId::Subagent(14),
+                "performance",
+                SubagentOutcome::Cancelled,
+            ),
+        ] {
+            store
+                .apply(&WorkflowEvent::new(
+                    review(),
+                    WorkflowTransition::ActorStarted {
+                        actor_id: actor_id.clone(),
+                        role: WorkflowActorRole::SpecialistReviewer {
+                            lane: lane.to_string(),
+                        },
+                    },
+                ))
+                .expect("start reviewer");
+            store
+                .apply(&WorkflowEvent::new(
+                    review(),
+                    WorkflowTransition::ActorFinished { actor_id, outcome },
+                ))
+                .expect("finish reviewer");
+        }
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::CoverageChanged {
+                    coverage: WorkflowCoverage::Degraded,
+                    reason: Some(
+                        "No specialist review fan-out is configured; the primary fallback reviewer ran."
+                            .to_string(),
+                    ),
+                },
+            ))
+            .expect("record degraded coverage");
+
+        assert_eq!(
+            store
+                .get(review())
+                .expect("review state")
+                .coverage_diagnostics(),
+            [
+                "No specialist review fan-out is configured; the primary fallback reviewer ran.",
+                "reviewer lane security (subagent 13) failed: agent process exited",
+                "reviewer lane performance (subagent 14) was cancelled",
+            ]
+        );
     }
 
     #[test]

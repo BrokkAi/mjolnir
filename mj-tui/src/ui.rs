@@ -7832,15 +7832,9 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
     let mut issues = state
         .workflows
         .iter()
-        .flat_map(|workflow| {
-            workflow
-                .issues
-                .iter()
-                .map(move |issue| (workflow.id, issue))
-        })
+        .flat_map(|workflow| workflow.issues.iter().map(move |issue| (workflow, issue)))
         .collect::<Vec<_>>();
-    issues
-        .sort_by_key(|(workflow_id, issue)| (workflow_id.turn_id, workflow_id.operation, issue.id));
+    issues.sort_by_key(|(workflow, issue)| (workflow.id.turn_id, workflow.id.operation, issue.id));
     let all = issues
         .iter()
         .map(|(_, issue)| (*issue).clone())
@@ -7876,17 +7870,17 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         )));
     } else {
         let mut last_group = None;
-        for (workflow_id, issue) in issues {
+        for (workflow, issue) in issues {
             // A pass header per (workflow, pass) keeps multi-turn sessions
             // legible without re-reading ids.
-            let group = (workflow_id.turn_id, workflow_id.operation, issue.pass);
+            let group = (workflow.id.turn_id, workflow.id.operation, issue.pass);
             if last_group != Some(group) {
                 last_group = Some(group);
                 lines.push(Line::from(Span::styled(
                     format!(
                         " {} turn {} · review pass {}",
                         crate::app::REVIEW_GLYPH,
-                        workflow_id.turn_id,
+                        workflow.id.turn_id,
                         issue.pass + 1
                     ),
                     Style::default()
@@ -7894,7 +7888,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
                         .add_modifier(Modifier::BOLD),
                 )));
             }
-            lines.extend(review_issue_detail_lines(issue, theme));
+            lines.extend(review_issue_detail_lines(workflow, issue, theme));
         }
     }
     let total = Paragraph::new(lines.clone())
@@ -7924,6 +7918,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
 /// report, the captured correction diff, and whether a later review verified
 /// that correction.
 fn review_issue_detail_lines(
+    workflow: &crate::workflow::WorkflowState,
     issue: &crate::workflow::ReviewIssue,
     theme: TerminalTheme,
 ) -> Vec<Line<'static>> {
@@ -7938,7 +7933,7 @@ fn review_issue_detail_lines(
         ReviewIssueStatus::Corrected => (
             "corrected — verification pending",
             theme.accent,
-            "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean, so this is not presented as fixed.",
+            "The primary changed the workspace and the correction evidence is below. No later verification review has returned clean with complete coverage, so this is not presented as fixed.",
         ),
         ReviewIssueStatus::Fixed => (
             "fixed — independently verified",
@@ -8000,6 +7995,29 @@ fn review_issue_detail_lines(
                 Style::default().ink(theme.text),
             ))
         }));
+    }
+    if issue.status == ReviewIssueStatus::Corrected {
+        let diagnostics = workflow.coverage_diagnostics();
+        if !diagnostics.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " Verification coverage",
+                Style::default()
+                    .ink(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "   This correction remains unverified because:",
+                Style::default().ink(theme.text),
+            )));
+            lines.extend(diagnostics.iter().flat_map(|diagnostic| {
+                diagnostic.lines().map(|line| {
+                    Line::from(Span::styled(
+                        format!("   {line}"),
+                        Style::default().ink(theme.text),
+                    ))
+                })
+            }));
+        }
     }
     if let Some(details) = issue.resolution_details.as_deref() {
         lines.push(Line::from(Span::styled(
@@ -15303,6 +15321,17 @@ mod tests {
                 ),
             },
         );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::CoverageChanged {
+                coverage: WorkflowCoverage::Degraded,
+                reason: Some(
+                    "No specialist review fan-out is configured; the primary fallback reviewer ran, so no independent verification pass was available."
+                        .to_string(),
+                ),
+            },
+        );
         state.open_review_issue_viewer();
 
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
@@ -15318,6 +15347,11 @@ mod tests {
         );
         assert!(
             rendered.contains("cleared the session cache on logout"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Verification coverage"), "{rendered}");
+        assert!(
+            rendered.contains("No specialist review fan-out is configured"),
             "{rendered}"
         );
         assert!(rendered.contains("+cache.clear();"), "{rendered}");
@@ -17090,6 +17124,7 @@ mod tests {
             workflow_id,
             WorkflowTransition::CoverageChanged {
                 coverage: WorkflowCoverage::Degraded,
+                reason: None,
             },
         );
 

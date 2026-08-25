@@ -266,6 +266,12 @@ pub struct ReviewWorkflowRecord {
     pub operation: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<String>,
+    /// Concrete reviewer failures, cancellations, or fallback explanations
+    /// that prevented this workflow from independently verifying corrections.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_diagnostics: Vec<String>,
     #[serde(default)]
     pub issues: Vec<ReviewIssueRecord>,
 }
@@ -2794,6 +2800,9 @@ impl TrackerState {
                 turn_id: workflow.id.turn_id,
                 operation: workflow.id.operation,
                 outcome: workflow.outcome.map(|outcome| outcome.as_str().to_string()),
+                coverage: (workflow.coverage == mj_core::workflow::WorkflowCoverage::Degraded)
+                    .then(|| workflow.coverage.as_str().to_string()),
+                coverage_diagnostics: workflow.coverage_diagnostics(),
                 issues: workflow
                     .issues
                     .iter()
@@ -11545,7 +11554,11 @@ const fixtureSession = {
   review_workflows: [{
     turn_id: 7,
     operation: 1,
-    outcome: "completed",
+    outcome: "degraded",
+    coverage: "degraded",
+    coverage_diagnostics: [
+      "No specialist review fan-out is configured; the primary fallback reviewer ran, so no independent verification pass was available.",
+    ],
     issues: [{
       id: 1,
       pass: 0,
@@ -11573,8 +11586,8 @@ function renderRichText(text) {
         script.push_str(
             r##"
 renderReviewBoard(fixtureSession);
-if (!reviewBoardEl.innerText.includes("Review · completed")) {
-  throw new Error(`review board did not render completed workflow: ${reviewBoardEl.innerText}`);
+if (!reviewBoardEl.innerText.includes("Review · degraded")) {
+  throw new Error(`review board did not render degraded workflow: ${reviewBoardEl.innerText}`);
 }
 if (!reviewBoardEl.innerText.includes("#1 P1 mj-remote/src/remote.rs")) {
   throw new Error(`review board did not render finding summary: ${reviewBoardEl.innerText}`);
@@ -11594,6 +11607,8 @@ const evidence = reviewIssuesBodyEl.innerText;
 for (const expected of [
   "Finding — validated review evidence",
   "browser must expose this finding",
+  "Verification coverage",
+  "No specialist review fan-out is configured",
   "Correction evidence",
   "diff --git a/mj-remote/src/remote.rs",
 ]) {
@@ -13288,9 +13303,16 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                 reason: Some("updated the transition and added a focused test".to_string()),
                 details: Some("cargo test -p mj-core\n\ndiff --git a/src/lib.rs".to_string()),
             },
+            WorkflowTransition::CoverageChanged {
+                coverage: WorkflowCoverage::Degraded,
+                reason: Some(
+                    "No specialist review fan-out is configured; the primary fallback reviewer ran, so no independent verification pass was available."
+                        .to_string(),
+                ),
+            },
             WorkflowTransition::Terminal {
-                outcome: WorkflowOutcome::Completed,
-                coverage: WorkflowCoverage::Complete,
+                outcome: WorkflowOutcome::Degraded,
+                coverage: WorkflowCoverage::Degraded,
             },
         ] {
             state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
@@ -13303,7 +13325,14 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert_eq!(snapshot.review_workflows.len(), 1);
         let workflow = &snapshot.review_workflows[0];
         assert_eq!(workflow.turn_id, 7);
-        assert_eq!(workflow.outcome.as_deref(), Some("completed"));
+        assert_eq!(workflow.outcome.as_deref(), Some("degraded"));
+        assert_eq!(workflow.coverage.as_deref(), Some("degraded"));
+        assert_eq!(
+            workflow.coverage_diagnostics,
+            [
+                "No specialist review fan-out is configured; the primary fallback reviewer ran, so no independent verification pass was available."
+            ]
+        );
         assert_eq!(workflow.issues.len(), 1);
         assert_eq!(
             workflow.issues[0].summary,
@@ -14091,6 +14120,8 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                 turn_id: 4,
                 operation: 1,
                 outcome: Some("completed".to_string()),
+                coverage: None,
+                coverage_diagnostics: Vec::new(),
                 issues: vec![ReviewIssueRecord {
                     id: 1,
                     pass: 0,
@@ -14147,6 +14178,8 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             turn_id: 4,
             operation: 1,
             outcome: Some("completed".to_string()),
+            coverage: None,
+            coverage_diagnostics: Vec::new(),
             issues: vec![ReviewIssueRecord {
                 id: 1,
                 pass: 1,
