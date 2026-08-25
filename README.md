@@ -207,7 +207,7 @@ Source builds need an Apple Development signing identity; ad-hoc signing makes
 macOS treat every rebuild as a new app and drops its privacy grants. In Xcode,
 open **Settings → Accounts**, select your Apple Developer team, choose
 **Manage Certificates**, and add **Apple Development**. Confirm the identity
-and export it for the shell that runs Mjolnir:
+and export it before the initial source build or Cargo install:
 
 ```bash
 security find-identity -v -p codesigning
@@ -222,13 +222,17 @@ cargo run
 ```
 
 The script signs the bundle with that identity, so grants persist after source
-rebuilds. A source `cargo install` needs the same exported identity; on first
-enable, Mjolnir creates or refreshes the sibling app bundle with it:
+rebuilds. A source `cargo install` needs the same exported identity once; on
+first enable, Mjolnir creates the sibling app bundle with it:
 
 ```bash
 cargo install --path . --locked
 mj
 ```
+
+Later `mj` launches reuse the unchanged signed bundle without the environment
+variable. After a future Cargo reinstall changes the host, Mjolnir reuses the
+existing Apple Development identity to refresh the bundle.
 
 After enabling **Mjolnir Computer** in System Settings, return to the Computer
 tab and press `r` once to restart the host and recheck permissions. Pass

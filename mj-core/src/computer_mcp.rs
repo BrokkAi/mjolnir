@@ -9,6 +9,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     future::Future,
+    io::Read as _,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Command,
@@ -34,6 +35,7 @@ use rmcp::{
     service::{NotificationContext, Peer, RequestContext},
     tool, tool_router,
 };
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -1158,7 +1160,7 @@ fn computer_bundle_path() -> Result<PathBuf> {
         .canonicalize()
         .with_context(|| format!("resolve mj executable {}", executable.display()))?;
     let bundle = computer_bundle_path_for_executable(&executable)?;
-    materialize_cargo_install_bundle(&executable, &bundle, sign_development_bundle)?;
+    materialize_cargo_install_bundle(&executable, &bundle)?;
     Ok(bundle)
 }
 
@@ -1173,16 +1175,16 @@ fn computer_bundle_path_for_executable(executable: &Path) -> Result<PathBuf> {
 /// bundle. Source builds require an Apple Development signing identity so
 /// macOS can retain TCC grants across rebuilds. A preexisting Developer
 /// ID-signed release bundle remains untouched.
-fn materialize_cargo_install_bundle(
-    executable: &Path,
-    bundle: &Path,
-    sign_bundle: impl FnOnce(&Path) -> Result<()>,
-) -> Result<()> {
+fn materialize_cargo_install_bundle(executable: &Path, bundle: &Path) -> Result<()> {
+    let host = executable
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("mj executable has no parent: {}", executable.display()))?
+        .join(COMPUTER_HOST_NAME);
     materialize_cargo_install_bundle_with_policy(
         executable,
         bundle,
-        cargo_install_bundle_needs_refresh,
-        sign_bundle,
+        |existing| cargo_install_bundle_needs_refresh(existing, &host),
+        sign_development_bundle,
     )
 }
 
@@ -1190,7 +1192,7 @@ fn materialize_cargo_install_bundle_with_policy(
     executable: &Path,
     bundle: &Path,
     should_refresh_existing: impl FnOnce(&Path) -> Result<bool>,
-    sign_bundle: impl FnOnce(&Path) -> Result<()>,
+    sign_bundle: impl FnOnce(&Path, Option<&Path>) -> Result<()>,
 ) -> Result<()> {
     let replace_existing = if bundle.is_dir() {
         if !should_refresh_existing(bundle)? {
@@ -1266,13 +1268,17 @@ fn materialize_cargo_install_bundle_with_policy(
             staged_host.display()
         )
     })?;
-    fs::write(resources.join(CARGO_INSTALL_BUNDLE_MARKER), []).with_context(|| {
+    fs::write(
+        resources.join(CARGO_INSTALL_BUNDLE_MARKER),
+        cargo_install_host_fingerprint(&host)?,
+    )
+    .with_context(|| {
         format!(
             "mark cargo-installed Mjolnir Computer.app at {}",
             staged_bundle.display()
         )
     })?;
-    sign_bundle(&staged_bundle)?;
+    sign_bundle(&staged_bundle, replace_existing.then_some(bundle))?;
     if replace_existing {
         let backup = staging.path().join("previous-Mjolnir Computer.app");
         fs::rename(bundle, &backup).with_context(|| {
@@ -1304,13 +1310,19 @@ fn materialize_cargo_install_bundle_with_policy(
     Ok(())
 }
 
-fn cargo_install_bundle_needs_refresh(bundle: &Path) -> Result<bool> {
+fn cargo_install_bundle_needs_refresh(bundle: &Path, installed_host: &Path) -> Result<bool> {
     if bundle
         .join("Contents/Resources")
         .join(CARGO_INSTALL_BUNDLE_MARKER)
         .is_file()
     {
-        return Ok(true);
+        let marker = bundle
+            .join("Contents/Resources")
+            .join(CARGO_INSTALL_BUNDLE_MARKER);
+        let installed_fingerprint = cargo_install_host_fingerprint(installed_host)?;
+        let bundle_fingerprint = fs::read_to_string(&marker)
+            .with_context(|| format!("read cargo-install marker at {}", marker.display()))?;
+        return Ok(bundle_fingerprint.trim() != installed_fingerprint);
     }
 
     // Bundles created before the marker was introduced were ad-hoc signed.
@@ -1332,15 +1344,72 @@ fn is_ad_hoc_signature(details: &str) -> bool {
     details.contains("Signature=adhoc")
 }
 
-fn sign_development_bundle(bundle: &Path) -> Result<()> {
-    let identity = development_signing_identity(std::env::var_os(COMPUTER_SIGNING_IDENTITY_ENV))?;
+fn cargo_install_host_fingerprint(host: &Path) -> Result<String> {
+    let mut file = fs::File::open(host)
+        .with_context(|| format!("read installed Mjolnir Computer host at {}", host.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).with_context(|| {
+            format!("read installed Mjolnir Computer host at {}", host.display())
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn sign_development_bundle(bundle: &Path, existing_bundle: Option<&Path>) -> Result<()> {
+    let existing_identity = match existing_bundle {
+        Some(existing_bundle) => apple_development_identity_from_bundle(existing_bundle)?,
+        None => None,
+    };
+    let identity = development_signing_identity(
+        std::env::var_os(COMPUTER_SIGNING_IDENTITY_ENV),
+        existing_identity,
+    )?;
     let host = bundle.join("Contents/MacOS").join(COMPUTER_HOST_NAME);
     sign_code_path(&host, &identity)?;
     sign_code_path(bundle, &identity)
 }
 
-fn development_signing_identity(identity: Option<OsString>) -> Result<OsString> {
-    identity.filter(|identity| !identity.is_empty()).ok_or_else(|| {
+fn apple_development_identity_from_bundle(bundle: &Path) -> Result<Option<OsString>> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["-d", "--verbose=4"])
+        .arg(bundle)
+        .output()
+        .with_context(|| {
+            format!(
+                "inspect Mjolnir Computer.app signing identity at {}",
+                bundle.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(apple_development_identity(&String::from_utf8_lossy(
+        &output.stderr,
+    )))
+}
+
+fn apple_development_identity(signature_details: &str) -> Option<OsString> {
+    signature_details
+        .lines()
+        .filter_map(|line| line.strip_prefix("Authority="))
+        .find(|authority| authority.starts_with("Apple Development:"))
+        .map(OsString::from)
+}
+
+fn development_signing_identity(
+    configured_identity: Option<OsString>,
+    existing_identity: Option<OsString>,
+) -> Result<OsString> {
+    configured_identity
+        .filter(|identity| !identity.is_empty())
+        .or(existing_identity)
+        .ok_or_else(|| {
         anyhow::anyhow!(
             "Computer Control from a source or cargo install needs an Apple Development signing identity. \
              In Xcode, open Settings > Accounts > select your team > Manage Certificates > + > Apple Development. \
@@ -1989,7 +2058,7 @@ mod tests {
             &executable,
             &bundle,
             |_| Ok(true),
-            |staged| {
+            |staged, _| {
                 assert!(staged.join("Contents/Info.plist").is_file());
                 assert!(staged.join("Contents/MacOS/mj-computer-host").is_file());
                 Ok(())
@@ -2010,7 +2079,32 @@ mod tests {
                 .join(CARGO_INSTALL_BUNDLE_MARKER)
                 .is_file()
         );
-        assert!(cargo_install_bundle_needs_refresh(&bundle).unwrap());
+        assert_eq!(
+            fs::read_to_string(
+                bundle
+                    .join("Contents/Resources")
+                    .join(CARGO_INSTALL_BUNDLE_MARKER),
+            )
+            .unwrap(),
+            cargo_install_host_fingerprint(&host).unwrap()
+        );
+        assert!(!cargo_install_bundle_needs_refresh(&bundle, &host).unwrap());
+        materialize_cargo_install_bundle_with_policy(
+            &executable,
+            &bundle,
+            |existing| cargo_install_bundle_needs_refresh(existing, &host),
+            |_, _| panic!("an unchanged cargo-installed host must not be re-signed"),
+        )
+        .unwrap();
+
+        fs::write(
+            bundle
+                .join("Contents/Resources")
+                .join(CARGO_INSTALL_BUNDLE_MARKER),
+            [],
+        )
+        .unwrap();
+        assert!(cargo_install_bundle_needs_refresh(&bundle, &host).unwrap());
     }
 
     #[test]
@@ -2024,10 +2118,9 @@ mod tests {
             &executable,
             &bundle,
             |_| Ok(false),
-            |_| panic!("existing release bundle must not be replaced"),
+            |_, _| panic!("existing release bundle must not be replaced"),
         )
         .unwrap();
-        assert!(!cargo_install_bundle_needs_refresh(&bundle).unwrap());
     }
 
     #[test]
@@ -2043,7 +2136,7 @@ mod tests {
             &executable,
             &bundle,
             |_| Ok(true),
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
         .unwrap();
         fs::write(&host, b"updated host").unwrap();
@@ -2058,9 +2151,9 @@ mod tests {
                         .join(CARGO_INSTALL_BUNDLE_MARKER)
                         .is_file()
                 );
-                Ok(true)
+                cargo_install_bundle_needs_refresh(existing, &host)
             },
-            |staged| {
+            |staged, _| {
                 assert_eq!(
                     fs::read(staged.join("Contents/MacOS/mj-computer-host")).unwrap(),
                     b"updated host"
@@ -2078,13 +2171,45 @@ mod tests {
 
     #[test]
     fn cargo_install_requires_an_explicit_signing_identity() {
-        let error = development_signing_identity(None).unwrap_err().to_string();
+        let error = development_signing_identity(None, None)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(COMPUTER_SIGNING_IDENTITY_ENV));
         assert!(error.contains("Apple Development"));
         assert_eq!(
-            development_signing_identity(Some(OsString::from("Apple Development: Mjolnir")))
+            development_signing_identity(Some(OsString::from("Apple Development: Mjolnir")), None,)
                 .unwrap(),
             OsString::from("Apple Development: Mjolnir")
+        );
+    }
+
+    #[test]
+    fn cargo_install_reuses_the_existing_apple_development_identity() {
+        let existing = OsString::from("Apple Development: Mjolnir (TEAMID)");
+        assert_eq!(
+            development_signing_identity(None, Some(existing.clone())).unwrap(),
+            existing
+        );
+        assert_eq!(
+            development_signing_identity(
+                Some(OsString::from("Apple Development: Replacement (OTHERTEAM)")),
+                Some(OsString::from("Apple Development: Mjolnir (TEAMID)")),
+            )
+            .unwrap(),
+            OsString::from("Apple Development: Replacement (OTHERTEAM)")
+        );
+    }
+
+    #[test]
+    fn apple_development_identity_uses_the_leaf_signing_authority() {
+        let signature = concat!(
+            "Authority=Apple Development: Mjolnir (TEAMID)\n",
+            "Authority=Apple Worldwide Developer Relations Certification Authority\n",
+            "Authority=Apple Root CA\n"
+        );
+        assert_eq!(
+            apple_development_identity(signature),
+            Some(OsString::from("Apple Development: Mjolnir (TEAMID)"))
         );
     }
 
