@@ -489,6 +489,13 @@ fn default_auto() -> String {
     "auto".to_string()
 }
 
+const FEATURED_REVIEW_MODEL: &str = "gpt-5-6-luna";
+const FEATURED_REVIEW_EFFORT: &str = "xhigh";
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_acp_priority() -> Vec<String> {
     DEFAULT_ACP_PRIORITY
         .into_iter()
@@ -618,6 +625,8 @@ impl TeamPreset {
     }
 
     pub fn apply(self, config: &mut Config) {
+        let replaces_featured_review_tier =
+            self != Self::ClaudeWithCodexReviewer && config.agent.review_tier_from_team_default;
         config.team = Some(self.id().to_string());
         let (coder, reviewer) = self.sources();
         config.agent.model = default_auto();
@@ -627,9 +636,16 @@ impl TeamPreset {
         let (review_model, reviewer_effort) = match self {
             Self::ClaudeWithCodexReviewer => {
                 config.agent.review_tier = ReviewTier::Extended;
-                ("gpt-5-6-luna", Some("xhigh"))
+                config.agent.review_tier_from_team_default = true;
+                (FEATURED_REVIEW_MODEL, Some(FEATURED_REVIEW_EFFORT))
             }
-            _ => ("auto", None),
+            _ => {
+                if replaces_featured_review_tier {
+                    config.agent.review_tier = ReviewTier::Quick;
+                }
+                config.agent.review_tier_from_team_default = false;
+                ("auto", None)
+            }
         };
         config.review.model = review_model.to_string();
         config.review.acp_source = Some(reviewer.to_string());
@@ -648,6 +664,26 @@ impl TeamPreset {
         config.agent.acp_source = Some(coder.to_string());
         config.review.acp_source = Some(reviewer.to_string());
         config.subagents.acp_source = Some(reviewer.to_string());
+    }
+
+    fn apply_automatic_defaults(self, config: &mut Config) {
+        if self != Self::ClaudeWithCodexReviewer
+            || config.review.model != "auto"
+            || config.review.reasoning_effort.is_some()
+            || config.subagents.model != "auto"
+            || config.subagents.reasoning_effort.is_some()
+        {
+            return;
+        }
+
+        config.review.model = FEATURED_REVIEW_MODEL.to_string();
+        config.review.reasoning_effort = Some(FEATURED_REVIEW_EFFORT.to_string());
+        config.subagents.model = FEATURED_REVIEW_MODEL.to_string();
+        config.subagents.reasoning_effort = Some(FEATURED_REVIEW_EFFORT.to_string());
+        if config.agent.review_tier == ReviewTier::Quick {
+            config.agent.review_tier = ReviewTier::Extended;
+            config.agent.review_tier_from_team_default = true;
+        }
     }
 }
 
@@ -908,6 +944,11 @@ pub struct AgentConfig {
     /// `Quick` without editing anything.
     #[serde(default, skip_serializing_if = "ReviewTier::is_default")]
     pub review_tier: ReviewTier,
+    /// Whether a selected team, rather than the user, supplied `review_tier`.
+    /// This lets a later team switch restore its own default without clobbering
+    /// an explicit review-depth choice.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub review_tier_from_team_default: bool,
     /// Highest numerical priority included in automatic correction. The P3
     /// default preserves the original all-priority corrective behavior.
     #[serde(default, skip_serializing_if = "ReviewCorrectionThreshold::is_default")]
@@ -929,6 +970,7 @@ impl Default for AgentConfig {
             session_defaults: BTreeMap::new(),
             discrete_review: true,
             review_tier: ReviewTier::default(),
+            review_tier_from_team_default: false,
             correction_threshold: ReviewCorrectionThreshold::default(),
             max_correction_rounds: None,
         }
@@ -936,6 +978,11 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    pub fn set_review_tier(&mut self, tier: ReviewTier) {
+        self.review_tier = tier;
+        self.review_tier_from_team_default = false;
+    }
+
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -1457,8 +1504,9 @@ impl Config {
     /// preference at all. A config that names a team or pins any seat's ACP
     /// source keeps what it has, so neither an explicit choice nor custom
     /// routing this build cannot map to a team is replaced behind the user's
-    /// back. Model choices are untouched; only the team and its routes are
-    /// filled in. Returns whether a team was adopted.
+    /// back. Explicit model choices are untouched; the all-Auto featured team
+    /// receives its reviewer and subagent defaults. Returns whether a team was
+    /// adopted.
     pub fn apply_default_team(&mut self) -> bool {
         self.adopt_team(default_team(self))
     }
@@ -1476,6 +1524,7 @@ impl Config {
         };
         self.team = Some(team.id().to_string());
         team.apply_runtime_routes(self);
+        team.apply_automatic_defaults(self);
         true
     }
 
@@ -2057,7 +2106,7 @@ kimi = "disabled"
     }
 
     #[test]
-    fn the_default_team_routes_every_seat_without_touching_model_choices() {
+    fn the_default_featured_team_fills_unset_review_defaults() {
         let mut config = Config::default();
         config.agent.model = "primary-model".to_string();
         config.agent.discrete_review = false;
@@ -2069,9 +2118,40 @@ kimi = "disabled"
         assert_eq!(config.review.acp_source.as_deref(), Some("codex-acp"));
         assert_eq!(config.subagents.acp_source.as_deref(), Some("codex-acp"));
         assert_eq!(config.agent.model, "primary-model");
+        assert_eq!(config.review.model, FEATURED_REVIEW_MODEL);
+        assert_eq!(config.subagents.model, FEATURED_REVIEW_MODEL);
+        assert_eq!(
+            config.review.reasoning_effort.as_deref(),
+            Some(FEATURED_REVIEW_EFFORT)
+        );
+        assert_eq!(
+            config.subagents.reasoning_effort.as_deref(),
+            Some(FEATURED_REVIEW_EFFORT)
+        );
+        assert_eq!(config.agent.review_tier, ReviewTier::Extended);
+        assert!(config.agent.review_tier_from_team_default);
         // A default fills in what the user left unset; it overrides nothing.
         assert!(!config.agent.discrete_review);
         assert_eq!(config.acp.policy("claude-acp"), AcpServerPolicy::Auto);
+    }
+
+    #[test]
+    fn the_default_featured_team_preserves_explicit_reviewer_configuration() {
+        let mut config = Config::default();
+        config.review.model = "review-model".to_string();
+        config.review.reasoning_effort = Some("high".to_string());
+        config.subagents.model = "subagent-model".to_string();
+        config.subagents.reasoning_effort = Some("medium".to_string());
+        config.agent.set_review_tier(ReviewTier::Extended);
+
+        assert!(config.adopt_team(Some(TeamPreset::ClaudeWithCodexReviewer)));
+
+        assert_eq!(config.review.model, "review-model");
+        assert_eq!(config.review.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(config.subagents.model, "subagent-model");
+        assert_eq!(config.subagents.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(config.agent.review_tier, ReviewTier::Extended);
+        assert!(!config.agent.review_tier_from_team_default);
     }
 
     #[test]
@@ -2375,6 +2455,7 @@ kimi = "disabled"
                 session_defaults: BTreeMap::new(),
                 discrete_review: false,
                 review_tier: ReviewTier::Extended,
+                review_tier_from_team_default: false,
                 correction_threshold: ReviewCorrectionThreshold::P1,
                 max_correction_rounds: Some(1),
             },
@@ -2984,6 +3065,10 @@ mode = "ask"
                     ReviewTier::Quick
                 }
             );
+            assert_eq!(
+                config.agent.review_tier_from_team_default,
+                uses_luna_extended_review
+            );
             assert_eq!(config.acp.policy(coder), AcpServerPolicy::Enabled);
             assert_eq!(config.acp.policy(reviewer), AcpServerPolicy::Enabled);
             assert_eq!(TeamPreset::from_id(preset.id()), Some(preset));
@@ -3002,7 +3087,48 @@ mode = "ask"
             preset.apply(&mut config);
 
             assert_eq!(config.agent.review_tier, ReviewTier::Extended);
+            assert!(!config.agent.review_tier_from_team_default);
         }
+    }
+
+    #[test]
+    fn leaving_the_featured_team_restores_quick_without_clobbering_user_choices() {
+        let mut config = Config::default();
+        TeamPreset::ClaudeWithCodexReviewer.apply(&mut config);
+        assert!(config.agent.review_tier_from_team_default);
+
+        TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+
+        assert_eq!(config.agent.review_tier, ReviewTier::Quick);
+        assert!(!config.agent.review_tier_from_team_default);
+    }
+
+    #[test]
+    fn an_explicit_review_tier_survives_leaving_the_featured_team() {
+        let mut config = Config::default();
+        TeamPreset::ClaudeWithCodexReviewer.apply(&mut config);
+        config.agent.set_review_tier(ReviewTier::Extended);
+        assert!(!config.agent.review_tier_from_team_default);
+
+        TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+
+        assert_eq!(config.agent.review_tier, ReviewTier::Extended);
+    }
+
+    #[test]
+    fn featured_review_tier_default_roundtrips_before_a_team_switch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        TeamPreset::ClaudeWithCodexReviewer.apply(&mut config);
+        config.save(&path).expect("save featured team");
+
+        let mut loaded = Config::load(&path).expect("load featured team");
+        assert!(loaded.agent.review_tier_from_team_default);
+
+        TeamPreset::CodexWithClaudeReviewer.apply(&mut loaded);
+        assert_eq!(loaded.agent.review_tier, ReviewTier::Quick);
+        assert!(!loaded.agent.review_tier_from_team_default);
     }
 
     #[test]

@@ -5851,9 +5851,10 @@ fn mjconfig_apply_edits(
         config.agent.discrete_review = enabled;
     }
     if let Some(tier) = request.review_tier {
-        config.agent.review_tier = tier
+        let tier = tier
             .parse()
             .map_err(|()| bad_request(format!("unknown review tier: {tier}")))?;
+        config.agent.set_review_tier(tier);
     }
     if let Some(threshold) = request.correction_threshold {
         config.agent.correction_threshold = threshold.parse().map_err(|()| {
@@ -11183,6 +11184,7 @@ mod tests {
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
         assert!(!saved.agent.discrete_review);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
+        assert!(!saved.agent.review_tier_from_team_default);
         assert_eq!(
             saved.agent.correction_threshold,
             config::ReviewCorrectionThreshold::P1

@@ -19298,6 +19298,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
         config.set_acp_server_policy("codex-acp", config::AcpServerPolicy::Enabled);
         config.save(&path).expect("save initial config");
         let mut state = AppState::new();
@@ -19361,6 +19362,7 @@ mod tests {
         );
         assert!(!saved.agent.discrete_review);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
+        assert!(!saved.agent.review_tier_from_team_default);
         assert_eq!(
             saved.agent.correction_threshold,
             config::ReviewCorrectionThreshold::P2

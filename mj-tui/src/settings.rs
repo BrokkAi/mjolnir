@@ -684,7 +684,7 @@ impl SettingsEditor {
             .position(|tier| *tier == self.config.agent.review_tier)
             .unwrap_or(0);
         let next = (current as i32 + delta).rem_euclid(tiers.len() as i32) as usize;
-        self.config.agent.review_tier = tiers[next];
+        self.config.agent.set_review_tier(tiers[next]);
     }
 
     fn cycle_correction_threshold(&mut self, delta: i32) {
