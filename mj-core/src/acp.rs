@@ -768,6 +768,20 @@ async fn emit_fatal_with_stderr(
     message
 }
 
+async fn report_fatal_with_stderr(
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    fatal_emitted: &Arc<AtomicBool>,
+    message: String,
+    stderr_tail: Option<&AgentStderrTail>,
+    defer_to_runtime: bool,
+) -> String {
+    let message = attach_agent_stderr_tail(message, stderr_tail).await;
+    if !defer_to_runtime {
+        emit_fatal(ui_tx, fatal_emitted, message.clone());
+    }
+    message
+}
+
 /// Classify a spawn-time `io::Error`. `ErrorKind::NotFound` becomes
 /// `CommandNotFound`; everything else falls through to `SpawnFailed`.
 fn classify_spawn_error(command: &std::path::Path, source: std::io::Error) -> LaunchError {
@@ -1282,6 +1296,7 @@ pub async fn run(
             cfg.memory.clone(),
             cfg.side_prompt_policy,
             Some(stderr_tail.clone()),
+            true,
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -1980,6 +1995,7 @@ where
         None,
         false,
         None,
+        false,
     )
     .await
 }
@@ -2016,6 +2032,7 @@ where
         None,
         false,
         None,
+        false,
     )
     .await
 }
@@ -2053,6 +2070,7 @@ where
         None,
         false,
         None,
+        false,
     )
     .await
 }
@@ -2078,6 +2096,7 @@ async fn drive_client_with_fs_limit<T>(
     memory: Option<crate::memory::SessionMemory>,
     side_prompt_policy: bool,
     stderr_tail: Option<AgentStderrTail>,
+    defer_fatal_to_runtime: bool,
 ) -> Result<()>
 where
     T: ConnectTo<Client>,
@@ -2334,6 +2353,7 @@ where
                 &ui_tx,
                 &mut ui_rx,
                 fatal_emitted,
+                defer_fatal_to_runtime,
                 session_state,
                 drive_terminals,
                 access_mode,
@@ -2383,6 +2403,7 @@ async fn drive_session(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
+    defer_fatal_to_runtime: bool,
     session_state: RuntimeSessionState,
     terminals: Arc<ManagedTerminals>,
     access_mode: RuntimeAccessMode,
@@ -2425,22 +2446,24 @@ async fn drive_session(
         Ok(r) => r,
         Err(source) => {
             let launch_err = classify_initialize_error(source);
-            let text = emit_fatal_with_stderr(
+            let text = report_fatal_with_stderr(
                 ui_tx,
                 &fatal_emitted,
                 launch_err.to_string(),
                 stderr_tail.as_ref(),
+                defer_fatal_to_runtime,
             )
             .await;
             return Err(anyhow::anyhow!(text));
         }
     };
     if let Err(launch_err) = validate_protocol_version(init_resp.protocol_version) {
-        let text = emit_fatal_with_stderr(
+        let text = report_fatal_with_stderr(
             ui_tx,
             &fatal_emitted,
             launch_err.to_string(),
             stderr_tail.as_ref(),
+            defer_fatal_to_runtime,
         )
         .await;
         return Err(anyhow::anyhow!(text));
@@ -2448,11 +2471,12 @@ async fn drive_session(
     if let Err(launch_err) =
         require_additional_directories(&init_resp.agent_capabilities, &additional_directories)
     {
-        let text = emit_fatal_with_stderr(
+        let text = report_fatal_with_stderr(
             ui_tx,
             &fatal_emitted,
             launch_err.to_string(),
             stderr_tail.as_ref(),
+            defer_fatal_to_runtime,
         )
         .await;
         return Err(anyhow::anyhow!(text));
@@ -2467,11 +2491,12 @@ async fn drive_session(
         match service.start(context, ui_tx.clone()).await {
             Ok(server) => Some(server),
             Err(error) => {
-                let text = emit_fatal_with_stderr(
+                let text = report_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
                     format!("could not start subagent MCP server: {error:#}"),
                     stderr_tail.as_ref(),
+                    defer_fatal_to_runtime,
                 )
                 .await;
                 return Err(anyhow::anyhow!(text));
@@ -2568,11 +2593,12 @@ async fn drive_session(
             let initial_config = match restore {
                 Ok(initial_config) => initial_config,
                 Err(launch_err) => {
-                    let text = emit_fatal_with_stderr(
+                    let text = report_fatal_with_stderr(
                         ui_tx,
                         &fatal_emitted,
                         launch_err.to_string(),
                         stderr_tail.as_ref(),
+                        defer_fatal_to_runtime,
                     )
                     .await;
                     return Err(anyhow::anyhow!(text));
@@ -2603,11 +2629,12 @@ async fn drive_session(
                 (s.session_id, config, false)
             }
             Err(launch_err) => {
-                let text = emit_fatal_with_stderr(
+                let text = report_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
                     launch_err.to_string(),
                     stderr_tail.as_ref(),
+                    defer_fatal_to_runtime,
                 )
                 .await;
                 return Err(anyhow::anyhow!(text));
@@ -2632,11 +2659,12 @@ async fn drive_session(
                 }
             }
             Err(error) => {
-                let text = emit_fatal_with_stderr(
+                let text = report_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
                     format!("{} configuration failed: {error}", role.label),
                     stderr_tail.as_ref(),
+                    defer_fatal_to_runtime,
                 )
                 .await;
                 return Err(anyhow::anyhow!(text));
@@ -8730,6 +8758,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         ));
 
         loop {
@@ -10632,6 +10661,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         ));
 
         let mut saw_warning = false;
@@ -12571,6 +12601,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         ));
 
         while !matches!(
@@ -13782,6 +13813,7 @@ mod tests {
             None,
             false,
             Some(stderr_tail),
+            false,
         ));
 
         let mut saw_retry_warning = false;
@@ -14003,6 +14035,7 @@ mod tests {
             }),
             false,
             None,
+            false,
         ));
 
         wait_for_session_started(&mut ui_rx, "old-session").await;
