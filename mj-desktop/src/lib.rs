@@ -32,6 +32,30 @@ const MINIMUM_WINDOW_WIDTH: f64 = 900.0;
 #[cfg(not(target_os = "android"))]
 const MINIMUM_WINDOW_HEIGHT: f64 = 600.0;
 
+#[cfg(not(target_os = "android"))]
+trait DesktopWindowSizeBuilder: Sized {
+    fn with_desktop_initial_size(self, width: f64, height: f64) -> Self;
+    fn with_desktop_minimum_size(self, width: f64, height: f64) -> Self;
+}
+
+#[cfg(not(target_os = "android"))]
+impl DesktopWindowSizeBuilder for WindowBuilder {
+    fn with_desktop_initial_size(self, width: f64, height: f64) -> Self {
+        self.with_inner_size(LogicalSize::new(width, height))
+    }
+
+    fn with_desktop_minimum_size(self, width: f64, height: f64) -> Self {
+        self.with_min_inner_size(LogicalSize::new(width, height))
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn apply_desktop_window_size<B: DesktopWindowSizeBuilder>(builder: B) -> B {
+    builder
+        .with_desktop_initial_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        .with_desktop_minimum_size(MINIMUM_WINDOW_WIDTH, MINIMUM_WINDOW_HEIGHT)
+}
+
 #[derive(Debug, Clone)]
 pub struct DesktopShellOptions {
     pub origin: Url,
@@ -194,19 +218,13 @@ pub fn run(
     on_ready(DesktopShellRemote {
         proxy: event_loop.create_proxy(),
     });
-    let window = WindowBuilder::new()
-        .with_title("Mjolnir")
-        .with_window_icon(Some(application_icon()?))
-        .with_inner_size(LogicalSize::new(
-            DEFAULT_WINDOW_WIDTH,
-            DEFAULT_WINDOW_HEIGHT,
-        ))
-        .with_min_inner_size(LogicalSize::new(
-            MINIMUM_WINDOW_WIDTH,
-            MINIMUM_WINDOW_HEIGHT,
-        ))
-        .build(&event_loop)
-        .context("create Mjolnir desktop window")?;
+    let window = apply_desktop_window_size(
+        WindowBuilder::new()
+            .with_title("Mjolnir")
+            .with_window_icon(Some(application_icon()?)),
+    )
+    .build(&event_loop)
+    .context("create Mjolnir desktop window")?;
 
     let popup_policy = policy.clone();
     let builder = WebViewBuilder::new()
@@ -801,14 +819,27 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     #[test]
     fn desktop_window_uses_a_normal_initial_size() {
-        assert_eq!(
-            (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
-            (1280.0, 800.0)
-        );
-        assert_eq!(
-            (MINIMUM_WINDOW_WIDTH, MINIMUM_WINDOW_HEIGHT),
-            (900.0, 600.0)
-        );
+        #[derive(Default)]
+        struct RecordingWindowBuilder {
+            initial_size: Option<(f64, f64)>,
+            minimum_size: Option<(f64, f64)>,
+        }
+
+        impl DesktopWindowSizeBuilder for RecordingWindowBuilder {
+            fn with_desktop_initial_size(mut self, width: f64, height: f64) -> Self {
+                self.initial_size = Some((width, height));
+                self
+            }
+
+            fn with_desktop_minimum_size(mut self, width: f64, height: f64) -> Self {
+                self.minimum_size = Some((width, height));
+                self
+            }
+        }
+
+        let builder = apply_desktop_window_size(RecordingWindowBuilder::default());
+        assert_eq!(builder.initial_size, Some((1280.0, 800.0)));
+        assert_eq!(builder.minimum_size, Some((900.0, 600.0)));
     }
 
     #[test]

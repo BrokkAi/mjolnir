@@ -126,6 +126,9 @@ npx -y @brokkai/mjolnir
 **crates.io:** install the terminal client and desktop voice worker with Rust:
 
 ```bash
+# Linux: install WebKitGTK 4.1 development files first for `mj app`.
+# Ubuntu/Debian: sudo apt-get install libwebkit2gtk-4.1-dev libasound2-dev
+# Fedora: sudo dnf install webkit2gtk4.1-devel alsa-lib-devel
 cargo install --locked brokk-mjolnir brokk-mj-voice-worker
 ```
 

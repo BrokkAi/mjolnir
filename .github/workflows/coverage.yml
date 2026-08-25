@@ -26,10 +26,10 @@ jobs:
       with:
         components: llvm-tools-preview
 
-    - name: Install Linux audio dependencies
+    - name: Install Linux desktop and audio dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
+        sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
     - name: Cache cargo registry
       uses: actions/cache@v5

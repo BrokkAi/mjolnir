@@ -106,6 +106,19 @@ archive or Cargo.
 
 ### crates.io
 
+On Linux, Cargo installations need WebKitGTK 4.1 development files for the
+default `mj app` desktop shell. Installing the voice worker also needs ALSA
+development files:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev libasound2-dev
+
+# Fedora
+sudo dnf install webkit2gtk4.1-devel alsa-lib-devel
+```
+
 Install the terminal client and voice worker together on desktop:
 
 ```bash
