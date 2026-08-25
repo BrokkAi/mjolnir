@@ -5,6 +5,8 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::io::{self, Stdout, Write};
@@ -109,6 +111,21 @@ const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_nanos(8_333_334);
 const STREAM_CATCH_UP_LINES: usize = 8;
 const STREAM_CATCH_UP_AGE: Duration = Duration::from_millis(120);
+
+#[cfg(test)]
+thread_local! {
+    static TURN_PROJECTION_ENTRIES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_turn_projection_entries() {
+    TURN_PROJECTION_ENTRIES.with(|entries| entries.set(0));
+}
+
+#[cfg(test)]
+fn turn_projection_entries() -> usize {
+    TURN_PROJECTION_ENTRIES.with(Cell::get)
+}
 
 #[derive(Debug)]
 struct CurrentBranchPrProbe {
@@ -993,11 +1010,35 @@ struct TurnToolSummary {
 }
 
 fn transcript_turns(state: &AppState) -> Vec<TranscriptTurn> {
-    let prompt_indexes = state
-        .transcript
+    transcript_turns_from(state, 0)
+}
+
+/// Build only the prompt turns that can affect a transcript suffix. The
+/// fullscreen cache keeps settled history before that suffix, so re-walking
+/// every old turn for each terminal-output snapshot would make animation cost
+/// grow with the age of the session.
+fn transcript_turns_from(state: &AppState, start: usize) -> Vec<TranscriptTurn> {
+    if state.transcript.is_empty() || start >= state.transcript.len() {
+        return Vec::new();
+    }
+
+    // A suffix can begin in the middle of a turn only after a previously
+    // cached boundary. Include that turn's prompt so its compact layout stays
+    // correct; in the normal live case `turn_start == start`.
+    let turn_start = state.transcript[..=start]
+        .iter()
+        .rposition(|entry| matches!(entry, Entry::UserPrompt(_)))
+        .unwrap_or(start);
+    #[cfg(test)]
+    TURN_PROJECTION_ENTRIES.with(|entries| {
+        entries.set(entries.get() + state.transcript.len() - turn_start);
+    });
+    let prompt_indexes = state.transcript[turn_start..]
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| matches!(entry, Entry::UserPrompt(_)).then_some(index))
+        .filter_map(|(offset, entry)| {
+            matches!(entry, Entry::UserPrompt(_)).then_some(turn_start + offset)
+        })
         .collect::<Vec<_>>();
 
     prompt_indexes
@@ -9261,19 +9302,26 @@ fn build_transcript_cache(
 /// - every frozen entry must settle naturally: the committed-by-fiat
 ///   shortcut is ignored, because a force-committed entry's render still
 ///   changes (a running terminal's reference line resolves when it exits)
-fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
+///
+/// First entry that must be rebuilt for a transcript suffix. Entries before
+/// `start` are already frozen in the settled-prefix cache, so this deliberately
+/// inspects only the live suffix on streaming redraws.
+fn settled_entry_boundary_from(state: &AppState, turns: &[TranscriptTurn], start: usize) -> usize {
     let len = state.transcript.len();
     if len == 0 {
         return 0;
     }
+    let start = start.min(len - 1);
     let mut boundary = len - 1;
-    for (index, entry) in state.transcript.iter().enumerate().rev() {
+    for (offset, entry) in state.transcript[start..].iter().enumerate().rev() {
+        let index = start + offset;
         if matches!(entry, Entry::Plan(_)) {
             boundary = boundary.min(index);
             break;
         }
     }
-    for (index, entry) in state.transcript.iter().enumerate().rev() {
+    for (offset, entry) in state.transcript[start..].iter().enumerate().rev() {
+        let index = start + offset;
         if matches!(entry, Entry::SubagentPlan(_)) {
             boundary = boundary.min(index);
             break;
@@ -9283,6 +9331,9 @@ fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
         boundary = boundary.min(index);
     }
     for (position, turn) in turns.iter().enumerate() {
+        if turn.end <= start {
+            continue;
+        }
         if turn.prompt_index >= boundary {
             break;
         }
@@ -9297,11 +9348,14 @@ fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
             break;
         }
     }
-    state.transcript[..boundary]
+    if boundary <= start {
+        return boundary;
+    }
+    state.transcript[start..boundary]
         .iter()
         .enumerate()
-        .find(|&(index, entry)| !transcript_entry_settles_naturally(state, index, entry))
-        .map_or(boundary, |(index, _)| index)
+        .find(|&(offset, entry)| !transcript_entry_settles_naturally(state, start + offset, entry))
+        .map_or(boundary, |(offset, _)| start + offset)
 }
 
 /// Build the chat pane's transcript cache, reusing and extending the settled
@@ -9318,16 +9372,30 @@ fn build_chat_transcript_cache(
     if search_query.is_some() {
         return build_transcript_cache(state, width, revision, search_query, false);
     }
-    let turns = transcript_turns(state);
-    let boundary = settled_entry_boundary(state, &turns);
     let epoch = state.settled_render_epoch();
     if prefix
         .as_ref()
-        .is_some_and(|p| p.epoch != epoch || p.width != width || p.entries > boundary)
+        .is_some_and(|p| p.epoch != epoch || p.width != width)
     {
         *prefix = None;
     }
-    let rendered_entries = prefix.as_ref().map_or(0, |p| p.entries);
+
+    // The prefix is immutable until its epoch changes. Recompute turn
+    // structure only for the unrendered suffix so frequent terminal snapshots
+    // cannot make spinner animation depend on the whole transcript length.
+    let (rendered_entries, turns, boundary) = loop {
+        let rendered_entries = prefix.as_ref().map_or(0, |p| p.entries);
+        let turns = transcript_turns_from(state, rendered_entries);
+        let boundary = settled_entry_boundary_from(state, &turns, rendered_entries);
+        if prefix.as_ref().is_some_and(|p| p.entries > boundary) {
+            // An unexpected invalidation below the cached boundary is safest
+            // handled as a one-time full rebuild. Normal stream updates only
+            // ever extend this prefix.
+            *prefix = None;
+            continue;
+        }
+        break (rendered_entries, turns, boundary);
+    };
     if rendered_entries < boundary {
         let new_lines = render_transcript_entry_range_with_turns(
             state,
@@ -23003,7 +23071,7 @@ mod tests {
         let turns = transcript_turns(&state);
         // Only the trailing entry stays live once every turn has settled.
         assert_eq!(
-            settled_entry_boundary(&state, &turns),
+            settled_entry_boundary_from(&state, &turns, 0),
             state.transcript.len() - 1
         );
 
@@ -23014,12 +23082,15 @@ mod tests {
             text_chunk("streaming answer"),
         )));
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), active_prompt);
+        assert_eq!(
+            settled_entry_boundary_from(&state, &turns, 0),
+            active_prompt
+        );
 
         // An entry paced by the reveal controller renders a growing slice.
         assert!(state.set_stream_visible_bytes(1, 4));
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), 1);
+        assert_eq!(settled_entry_boundary_from(&state, &turns, 0), 1);
         assert!(state.clear_stream_visible_bytes(1));
 
         // The newest Plan entry is replaced in place by later plan updates,
@@ -23036,7 +23107,7 @@ mod tests {
             usage: None,
         });
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), plan_index);
+        assert_eq!(settled_entry_boundary_from(&state, &turns, 0), plan_index);
     }
 
     #[test]
@@ -23150,6 +23221,100 @@ mod tests {
     }
 
     #[test]
+    fn chat_cache_projects_only_the_live_turn_for_terminal_updates() {
+        let mut state = settled_turns_state(24);
+        state.record_user_prompt("run the complete test suite".to_string());
+        let active_prompt = state.transcript.len() - 1;
+        insert_running_terminal_tool_call(&mut state, "live-tests", "cargo test");
+
+        let width = 72;
+        let mut prefix = None;
+        build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let frozen_entries = prefix.as_ref().expect("prefix populated").entries;
+        assert_eq!(frozen_entries, active_prompt);
+        assert_eq!(
+            transcript_turns_from(&state, frozen_entries).len(),
+            1,
+            "terminal snapshots must not re-project settled history"
+        );
+
+        state.apply_event(UiEvent::TerminalOutput(
+            crate::event::TerminalOutputSnapshot {
+                terminal_id: "live-tests-terminal".to_string(),
+                output: (1..=20)
+                    .map(|line| format!("test ui::case_{line} ... ok"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                truncated: false,
+                exit_status: None,
+            },
+        ));
+        reset_turn_projection_entries();
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        assert_eq!(
+            turn_projection_entries(),
+            state.transcript.len() - frozen_entries,
+            "terminal snapshots must project only the unfrozen live suffix"
+        );
+        let (_, full_rows) = wrapped_row_starts(&render_transcript_lines(&state, width), width);
+        assert_eq!(cache.line_count, full_rows);
+        assert_eq!(prefix.as_ref().expect("prefix").entries, frozen_entries);
+    }
+
+    #[test]
+    fn chat_cache_rebuilds_when_discrete_review_reopens_a_completed_turn() {
+        let mut state = settled_turns_state(1);
+        let width = 72;
+        let mut prefix = None;
+        build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let frozen_entries = prefix.as_ref().expect("prefix populated").entries;
+        assert!(frozen_entries > 0);
+
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "orchestrator".to_string(),
+            target: "primary".to_string(),
+            kind: crate::event::InternalMessageKind::DiscreteReview,
+            text: "review the completed turn".to_string(),
+            owner_subagent_id: None,
+        }));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("review is starting"),
+        )));
+
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        assert!(
+            prefix.is_none(),
+            "the stale prefix must be dropped instead of slicing it backward"
+        );
+        let (_, full_rows) = wrapped_row_starts(&render_transcript_lines(&state, width), width);
+        assert_eq!(cache.line_count, full_rows);
+    }
+
+    #[test]
     fn fullscreen_transcript_draw_extends_the_prefix_like_a_fresh_render() {
         let mut state = settled_turns_state(3);
         state.record_user_prompt("active".to_string());
@@ -23206,7 +23371,10 @@ mod tests {
         // time to the turn header.
         state.record_steered_prompt("sorry, make it v2".to_string(), Vec::new());
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), running_prompt);
+        assert_eq!(
+            settled_entry_boundary_from(&state, &turns, 0),
+            running_prompt
+        );
 
         let (width, height) = (60u16, 16u16);
         let mut scroll = TranscriptScrollState::default();
@@ -23261,7 +23429,7 @@ mod tests {
             &state.transcript[tool_index]
         ));
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), tool_index);
+        assert_eq!(settled_entry_boundary_from(&state, &turns, 0), tool_index);
     }
 
     #[test]
