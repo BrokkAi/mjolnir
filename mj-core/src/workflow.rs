@@ -337,6 +337,9 @@ pub struct WorkflowState {
     pub actors: BTreeMap<WorkflowActorId, WorkflowActorState>,
     pub waiting: Option<WorkflowWait>,
     pub coverage: WorkflowCoverage,
+    /// The source error that prevented a complete review. This is durable
+    /// workflow state, not a transcript-only status message.
+    pub coverage_error: Option<String>,
     pub outcome: Option<WorkflowOutcome>,
     pub issues: Vec<ReviewIssue>,
 }
@@ -388,6 +391,26 @@ impl WorkflowState {
             .count()
     }
 
+    /// The exact recorded reason this review could not establish complete
+    /// coverage. Actor failures are already durable lifecycle records, so
+    /// use their original message when the fan-out itself was available.
+    pub fn coverage_error(&self) -> Option<String> {
+        if self.coverage != WorkflowCoverage::Degraded {
+            return None;
+        }
+        self.coverage_error.clone().or_else(|| {
+            self.actors
+                .values()
+                .find_map(|actor| match &actor.lifecycle {
+                    WorkflowActorLifecycle::Failed(error) => Some(error.clone()),
+                    WorkflowActorLifecycle::Cancelled => Some("review was cancelled".to_string()),
+                    WorkflowActorLifecycle::Running
+                    | WorkflowActorLifecycle::Waiting { .. }
+                    | WorkflowActorLifecycle::Completed => None,
+                })
+        })
+    }
+
     fn unfinished_count(&self) -> usize {
         self.running_count() + self.waiting_count()
     }
@@ -429,23 +452,31 @@ impl WorkflowState {
     pub fn terminal_notice(&self, outcome: WorkflowOutcome) -> String {
         match self.kind {
             WorkflowKind::Review => {
-                let head = match outcome {
+                let mut head = match outcome {
                     WorkflowOutcome::Clean if self.issues.is_empty() => {
-                        "review complete · no material findings"
+                        "review complete · no material findings".to_string()
                     }
-                    WorkflowOutcome::Clean | WorkflowOutcome::Completed => "review complete",
-                    WorkflowOutcome::Degraded => "review complete · degraded coverage",
-                    WorkflowOutcome::Failed => "review failed",
-                    WorkflowOutcome::Cancelled => "review cancelled",
+                    WorkflowOutcome::Clean | WorkflowOutcome::Completed => {
+                        "review complete".to_string()
+                    }
+                    WorkflowOutcome::Degraded => "review complete · degraded coverage".to_string(),
+                    WorkflowOutcome::Failed => "review failed".to_string(),
+                    WorkflowOutcome::Cancelled => "review cancelled".to_string(),
                 };
+                if matches!(outcome, WorkflowOutcome::Degraded | WorkflowOutcome::Failed)
+                    && let Some(error) = self.coverage_error()
+                {
+                    head.push_str(": ");
+                    head.push_str(&error);
+                }
                 if self.issues.is_empty() {
-                    return head.to_string();
+                    return head;
                 }
                 // The final tally is the record the user scrolls back for;
                 // "review complete" alone buries the verdict.
                 let tally = self.issue_tally();
                 let mut parts = vec![
-                    head.to_string(),
+                    head,
                     format!(
                         "{} issue{}",
                         tally.found,
@@ -545,6 +576,9 @@ pub enum WorkflowTransition {
     },
     CoverageChanged {
         coverage: WorkflowCoverage,
+        /// Required whenever coverage becomes degraded. The caller must pass
+        /// through the source error rather than replacing it with a category.
+        error: Option<String>,
     },
     IssuesValidated {
         pass: u32,
@@ -647,6 +681,7 @@ impl WorkflowStore {
                     actors: BTreeMap::new(),
                     waiting: None,
                     coverage: WorkflowCoverage::Unknown,
+                    coverage_error: None,
                     outcome: None,
                     issues: Vec::new(),
                 },
@@ -833,8 +868,16 @@ impl WorkflowStore {
                 }
                 state.waiting = Some(waiting);
             }
-            WorkflowTransition::CoverageChanged { coverage } => {
-                if state.coverage == *coverage {
+            WorkflowTransition::CoverageChanged { coverage, error } => {
+                if *coverage == WorkflowCoverage::Degraded
+                    && error.as_deref().is_none_or(|error| error.trim().is_empty())
+                {
+                    return Err(Self::error(
+                        event.workflow_id,
+                        "degraded review coverage requires the root error",
+                    ));
+                }
+                if state.coverage == *coverage && state.coverage_error == *error {
                     return Ok(ApplyOutcome::Duplicate);
                 }
                 if state.coverage == WorkflowCoverage::Degraded
@@ -846,6 +889,11 @@ impl WorkflowStore {
                     ));
                 }
                 state.coverage = *coverage;
+                state.coverage_error = if *coverage == WorkflowCoverage::Degraded {
+                    error.clone()
+                } else {
+                    None
+                };
             }
             WorkflowTransition::IssuesValidated { pass, summaries } => {
                 if summaries.is_empty() {
@@ -933,6 +981,21 @@ impl WorkflowStore {
                 }
             }
             WorkflowTransition::Terminal { outcome, coverage } => {
+                if state.kind == WorkflowKind::Review
+                    && *coverage == WorkflowCoverage::Degraded
+                    && state.coverage_error.is_none()
+                    && !state.actors.values().any(|actor| {
+                        matches!(
+                            actor.lifecycle,
+                            WorkflowActorLifecycle::Failed(_) | WorkflowActorLifecycle::Cancelled
+                        )
+                    })
+                {
+                    return Err(Self::error(
+                        event.workflow_id,
+                        "degraded review terminal requires the root error",
+                    ));
+                }
                 if state.coverage == WorkflowCoverage::Degraded
                     && *coverage == WorkflowCoverage::Complete
                 {
@@ -1467,6 +1530,7 @@ mod tests {
                 review(),
                 WorkflowTransition::CoverageChanged {
                     coverage: WorkflowCoverage::Degraded,
+                    error: Some("review worker exited: adapter unavailable".to_string()),
                 },
             ))
             .unwrap();
@@ -1487,6 +1551,65 @@ mod tests {
             WorkflowCoverage::Degraded
         );
         assert_eq!(store.get(review()).unwrap().outcome, None);
+    }
+
+    #[test]
+    fn degraded_coverage_requires_the_source_error() {
+        let mut store = WorkflowStore::default();
+        store.apply(&started()).unwrap();
+
+        let error = store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::CoverageChanged {
+                    coverage: WorkflowCoverage::Degraded,
+                    error: None,
+                },
+            ))
+            .expect_err("a degraded review without the source error is invalid");
+
+        assert!(error.message.contains("requires the root error"));
+    }
+
+    #[test]
+    fn degraded_review_terminal_requires_the_source_error() {
+        let mut store = WorkflowStore::default();
+        store.apply(&started()).unwrap();
+
+        let error = store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::Terminal {
+                    outcome: WorkflowOutcome::Degraded,
+                    coverage: WorkflowCoverage::Degraded,
+                },
+            ))
+            .expect_err("a degraded review terminal without a cause is invalid");
+
+        assert!(error.message.contains("requires the root error"));
+    }
+
+    #[test]
+    fn degraded_terminal_notice_includes_the_source_error() {
+        let mut store = WorkflowStore::default();
+        store.apply(&started()).unwrap();
+        store
+            .apply(&WorkflowEvent::new(
+                review(),
+                WorkflowTransition::CoverageChanged {
+                    coverage: WorkflowCoverage::Degraded,
+                    error: Some("claude-acp: authentication expired".to_string()),
+                },
+            ))
+            .unwrap();
+
+        assert!(
+            store
+                .get(review())
+                .expect("review state")
+                .terminal_notice(WorkflowOutcome::Degraded)
+                .contains("claude-acp: authentication expired")
+        );
     }
 
     #[test]

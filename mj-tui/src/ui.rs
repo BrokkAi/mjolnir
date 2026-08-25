@@ -5,6 +5,8 @@
 //! into `AppState`, redraws on every tick, and emits `UiCommand`s back
 //! to the runtime when the user submits prompts or cancels.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::io::{self, Stdout, Write};
@@ -16,8 +18,8 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommandInput, SessionConfigOption, SessionConfigValueId, SessionUpdate, StopReason,
-    ToolCallStatus,
+    AvailableCommandInput, SessionConfigOption, SessionConfigOptionCategory, SessionConfigValueId,
+    SessionUpdate, StopReason, ToolCallStatus,
 };
 use anyhow::{Context, Result};
 use crossterm::cursor::MoveTo;
@@ -109,6 +111,21 @@ const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_nanos(8_333_334);
 const STREAM_CATCH_UP_LINES: usize = 8;
 const STREAM_CATCH_UP_AGE: Duration = Duration::from_millis(120);
+
+#[cfg(test)]
+thread_local! {
+    static TURN_PROJECTION_ENTRIES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_turn_projection_entries() {
+    TURN_PROJECTION_ENTRIES.with(|entries| entries.set(0));
+}
+
+#[cfg(test)]
+fn turn_projection_entries() -> usize {
+    TURN_PROJECTION_ENTRIES.with(Cell::get)
+}
 
 #[derive(Debug)]
 struct CurrentBranchPrProbe {
@@ -993,11 +1010,35 @@ struct TurnToolSummary {
 }
 
 fn transcript_turns(state: &AppState) -> Vec<TranscriptTurn> {
-    let prompt_indexes = state
-        .transcript
+    transcript_turns_from(state, 0)
+}
+
+/// Build only the prompt turns that can affect a transcript suffix. The
+/// fullscreen cache keeps settled history before that suffix, so re-walking
+/// every old turn for each terminal-output snapshot would make animation cost
+/// grow with the age of the session.
+fn transcript_turns_from(state: &AppState, start: usize) -> Vec<TranscriptTurn> {
+    if state.transcript.is_empty() || start >= state.transcript.len() {
+        return Vec::new();
+    }
+
+    // A suffix can begin in the middle of a turn only after a previously
+    // cached boundary. Include that turn's prompt so its compact layout stays
+    // correct; in the normal live case `turn_start == start`.
+    let turn_start = state.transcript[..=start]
+        .iter()
+        .rposition(|entry| matches!(entry, Entry::UserPrompt(_)))
+        .unwrap_or(start);
+    #[cfg(test)]
+    TURN_PROJECTION_ENTRIES.with(|entries| {
+        entries.set(entries.get() + state.transcript.len() - turn_start);
+    });
+    let prompt_indexes = state.transcript[turn_start..]
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| matches!(entry, Entry::UserPrompt(_)).then_some(index))
+        .filter_map(|(offset, entry)| {
+            matches!(entry, Entry::UserPrompt(_)).then_some(turn_start + offset)
+        })
         .collect::<Vec<_>>();
 
     prompt_indexes
@@ -5348,6 +5389,15 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if plain_text_only && matches!(text.as_str(), "/model" | "/effort") {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        open_live_session_config_picker(state, &text);
+        return;
+    }
+
     if plain_text_only && text == "/diff" {
         state.input.clear();
         clear_attachments(state);
@@ -5624,6 +5674,56 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     });
 }
 
+fn open_live_session_config_picker(state: &mut AppState, command: &str) {
+    if state.runtime_closed {
+        state.record_status_message(StatusKind::Warning, "the ACP runtime is closed");
+        return;
+    }
+    if state.session_id.is_none() {
+        state.announce_waiting_for_primary();
+        return;
+    }
+
+    let is_model = command == "/model";
+    let option_index = state
+        .session_config_options
+        .iter()
+        .enumerate()
+        .find(|(index, option)| {
+            let target = state.session_config_targets.get(*index);
+            if is_model {
+                matches!(target, Some(SessionConfigTarget::ConfigOption { .. }))
+                    && matches!(option.category, Some(SessionConfigOptionCategory::Model))
+                    && option.id.to_string() != crate::acp::REASONING_EFFORT_CONFIG_ID
+            } else {
+                matches!(
+                    target,
+                    Some(
+                        SessionConfigTarget::ConfigOption { .. } | SessionConfigTarget::LegacyMode
+                    )
+                ) && crate::settings::session_option_controls_reasoning_effort(option)
+            }
+        })
+        .map(|(index, _)| index);
+
+    let label = if is_model {
+        "model"
+    } else {
+        "reasoning-effort"
+    };
+    match option_index {
+        Some(index) if state.open_config_value_picker(index) => state.record_status_message(
+            StatusKind::Info,
+            format!("choose a {label} for the active session"),
+        ),
+        Some(_) => {}
+        None => state.record_status_message(
+            StatusKind::Warning,
+            format!("the active agent does not expose a live {label} selector"),
+        ),
+    }
+}
+
 fn discrete_review_command_arguments(text: &str) -> Option<&str> {
     ["/discrete-review", "/adversarial-review"]
         .into_iter()
@@ -5867,8 +5967,8 @@ fn handle_mjconfig_menu_key(
             inline_repair_request(mode)
         }
         SettingsAction::Save => {
-            if let Some(config) = state.mjconfig_menu_accept() {
-                persist_mjconfig_selection(state, cmd_tx, config);
+            if let Some((initial_config, config)) = state.mjconfig_menu_accept() {
+                persist_mjconfig_selection(state, cmd_tx, initial_config, config);
             }
             inline_repair_request(mode)
         }
@@ -5892,6 +5992,7 @@ fn handle_mjconfig_menu_key(
 fn persist_mjconfig_selection(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    initial_config: config::Config,
     mut config: config::Config,
 ) {
     let theme = config.theme;
@@ -5903,12 +6004,12 @@ fn persist_mjconfig_selection(
     let keep_awake_enabled = config.keep_awake;
     let thought_output = config.thought_output;
     let voice_auto_send = config.voice_auto_send;
-    let live_session_updates = live_primary_session_config_updates(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
     // letting the next /new or restart fail to resolve.
     let reroute_notices =
         crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
+    let live_session_updates = live_primary_session_config_updates(state, &initial_config, &config);
     let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
@@ -5937,7 +6038,7 @@ fn persist_mjconfig_selection(
                     let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
                 }
                 let mut message = format!(
-                    "config saved — theme {theme}, spinner {style}; compatible session options and the reviewer/subagent route update the active primary when its agent is unchanged, while primary model and ACP routing changes apply on /new or /clear"
+                    "config saved — theme {theme}, spinner {style}; changed session settings update the active primary when supported, while ACP routing changes apply on /new or /clear"
                 );
                 for notice in &reroute_notices {
                     message.push_str("; ");
@@ -5983,6 +6084,7 @@ fn primary_config_matches_active_route(state: &AppState, config: &config::Config
 
 fn live_primary_session_config_updates(
     state: &AppState,
+    initial_config: &config::Config,
     config: &config::Config,
 ) -> Vec<(SessionConfigTarget, SessionConfigValueId)> {
     if state.session_id.is_none() {
@@ -5991,8 +6093,12 @@ fn live_primary_session_config_updates(
     let Some(source_id) = state.active_models.primary_source.as_deref() else {
         return Vec::new();
     };
-    let Some(defaults) = config.agent.session_defaults.get(source_id) else {
-        return Vec::new();
+    let defaults = config.agent.session_defaults.get(source_id);
+    let source_stays_active = config.agent.acp_source.as_deref() == Some(source_id);
+    let selected_model = if config.agent.model == "auto" {
+        crate::roster::auto_primary_model_for_source(&state.model_choices, source_id)
+    } else {
+        Some(config.agent.model.as_str())
     };
 
     state
@@ -6000,13 +6106,39 @@ fn live_primary_session_config_updates(
         .iter()
         .zip(state.session_config_targets.iter())
         .filter_map(|(option, target)| {
-            let desired = defaults.get(&crate::acp::session_config_option_key(&option.id))?;
+            let desired = if crate::settings::session_option_controls_reasoning_effort(option) {
+                if !source_stays_active
+                    || initial_config.agent.reasoning_effort == config.agent.reasoning_effort
+                {
+                    return None;
+                }
+                SessionConfigValueId::from(config.agent.reasoning_effort.clone()?)
+            } else if matches!(option.category, Some(SessionConfigOptionCategory::Model)) {
+                if !source_stays_active
+                    || initial_config.agent.model == config.agent.model
+                    || !matches!(target, SessionConfigTarget::ConfigOption { .. })
+                {
+                    return None;
+                }
+                crate::acp::session_config_model_value(option, source_id, selected_model?, None)?
+            } else {
+                let key = crate::acp::session_config_option_key(&option.id);
+                let desired = defaults?.get(&key)?;
+                let initial = initial_config
+                    .agent
+                    .session_defaults
+                    .get(source_id)
+                    .and_then(|defaults| defaults.get(&key));
+                if initial == Some(desired) {
+                    return None;
+                }
+                SessionConfigValueId::from(desired.clone())
+            };
             let current = crate::app::config_option_current_value_id(option)?;
-            let desired_value = SessionConfigValueId::from(desired.clone());
-            if !crate::acp::session_config_option_contains_value(option, &desired_value) {
+            if !crate::acp::session_config_option_contains_value(option, &desired) {
                 return None;
             }
-            (current.to_string() != *desired).then(|| (target.clone(), desired_value))
+            (current != &desired).then(|| (target.clone(), desired))
         })
         .collect()
 }
@@ -7832,15 +7964,9 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
     let mut issues = state
         .workflows
         .iter()
-        .flat_map(|workflow| {
-            workflow
-                .issues
-                .iter()
-                .map(move |issue| (workflow.id, issue))
-        })
+        .flat_map(|workflow| workflow.issues.iter().map(move |issue| (workflow, issue)))
         .collect::<Vec<_>>();
-    issues
-        .sort_by_key(|(workflow_id, issue)| (workflow_id.turn_id, workflow_id.operation, issue.id));
+    issues.sort_by_key(|(workflow, issue)| (workflow.id.turn_id, workflow.id.operation, issue.id));
     let all = issues
         .iter()
         .map(|(_, issue)| (*issue).clone())
@@ -7876,17 +8002,17 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
         )));
     } else {
         let mut last_group = None;
-        for (workflow_id, issue) in issues {
+        for (workflow, issue) in issues {
             // A pass header per (workflow, pass) keeps multi-turn sessions
             // legible without re-reading ids.
-            let group = (workflow_id.turn_id, workflow_id.operation, issue.pass);
+            let group = (workflow.id.turn_id, workflow.id.operation, issue.pass);
             if last_group != Some(group) {
                 last_group = Some(group);
                 lines.push(Line::from(Span::styled(
                     format!(
                         " {} turn {} · review pass {}",
                         crate::app::REVIEW_GLYPH,
-                        workflow_id.turn_id,
+                        workflow.id.turn_id,
                         issue.pass + 1
                     ),
                     Style::default()
@@ -7894,7 +8020,11 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
                         .add_modifier(Modifier::BOLD),
                 )));
             }
-            lines.extend(review_issue_detail_lines(issue, theme));
+            lines.extend(review_issue_detail_lines(
+                issue,
+                theme,
+                workflow.coverage_error().as_deref(),
+            ));
         }
     }
     let total = Paragraph::new(lines.clone())
@@ -7926,6 +8056,7 @@ fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppS
 fn review_issue_detail_lines(
     issue: &crate::workflow::ReviewIssue,
     theme: TerminalTheme,
+    coverage_error: Option<&str>,
 ) -> Vec<Line<'static>> {
     use crate::workflow::ReviewIssueStatus;
 
@@ -7987,6 +8118,22 @@ fn review_issue_detail_lines(
         format!("   {explanation}"),
         Style::default().ink(theme.text),
     )));
+    if issue.status == ReviewIssueStatus::Corrected
+        && let Some(error) = coverage_error
+    {
+        lines.push(Line::from(Span::styled(
+            " Verification could not complete",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(error.lines().map(|line| {
+            Line::from(Span::styled(
+                format!("   {line}"),
+                Style::default().ink(theme.text),
+            ))
+        }));
+    }
     if let Some(reason) = issue.resolution_reason.as_deref() {
         lines.push(Line::from(Span::styled(
             " Recorded outcome",
@@ -9246,19 +9393,26 @@ fn build_transcript_cache(
 /// - every frozen entry must settle naturally: the committed-by-fiat
 ///   shortcut is ignored, because a force-committed entry's render still
 ///   changes (a running terminal's reference line resolves when it exits)
-fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
+///
+/// First entry that must be rebuilt for a transcript suffix. Entries before
+/// `start` are already frozen in the settled-prefix cache, so this deliberately
+/// inspects only the live suffix on streaming redraws.
+fn settled_entry_boundary_from(state: &AppState, turns: &[TranscriptTurn], start: usize) -> usize {
     let len = state.transcript.len();
     if len == 0 {
         return 0;
     }
+    let start = start.min(len - 1);
     let mut boundary = len - 1;
-    for (index, entry) in state.transcript.iter().enumerate().rev() {
+    for (offset, entry) in state.transcript[start..].iter().enumerate().rev() {
+        let index = start + offset;
         if matches!(entry, Entry::Plan(_)) {
             boundary = boundary.min(index);
             break;
         }
     }
-    for (index, entry) in state.transcript.iter().enumerate().rev() {
+    for (offset, entry) in state.transcript[start..].iter().enumerate().rev() {
+        let index = start + offset;
         if matches!(entry, Entry::SubagentPlan(_)) {
             boundary = boundary.min(index);
             break;
@@ -9268,6 +9422,9 @@ fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
         boundary = boundary.min(index);
     }
     for (position, turn) in turns.iter().enumerate() {
+        if turn.end <= start {
+            continue;
+        }
         if turn.prompt_index >= boundary {
             break;
         }
@@ -9282,11 +9439,14 @@ fn settled_entry_boundary(state: &AppState, turns: &[TranscriptTurn]) -> usize {
             break;
         }
     }
-    state.transcript[..boundary]
+    if boundary <= start {
+        return boundary;
+    }
+    state.transcript[start..boundary]
         .iter()
         .enumerate()
-        .find(|&(index, entry)| !transcript_entry_settles_naturally(state, index, entry))
-        .map_or(boundary, |(index, _)| index)
+        .find(|&(offset, entry)| !transcript_entry_settles_naturally(state, start + offset, entry))
+        .map_or(boundary, |(offset, _)| start + offset)
 }
 
 /// Build the chat pane's transcript cache, reusing and extending the settled
@@ -9303,16 +9463,30 @@ fn build_chat_transcript_cache(
     if search_query.is_some() {
         return build_transcript_cache(state, width, revision, search_query, false);
     }
-    let turns = transcript_turns(state);
-    let boundary = settled_entry_boundary(state, &turns);
     let epoch = state.settled_render_epoch();
     if prefix
         .as_ref()
-        .is_some_and(|p| p.epoch != epoch || p.width != width || p.entries > boundary)
+        .is_some_and(|p| p.epoch != epoch || p.width != width)
     {
         *prefix = None;
     }
-    let rendered_entries = prefix.as_ref().map_or(0, |p| p.entries);
+
+    // The prefix is immutable until its epoch changes. Recompute turn
+    // structure only for the unrendered suffix so frequent terminal snapshots
+    // cannot make spinner animation depend on the whole transcript length.
+    let (rendered_entries, turns, boundary) = loop {
+        let rendered_entries = prefix.as_ref().map_or(0, |p| p.entries);
+        let turns = transcript_turns_from(state, rendered_entries);
+        let boundary = settled_entry_boundary_from(state, &turns, rendered_entries);
+        if prefix.as_ref().is_some_and(|p| p.entries > boundary) {
+            // An unexpected invalidation below the cached boundary is safest
+            // handled as a one-time full rebuild. Normal stream updates only
+            // ever extend this prefix.
+            *prefix = None;
+            continue;
+        }
+        break (rendered_entries, turns, boundary);
+    };
     if rendered_entries < boundary {
         let new_lines = render_transcript_entry_range_with_turns(
             state,
@@ -13006,7 +13180,10 @@ fn workflow_progress_line(
     let failed = workflow.failed_count();
     let cancelled = workflow.cancelled_count();
     if workflow.coverage == WorkflowCoverage::Degraded {
-        details.push("degraded coverage".to_string());
+        details.push(match workflow.coverage_error() {
+            Some(error) => format!("verification: {error}"),
+            None => "degraded coverage".to_string(),
+        });
     }
     if failed > 0 {
         details.push(format!("{failed} failed"));
@@ -14453,6 +14630,12 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_section_line("General", theme),
         help_binding_line("Ctrl-N", "new session", theme),
         help_binding_line("Ctrl-O", "load session", theme),
+        help_binding_line("/model", "change the active session model", theme),
+        help_binding_line(
+            "/effort",
+            "change the active session reasoning effort",
+            theme,
+        ),
         help_binding_line(
             "Shift-Tab",
             "switch between Codex, Claude, and the two coder/reviewer pairings",
@@ -15303,6 +15486,14 @@ mod tests {
                 ),
             },
         );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::CoverageChanged {
+                coverage: WorkflowCoverage::Degraded,
+                error: Some("claude-acp: authentication expired".to_string()),
+            },
+        );
         state.open_review_issue_viewer();
 
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
@@ -15314,6 +15505,10 @@ mod tests {
         assert!(rendered.contains("caller reuses this entry"), "{rendered}");
         assert!(
             rendered.contains("corrected — verification pending"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("claude-acp: authentication expired"),
             "{rendered}"
         );
         assert!(
@@ -15552,9 +15747,10 @@ mod tests {
         AvailableCommand, ContentBlock, ContentChunk, ElicitationFormMode, ElicitationId,
         ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,
         EnumOption, PermissionOption, PermissionOptionKind, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId,
-        SessionUpdate, StopReason, StringPropertySchema, TerminalExitStatus, TextContent, ToolCall,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        PlanEntryStatus, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
+        StringPropertySchema, TerminalExitStatus, TextContent, ToolCall, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -17090,6 +17286,7 @@ mod tests {
             workflow_id,
             WorkflowTransition::CoverageChanged {
                 coverage: WorkflowCoverage::Degraded,
+                error: Some("reviewer exited: authentication expired".to_string()),
             },
         );
 
@@ -17104,7 +17301,10 @@ mod tests {
         assert!(rendered.contains("reviewers 2/3"), "{rendered}");
         assert!(rendered.contains("1 waiting"), "{rendered}");
         assert!(rendered.contains("1 failed"), "{rendered}");
-        assert!(rendered.contains("degraded coverage"), "{rendered}");
+        assert!(
+            rendered.contains("verification: reviewer exited: authentication expired"),
+            "{rendered}"
+        );
 
         let backend = TestBackend::new(22, 1);
         let mut narrow = Terminal::new(backend).expect("terminal");
@@ -17144,7 +17344,7 @@ mod tests {
             state.visible_workflows().next().expect("workflow"),
             "⠋",
             Duration::ZERO,
-            120,
+            180,
             state.theme,
             true,
         );
@@ -17162,7 +17362,7 @@ mod tests {
             state.visible_workflows().next().expect("terminal workflow"),
             "⠋",
             Duration::ZERO,
-            120,
+            180,
             state.theme,
             true,
         );
@@ -18749,6 +18949,90 @@ mod tests {
     }
 
     #[test]
+    fn slash_model_updates_the_active_session_without_starting_a_new_one() {
+        let mut state = ready_state_with_session();
+        let session_id = state.session_id.clone();
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "model".into(),
+        }];
+        state.input = "/model".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.config_picker.is_some(), "model picker should be open");
+        assert!(state.input.is_empty(), "command should be consumed");
+        assert_eq!(state.session_id, session_id);
+        assert_eq!(state.exit_reason, None);
+        assert!(cmd_rx.try_recv().is_err(), "picking is local");
+
+        state.config_picker_move(1);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "model" && value.to_string() == "model-2"
+        ));
+        assert_eq!(state.session_id, session_id);
+        assert_eq!(state.exit_reason, None);
+    }
+
+    #[test]
+    fn slash_effort_uses_the_adapter_reasoning_effort_selector() {
+        let mut state = ready_state_with_session();
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                crate::acp::REASONING_EFFORT_CONFIG_ID,
+                "Reasoning effort",
+                "medium",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("medium", "Medium"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            // Codex tags this selector as `Model`, so `/effort` must use its
+            // stable config id instead of relying only on the category.
+            .category(SessionConfigOptionCategory::Model),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: crate::acp::REASONING_EFFORT_CONFIG_ID.into(),
+        }];
+        state.input = "/effort".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+        state.config_picker_move(1);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == crate::acp::REASONING_EFFORT_CONFIG_ID
+                && value.to_string() == "high"
+        ));
+        assert!(state.session_id.is_some());
+        assert_eq!(state.exit_reason, None);
+    }
+
+    #[test]
     fn slash_diff_opens_workspace_viewer_without_queueing_while_busy() {
         let mut state = AppState::new();
         state.record_user_prompt("active".to_string());
@@ -19113,7 +19397,7 @@ mod tests {
         )];
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        persist_mjconfig_selection(&mut state, &cmd_tx, config);
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
         let server = state
             .acp_inventory
@@ -19128,7 +19412,8 @@ mod tests {
     fn saving_mjconfig_updates_the_live_primary_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        let mut config = config::Config::default();
+        let initial_config = config::Config::default();
+        let mut config = initial_config.clone();
         config
             .agent
             .session_defaults
@@ -19153,7 +19438,7 @@ mod tests {
         }];
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-        persist_mjconfig_selection(&mut state, &cmd_tx, config);
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
 
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -19161,6 +19446,125 @@ mod tests {
                 target: SessionConfigTarget::ConfigOption { config_id },
                 value,
             }) if config_id.to_string() == "service_tier" && value.to_string() == "priority"
+        ));
+    }
+
+    #[test]
+    fn saving_mjconfig_does_not_reset_live_reasoning_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config
+            .agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:thinking".to_string(), "medium".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "thinking",
+                "Thinking",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("medium", "Thinking: medium"),
+                    SessionConfigSelectOption::new("high", "Thinking: high"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::LegacyMode];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "saving a default must not overwrite the active session's effort"
+        );
+    }
+
+    #[test]
+    fn saving_mjconfig_updates_changed_live_reasoning_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        initial_config.agent.acp_source = Some("codex-acp".to_string());
+        initial_config.agent.reasoning_effort = Some("medium".to_string());
+        let mut config = initial_config.clone();
+        config.agent.reasoning_effort = Some("high".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "thinking",
+                "Thinking",
+                "medium",
+                vec![
+                    SessionConfigSelectOption::new("medium", "Thinking: medium"),
+                    SessionConfigSelectOption::new("high", "Thinking: high"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::LegacyMode];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::LegacyMode,
+                value,
+            }) if value.to_string() == "high"
+        ));
+    }
+
+    #[test]
+    fn saving_mjconfig_updates_changed_primary_model_with_the_adapter_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        initial_config.agent.acp_source = Some("claude-acp".to_string());
+        initial_config.agent.model = "claude-sonnet-4-6".to_string();
+        let mut config = initial_config.clone();
+        config.agent.model = "claude-opus-4-8".to_string();
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "sonnet",
+                vec![
+                    SessionConfigSelectOption::new("sonnet", "Sonnet").description("Sonnet 4.6"),
+                    SessionConfigSelectOption::new("opus", "Opus")
+                        .description("Opus 4.8 with 1M context"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "model".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "model" && value.to_string() == "opus"
         ));
     }
 
@@ -22969,7 +23373,7 @@ mod tests {
         let turns = transcript_turns(&state);
         // Only the trailing entry stays live once every turn has settled.
         assert_eq!(
-            settled_entry_boundary(&state, &turns),
+            settled_entry_boundary_from(&state, &turns, 0),
             state.transcript.len() - 1
         );
 
@@ -22980,12 +23384,15 @@ mod tests {
             text_chunk("streaming answer"),
         )));
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), active_prompt);
+        assert_eq!(
+            settled_entry_boundary_from(&state, &turns, 0),
+            active_prompt
+        );
 
         // An entry paced by the reveal controller renders a growing slice.
         assert!(state.set_stream_visible_bytes(1, 4));
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), 1);
+        assert_eq!(settled_entry_boundary_from(&state, &turns, 0), 1);
         assert!(state.clear_stream_visible_bytes(1));
 
         // The newest Plan entry is replaced in place by later plan updates,
@@ -23002,7 +23409,7 @@ mod tests {
             usage: None,
         });
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), plan_index);
+        assert_eq!(settled_entry_boundary_from(&state, &turns, 0), plan_index);
     }
 
     #[test]
@@ -23116,6 +23523,100 @@ mod tests {
     }
 
     #[test]
+    fn chat_cache_projects_only_the_live_turn_for_terminal_updates() {
+        let mut state = settled_turns_state(24);
+        state.record_user_prompt("run the complete test suite".to_string());
+        let active_prompt = state.transcript.len() - 1;
+        insert_running_terminal_tool_call(&mut state, "live-tests", "cargo test");
+
+        let width = 72;
+        let mut prefix = None;
+        build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let frozen_entries = prefix.as_ref().expect("prefix populated").entries;
+        assert_eq!(frozen_entries, active_prompt);
+        assert_eq!(
+            transcript_turns_from(&state, frozen_entries).len(),
+            1,
+            "terminal snapshots must not re-project settled history"
+        );
+
+        state.apply_event(UiEvent::TerminalOutput(
+            crate::event::TerminalOutputSnapshot {
+                terminal_id: "live-tests-terminal".to_string(),
+                output: (1..=20)
+                    .map(|line| format!("test ui::case_{line} ... ok"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                truncated: false,
+                exit_status: None,
+            },
+        ));
+        reset_turn_projection_entries();
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        assert_eq!(
+            turn_projection_entries(),
+            state.transcript.len() - frozen_entries,
+            "terminal snapshots must project only the unfrozen live suffix"
+        );
+        let (_, full_rows) = wrapped_row_starts(&render_transcript_lines(&state, width), width);
+        assert_eq!(cache.line_count, full_rows);
+        assert_eq!(prefix.as_ref().expect("prefix").entries, frozen_entries);
+    }
+
+    #[test]
+    fn chat_cache_rebuilds_when_discrete_review_reopens_a_completed_turn() {
+        let mut state = settled_turns_state(1);
+        let width = 72;
+        let mut prefix = None;
+        build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        let frozen_entries = prefix.as_ref().expect("prefix populated").entries;
+        assert!(frozen_entries > 0);
+
+        state.apply_event(UiEvent::InternalMessage(InternalMessage {
+            source: "orchestrator".to_string(),
+            target: "primary".to_string(),
+            kind: crate::event::InternalMessageKind::DiscreteReview,
+            text: "review the completed turn".to_string(),
+            owner_subagent_id: None,
+        }));
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("review is starting"),
+        )));
+
+        let cache = build_chat_transcript_cache(
+            &state,
+            width,
+            state.transcript_revision(),
+            None,
+            &mut prefix,
+        );
+        assert!(
+            prefix.is_none(),
+            "the stale prefix must be dropped instead of slicing it backward"
+        );
+        let (_, full_rows) = wrapped_row_starts(&render_transcript_lines(&state, width), width);
+        assert_eq!(cache.line_count, full_rows);
+    }
+
+    #[test]
     fn fullscreen_transcript_draw_extends_the_prefix_like_a_fresh_render() {
         let mut state = settled_turns_state(3);
         state.record_user_prompt("active".to_string());
@@ -23172,7 +23673,10 @@ mod tests {
         // time to the turn header.
         state.record_steered_prompt("sorry, make it v2".to_string(), Vec::new());
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), running_prompt);
+        assert_eq!(
+            settled_entry_boundary_from(&state, &turns, 0),
+            running_prompt
+        );
 
         let (width, height) = (60u16, 16u16);
         let mut scroll = TranscriptScrollState::default();
@@ -23227,7 +23731,7 @@ mod tests {
             &state.transcript[tool_index]
         ));
         let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary(&state, &turns), tool_index);
+        assert_eq!(settled_entry_boundary_from(&state, &turns, 0), tool_index);
     }
 
     #[test]
@@ -26813,6 +27317,20 @@ mod tests {
         ] {
             assert!(help.contains(expected), "missing {expected:?}:\n{help}");
         }
+    }
+
+    #[test]
+    fn help_advertises_live_model_and_effort_controls() {
+        let help = general_help_lines(false, TerminalThemeKind::Adaptive.palette())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(help.contains("/model"));
+        assert!(help.contains("active session model"));
+        assert!(help.contains("/effort"));
+        assert!(help.contains("active session reasoning effort"));
     }
 
     #[test]

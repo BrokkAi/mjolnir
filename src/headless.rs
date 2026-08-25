@@ -236,22 +236,35 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             max_correction_rounds: app_config.agent.max_correction_rounds,
             primary_model: Some(primary.model.model.clone()),
             review_root: cfg.cwd.clone(),
-            review_fanout: review_workers
-                .zip(review_supervisor)
-                .map(|(workers, supervisor)| {
-                    crate::discrete_review::live_spawner(crate::discrete_review::FanoutConfig {
-                        workers,
-                        supervisor,
-                        cwd: cfg.cwd.clone(),
-                        additional_directories: cfg.additional_directories.clone(),
-                        session_tag: Some(format!("headless-{}", std::process::id())),
-                        agent_stderr: cfg.agent_stderr.clone(),
-                        snapshot_exclusions: cfg.snapshot_exclusions.clone(),
-                        fs_max_text_bytes: cfg.fs_max_text_bytes,
-                        permission: review_permission,
-                        id_allocator: subagent_ids.clone(),
-                    })
-                }),
+            review_fanout: match (review_workers, review_supervisor) {
+                (Some(workers), Some(supervisor)) => {
+                    mj_core::orchestrator::ReviewFanout::available(
+                        crate::discrete_review::live_spawner(
+                            crate::discrete_review::FanoutConfig {
+                                workers,
+                                supervisor,
+                                cwd: cfg.cwd.clone(),
+                                additional_directories: cfg.additional_directories.clone(),
+                                session_tag: Some(format!("headless-{}", std::process::id())),
+                                agent_stderr: cfg.agent_stderr.clone(),
+                                snapshot_exclusions: cfg.snapshot_exclusions.clone(),
+                                fs_max_text_bytes: cfg.fs_max_text_bytes,
+                                permission: review_permission,
+                                id_allocator: subagent_ids.clone(),
+                            },
+                        ),
+                    )
+                }
+                (workers, supervisor) => {
+                    mj_core::orchestrator::ReviewFanout::unavailable(crate::review_fanout_error(
+                        workers.is_some(),
+                        supervisor.is_some(),
+                        &app_config.subagents.model,
+                        app_config.agent.discrete_review,
+                        &resolved.warnings,
+                    ))
+                }
+            },
         },
     );
     let primary_orchestrator = orchestrated.handle.clone();

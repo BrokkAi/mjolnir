@@ -65,9 +65,8 @@ jobs:
           # instead of against the registry, where this version does not exist
           # until the publish job.
           cargo package --locked --workspace
-          # `cargo package` verifies the root without `desktop-app`, so build
-          # the feature explicitly to validate that composition too.
-          cargo build --locked -p brokk-mjolnir --features desktop-app
+          # Build the normal desktop CLI after package verification.
+          cargo build --locked -p brokk-mjolnir
 
       - uses: actions/upload-artifact@v7
         with:

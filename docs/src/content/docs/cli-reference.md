@@ -35,6 +35,7 @@ mj memory list
 mj memory add [--global] "one short fact"
 mj memory forget m7
 mj memory clear --yes
+mj app [--history-days DAYS]
 mj server [--hostname HOST] [--no-tailscale-detect] [--port PORT]
 ```
 

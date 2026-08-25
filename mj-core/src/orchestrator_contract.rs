@@ -402,6 +402,29 @@ impl ReviewSpawner {
     }
 }
 
+/// The resolved plan for a specialist review. A review may only fall back
+/// after its source has supplied the error that prevented the fan-out.
+#[derive(Clone, Debug)]
+pub enum ReviewFanout {
+    Available(ReviewSpawner),
+    Unavailable(String),
+}
+
+impl ReviewFanout {
+    pub const fn available(spawner: ReviewSpawner) -> Self {
+        Self::Available(spawner)
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        assert!(
+            !reason.trim().is_empty(),
+            "an unavailable review fan-out must include its root error"
+        );
+        Self::Unavailable(reason)
+    }
+}
+
 pub fn review_section_limits(trajectory_len: usize, diff_len: usize) -> (usize, usize) {
     const TOTAL: usize = 128 * 1024;
     const TRAJECTORY_SHARE: usize = 32 * 1024;

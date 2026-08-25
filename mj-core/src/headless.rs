@@ -157,6 +157,8 @@ pub struct WorkflowStreamRecord {
     requires_user_action: bool,
     coverage: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     actor_id: Option<String>,
@@ -702,6 +704,7 @@ fn workflow_stream_record(
         remaining,
         requires_user_action,
         coverage: state.coverage.as_str(),
+        coverage_error: state.coverage_error(),
         outcome: state.outcome.map(|outcome| outcome.as_str()),
         actor_id,
         actor_role,
@@ -1876,6 +1879,7 @@ mod tests {
             (
                 WorkflowTransition::CoverageChanged {
                     coverage: WorkflowCoverage::Complete,
+                    error: None,
                 },
                 "coverage_changed",
             ),
@@ -1909,6 +1913,45 @@ mod tests {
             let record = record_json(&workflow_stream_record(&event, &workflows).unwrap());
             assert_eq!(record["transition"], expected);
         }
+    }
+
+    #[test]
+    fn workflow_stream_record_preserves_the_degraded_coverage_error() {
+        use crate::workflow::{
+            WorkflowCoverage, WorkflowEvent, WorkflowId, WorkflowKind, WorkflowPhase,
+            WorkflowStage, WorkflowStore, WorkflowTransition,
+        };
+
+        let workflow_id = WorkflowId::review(82);
+        let mut workflows = WorkflowStore::default();
+        handle_workflow_event(
+            OutputFormat::StreamJson,
+            &mut workflows,
+            WorkflowEvent::new(
+                workflow_id,
+                WorkflowTransition::Started {
+                    kind: WorkflowKind::Review,
+                    stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+                },
+            ),
+        )
+        .expect("start workflow");
+        let event = WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::CoverageChanged {
+                coverage: WorkflowCoverage::Degraded,
+                error: Some("claude-acp: authentication expired".to_string()),
+            },
+        );
+        handle_workflow_event(OutputFormat::StreamJson, &mut workflows, event.clone())
+            .expect("record coverage error");
+
+        let record = record_json(&workflow_stream_record(&event, &workflows).unwrap());
+        assert_eq!(record["coverage"], "degraded");
+        assert_eq!(
+            record["coverage_error"],
+            "claude-acp: authentication expired"
+        );
     }
 
     #[test]

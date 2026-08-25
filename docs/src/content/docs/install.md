@@ -106,6 +106,19 @@ archive or Cargo.
 
 ### crates.io
 
+On Linux, Cargo installations need WebKitGTK 4.1 development files for the
+default `mj app` desktop shell. Installing the voice worker also needs ALSA
+development files:
+
+```bash
+# Ubuntu or Debian
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev libasound2-dev
+
+# Fedora
+sudo dnf install webkit2gtk4.1-devel alsa-lib-devel
+```
+
 Install the terminal client and voice worker together on desktop:
 
 ```bash
@@ -124,9 +137,8 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-The default terminal build needs no WebView development package. To compile
-the optional `desktop-app` feature used for native desktop-shell development
-on macOS, install Apple's Command Line Tools. The shell uses the WebKit
+The default desktop build includes the native WebView shell. On macOS, install
+Apple's Command Line Tools. The shell uses the WebKit
 framework included in the macOS SDK:
 
 ```bash
@@ -149,12 +161,13 @@ expected by Wry; `webkitgtk6.0-devel` is the incompatible GTK 4 API. Build the
 feature with:
 
 ```bash
-cargo build --release --features desktop-app
+cargo build --release
 ```
 
-The default terminal client only needs Rust. On Linux, the optional desktop
-shell needs WebKitGTK and the voice worker needs ALSA development files. On
-macOS, both use frameworks from the SDK installed with the Command Line Tools.
+On Linux, the desktop shell needs WebKitGTK and the voice worker needs ALSA
+development files. On macOS, both use frameworks from the SDK installed with
+the Command Line Tools. On Windows, the desktop shell uses the system WebView2
+runtime.
 See
 [CONTRIBUTING.md](https://github.com/BrokkAi/mjolnir/blob/master/CONTRIBUTING.md)
 for voice prerequisites and the full validation matrix.

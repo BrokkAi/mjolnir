@@ -71,6 +71,27 @@ automatically and the server is reachable over the tailnet; `--hostname` exposes
 the server under an explicit name instead. On start, `mj server` prints the URL
 to open, the six-digit viewer code, and the viewer session lifetime.
 
+## Open the native desktop app
+
+```bash
+mj app
+```
+
+`mj app` opens the same viewer in a native window and starts its own loopback
+listener. The first app tries port 11922; further app instances take the next
+available port. Each listener registers in the shared session database and
+heartbeats once per minute. Terminal sessions query that registry as part of
+their normal remote-control requests: they use a live `mj server` first, then
+the most recently heartbeating app. If an endpoint has died but its row has not
+expired yet, they try the next live candidate; rows from crashed processes age
+out after two minutes.
+
+The app is deliberately local-only. It does not replace `mj server`, so a
+server with Tailscale or an explicit hostname remains the primary browser and
+remote-device entry point. All local endpoints use the same session database,
+bearer token, and stable loopback TLS identity, so starting or stopping either
+one does not fork session state.
+
 ## Choose a port
 
 ```bash
@@ -79,9 +100,9 @@ mj server --port 9443
 
 `--port` moves every listener, the printed viewer URL, and the login QR code to
 that port. It applies to automatic Tailscale and explicit `--hostname` mode as
-well. The running server records its port next to its certificate and token, so
-`mj` sessions on the same machine follow a non-default choice without needing
-the flag themselves. Until a server publishes a port, sessions use 11921.
+well. A live server remains the local terminal clients' first choice regardless
+of its port; they otherwise use a live `mj app` listener from the shared
+registry.
 
 Sign in with that viewer code or a bearer login token; the browser then stores a
 signed session cookie. Treat QR codes, login URLs, tokens, cookies, certificate

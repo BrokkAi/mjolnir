@@ -230,6 +230,13 @@ impl RootServerSessionManager {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_bound(&self) -> bool {
+        self.launch
+            .read()
+            .is_ok_and(|launch| launch.binding.is_bound())
+    }
+
     fn with_binding(
         binding: ServerSessionBinding,
         config_hash: Option<u64>,
@@ -647,26 +654,50 @@ fn start_server_agent_session(
                 .as_ref()
                 .map(|resolved| resolved.primary.model.model.clone()),
             review_root: provenance_cwd.clone(),
-            review_fanout: review_workers
-                .zip(
-                    roster
-                        .as_ref()
-                        .and_then(|resolved| resolved.review_supervisor.clone()),
-                )
-                .map(|(workers, supervisor)| {
-                    crate::discrete_review::live_spawner(crate::discrete_review::FanoutConfig {
-                        workers,
-                        supervisor,
-                        cwd: provenance_cwd.clone(),
-                        additional_directories: review_additional_directories,
-                        session_tag: Some(auxiliary_session_tag.clone()),
-                        agent_stderr: None,
-                        snapshot_exclusions: snapshot_exclusions.clone(),
-                        fs_max_text_bytes,
-                        permission: app_config.review.permission,
-                        id_allocator: subagent_ids.clone(),
-                    })
-                }),
+            review_fanout: match (
+                review_workers,
+                roster
+                    .as_ref()
+                    .and_then(|resolved| resolved.review_supervisor.clone()),
+            ) {
+                (Some(workers), Some(supervisor)) => {
+                    mj_core::orchestrator::ReviewFanout::available(
+                        crate::discrete_review::live_spawner(
+                            crate::discrete_review::FanoutConfig {
+                                workers,
+                                supervisor,
+                                cwd: provenance_cwd.clone(),
+                                additional_directories: review_additional_directories,
+                                session_tag: Some(auxiliary_session_tag.clone()),
+                                agent_stderr: None,
+                                snapshot_exclusions: snapshot_exclusions.clone(),
+                                fs_max_text_bytes,
+                                permission: app_config.review.permission,
+                                id_allocator: subagent_ids.clone(),
+                            },
+                        ),
+                    )
+                }
+                (workers, supervisor) => {
+                    let error = roster.as_ref().map_or_else(
+                        || {
+                            roster_setup_error.clone().unwrap_or_else(|| {
+                                "the remote session has no resolved review roster".to_string()
+                            })
+                        },
+                        |resolved| {
+                            crate::review_fanout_error(
+                                workers.is_some(),
+                                supervisor.is_some(),
+                                &app_config.subagents.model,
+                                app_config.agent.discrete_review,
+                                &resolved.warnings,
+                            )
+                        },
+                    );
+                    mj_core::orchestrator::ReviewFanout::unavailable(error)
+                }
+            },
         },
     );
     let primary_orchestrator = orchestrated.handle.clone();
@@ -860,29 +891,43 @@ fn start_server_agent_session(
                         if let Some(home) = codex_home {
                             command_subagent_codex_homes.push(home);
                         }
-                        let review_fanout = pool.zip(updated_roster.review_supervisor.clone()).map(
-                            |(workers, supervisor)| {
-                                crate::discrete_review::live_spawner(
-                                    crate::discrete_review::FanoutConfig {
-                                        workers,
-                                        supervisor,
-                                        cwd: side_cwd.clone(),
-                                        additional_directories:
-                                            command_review_additional_directories.clone(),
-                                        session_tag: Some(
-                                            command_live_subagent_options.session_tag.clone(),
-                                        ),
-                                        agent_stderr: None,
-                                        snapshot_exclusions: command_snapshot_exclusions.clone(),
-                                        fs_max_text_bytes,
-                                        permission: updated_config.review.permission,
-                                        id_allocator: command_live_subagent_options
-                                            .id_allocator
-                                            .clone(),
-                                    },
+                        let review_fanout = match (pool, updated_roster.review_supervisor.clone()) {
+                            (Some(workers), Some(supervisor)) => {
+                                mj_core::orchestrator::ReviewFanout::available(
+                                    crate::discrete_review::live_spawner(
+                                        crate::discrete_review::FanoutConfig {
+                                            workers,
+                                            supervisor,
+                                            cwd: side_cwd.clone(),
+                                            additional_directories:
+                                                command_review_additional_directories.clone(),
+                                            session_tag: Some(
+                                                command_live_subagent_options.session_tag.clone(),
+                                            ),
+                                            agent_stderr: None,
+                                            snapshot_exclusions: command_snapshot_exclusions
+                                                .clone(),
+                                            fs_max_text_bytes,
+                                            permission: updated_config.review.permission,
+                                            id_allocator: command_live_subagent_options
+                                                .id_allocator
+                                                .clone(),
+                                        },
+                                    ),
                                 )
-                            },
-                        );
+                            }
+                            (workers, supervisor) => {
+                                mj_core::orchestrator::ReviewFanout::unavailable(
+                                    crate::review_fanout_error(
+                                        workers.is_some(),
+                                        supervisor.is_some(),
+                                        &updated_config.subagents.model,
+                                        updated_config.agent.discrete_review,
+                                        &updated_roster.warnings,
+                                    ),
+                                )
+                            }
+                        };
                         primary_orchestrator.set_review_fanout(review_fanout);
                         primary_orchestrator
                             .set_review_enabled(updated_config.agent.discrete_review);

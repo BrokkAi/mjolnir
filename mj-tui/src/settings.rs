@@ -724,7 +724,24 @@ impl SettingsEditor {
             choices.push(crate::config::DISABLED_MODEL.to_string());
             seen.insert(crate::config::DISABLED_MODEL.to_string());
         }
-        for choice in self.choices.iter().filter(|choice| choice.available) {
+        // Keep the primary model row on the source selected in this editor.
+        // In particular, selecting a Team before choosing a model must not
+        // re-pin the Team to the adapter of the currently running session.
+        let primary_source = (role == 0 && self.active_models.is_some())
+            .then(|| {
+                self.config
+                    .agent
+                    .acp_source
+                    .clone()
+                    .or_else(|| self.selected_session_source(SessionDefaultsSeat::Primary))
+            })
+            .flatten();
+        for choice in self.choices.iter().filter(|choice| {
+            choice.available
+                && primary_source
+                    .as_deref()
+                    .is_none_or(|source| choice.adapter.as_deref() == Some(source))
+        }) {
             if seen.insert(choice.model.clone()) {
                 choices.push(choice.model.clone());
             }
@@ -2072,7 +2089,8 @@ mod tests {
             "Reasoning effort",
             "value",
             choice(),
-        );
+        )
+        .category(SessionConfigOptionCategory::Model);
         let fast = SessionConfigOption::select("fast_mode", "Fast mode", "value", choice())
             .category(SessionConfigOptionCategory::ModelConfig);
         let service =
@@ -2515,6 +2533,51 @@ mod tests {
                 .model_choices(2)
                 .iter()
                 .any(|choice| choice == "disabled")
+        );
+    }
+
+    #[test]
+    fn primary_model_choices_follow_the_team_selected_source() {
+        let choices = vec![
+            ModelChoice {
+                model: "gpt-5-6-sol".to_string(),
+                pass_at_1: 0.7,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            },
+            ModelChoice {
+                model: "claude-opus-4-8".to_string(),
+                pass_at_1: 0.7,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("claude-acp".to_string()),
+                ranked: true,
+            },
+        ];
+        let mut editor = SettingsEditor::new(Config::default(), choices, None).with_active_models(
+            ModelsConfig {
+                primary: "gpt-5-6-sol".to_string(),
+                primary_source: Some("codex-acp".to_string()),
+                ..ModelsConfig::default()
+            },
+        );
+        TeamPreset::Claude.apply(&mut editor.config);
+
+        assert_eq!(editor.model_choices(0), vec!["auto", "claude-opus-4-8"]);
+        assert_eq!(
+            editor.model_choices(1),
+            vec!["auto", "gpt-5-6-sol", "claude-opus-4-8"]
+        );
+
+        editor.cycle_model(0, 1);
+        assert_eq!(editor.config.agent.model, "claude-opus-4-8");
+        assert_eq!(
+            editor.config.agent.acp_source.as_deref(),
+            Some("claude-acp")
         );
     }
 
