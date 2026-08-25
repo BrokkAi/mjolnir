@@ -5857,10 +5857,8 @@
               const detail = await response.text();
               throw new Error(detail || `HTTP ${response.status}`);
             }
-            historyVisible = true;
-            historyLoaded = false;
-            await refreshSessions();
-            await refreshHistory();
+            await refreshSessions(false);
+            await refreshHistory(true, false);
             statusEl.textContent = "Session archived.";
             return;
           }
@@ -9348,7 +9346,7 @@
 
       /* ---- network ---- */
 
-      async function refreshHistory(render = true) {
+      async function refreshHistory(render = true, revealRoutedArchive = true) {
         if (!authenticated || historyLoading) {
           return;
         }
@@ -9369,7 +9367,7 @@
             return rightTime - leftTime;
           });
           historyLoaded = true;
-          if (archivedSessionById(routeSessionId())) {
+          if (revealRoutedArchive && archivedSessionById(routeSessionId())) {
             historyVisible = true;
           }
         } catch (error) {
@@ -9436,7 +9434,7 @@
         }
       }
 
-      async function refreshSessions() {
+      async function refreshSessions(revealRoutedArchive = true) {
         if (!authenticated) {
           return;
         }
@@ -9463,7 +9461,7 @@
           const missingRouteNeedsHistory = routedMissing
             && (previousLiveIdSet.has(routed) || (!historyLoaded && !historyError));
           if (missingRouteNeedsHistory || (historyVisible && previousLiveIds !== nextLiveIds)) {
-            await refreshHistory(false);
+            await refreshHistory(false, revealRoutedArchive);
           }
           if (!authenticated) {
             return;

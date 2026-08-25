@@ -11967,6 +11967,23 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(viewer.contains("pendingSessionActions"));
     }
 
+    #[test]
+    fn embedded_viewer_archiving_preserves_history_disclosure_state() {
+        let viewer = include_str!("remote_viewer.html");
+        let archive_action_start = viewer
+            .find("      async function runSessionCardAction")
+            .expect("archive action");
+        let archive_action_end = viewer
+            .find("      function updateSessionCard")
+            .expect("archive action boundary");
+        let archive_action = &viewer[archive_action_start..archive_action_end];
+
+        assert!(archive_action.contains("await refreshSessions(false);"));
+        assert!(archive_action.contains("await refreshHistory(true, false);"));
+        assert!(!archive_action.contains("historyVisible = true;"));
+        assert!(!archive_action.contains("historyLoaded = false;"));
+    }
+
     #[tokio::test]
     async fn select_elicitations_track_cards_and_forward_valid_choices() {
         for (tool, choice) in [
