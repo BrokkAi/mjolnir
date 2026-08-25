@@ -39,7 +39,7 @@ contents="$bundle/Contents"
 rm -rf "$bundle"
 mkdir -p "$contents/MacOS"
 sed "s/@VERSION@/${version}/g" \
-  "assets/macos/Mjolnir Computer.app/Contents/Info.plist" \
+  "mj-core/assets/macos/Mjolnir Computer.app/Contents/Info.plist" \
   > "$contents/Info.plist"
 install -m 0755 "target/${cargo_profile}/mj-computer-host" \
   "$contents/MacOS/mj-computer-host"

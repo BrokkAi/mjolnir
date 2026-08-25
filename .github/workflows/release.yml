@@ -297,7 +297,7 @@ jobs:
           cp target/universal-apple-darwin/release/mj "$name/"
           mkdir -p "$name/Mjolnir Computer.app/Contents/MacOS"
           version="${GITHUB_REF_NAME#v}"
-          sed "s/@VERSION@/$version/g" assets/macos/Mjolnir\ Computer.app/Contents/Info.plist > "$name/Mjolnir Computer.app/Contents/Info.plist"
+          sed "s/@VERSION@/$version/g" mj-core/assets/macos/Mjolnir\ Computer.app/Contents/Info.plist > "$name/Mjolnir Computer.app/Contents/Info.plist"
           plutil -lint "$name/Mjolnir Computer.app/Contents/Info.plist"
           cp target/universal-apple-darwin/release/mj-computer-host "$name/Mjolnir Computer.app/Contents/MacOS/"
           bundle="$name/Mjolnir Computer.app"

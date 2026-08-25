@@ -6,8 +6,11 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs,
     future::Future,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -50,6 +53,10 @@ pub const MCP_SERVER_NAME: &str = "mj-computer";
 const MAX_RETAINED_OBSERVATIONS: usize = 32;
 const MAX_WAIT_MILLISECONDS: u64 = 10_000;
 const CONFIG_REVOCATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const COMPUTER_BUNDLE_NAME: &str = "Mjolnir Computer.app";
+const COMPUTER_HOST_NAME: &str = "mj-computer-host";
+const COMPUTER_BUNDLE_INFO_TEMPLATE: &str =
+    include_str!("../assets/macos/Mjolnir Computer.app/Contents/Info.plist");
 const COMPUTER_TOOL_NAMES: [&str; 9] = [
     "computer_click",
     "computer_double_click",
@@ -1147,14 +1154,114 @@ fn computer_bundle_path() -> Result<PathBuf> {
     let executable = executable
         .canonicalize()
         .with_context(|| format!("resolve mj executable {}", executable.display()))?;
-    computer_bundle_path_for_executable(&executable)
+    let bundle = computer_bundle_path_for_executable(&executable)?;
+    materialize_cargo_install_bundle(&executable, &bundle, sign_development_bundle)?;
+    Ok(bundle)
 }
 
 fn computer_bundle_path_for_executable(executable: &Path) -> Result<PathBuf> {
     let parent = executable
         .parent()
         .ok_or_else(|| anyhow::anyhow!("mj executable has no parent: {}", executable.display()))?;
-    Ok(parent.join("Mjolnir Computer.app"))
+    Ok(parent.join(COMPUTER_BUNDLE_NAME))
+}
+
+/// `cargo install` can install the two executables but cannot install an app
+/// bundle. Build the development bundle next to an installed `mj` exactly
+/// once, preserving a preexisting release bundle and its Developer ID
+/// signature.
+fn materialize_cargo_install_bundle(
+    executable: &Path,
+    bundle: &Path,
+    sign_bundle: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    if bundle.is_dir() {
+        return Ok(());
+    }
+    if bundle.exists() {
+        anyhow::bail!(
+            "Mjolnir Computer.app is not a directory at {}; remove the invalid path before enabling Computer Control",
+            bundle.display()
+        );
+    }
+
+    let parent = executable.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "mj executable has no parent for Mjolnir Computer.app: {}",
+            executable.display()
+        )
+    })?;
+    let host = parent.join(COMPUTER_HOST_NAME);
+    if !host.is_file() {
+        anyhow::bail!(
+            "Mjolnir Computer.app is missing at {}, and its sibling {} is unavailable to create it",
+            bundle.display(),
+            host.display()
+        );
+    }
+
+    let staging = tempfile::Builder::new()
+        .prefix("mjolnir-computer-bundle-")
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "create Mjolnir Computer.app beside {}",
+                executable.display()
+            )
+        })?;
+    let staged_bundle = staging.path().join(COMPUTER_BUNDLE_NAME);
+    let contents = staged_bundle.join("Contents");
+    let macos = contents.join("MacOS");
+    fs::create_dir_all(&macos)
+        .with_context(|| format!("create Mjolnir Computer.app at {}", staged_bundle.display()))?;
+    fs::write(
+        contents.join("Info.plist"),
+        COMPUTER_BUNDLE_INFO_TEMPLATE.replace("@VERSION@", env!("CARGO_PKG_VERSION")),
+    )
+    .with_context(|| {
+        format!(
+            "write Mjolnir Computer Info.plist at {}",
+            staged_bundle.display()
+        )
+    })?;
+    let staged_host = macos.join(COMPUTER_HOST_NAME);
+    fs::copy(&host, &staged_host).with_context(|| {
+        format!(
+            "copy installed Mjolnir Computer host from {} to {}",
+            host.display(),
+            staged_host.display()
+        )
+    })?;
+    fs::set_permissions(&staged_host, fs::Permissions::from_mode(0o755)).with_context(|| {
+        format!(
+            "make installed Mjolnir Computer host executable at {}",
+            staged_host.display()
+        )
+    })?;
+    sign_bundle(&staged_bundle)?;
+    fs::rename(&staged_bundle, bundle).with_context(|| {
+        format!(
+            "install Mjolnir Computer.app from {} to {}",
+            staged_bundle.display(),
+            bundle.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sign_development_bundle(bundle: &Path) -> Result<()> {
+    let status = Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-", "--timestamp=none"])
+        .arg(bundle)
+        .status()
+        .with_context(|| format!("ad-hoc sign Mjolnir Computer.app at {}", bundle.display()))?;
+    if !status.success() {
+        anyhow::bail!(
+            "ad-hoc sign Mjolnir Computer.app at {} exited with {status}",
+            bundle.display()
+        );
+    }
+    Ok(())
 }
 
 impl ServerHandler for McpHandler {
@@ -1759,6 +1866,66 @@ mod tests {
         assert_eq!(
             computer_bundle_path_for_executable(Path::new("/opt/mj/mj")).unwrap(),
             PathBuf::from("/opt/mj/Mjolnir Computer.app")
+        );
+    }
+
+    #[test]
+    fn cargo_install_layout_materializes_a_signed_bundle_from_the_sibling_host() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("mj");
+        let host = temporary.path().join(COMPUTER_HOST_NAME);
+        fs::write(&executable, []).unwrap();
+        fs::write(&host, b"installed computer host").unwrap();
+        let bundle = computer_bundle_path_for_executable(&executable).unwrap();
+
+        materialize_cargo_install_bundle(&executable, &bundle, |staged| {
+            assert!(staged.join("Contents/Info.plist").is_file());
+            assert!(staged.join("Contents/MacOS/mj-computer-host").is_file());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read(bundle.join("Contents/MacOS/mj-computer-host")).unwrap(),
+            b"installed computer host"
+        );
+        let info = fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
+        assert!(info.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!info.contains("@VERSION@"));
+    }
+
+    #[test]
+    fn cargo_install_bundle_materialization_preserves_an_existing_bundle() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("mj");
+        let bundle = computer_bundle_path_for_executable(&executable).unwrap();
+        fs::create_dir(&bundle).unwrap();
+
+        materialize_cargo_install_bundle(&executable, &bundle, |_| {
+            panic!("existing release bundle must not be replaced")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn cargo_install_bundle_materialization_creates_a_verifiable_app_signature() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("mj");
+        let host = temporary.path().join(COMPUTER_HOST_NAME);
+        fs::write(&executable, []).unwrap();
+        fs::copy(std::env::current_exe().unwrap(), &host).unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+        let bundle = computer_bundle_path_for_executable(&executable).unwrap();
+
+        materialize_cargo_install_bundle(&executable, &bundle, sign_development_bundle).unwrap();
+
+        assert!(
+            Command::new("/usr/bin/codesign")
+                .args(["--verify", "--deep", "--strict"])
+                .arg(&bundle)
+                .status()
+                .unwrap()
+                .success()
         );
     }
 }
