@@ -7725,7 +7725,7 @@ fn draw_inline_team_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState)
 fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(Clear, area);
     let content = inline_content_rect(area);
-    if content.width == 0 || content.height < 5 {
+    if content.width == 0 || content.height < 6 {
         return;
     }
 
@@ -7750,6 +7750,11 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         .map(Line::from)
         .collect::<Vec<_>>();
     let detail_height = detail_lines.len().max(1).min(u16::MAX as usize) as u16;
+    let scope_lines = wrap_text_to_width(session_config_picker_scope_notice(state), content.width)
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().ink(state.theme.muted))))
+        .collect::<Vec<_>>();
+    let scope_height = scope_lines.len().max(1).min(u16::MAX as usize) as u16;
     // Score attribution, rendered as its own row just above the footer.
     let legend = model_score_legend(state, option);
     let legend_rows = u16::from(legend.is_some());
@@ -7759,6 +7764,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         .constraints([
             Constraint::Length(1),
             Constraint::Length(detail_height),
+            Constraint::Length(scope_height),
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(legend_rows),
@@ -7776,6 +7782,7 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
         layout[0],
     );
     f.render_widget(Paragraph::new(detail_lines), layout[1]);
+    f.render_widget(Paragraph::new(scope_lines), layout[2]);
 
     let search_text = if picker.search_query.is_empty() {
         "filter:".to_string()
@@ -7784,18 +7791,18 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
     };
     f.render_widget(
         Paragraph::new(search_text).style(Style::default().ink(state.theme.muted)),
-        layout[2],
+        layout[3],
     );
 
     let total = picker.filtered_indices.len();
     if total == 0 {
         f.render_widget(
             Paragraph::new("No matches").style(Style::default().ink(state.theme.muted)),
-            layout[3],
+            layout[4],
         );
     } else {
         let selected = picker.selected_value;
-        let range = centered_visible_range(total, selected, usize::from(layout[3].height));
+        let range = centered_visible_range(total, selected, usize::from(layout[4].height));
         let start = range.start;
         let items = picker.filtered_indices[range]
             .iter()
@@ -7805,17 +7812,17 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
                 let marker = if absolute == selected { ">" } else { " " };
                 let choice = &choices[full_idx];
                 let score = model_choice_score(state, option, choice);
-                let line = config_value_row_text(choice, score.as_deref(), layout[3].width);
-                truncate_line(line, layout[3].width, marker == ">", state.theme)
+                let line = config_value_row_text(choice, score.as_deref(), layout[4].width);
+                truncate_line(line, layout[4].width, marker == ">", state.theme)
             })
             .collect::<Vec<ListItem>>();
-        f.render_widget(List::new(items), layout[3]);
+        f.render_widget(List::new(items), layout[4]);
     }
 
     if let Some(legend) = legend {
         f.render_widget(
             Paragraph::new(legend).style(Style::default().ink(state.theme.muted)),
-            layout[4],
+            layout[5],
         );
     }
 
@@ -7826,8 +7833,16 @@ fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &A
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
-        layout[5],
+        layout[6],
     );
+}
+
+fn session_config_picker_scope_notice(state: &AppState) -> &'static str {
+    if state.config_path.is_some() {
+        "Saved for future sessions on this ACP model route; applied after /mjconfig defaults."
+    } else {
+        "Current-session only: configuration is unavailable, so this selection cannot be saved."
+    }
 }
 
 /// Full-screen inline reader for the entire transcript with all details
@@ -8904,9 +8919,12 @@ fn inline_config_view_line_count(state: &AppState, width: u16) -> usize {
         .clone()
         .unwrap_or_else(|| config_option_current_value_label(option));
     let detail_rows = wrap_text_to_width(&detail, width).len().max(1);
+    let scope_rows = wrap_text_to_width(session_config_picker_scope_notice(state), width)
+        .len()
+        .max(1);
     let option_rows = picker.filtered_indices.len().max(1);
     let legend_rows = usize::from(model_score_legend(state, option).is_some());
-    1 + detail_rows + 1 + option_rows + legend_rows + 1
+    1 + detail_rows + scope_rows + 1 + option_rows + legend_rows + 1
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -14956,7 +14974,6 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
         .clone()
         .unwrap_or_else(|| config_option_current_value_label(option));
     let legend = model_score_legend(state, option);
-    let legend_rows = u16::from(legend.is_some());
     let total = picker.filtered_indices.len();
     let selected = picker.selected_value;
     let rows = 8u16;
@@ -14971,11 +14988,41 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     } else {
         area.height.saturating_sub(4)
     };
-    let height = (desired_rows + 5 + legend_rows).min(max_height);
-    if height < 6 {
+    let width = area.width.saturating_sub(8).min(90);
+    let inner_width = width.saturating_sub(2);
+    if inner_width == 0 {
         return;
     }
-    let width = area.width.saturating_sub(8).min(90);
+    let mut header_lines = wrap_text_to_width(&detail, inner_width)
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    if let Some(legend) = legend {
+        header_lines.extend(
+            wrap_text_to_width(legend, inner_width)
+                .into_iter()
+                .map(|line| {
+                    Line::from(Span::styled(line, Style::default().ink(state.theme.muted)))
+                }),
+        );
+    }
+    header_lines.extend(
+        wrap_text_to_width(session_config_picker_scope_notice(state), inner_width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().ink(state.theme.muted)))),
+    );
+    header_lines.extend(
+        wrap_text_to_width("Enter to apply | Esc cancel", inner_width)
+            .into_iter()
+            .map(Line::from),
+    );
+    let header_rows = header_lines.len().min(u16::MAX as usize) as u16;
+    let max_option_rows = max_height.saturating_sub(header_rows.saturating_add(4));
+    if max_option_rows == 0 {
+        return;
+    }
+    let option_rows = desired_rows.min(max_option_rows);
+    let height = header_rows + option_rows + 4;
     let rect = centered_modal_rect(area, width, height);
 
     f.render_widget(Clear, rect);
@@ -14989,22 +15036,14 @@ fn draw_config_value_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &Ap
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2 + legend_rows),
+            Constraint::Length(header_rows),
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(inner);
 
-    let mut header_lines = vec![Line::from(detail)];
-    if let Some(legend) = legend {
-        header_lines.push(Line::from(Span::styled(
-            legend,
-            Style::default().ink(state.theme.muted),
-        )));
-    }
-    header_lines.push(Line::from("Enter to apply | Esc cancel".to_string()));
-    let header = Paragraph::new(header_lines).wrap(Wrap { trim: false });
+    let header = Paragraph::new(header_lines);
     f.render_widget(header, layout[0]);
 
     // Search input box
@@ -27014,6 +27053,53 @@ mod tests {
             rendered_lines
                 .iter()
                 .any(|line| line.contains("Backspace to clear")),
+            "rendered lines: {rendered_lines:?}"
+        );
+    }
+
+    #[test]
+    fn config_picker_explains_that_changes_persist_on_the_acp_model_route() {
+        let mut state = AppState::new();
+        state.session_config_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "model-1",
+            vec![
+                SessionConfigSelectOption::new("model-1", "Model 1"),
+                SessionConfigSelectOption::new("model-2", "Model 2"),
+            ],
+        )
+        .description(
+            "The connected agent advertised this deliberately long description for its model selector.",
+        )];
+        state.config_path = Some(std::path::PathBuf::from("mj-config.toml"));
+        assert!(state.open_config_value_picker(0));
+
+        let backend = TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_config_value_picker_modal(frame, frame.area(), &state))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let rendered_lines = (0..buffer.area().height)
+            .map(|y| {
+                (0..buffer.area().width)
+                    .map(|x| buffer.cell((x, y)).expect("cell").symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("Saved for future sessions on this ACP model route;")),
+            "rendered lines: {rendered_lines:?}"
+        );
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("after /mjconfig defaults.")),
             "rendered lines: {rendered_lines:?}"
         );
     }
