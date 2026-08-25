@@ -110,8 +110,9 @@ all offer the same four configurations:
 Choosing a team keeps all three model selections on Auto, pins the primary
 seat to the coder, pins the subagent and review seats to the reviewer, enables
 discrete review and subagent failover, and enables the required built-in ACP
-routes. After saving from **Shift+Tab**, start the offered new session to use the
-new team immediately. See [Teams and adversarial review](/teams/).
+routes. After saving from **Shift+Tab**, you can switch primary agents
+immediately; Mjolnir starts the new provider-native session with the complete
+durable session transcript as context. See [Teams and adversarial review](/teams/).
 
 ACP priority lists default to `codex-acp`, then `claude-acp`,
 preserving the automatic behavior of earlier configurations. When a source is

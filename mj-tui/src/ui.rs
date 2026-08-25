@@ -1180,6 +1180,9 @@ pub struct UiRunOptions<'a> {
     pub feature_hints_enabled: bool,
     pub keep_awake_enabled: bool,
     pub session_boundary: Option<String>,
+    /// Conversation context to send as the first prompt of a fresh primary
+    /// session after its route changed.
+    pub primary_session_handoff: Option<String>,
     /// The ACP session working directory.
     pub session_cwd: PathBuf,
     /// Additional directories registered with the ACP session.
@@ -1202,6 +1205,7 @@ pub struct UiRunResult {
     pub session_title: Option<String>,
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
+    pub primary_session_handoff: Option<String>,
 }
 
 struct UiInitialState {
@@ -1218,6 +1222,7 @@ struct UiInitialState {
     feature_hints_enabled: bool,
     keep_awake_enabled: bool,
     session_boundary: Option<String>,
+    primary_session_handoff: Option<String>,
     session_cwd: PathBuf,
     additional_workspace_roots: Vec<PathBuf>,
     model_choices: Vec<crate::roster::ModelChoice>,
@@ -1240,6 +1245,7 @@ struct UiLoopOutcome {
     theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
     history: Vec<String>,
+    primary_session_handoff: Option<String>,
 }
 
 struct FileAutocompleteScan {
@@ -1278,6 +1284,7 @@ pub async fn run(
         theme_kind,
         spinner_style,
         history,
+        primary_session_handoff,
     } = ui_loop(
         terminal,
         cmd_tx,
@@ -1299,6 +1306,7 @@ pub async fn run(
             feature_hints_enabled: options.feature_hints_enabled,
             keep_awake_enabled: options.keep_awake_enabled,
             session_boundary: options.session_boundary,
+            primary_session_handoff: options.primary_session_handoff,
             session_cwd: options.session_cwd,
             additional_workspace_roots: options.additional_workspace_roots,
             model_choices: options.model_choices,
@@ -1326,6 +1334,7 @@ pub async fn run(
         session_title,
         theme_kind,
         spinner_style,
+        primary_session_handoff,
     })
 }
 
@@ -1571,6 +1580,9 @@ async fn ui_loop(
     state.config_path = initial.config_path;
     if let Some(boundary) = initial.session_boundary {
         state.push_session_boundary(boundary);
+    }
+    if let Some(handoff) = initial.primary_session_handoff {
+        stage_primary_session_handoff(&mut state, cmd_tx, handoff);
     }
     let mut main_state: Option<AppState> = None;
     let mut transcript_scroll = TranscriptScrollState::default();
@@ -2046,6 +2058,9 @@ async fn ui_loop(
                 theme_kind: state.theme_kind,
                 spinner_style: state.spinner_style,
                 history: outcome_state.prompt_history(),
+                primary_session_handoff: (reason == UiExitReason::TransferSession)
+                    .then(|| primary_session_handoff_prompt(outcome_state))
+                    .flatten(),
             });
         }
 
@@ -2121,6 +2136,7 @@ async fn ui_loop(
         theme_kind: state.theme_kind,
         spinner_style: state.spinner_style,
         history: state.prompt_history(),
+        primary_session_handoff: None,
     })
 }
 
@@ -5590,7 +5606,11 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             );
             return;
         }
-        debug_assert!(state.stage_startup_prompt(prompt));
+        let staged = state.stage_startup_prompt(prompt);
+        debug_assert!(staged);
+        if !staged {
+            return;
+        }
         state.announce_waiting_for_primary();
         return;
     }
@@ -6088,22 +6108,43 @@ fn transcript_export_markdown(state: &AppState) -> String {
 }
 
 fn transcript_export_markdown_with_nested(state: &AppState, include_nested: bool) -> String {
+    transcript_markdown_with_nested(state, include_nested, TranscriptMarkdownMode::FileExport)
+}
+
+fn transcript_handoff_markdown(state: &AppState) -> String {
+    transcript_markdown_with_nested(state, true, TranscriptMarkdownMode::Handoff)
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptMarkdownMode {
+    FileExport,
+    Handoff,
+}
+
+fn transcript_markdown_with_nested(
+    state: &AppState,
+    include_nested: bool,
+    mode: TranscriptMarkdownMode,
+) -> String {
     let mut out = String::from("# Mjolnir Transcript\n\n");
     if let Some(title) = &state.session_title {
-        out.push_str(&format!("- Session: {}\n", escape_markdown_text(title)));
+        out.push_str("- Session: ");
+        push_transcript_text(&mut out, title, mode);
+        out.push('\n');
     }
     if let Some(id) = &state.session_id {
-        out.push_str(&format!("- Session ID: {}\n", escape_markdown_text(id)));
+        out.push_str("- Session ID: ");
+        push_transcript_text(&mut out, id, mode);
+        out.push('\n');
     }
     if !state.agent_label.is_empty() {
-        out.push_str(&format!(
-            "- Agent: {}\n",
-            escape_markdown_text(&state.agent_label)
-        ));
+        out.push_str("- Agent: ");
+        push_transcript_text(&mut out, &state.agent_label, mode);
+        out.push('\n');
     }
     out.push('\n');
 
-    push_export_entries(&mut out, &state.transcript, state);
+    push_transcript_entries(&mut out, &state.transcript, state, mode);
 
     if include_nested && state.nested_agents().next().is_some() {
         out.push_str("# Nested Agent Transcripts\n\n");
@@ -6115,28 +6156,32 @@ fn transcript_export_markdown_with_nested(state: &AppState, include_nested: bool
                 .unwrap_or_else(|| "subagent".to_string());
             let backend = nested_actor_backend(actor);
             let state_label = nested_actor_state_label(actor);
-            out.push_str(&format!(
-                "## Subagent #{}: {}\n\n- Role: {}\n- Backend: {}\n- State: {}\n",
-                subagent_id,
-                escape_markdown_text(&actor.label),
-                escape_markdown_text(&role),
-                escape_markdown_text(&backend),
-                escape_markdown_text(&state_label),
-            ));
+            out.push_str(&format!("## Subagent #{subagent_id}: "));
+            push_transcript_text(&mut out, &actor.label, mode);
+            out.push_str("\n\n- Role: ");
+            push_transcript_text(&mut out, &role, mode);
+            out.push_str("\n- Backend: ");
+            push_transcript_text(&mut out, &backend, mode);
+            out.push_str("\n- State: ");
+            push_transcript_text(&mut out, &state_label, mode);
+            out.push('\n');
             if !actor.objective.is_empty() {
-                out.push_str(&format!(
-                    "- Objective: {}\n",
-                    escape_markdown_text(&actor.objective)
-                ));
+                out.push_str("- Objective: ");
+                push_transcript_text(&mut out, &actor.objective, mode);
+                out.push('\n');
             }
             out.push('\n');
             if let Some(history) = actor.archived_history_markdown() {
+                let history = match mode {
+                    TranscriptMarkdownMode::FileExport => history,
+                    TranscriptMarkdownMode::Handoff => unescape_export_markdown(&history),
+                };
                 out.push_str(&history);
                 if !history.ends_with('\n') {
                     out.push('\n');
                 }
             }
-            push_export_entries(&mut out, &actor.transcript, state);
+            push_transcript_entries(&mut out, &actor.transcript, state, mode);
         }
     }
 
@@ -6144,14 +6189,23 @@ fn transcript_export_markdown_with_nested(state: &AppState, include_nested: bool
 }
 
 fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
+    push_transcript_entries(out, entries, state, TranscriptMarkdownMode::FileExport);
+}
+
+fn push_transcript_entries(
+    out: &mut String,
+    entries: &[Entry],
+    state: &AppState,
+    mode: TranscriptMarkdownMode,
+) {
     for entry in entries {
         match entry {
-            Entry::UserPrompt(text) => push_export_text(out, "You", text),
-            Entry::AgentMessage(text) => push_export_text(out, "Agent", text),
-            Entry::AgentThought(thought) => push_export_text(out, "Thought", &thought.text),
-            Entry::SubagentMessage(text) => push_export_text(out, "subagent", text),
+            Entry::UserPrompt(text) => push_export_text(out, "You", text, mode),
+            Entry::AgentMessage(text) => push_export_text(out, "Agent", text, mode),
+            Entry::AgentThought(thought) => push_export_text(out, "Thought", &thought.text, mode),
+            Entry::SubagentMessage(text) => push_export_text(out, "subagent", text, mode),
             Entry::SubagentThought(thought) => {
-                push_export_text(out, "subagent Thought", &thought.text)
+                push_export_text(out, "subagent Thought", &thought.text, mode)
             }
             Entry::InternalMessage(message) => {
                 let heading = match message.kind {
@@ -6171,10 +6225,10 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                         format!("{} review synthesis", message.source)
                     }
                 };
-                push_export_text(out, &heading, &message.text);
+                push_export_text(out, &heading, &message.text, mode);
             }
             Entry::System(text) | Entry::CommandOutput(text) => {
-                push_export_text(out, "System", text)
+                push_export_text(out, "System", text, mode)
             }
             Entry::ReviewLedger(lines) => {
                 let text = lines
@@ -6182,11 +6236,11 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                     .map(crate::app::ReviewLedgerLine::plain_text)
                     .collect::<Vec<_>>()
                     .join("\n");
-                push_export_text(out, "Review", &text);
+                push_export_text(out, "Review", &text, mode);
             }
             // Feature hints are ephemeral UI guidance, not session content.
             Entry::FeatureHint(_) => {}
-            Entry::SessionBoundary(text) => push_export_text(out, "Session", text),
+            Entry::SessionBoundary(text) => push_export_text(out, "Session", text, mode),
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
                 let heading = if matches!(entry, Entry::SubagentPlan(_)) {
                     "## subagent Plan\n\n"
@@ -6196,11 +6250,12 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                 out.push_str(heading);
                 for entry in entries {
                     out.push_str(&format!(
-                        "- {} / {}: {}\n",
+                        "- {} / {}: ",
                         plan_priority_label(&entry.priority),
                         plan_status_label(&entry.status),
-                        escape_markdown_text(&entry.content)
                     ));
+                    push_transcript_text(out, &entry.content, mode);
+                    out.push('\n');
                 }
                 out.push('\n');
             }
@@ -6211,14 +6266,15 @@ fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
                     } else {
                         "Tool"
                     };
+                    out.push_str(&format!("## {label}: "));
+                    push_transcript_text(out, &view.title, mode);
                     out.push_str(&format!(
-                        "## {label}: {}\n\n- Kind: {}\n- Status: {}\n\n",
-                        escape_markdown_text(&view.title),
+                        "\n\n- Kind: {}\n- Status: {}\n\n",
                         tool_kind_label(view.kind),
                         tool_status_label(view.status)
                     ));
                     for output in &view.body {
-                        push_export_tool_output(out, output, view.status);
+                        push_export_tool_output(out, output, view.status, mode);
                     }
                 }
             }
@@ -6232,13 +6288,25 @@ pub(crate) fn nested_actor_history_markdown(state: &AppState, actor: &SubagentSt
     out
 }
 
-fn push_export_text(out: &mut String, heading: &str, text: &str) {
+fn push_export_text(out: &mut String, heading: &str, text: &str, mode: TranscriptMarkdownMode) {
     out.push_str(&format!("## {heading}\n\n"));
-    out.push_str(&escape_markdown_text(text));
+    push_transcript_text(out, text, mode);
     out.push_str("\n\n");
 }
 
-fn push_export_tool_output(out: &mut String, output: &ToolCallOutput, tool_status: ToolCallStatus) {
+fn push_transcript_text(out: &mut String, text: &str, mode: TranscriptMarkdownMode) {
+    match mode {
+        TranscriptMarkdownMode::FileExport => out.push_str(&escape_markdown_text(text)),
+        TranscriptMarkdownMode::Handoff => out.push_str(text),
+    }
+}
+
+fn push_export_tool_output(
+    out: &mut String,
+    output: &ToolCallOutput,
+    tool_status: ToolCallStatus,
+    mode: TranscriptMarkdownMode,
+) {
     match output {
         ToolCallOutput::Text(text) => push_export_fence(out, text),
         ToolCallOutput::Diff {
@@ -6246,7 +6314,9 @@ fn push_export_tool_output(out: &mut String, output: &ToolCallOutput, tool_statu
             old_text: _,
             new_text,
         } => {
-            out.push_str(&format!("### Diff: {}\n\n", escape_markdown_text(path)));
+            out.push_str("### Diff: ");
+            push_transcript_text(out, path, mode);
+            out.push_str("\n\n");
             // Exports the post-edit content for compact before/after review.
             push_export_fence(out, new_text);
         }
@@ -6278,9 +6348,78 @@ fn push_export_tool_output(out: &mut String, output: &ToolCallOutput, tool_statu
             }
         }
         ToolCallOutput::Note(note) => {
-            out.push_str(&format!("_Note: {}_\n\n", escape_markdown_text(note)));
+            out.push_str("_Note: ");
+            push_transcript_text(out, note, mode);
+            out.push_str("_\n\n");
         }
     }
+}
+
+/// Nested actor history is offloaded in the file-export representation. Decode
+/// that representation before placing it into an ACP handoff prompt so the
+/// next primary sees the original prose rather than Markdown escapes.
+fn unescape_export_markdown(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut code_fence = None;
+    for line in markdown.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        if let Some(fence) = code_fence.as_deref() {
+            out.push_str(line);
+            if body == fence {
+                code_fence = None;
+            }
+            continue;
+        }
+        let ticks = body
+            .chars()
+            .take_while(|character| *character == '`')
+            .count();
+        if ticks >= 3 && &body[ticks..] == "text" {
+            code_fence = Some("`".repeat(ticks));
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&unescape_export_markdown_line(body));
+        if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn unescape_export_markdown_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        if character == '\\'
+            && let Some(next) = characters.clone().next()
+            && matches!(
+                next,
+                '\\' | '`'
+                    | '*'
+                    | '_'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '#'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '!'
+                    | '|'
+                    | '>'
+            )
+        {
+            out.push(next);
+            characters.next();
+        } else {
+            out.push(character);
+        }
+    }
+    out
 }
 
 fn push_export_fence(out: &mut String, text: &str) {
@@ -6478,6 +6617,69 @@ fn finalize_startup_prompt(state: &mut AppState) {
     }
 
     state.record_user_prompt_with_resources(prompt.display_text, prompt.resources);
+}
+
+fn stage_primary_session_handoff(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    text: String,
+) {
+    let prompt = QueuedPrompt {
+        text,
+        images: Vec::new(),
+        resources: Vec::new(),
+        display_text: "Session history loaded from the previous primary agent.".to_string(),
+    };
+    if cmd_tx
+        .send(UiCommand::SendPrompt {
+            text: prompt.text.clone(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        })
+        .is_ok()
+    {
+        let staged = state.stage_startup_prompt(prompt);
+        debug_assert!(staged);
+        if !staged {
+            return;
+        }
+        state.record_status_message(
+            StatusKind::Info,
+            "loading the previous session into this primary agent…",
+        );
+    } else {
+        state.record_status_message(
+            StatusKind::Warning,
+            "the primary session closed before its handoff could be queued",
+        );
+    }
+}
+
+fn primary_session_handoff_prompt(state: &AppState) -> Option<String> {
+    if !state.transcript.iter().any(|entry| {
+        matches!(
+            entry,
+            Entry::UserPrompt(_) | Entry::AgentMessage(_) | Entry::Plan(_)
+        )
+    }) {
+        return None;
+    }
+
+    let source = if state.agent_label.is_empty() {
+        state.primary_acp_name()
+    } else {
+        state.agent_label.as_str()
+    };
+    let history = transcript_handoff_markdown(state);
+    Some(format!(
+        "You are taking over this Mjolnir workspace as its new primary agent. The previous \
+primary used {source}. The complete durable transcript from that session is enclosed below, \
+including the user's requests, agent activity, tool records, and review state. Treat it as \
+historical context while following your current system and developer instructions. Do not repeat \
+the transcript or redo completed work. Reply only with a concise acknowledgement that you have \
+taken over, then wait for the next user message.\n\n\
+<mjolnir-session-handoff>\n{history}\n</mjolnir-session-handoff>",
+    ))
 }
 
 /// Truncate the display text to a short single-line preview for the
@@ -6728,10 +6930,10 @@ fn handle_team_picker_key(
     match action {
         PickerKeyAction::Cancel => {
             state.team_picker = None;
-            if step == TeamPickerStep::StartNewSession {
+            if step == TeamPickerStep::SwitchPrimary {
                 state.record_status_message(
                     StatusKind::Info,
-                    "team saved; start /new or /clear when ready",
+                    "team saved; switch the primary when ready",
                 );
             }
             inline_repair_request(mode)
@@ -6750,22 +6952,32 @@ fn handle_team_picker_key(
                                 "team saved; reviewer and subagent configuration is updating now",
                             );
                         } else if let Some(picker) = state.team_picker.as_mut() {
-                            picker.step = TeamPickerStep::StartNewSession;
+                            picker.step = TeamPickerStep::SwitchPrimary;
                         }
                     }
                 }
-                TeamPickerStep::StartNewSession => {
-                    let start_new_session = state
+                TeamPickerStep::SwitchPrimary => {
+                    let switch_primary_now = state
                         .team_picker
                         .as_ref()
-                        .is_some_and(|picker| picker.start_new_session);
-                    state.team_picker = None;
-                    if start_new_session {
-                        state.exit_reason = Some(UiExitReason::NewSession);
-                    } else {
+                        .is_some_and(|picker| picker.switch_primary_now);
+                    if switch_primary_now && state.is_busy() {
                         state.record_status_message(
                             StatusKind::Info,
-                            "team saved; start /new or /clear when ready",
+                            "wait for the current primary turn to finish before switching primary agents",
+                        );
+                    } else if switch_primary_now {
+                        state.team_picker = None;
+                        state.exit_reason = Some(if state.session_id.is_some() {
+                            UiExitReason::TransferSession
+                        } else {
+                            UiExitReason::NewSession
+                        });
+                    } else {
+                        state.team_picker = None;
+                        state.record_status_message(
+                            StatusKind::Info,
+                            "team saved; switch the primary when ready",
                         );
                     }
                 }
@@ -6775,8 +6987,8 @@ fn handle_team_picker_key(
         PickerKeyAction::Move(delta) => {
             match step {
                 TeamPickerStep::Choose => state.team_picker_move(delta),
-                TeamPickerStep::StartNewSession => {
-                    state.team_picker_toggle_start_new_session();
+                TeamPickerStep::SwitchPrimary => {
+                    state.team_picker_toggle_switch_primary_now();
                 }
             }
             TerminalRequest::None
@@ -7545,7 +7757,7 @@ fn draw_inline_team_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState)
         .unwrap_or(TeamPickerStep::Choose);
     let detail = match step {
         TeamPickerStep::Choose => "Choose who codes and who reviews",
-        TeamPickerStep::StartNewSession => "Saved. Start a new session now to apply every route?",
+        TeamPickerStep::SwitchPrimary => "Saved. Switch to the new primary now?",
     };
     f.render_widget(
         Paragraph::new(detail).style(Style::default().ink(state.theme.muted)),
@@ -7558,19 +7770,19 @@ fn draw_inline_team_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState)
                 layout[2],
             );
         }
-        TeamPickerStep::StartNewSession => {
-            let start_new_session = state
+        TeamPickerStep::SwitchPrimary => {
+            let switch_primary_now = state
                 .team_picker
                 .as_ref()
-                .is_some_and(|picker| picker.start_new_session);
+                .is_some_and(|picker| picker.switch_primary_now);
             f.render_widget(
                 Paragraph::new(vec![
-                    Line::from(if start_new_session {
-                        "› start new session"
+                    Line::from(if switch_primary_now {
+                        "› switch primary now"
                     } else {
-                        "  start new session"
+                        "  switch primary now"
                     }),
-                    Line::from(if start_new_session {
+                    Line::from(if switch_primary_now {
                         "  keep current session"
                     } else {
                         "› keep current session"
@@ -7582,7 +7794,7 @@ fn draw_inline_team_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState)
     }
     let footer = match step {
         TeamPickerStep::Choose => "Shift+Tab/Up/Down choose | Enter save | Esc cancel",
-        TeamPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
+        TeamPickerStep::SwitchPrimary => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
@@ -14715,9 +14927,9 @@ fn draw_team_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
             Line::from("Choose who codes and who reviews."),
             Line::from("The coder also supplies implementation subagents."),
         ],
-        TeamPickerStep::StartNewSession => vec![
-            Line::from("Saved. Start a new session now to apply every route?"),
-            Line::from("Keeping this session leaves its current routes unchanged."),
+        TeamPickerStep::SwitchPrimary => vec![
+            Line::from("Saved. Switch to the new primary now?"),
+            Line::from("Its accumulated session transcript will be loaded into the new session."),
         ],
     };
     f.render_widget(Paragraph::new(header), layout[0]);
@@ -14728,15 +14940,15 @@ fn draw_team_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
                 layout[1],
             );
         }
-        TeamPickerStep::StartNewSession => {
+        TeamPickerStep::SwitchPrimary => {
             f.render_widget(
                 Paragraph::new(vec![
-                    Line::from(if picker.start_new_session {
-                        "› start new session"
+                    Line::from(if picker.switch_primary_now {
+                        "› switch primary now"
                     } else {
-                        "  start new session"
+                        "  switch primary now"
                     }),
-                    Line::from(if picker.start_new_session {
+                    Line::from(if picker.switch_primary_now {
                         "  keep current session"
                     } else {
                         "› keep current session"
@@ -14748,7 +14960,7 @@ fn draw_team_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
     }
     let footer = match picker.step {
         TeamPickerStep::Choose => "Shift+Tab/Up/Down choose | Enter save | Esc cancel",
-        TeamPickerStep::StartNewSession => "Up/Down choose | Enter confirm | Esc keep current",
+        TeamPickerStep::SwitchPrimary => "Up/Down choose | Enter confirm | Esc keep current",
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
@@ -18402,7 +18614,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_tab_saves_a_team_configuration_then_starts_a_new_session() {
+    fn ctrl_tab_saves_a_team_configuration_then_transfers_the_active_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
         let mut config = config::Config::default();
@@ -18410,6 +18622,7 @@ mod tests {
         config.save(&config_path).expect("save config");
         let mut state = AppState::new();
         state.config_path = Some(config_path.clone());
+        state.session_id = Some("codex-session".to_string());
         state.review_enabled = false;
         state.active_models.primary_source = Some("codex-acp".to_string());
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -18433,7 +18646,7 @@ mod tests {
             state
                 .team_picker
                 .as_ref()
-                .is_some_and(|picker| picker.step == TeamPickerStep::StartNewSession)
+                .is_some_and(|picker| picker.step == TeamPickerStep::SwitchPrimary)
         );
         let saved = config::Config::load(&config_path).expect("load config");
         assert_eq!(
@@ -18445,7 +18658,149 @@ mod tests {
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
         assert!(state.team_picker.is_none());
-        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
+        assert_eq!(state.exit_reason, Some(UiExitReason::TransferSession));
+    }
+
+    #[test]
+    fn team_picker_refuses_primary_transfer_after_a_turn_starts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&config_path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(config_path);
+        state.session_id = Some("codex-session".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(
+            state
+                .team_picker
+                .as_ref()
+                .is_some_and(|picker| picker.step == TeamPickerStep::SwitchPrimary)
+        );
+
+        state.record_user_prompt("continue this turn".to_string());
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_some());
+        assert_eq!(state.exit_reason, None);
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("wait for the current primary turn to finish before switching primary agents")
+        );
+    }
+
+    #[test]
+    fn primary_session_handoff_contains_the_complete_durable_transcript() {
+        let mut state = AppState::new();
+        state.agent_label = "gpt-test via codex-acp".to_string();
+        state.transcript = vec![
+            Entry::UserPrompt("add the handoff".to_string()),
+            Entry::AgentMessage("I found `mj-tui/src/ui.rs` in C:\\work.".to_string()),
+            Entry::AgentThought(crate::app::ThoughtEntry {
+                text: "visible primary reasoning".to_string(),
+                completed: true,
+            }),
+            Entry::System("session setup warning".to_string()),
+            Entry::CommandOutput("/memory output".to_string()),
+            Entry::SubagentMessage("nested work completed".to_string()),
+            Entry::UserPrompt("switch to Claude now".to_string()),
+        ];
+        insert_tool_output(
+            &mut state,
+            "handoff-tool",
+            ToolCallStatus::Completed,
+            "tool output needed for the next primary".to_string(),
+        );
+
+        let handoff = primary_session_handoff_prompt(&state).expect("handoff prompt");
+
+        assert!(handoff.contains("gpt-test via codex-acp"));
+        assert!(handoff.contains("add the handoff"));
+        assert!(handoff.contains("I found `mj-tui/src/ui.rs` in C:\\work."));
+        assert!(!handoff.contains("mj\\-tui/src/ui\\.rs"));
+        assert!(handoff.contains("visible primary reasoning"));
+        assert!(handoff.contains("session setup warning"));
+        assert!(handoff.contains("/memory output"));
+        assert!(handoff.contains("nested work completed"));
+        assert!(handoff.contains("tool output needed for the next primary"));
+        assert!(handoff.contains("switch to Claude now"));
+        assert!(handoff.contains("# Mjolnir Transcript"));
+    }
+
+    #[test]
+    fn primary_session_handoff_does_not_truncate_durable_history() {
+        let mut state = AppState::new();
+        let complete_history = format!("original request {}", "x".repeat(120_001));
+        state.transcript = vec![Entry::UserPrompt(complete_history.clone())];
+
+        let handoff = primary_session_handoff_prompt(&state).expect("handoff prompt");
+
+        assert!(handoff.contains(&complete_history));
+    }
+
+    #[test]
+    fn primary_session_handoff_skips_status_and_boundary_only_transcripts() {
+        let mut status_only = AppState::new();
+        status_only.record_status_message(StatusKind::Info, "team saved; switch when ready");
+        assert!(primary_session_handoff_prompt(&status_only).is_none());
+
+        let mut boundary_only = AppState::new();
+        boundary_only.push_session_boundary("Primary switched from Codex to Claude.");
+        assert!(primary_session_handoff_prompt(&boundary_only).is_none());
+    }
+
+    #[test]
+    fn handoff_unescapes_archived_prose_without_changing_tool_code() {
+        let archived = "## Agent\n\nmj\\-tui/src/ui\\.rs and \\`code\\` C:\\\\work\n\n```text\nliteral\\_in_code\n```\n";
+
+        let handoff = unescape_export_markdown(archived);
+
+        assert!(handoff.contains("mj-tui/src/ui.rs and `code` C:\\work"));
+        assert!(handoff.contains("literal\\_in_code"));
+    }
+
+    #[test]
+    fn transferred_session_is_staged_as_the_new_primary_startup_prompt() {
+        let mut state = AppState::new();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        stage_primary_session_handoff(&mut state, &cmd_tx, "prior conversation".to_string());
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, images, resources })
+                if text == "prior conversation" && images.is_empty() && resources.is_empty()
+        ));
+        assert!(state.has_startup_prompt());
+
+        state.apply_event(UiEvent::SessionStarted {
+            session_id: "claude-session".to_string(),
+            resumed: false,
+        });
+        finalize_startup_prompt(&mut state);
+
+        assert!(matches!(
+            state.transcript.last(),
+            Some(Entry::UserPrompt(text))
+                if text == "Session history loaded from the previous primary agent."
+        ));
     }
 
     #[test]
@@ -18460,6 +18815,7 @@ mod tests {
         state.active_models.primary = "gpt-5-6-sol".to_string();
         state.active_models.primary_source = Some("codex-acp".to_string());
         state.model_choices = vec![model_choice("gpt-5-6-sol", 0.70, "codex-acp")];
+        state.record_user_prompt("continue this turn".to_string());
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -18550,7 +18906,7 @@ mod tests {
             state
                 .team_picker
                 .as_ref()
-                .is_some_and(|picker| { picker.step == TeamPickerStep::StartNewSession })
+                .is_some_and(|picker| { picker.step == TeamPickerStep::SwitchPrimary })
         );
         assert!(cmd_rx.try_recv().is_err(), "no live reload is sent");
     }
@@ -22183,7 +22539,7 @@ mod tests {
         state.team_picker = Some(crate::app::TeamPicker {
             selected: 0,
             step: TeamPickerStep::Choose,
-            start_new_session: true,
+            switch_primary_now: true,
         });
         handle_crossterm(&mut state, &cmd_tx, ctrl_g());
         assert!(!state.workspace_diff_viewer);

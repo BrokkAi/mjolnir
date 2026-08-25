@@ -1436,6 +1436,7 @@ struct RunSessionResult {
     session_title: Option<String>,
     theme_kind: theme::TerminalThemeKind,
     spinner_style: spinner::SpinnerStyle,
+    primary_session_handoff: Option<String>,
 }
 
 async fn start_new_session_loading() -> Option<(CancellationToken, tokio::task::JoinHandle<()>)> {
@@ -1490,6 +1491,7 @@ impl From<ui::UiRunResult> for RunSessionResult {
             session_title: result.session_title,
             theme_kind: result.theme_kind,
             spinner_style: result.spinner_style,
+            primary_session_handoff: result.primary_session_handoff,
         }
     }
 }
@@ -1633,8 +1635,11 @@ async fn run_app(
     let mut initial_agent = initial_agent.or_else(|| Some(primary_agent.clone()));
     let mut pending_new_session_boundary = false;
     let mut pending_models_boundary = None;
+    let mut pending_primary_session_handoff = None;
+    let mut pending_session_title = None;
     loop {
         let resume = initial_resume.take();
+        let primary_session_handoff = pending_primary_session_handoff.take();
         let agent = initial_agent
             .take()
             .unwrap_or_else(|| primary_agent.clone());
@@ -1654,9 +1659,13 @@ async fn run_app(
                 project: project_label.clone(),
                 worktree: worktree_label.clone(),
                 additional_roots: runtime_options.additional_directories.len(),
-                session_title: resume.as_ref().and_then(|target| target.title.clone()),
+                session_title: resume
+                    .as_ref()
+                    .and_then(|target| target.title.clone())
+                    .or_else(|| pending_session_title.take()),
             },
             resume.as_ref().map(|target| target.session_id.clone()),
+            primary_session_handoff,
             mode,
             cfg.theme,
             cfg.spinner,
@@ -1688,6 +1697,38 @@ async fn run_app(
                 if session_result.reason == UiExitReason::ClearSession {
                     pending_models_boundary = Some(models_reload_message(&roster));
                 }
+                continue;
+            }
+            UiExitReason::TransferSession => {
+                let previous_primary = roster.primary.clone();
+                let handoff_loaded = session_result.primary_session_handoff.is_some();
+                cfg = Config::load(&config_path)?;
+                let (resolved, notices) = resolve_roster_for_tui(&mut cfg, &cwd).await?;
+                if !notices.is_empty()
+                    && let Err(error) = cfg.save(&config_path)
+                {
+                    tracing::warn!(%error, "model recovery notices were not persisted");
+                }
+                let new_primary = resolved.primary.clone();
+                roster = resolved;
+                primary_agent = selected_agent_for_role(&roster.primary);
+                mode = effective_ui_mode(fullscreen_tui, &cfg);
+                initial_agent = Some(primary_agent.clone());
+                pending_primary_session_handoff = session_result.primary_session_handoff;
+                pending_session_title = session_result.session_title;
+                pending_models_boundary = Some(if handoff_loaded {
+                    format!(
+                        "Primary switched from {} to {}; session transcript is loading into the new session.",
+                        previous_primary.launch.kind.display_name(),
+                        new_primary.launch.kind.display_name(),
+                    )
+                } else {
+                    format!(
+                        "Primary switched from {} to {}.",
+                        previous_primary.launch.kind.display_name(),
+                        new_primary.launch.kind.display_name(),
+                    )
+                });
                 continue;
             }
             UiExitReason::SwitchSession => {
@@ -2126,6 +2167,7 @@ async fn run_session(
     runtime_options: RuntimeOptions,
     header_labels: HeaderLabels,
     resume_session: Option<String>,
+    mut primary_session_handoff: Option<String>,
     mode: UiMode,
     mut theme_kind: theme::TerminalThemeKind,
     mut spinner_style: spinner::SpinnerStyle,
@@ -2816,6 +2858,7 @@ async fn run_session(
                 feature_hints_enabled: ui_config.feature_hints,
                 keep_awake_enabled: ui_config.keep_awake,
                 session_boundary: session_boundary.take(),
+                primary_session_handoff: primary_session_handoff.take(),
                 session_cwd: cwd.clone(),
                 additional_workspace_roots: runtime_options.additional_directories.clone(),
                 model_choices: roster.choices.clone(),
@@ -2907,6 +2950,7 @@ async fn run_session(
                 session_title: current_session_title,
                 theme_kind,
                 spinner_style,
+                primary_session_handoff: None,
             });
         };
 
@@ -2921,6 +2965,7 @@ async fn run_session(
                 session_title: target_title,
                 theme_kind,
                 spinner_style,
+                primary_session_handoff: None,
             });
         }
 
@@ -2959,6 +3004,7 @@ async fn run_session(
                     session_title: target_title,
                     theme_kind,
                     spinner_style,
+                    primary_session_handoff: None,
                 });
             }
         }
@@ -3908,6 +3954,7 @@ mod tests {
             session_title: Some("Current".to_string()),
             theme_kind: theme::TerminalThemeKind::Ansi,
             spinner_style: spinner::SpinnerStyle::Bars,
+            primary_session_handoff: None,
         };
 
         apply_session_result_to_config(&mut cfg, &result);
@@ -3924,6 +3971,7 @@ mod tests {
             session_title: Some("Selected".to_string()),
             theme_kind: theme::TerminalThemeKind::Adaptive,
             spinner_style: spinner::SpinnerStyle::Globe,
+            primary_session_handoff: None,
         });
 
         assert_eq!(result.reason, UiExitReason::SwitchSession);

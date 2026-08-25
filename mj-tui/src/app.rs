@@ -416,6 +416,9 @@ pub enum UiExitReason {
     ClearSession,
     LoadSession,
     SwitchSession,
+    /// Replace the primary route and give the new session the durable
+    /// transcript from the session that just ended.
+    TransferSession,
 }
 
 /// One entry in the scrolling transcript.
@@ -1937,7 +1940,7 @@ impl InputPasteBurst {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamPickerStep {
     Choose,
-    StartNewSession,
+    SwitchPrimary,
 }
 
 /// Deferred four-configuration team picker opened by Shift+Tab (or Ctrl+Tab
@@ -1946,7 +1949,7 @@ pub enum TeamPickerStep {
 pub struct TeamPicker {
     pub selected: usize,
     pub step: TeamPickerStep,
-    pub start_new_session: bool,
+    pub switch_primary_now: bool,
 }
 
 /// Config option picker overlay state.
@@ -2401,6 +2404,13 @@ impl AppState {
     }
 
     pub fn open_team_picker(&mut self) {
+        if self.is_side {
+            self.record_status_message(
+                StatusKind::Info,
+                "return to the primary session before switching teams",
+            );
+            return;
+        }
         if crate::roster::external_adapter().is_some() {
             self.record_status_message(
                 StatusKind::Info,
@@ -2430,7 +2440,7 @@ impl AppState {
         self.team_picker = Some(TeamPicker {
             selected,
             step: TeamPickerStep::Choose,
-            start_new_session: true,
+            switch_primary_now: true,
         });
     }
 
@@ -2447,9 +2457,9 @@ impl AppState {
         crate::config::TeamPreset::ALL.get(picker.selected).copied()
     }
 
-    pub fn team_picker_toggle_start_new_session(&mut self) {
+    pub fn team_picker_toggle_switch_primary_now(&mut self) {
         if let Some(picker) = self.team_picker.as_mut() {
-            picker.start_new_session = !picker.start_new_session;
+            picker.switch_primary_now = !picker.switch_primary_now;
         }
     }
 
@@ -3356,6 +3366,10 @@ impl AppState {
 
     pub fn set_primary_acp_name(&mut self, name: impl Into<String>) {
         self.primary_acp_name = name.into();
+    }
+
+    pub fn primary_acp_name(&self) -> &str {
+        &self.primary_acp_name
     }
 
     pub fn announce_waiting_for_primary(&mut self) {
@@ -11489,5 +11503,22 @@ mod tests {
         state.set_connection_state(ConnectionState::Streaming);
         state.keep_awake.set_enabled(false);
         assert!(!state.keep_awake.wants_hold());
+    }
+
+    #[test]
+    fn team_switch_stays_on_the_primary_session() {
+        let mut state = AppState::new();
+        state.is_side = true;
+
+        state.open_team_picker();
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("return to the primary session before switching teams")
+        );
     }
 }

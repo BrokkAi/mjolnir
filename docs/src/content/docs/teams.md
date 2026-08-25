@@ -35,8 +35,13 @@ Choosing a team keeps every model selection on Auto, pins the primary seat to
 the coder's adapter and the review and subagent seats to the reviewer's,
 enables discrete review and subagent failover, and enables the built-in ACP
 routes its seats use — both routes for a mixed team, only that provider's
-route for a single-provider team. Team changes apply to a new session; after saving from **Shift+Tab**,
-start the offered session to use the new team immediately.
+route for a single-provider team. When a team change replaces the primary
+agent, **Shift+Tab** offers to switch immediately: Mjolnir starts a fresh
+provider-native session and loads the complete durable session transcript into
+it, including agent activity, tool records, and review state.
+The original provider session remains available in the session picker. Keeping
+the current session leaves its existing primary route in place until you start
+a new one.
 
 A single-provider team still gets discrete review — the reviewer is an
 independent session with its own context, just not an independent provider.
