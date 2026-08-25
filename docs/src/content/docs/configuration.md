@@ -96,8 +96,9 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 In an active primary session, model and reasoning-effort entries in `/mjconfig`
 and the `/model` and `/effort` commands update the current ACP session without
 a restart when the connected agent advertises the corresponding selectors;
-changes made during a turn apply after it finishes. Team and ACP routing changes
-still apply to a new session. A `max_parallel` above 16 is a configuration
+changes made during a turn apply after it finishes. Team changes that keep the
+current primary route apply live; a team or ACP routing change that replaces
+the primary starts a new session. A `max_parallel` above 16 is a configuration
 error, not a silently clamped value.
 
 Onboarding, the **Team** tab in `/mjconfig`, and **Shift+Tab** during a session
