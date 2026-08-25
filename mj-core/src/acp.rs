@@ -768,18 +768,27 @@ async fn emit_fatal_with_stderr(
     message
 }
 
-async fn report_fatal_with_stderr(
-    ui_tx: &mpsc::UnboundedSender<UiEvent>,
-    fatal_emitted: &Arc<AtomicBool>,
+struct DeferredInitializeFatal {
     message: String,
-    stderr_tail: Option<&AgentStderrTail>,
-    defer_to_runtime: bool,
+}
+
+fn should_defer_initialize_fatal(launch_err: &LaunchError) -> bool {
+    matches!(launch_err, LaunchError::ConnectionClosed { .. })
+}
+
+fn runtime_fatal_message(
+    deferred_initialize_fatal: Option<DeferredInitializeFatal>,
+    child_exit_detail: Option<String>,
+    driver_error: &anyhow::Error,
 ) -> String {
-    let message = attach_agent_stderr_tail(message, stderr_tail).await;
-    if !defer_to_runtime {
-        emit_fatal(ui_tx, fatal_emitted, message.clone());
+    match deferred_initialize_fatal {
+        Some(deferred) => child_exit_detail
+            .map(agent_exited_unexpectedly_msg)
+            .unwrap_or(deferred.message),
+        None => child_exit_detail
+            .map(agent_exited_unexpectedly_msg)
+            .unwrap_or_else(|| format!("acp: {driver_error}")),
     }
-    message
 }
 
 /// Classify a spawn-time `io::Error`. `ErrorKind::NotFound` becomes
@@ -887,7 +896,14 @@ fn stdio_mcp_server_descriptions(mcp_servers: &[McpServer]) -> Box<[String]> {
 fn classify_initialize_error(source: agent_client_protocol::Error) -> LaunchError {
     match auth_required_detail(&source) {
         Some(detail) => LaunchError::AuthRequired { detail },
-        None if agent_client_protocol::is_incoming_transport_closed(&source) => {
+        // Windows may surface an EOF from the stdio pipe as os error 232
+        // instead of ACP's structured `incoming_transport_closed` payload.
+        None if agent_client_protocol::is_incoming_transport_closed(&source)
+            || source
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("pipe is being closed") =>
+        {
             LaunchError::ConnectionClosed { source }
         }
         None => LaunchError::InitializeFailed { source },
@@ -1274,6 +1290,7 @@ pub async fn run(
     // poll (because it noticed EOF on stdin), we want the clean-shutdown
     // outcome, not a spurious "agent exited unexpectedly" Fatal. The wait
     // branch only wins when drive is still pending.
+    let deferred_initialize_fatal = Arc::new(std::sync::Mutex::new(None));
     let mut result: Result<()> = {
         let termination = cfg.termination.clone().unwrap_or_default();
         let drive = drive_client_with_fs_limit(
@@ -1296,7 +1313,7 @@ pub async fn run(
             cfg.memory.clone(),
             cfg.side_prompt_policy,
             Some(stderr_tail.clone()),
-            true,
+            Some(deferred_initialize_fatal.clone()),
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -1335,7 +1352,15 @@ pub async fn run(
     // Snapshot whether the child died on its own *before* we touch it,
     // so the post-drive Fatal can distinguish "agent crashed" from
     // "we killed it after a different error".
-    let pre_kill_exit = child.try_wait().ok().flatten();
+    let child_exit_detail = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| status.to_string());
+    let deferred_initialize_fatal = deferred_initialize_fatal
+        .lock()
+        .expect("deferred initialize fatal mutex poisoned")
+        .take();
 
     // Reap the entire agent subtree, not just the immediate child.
     // Wrappers like `uvx brokk acp` fork a Python interpreter as a
@@ -1350,15 +1375,7 @@ pub async fn run(
     // action text, and the guard suppresses a second emission.
     if let Err(e) = &result {
         let fatal_already_emitted = fatal_emitted.load(Ordering::SeqCst);
-        // Race-condition handling: drive_client can return with a raw
-        // `Broken pipe` before the `child.wait()` arm fires, leaving the
-        // user with no action text. If the child *had* already exited at
-        // that point, swap in the friendly "agent exited" wording.
-        let msg = if let Some(status) = pre_kill_exit {
-            agent_exited_unexpectedly_msg(status)
-        } else {
-            format!("acp: {e}")
-        };
+        let msg = runtime_fatal_message(deferred_initialize_fatal, child_exit_detail, e);
         let msg = emit_fatal_with_stderr(&ui_tx, &fatal_emitted, msg, Some(&stderr_tail)).await;
         if !fatal_already_emitted {
             result = Err(anyhow::anyhow!(msg));
@@ -1995,7 +2012,7 @@ where
         None,
         false,
         None,
-        false,
+        None,
     )
     .await
 }
@@ -2032,7 +2049,7 @@ where
         None,
         false,
         None,
-        false,
+        None,
     )
     .await
 }
@@ -2070,7 +2087,7 @@ where
         None,
         false,
         None,
-        false,
+        None,
     )
     .await
 }
@@ -2096,7 +2113,7 @@ async fn drive_client_with_fs_limit<T>(
     memory: Option<crate::memory::SessionMemory>,
     side_prompt_policy: bool,
     stderr_tail: Option<AgentStderrTail>,
-    defer_fatal_to_runtime: bool,
+    deferred_initialize_fatal: Option<Arc<std::sync::Mutex<Option<DeferredInitializeFatal>>>>,
 ) -> Result<()>
 where
     T: ConnectTo<Client>,
@@ -2353,7 +2370,7 @@ where
                 &ui_tx,
                 &mut ui_rx,
                 fatal_emitted,
-                defer_fatal_to_runtime,
+                deferred_initialize_fatal,
                 session_state,
                 drive_terminals,
                 access_mode,
@@ -2403,7 +2420,7 @@ async fn drive_session(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     fatal_emitted: Arc<AtomicBool>,
-    defer_fatal_to_runtime: bool,
+    deferred_initialize_fatal: Option<Arc<std::sync::Mutex<Option<DeferredInitializeFatal>>>>,
     session_state: RuntimeSessionState,
     terminals: Arc<ManagedTerminals>,
     access_mode: RuntimeAccessMode,
@@ -2446,24 +2463,30 @@ async fn drive_session(
         Ok(r) => r,
         Err(source) => {
             let launch_err = classify_initialize_error(source);
-            let text = report_fatal_with_stderr(
-                ui_tx,
-                &fatal_emitted,
-                launch_err.to_string(),
-                stderr_tail.as_ref(),
-                defer_fatal_to_runtime,
-            )
-            .await;
+            let text = attach_agent_stderr_tail(launch_err.to_string(), stderr_tail.as_ref()).await;
+            if should_defer_initialize_fatal(&launch_err) {
+                if let Some(deferred) = deferred_initialize_fatal {
+                    *deferred
+                        .lock()
+                        .expect("deferred initialize fatal mutex poisoned") =
+                        Some(DeferredInitializeFatal {
+                            message: text.clone(),
+                        });
+                } else {
+                    emit_fatal(ui_tx, &fatal_emitted, text.clone());
+                }
+            } else {
+                emit_fatal(ui_tx, &fatal_emitted, text.clone());
+            }
             return Err(anyhow::anyhow!(text));
         }
     };
     if let Err(launch_err) = validate_protocol_version(init_resp.protocol_version) {
-        let text = report_fatal_with_stderr(
+        let text = emit_fatal_with_stderr(
             ui_tx,
             &fatal_emitted,
             launch_err.to_string(),
             stderr_tail.as_ref(),
-            defer_fatal_to_runtime,
         )
         .await;
         return Err(anyhow::anyhow!(text));
@@ -2471,12 +2494,11 @@ async fn drive_session(
     if let Err(launch_err) =
         require_additional_directories(&init_resp.agent_capabilities, &additional_directories)
     {
-        let text = report_fatal_with_stderr(
+        let text = emit_fatal_with_stderr(
             ui_tx,
             &fatal_emitted,
             launch_err.to_string(),
             stderr_tail.as_ref(),
-            defer_fatal_to_runtime,
         )
         .await;
         return Err(anyhow::anyhow!(text));
@@ -2491,12 +2513,11 @@ async fn drive_session(
         match service.start(context, ui_tx.clone()).await {
             Ok(server) => Some(server),
             Err(error) => {
-                let text = report_fatal_with_stderr(
+                let text = emit_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
                     format!("could not start subagent MCP server: {error:#}"),
                     stderr_tail.as_ref(),
-                    defer_fatal_to_runtime,
                 )
                 .await;
                 return Err(anyhow::anyhow!(text));
@@ -2593,12 +2614,11 @@ async fn drive_session(
             let initial_config = match restore {
                 Ok(initial_config) => initial_config,
                 Err(launch_err) => {
-                    let text = report_fatal_with_stderr(
+                    let text = emit_fatal_with_stderr(
                         ui_tx,
                         &fatal_emitted,
                         launch_err.to_string(),
                         stderr_tail.as_ref(),
-                        defer_fatal_to_runtime,
                     )
                     .await;
                     return Err(anyhow::anyhow!(text));
@@ -2629,12 +2649,11 @@ async fn drive_session(
                 (s.session_id, config, false)
             }
             Err(launch_err) => {
-                let text = report_fatal_with_stderr(
+                let text = emit_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
                     launch_err.to_string(),
                     stderr_tail.as_ref(),
-                    defer_fatal_to_runtime,
                 )
                 .await;
                 return Err(anyhow::anyhow!(text));
@@ -2659,12 +2678,11 @@ async fn drive_session(
                 }
             }
             Err(error) => {
-                let text = report_fatal_with_stderr(
+                let text = emit_fatal_with_stderr(
                     ui_tx,
                     &fatal_emitted,
                     format!("{} configuration failed: {error}", role.label),
                     stderr_tail.as_ref(),
-                    defer_fatal_to_runtime,
                 )
                 .await;
                 return Err(anyhow::anyhow!(text));
@@ -3196,14 +3214,6 @@ async fn reload_active_session(
             source,
             stdio_mcp_servers: Box::default(),
         })?;
-    // Agents can replay notifications before replying to `session/load`.
-    // Publish the restored session first so every consumer assigns that replay
-    // to the restored session rather than to the just-rejected target.
-    emit_connected(ui_tx, connected_fields);
-    let _ = ui_tx.send(UiEvent::SessionStarted {
-        session_id: session_id.to_string(),
-        resumed: true,
-    });
     let loaded_config = load_existing_session(
         conn,
         session_id.clone(),
@@ -3220,6 +3230,14 @@ async fn reload_active_session(
             options: Vec::new(),
             targets: Vec::new(),
         });
+    // This request keeps the current session id, so consumers already route
+    // replayed notifications to it. Publish reset events only after success;
+    // a rejected reload must leave their pending state intact.
+    emit_connected(ui_tx, connected_fields);
+    let _ = ui_tx.send(UiEvent::SessionStarted {
+        session_id: session_id.to_string(),
+        resumed: true,
+    });
     let _ = ui_tx.send(UiEvent::SessionConfigOptions {
         options: session_config.options.clone(),
         targets: session_config.targets.clone(),
@@ -8758,7 +8776,7 @@ mod tests {
             None,
             false,
             None,
-            false,
+            None,
         ));
 
         loop {
@@ -10178,6 +10196,7 @@ mod tests {
     async fn run_mock_agent_same_session_reload(
         stream: tokio::io::DuplexStream,
         load_seen: Arc<StdAtomicBool>,
+        reject_load: bool,
     ) {
         let load_seen_for_req = load_seen.clone();
         let (r, w) = split(stream);
@@ -10209,6 +10228,10 @@ mod tests {
                             cx: ConnectionTo<agent_client_protocol::Client>| {
                     assert_eq!(req.session_id.to_string(), "same-session");
                     load_seen_for_req.store(true, Ordering::SeqCst);
+                    if reject_load {
+                        return responder
+                            .respond_with_internal_error("same session reload rejected");
+                    }
                     let session_id = req.session_id.clone();
                     let response = responder.respond(LoadSessionResponse::new());
                     tokio::spawn(async move {
@@ -10661,7 +10684,7 @@ mod tests {
             None,
             false,
             None,
-            false,
+            None,
         ));
 
         let mut saw_warning = false;
@@ -12601,7 +12624,7 @@ mod tests {
             None,
             false,
             None,
-            false,
+            None,
         ));
 
         while !matches!(
@@ -13631,6 +13654,51 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("--agent-stderr"), "{message}");
+
+        let windows_pipe_closed = classify_initialize_error(
+            agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                "data": "The pipe is being closed. (os error 232)",
+            })),
+        );
+        assert!(
+            matches!(windows_pipe_closed, LaunchError::ConnectionClosed { .. }),
+            "expected ConnectionClosed, got {windows_pipe_closed:?}"
+        );
+    }
+
+    #[test]
+    fn only_closed_initialize_transport_defers_fatal() {
+        let auth = LaunchError::AuthRequired {
+            detail: Some("login first".to_string()),
+        };
+        assert!(!should_defer_initialize_fatal(&auth));
+
+        let protocol = LaunchError::UnsupportedProtocolVersion {
+            negotiated: ProtocolVersion::V0,
+        };
+        assert!(!should_defer_initialize_fatal(&protocol));
+
+        let closed = LaunchError::ConnectionClosed {
+            source: agent_client_protocol::Error::internal_error(),
+        };
+        assert!(should_defer_initialize_fatal(&closed));
+    }
+
+    #[test]
+    fn runtime_fatal_message_prefers_exit_for_closed_initialize_transport() {
+        let message = runtime_fatal_message(
+            Some(DeferredInitializeFatal {
+                message: "agent closed the ACP connection".to_string(),
+            }),
+            Some("exit status: 1".to_string()),
+            &anyhow::anyhow!("wrapped driver error"),
+        );
+
+        assert!(
+            message.contains("agent process exited unexpectedly"),
+            "{message}"
+        );
+        assert!(message.contains("exit status: 1"), "{message}");
     }
 
     #[test]
@@ -13813,7 +13881,7 @@ mod tests {
             None,
             false,
             Some(stderr_tail),
-            false,
+            None,
         ));
 
         let mut saw_retry_warning = false;
@@ -14035,7 +14103,7 @@ mod tests {
             }),
             false,
             None,
-            false,
+            None,
         ));
 
         wait_for_session_started(&mut ui_rx, "old-session").await;
@@ -14225,6 +14293,7 @@ mod tests {
         let agent_task = tokio::spawn(run_mock_agent_same_session_reload(
             agent_side,
             load_seen.clone(),
+            false,
         ));
 
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
@@ -14256,6 +14325,79 @@ mod tests {
         );
         wait_for_session_started(&mut ui_rx, "same-session").await;
         wait_for_agent_message_chunk(&mut ui_rx, "same session replay").await;
+        assert!(load_seen.load(Ordering::SeqCst));
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        client_task.abort();
+        agent_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejected_current_session_reload_does_not_reset_consumers() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let load_seen = Arc::new(StdAtomicBool::new(false));
+
+        let agent_task = tokio::spawn(run_mock_agent_same_session_reload(
+            agent_side,
+            load_seen.clone(),
+            true,
+        ));
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client(
+            client_transport,
+            std::env::temp_dir(),
+            None,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        wait_for_session_started(&mut ui_rx, "same-session").await;
+        while ui_rx.try_recv().is_ok() {}
+
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::LoadSession {
+                session_id: "same-session".to_string(),
+                cwd: std::env::temp_dir(),
+                title: None,
+                responder,
+            })
+            .expect("send load session");
+
+        let mut saw_warning = false;
+        while !saw_warning {
+            let event = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
+                .await
+                .expect("timeout waiting for rejected reload")
+                .expect("ui event channel closed");
+            match event {
+                UiEvent::Warning(message) => {
+                    assert!(
+                        message.contains("current session remains active"),
+                        "{message}"
+                    );
+                    saw_warning = true;
+                }
+                other @ (UiEvent::SessionStarted { .. } | UiEvent::SessionConfigOptions { .. }) => {
+                    panic!("rejected reload reset the active session: {other:?}")
+                }
+                _ => {}
+            }
+        }
+        match response.await.expect("load response") {
+            LoadSessionResult::Rejected { message } => {
+                assert!(
+                    message.contains("current session remains active"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
         assert!(load_seen.load(Ordering::SeqCst));
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
