@@ -2206,6 +2206,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn entering_the_computer_tab_does_not_restart_the_host() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None)
