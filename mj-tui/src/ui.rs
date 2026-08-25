@@ -18,8 +18,8 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommandInput, SessionConfigOption, SessionConfigValueId, SessionUpdate, StopReason,
-    ToolCallStatus,
+    AvailableCommandInput, SessionConfigOption, SessionConfigOptionCategory, SessionConfigValueId,
+    SessionUpdate, StopReason, ToolCallStatus,
 };
 use anyhow::{Context, Result};
 use crossterm::cursor::MoveTo;
@@ -5389,6 +5389,15 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         return;
     }
 
+    if plain_text_only && matches!(text.as_str(), "/model" | "/effort") {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        open_live_session_config_picker(state, &text);
+        return;
+    }
+
     if plain_text_only && text == "/diff" {
         state.input.clear();
         clear_attachments(state);
@@ -5665,6 +5674,56 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
     });
 }
 
+fn open_live_session_config_picker(state: &mut AppState, command: &str) {
+    if state.runtime_closed {
+        state.record_status_message(StatusKind::Warning, "the ACP runtime is closed");
+        return;
+    }
+    if state.session_id.is_none() {
+        state.announce_waiting_for_primary();
+        return;
+    }
+
+    let is_model = command == "/model";
+    let option_index = state
+        .session_config_options
+        .iter()
+        .enumerate()
+        .find(|(index, option)| {
+            let target = state.session_config_targets.get(*index);
+            if is_model {
+                matches!(target, Some(SessionConfigTarget::ConfigOption { .. }))
+                    && matches!(option.category, Some(SessionConfigOptionCategory::Model))
+                    && option.id.to_string() != crate::acp::REASONING_EFFORT_CONFIG_ID
+            } else {
+                matches!(
+                    target,
+                    Some(
+                        SessionConfigTarget::ConfigOption { .. } | SessionConfigTarget::LegacyMode
+                    )
+                ) && crate::settings::session_option_controls_reasoning_effort(option)
+            }
+        })
+        .map(|(index, _)| index);
+
+    let label = if is_model {
+        "model"
+    } else {
+        "reasoning-effort"
+    };
+    match option_index {
+        Some(index) if state.open_config_value_picker(index) => state.record_status_message(
+            StatusKind::Info,
+            format!("choose a {label} for the active session"),
+        ),
+        Some(_) => {}
+        None => state.record_status_message(
+            StatusKind::Warning,
+            format!("the active agent does not expose a live {label} selector"),
+        ),
+    }
+}
+
 fn discrete_review_command_arguments(text: &str) -> Option<&str> {
     ["/discrete-review", "/adversarial-review"]
         .into_iter()
@@ -5908,8 +5967,8 @@ fn handle_mjconfig_menu_key(
             inline_repair_request(mode)
         }
         SettingsAction::Save => {
-            if let Some(config) = state.mjconfig_menu_accept() {
-                persist_mjconfig_selection(state, cmd_tx, config);
+            if let Some((initial_config, config)) = state.mjconfig_menu_accept() {
+                persist_mjconfig_selection(state, cmd_tx, initial_config, config);
             }
             inline_repair_request(mode)
         }
@@ -5933,6 +5992,7 @@ fn handle_mjconfig_menu_key(
 fn persist_mjconfig_selection(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    initial_config: config::Config,
     mut config: config::Config,
 ) {
     let theme = config.theme;
@@ -5944,12 +6004,12 @@ fn persist_mjconfig_selection(
     let keep_awake_enabled = config.keep_awake;
     let thought_output = config.thought_output;
     let voice_auto_send = config.voice_auto_send;
-    let live_session_updates = live_primary_session_config_updates(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
     // letting the next /new or restart fail to resolve.
     let reroute_notices =
         crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
+    let live_session_updates = live_primary_session_config_updates(state, &initial_config, &config);
     let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
@@ -5978,7 +6038,7 @@ fn persist_mjconfig_selection(
                     let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
                 }
                 let mut message = format!(
-                    "config saved — theme {theme}, spinner {style}; compatible session options and the reviewer/subagent route update the active primary when its agent is unchanged, while primary model and ACP routing changes apply on /new or /clear"
+                    "config saved — theme {theme}, spinner {style}; changed session settings update the active primary when supported, while ACP routing changes apply on /new or /clear"
                 );
                 for notice in &reroute_notices {
                     message.push_str("; ");
@@ -6024,6 +6084,7 @@ fn primary_config_matches_active_route(state: &AppState, config: &config::Config
 
 fn live_primary_session_config_updates(
     state: &AppState,
+    initial_config: &config::Config,
     config: &config::Config,
 ) -> Vec<(SessionConfigTarget, SessionConfigValueId)> {
     if state.session_id.is_none() {
@@ -6032,8 +6093,12 @@ fn live_primary_session_config_updates(
     let Some(source_id) = state.active_models.primary_source.as_deref() else {
         return Vec::new();
     };
-    let Some(defaults) = config.agent.session_defaults.get(source_id) else {
-        return Vec::new();
+    let defaults = config.agent.session_defaults.get(source_id);
+    let source_stays_active = config.agent.acp_source.as_deref() == Some(source_id);
+    let selected_model = if config.agent.model == "auto" {
+        crate::roster::auto_primary_model_for_source(&state.model_choices, source_id)
+    } else {
+        Some(config.agent.model.as_str())
     };
 
     state
@@ -6041,13 +6106,39 @@ fn live_primary_session_config_updates(
         .iter()
         .zip(state.session_config_targets.iter())
         .filter_map(|(option, target)| {
-            let desired = defaults.get(&crate::acp::session_config_option_key(&option.id))?;
+            let desired = if crate::settings::session_option_controls_reasoning_effort(option) {
+                if !source_stays_active
+                    || initial_config.agent.reasoning_effort == config.agent.reasoning_effort
+                {
+                    return None;
+                }
+                SessionConfigValueId::from(config.agent.reasoning_effort.clone()?)
+            } else if matches!(option.category, Some(SessionConfigOptionCategory::Model)) {
+                if !source_stays_active
+                    || initial_config.agent.model == config.agent.model
+                    || !matches!(target, SessionConfigTarget::ConfigOption { .. })
+                {
+                    return None;
+                }
+                crate::acp::session_config_model_value(option, source_id, selected_model?, None)?
+            } else {
+                let key = crate::acp::session_config_option_key(&option.id);
+                let desired = defaults?.get(&key)?;
+                let initial = initial_config
+                    .agent
+                    .session_defaults
+                    .get(source_id)
+                    .and_then(|defaults| defaults.get(&key));
+                if initial == Some(desired) {
+                    return None;
+                }
+                SessionConfigValueId::from(desired.clone())
+            };
             let current = crate::app::config_option_current_value_id(option)?;
-            let desired_value = SessionConfigValueId::from(desired.clone());
-            if !crate::acp::session_config_option_contains_value(option, &desired_value) {
+            if !crate::acp::session_config_option_contains_value(option, &desired) {
                 return None;
             }
-            (current.to_string() != *desired).then(|| (target.clone(), desired_value))
+            (current != &desired).then(|| (target.clone(), desired))
         })
         .collect()
 }
@@ -14539,6 +14630,12 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         help_section_line("General", theme),
         help_binding_line("Ctrl-N", "new session", theme),
         help_binding_line("Ctrl-O", "load session", theme),
+        help_binding_line("/model", "change the active session model", theme),
+        help_binding_line(
+            "/effort",
+            "change the active session reasoning effort",
+            theme,
+        ),
         help_binding_line(
             "Shift-Tab",
             "switch between Codex, Claude, and the two coder/reviewer pairings",
@@ -15650,9 +15747,10 @@ mod tests {
         AvailableCommand, ContentBlock, ContentChunk, ElicitationFormMode, ElicitationId,
         ElicitationMode, ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode,
         EnumOption, PermissionOption, PermissionOptionKind, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId,
-        SessionUpdate, StopReason, StringPropertySchema, TerminalExitStatus, TextContent, ToolCall,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        PlanEntryStatus, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
+        StringPropertySchema, TerminalExitStatus, TextContent, ToolCall, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::backend::{Backend, TestBackend};
@@ -18851,6 +18949,90 @@ mod tests {
     }
 
     #[test]
+    fn slash_model_updates_the_active_session_without_starting_a_new_one() {
+        let mut state = ready_state_with_session();
+        let session_id = state.session_id.clone();
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "model".into(),
+        }];
+        state.input = "/model".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.config_picker.is_some(), "model picker should be open");
+        assert!(state.input.is_empty(), "command should be consumed");
+        assert_eq!(state.session_id, session_id);
+        assert_eq!(state.exit_reason, None);
+        assert!(cmd_rx.try_recv().is_err(), "picking is local");
+
+        state.config_picker_move(1);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "model" && value.to_string() == "model-2"
+        ));
+        assert_eq!(state.session_id, session_id);
+        assert_eq!(state.exit_reason, None);
+    }
+
+    #[test]
+    fn slash_effort_uses_the_adapter_reasoning_effort_selector() {
+        let mut state = ready_state_with_session();
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                crate::acp::REASONING_EFFORT_CONFIG_ID,
+                "Reasoning effort",
+                "medium",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("medium", "Medium"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            // Codex tags this selector as `Model`, so `/effort` must use its
+            // stable config id instead of relying only on the category.
+            .category(SessionConfigOptionCategory::Model),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: crate::acp::REASONING_EFFORT_CONFIG_ID.into(),
+        }];
+        state.input = "/effort".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        submit_prompt(&mut state, &cmd_tx);
+        state.config_picker_move(1);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == crate::acp::REASONING_EFFORT_CONFIG_ID
+                && value.to_string() == "high"
+        ));
+        assert!(state.session_id.is_some());
+        assert_eq!(state.exit_reason, None);
+    }
+
+    #[test]
     fn slash_diff_opens_workspace_viewer_without_queueing_while_busy() {
         let mut state = AppState::new();
         state.record_user_prompt("active".to_string());
@@ -19215,7 +19397,7 @@ mod tests {
         )];
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        persist_mjconfig_selection(&mut state, &cmd_tx, config);
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
         let server = state
             .acp_inventory
@@ -19230,7 +19412,8 @@ mod tests {
     fn saving_mjconfig_updates_the_live_primary_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        let mut config = config::Config::default();
+        let initial_config = config::Config::default();
+        let mut config = initial_config.clone();
         config
             .agent
             .session_defaults
@@ -19255,7 +19438,7 @@ mod tests {
         }];
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-        persist_mjconfig_selection(&mut state, &cmd_tx, config);
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
 
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -19263,6 +19446,125 @@ mod tests {
                 target: SessionConfigTarget::ConfigOption { config_id },
                 value,
             }) if config_id.to_string() == "service_tier" && value.to_string() == "priority"
+        ));
+    }
+
+    #[test]
+    fn saving_mjconfig_does_not_reset_live_reasoning_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config
+            .agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:thinking".to_string(), "medium".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "thinking",
+                "Thinking",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("medium", "Thinking: medium"),
+                    SessionConfigSelectOption::new("high", "Thinking: high"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::LegacyMode];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "saving a default must not overwrite the active session's effort"
+        );
+    }
+
+    #[test]
+    fn saving_mjconfig_updates_changed_live_reasoning_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        initial_config.agent.acp_source = Some("codex-acp".to_string());
+        initial_config.agent.reasoning_effort = Some("medium".to_string());
+        let mut config = initial_config.clone();
+        config.agent.reasoning_effort = Some("high".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "thinking",
+                "Thinking",
+                "medium",
+                vec![
+                    SessionConfigSelectOption::new("medium", "Thinking: medium"),
+                    SessionConfigSelectOption::new("high", "Thinking: high"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::LegacyMode];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::LegacyMode,
+                value,
+            }) if value.to_string() == "high"
+        ));
+    }
+
+    #[test]
+    fn saving_mjconfig_updates_changed_primary_model_with_the_adapter_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        initial_config.agent.acp_source = Some("claude-acp".to_string());
+        initial_config.agent.model = "claude-sonnet-4-6".to_string();
+        let mut config = initial_config.clone();
+        config.agent.model = "claude-opus-4-8".to_string();
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "sonnet",
+                vec![
+                    SessionConfigSelectOption::new("sonnet", "Sonnet").description("Sonnet 4.6"),
+                    SessionConfigSelectOption::new("opus", "Opus")
+                        .description("Opus 4.8 with 1M context"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "model".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "model" && value.to_string() == "opus"
         ));
     }
 
@@ -27015,6 +27317,20 @@ mod tests {
         ] {
             assert!(help.contains(expected), "missing {expected:?}:\n{help}");
         }
+    }
+
+    #[test]
+    fn help_advertises_live_model_and_effort_controls() {
+        let help = general_help_lines(false, TerminalThemeKind::Adaptive.palette())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(help.contains("/model"));
+        assert!(help.contains("active session model"));
+        assert!(help.contains("/effort"));
+        assert!(help.contains("active session reasoning effort"));
     }
 
     #[test]

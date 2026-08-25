@@ -220,6 +220,8 @@ const BUILTIN_SIDE_COMMAND: &str = "side";
 const BUILTIN_EXPORT_COMMAND: &str = "export";
 const BUILTIN_DIFF_COMMAND: &str = "diff";
 const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
+const BUILTIN_MODEL_COMMAND: &str = "model";
+const BUILTIN_EFFORT_COMMAND: &str = "effort";
 const BUILTIN_AGENTS_COMMAND: &str = "agents";
 const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
 const RETIRED_REVIEW_COMMAND: &str = "review";
@@ -277,6 +279,20 @@ fn builtin_mjconfig_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_MJCONFIG_COMMAND,
         "configure the team, agents, ACP servers, and appearance",
+    )
+}
+
+fn builtin_model_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_MODEL_COMMAND,
+        "change the active session model without starting a new session",
+    )
+}
+
+fn builtin_effort_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_EFFORT_COMMAND,
+        "change the active session reasoning effort without starting a new session",
     )
 }
 
@@ -349,6 +365,8 @@ fn install_builtin_commands(
             && command.name != BUILTIN_EXPORT_COMMAND
             && command.name != BUILTIN_DIFF_COMMAND
             && command.name != BUILTIN_MJCONFIG_COMMAND
+            && command.name != BUILTIN_MODEL_COMMAND
+            && command.name != BUILTIN_EFFORT_COMMAND
             && command.name != BUILTIN_AGENTS_COMMAND
             && command.name != BUILTIN_SUBAGENTS_COMMAND
             && command.name != RETIRED_REVIEW_COMMAND
@@ -367,6 +385,8 @@ fn install_builtin_commands(
     commands.insert(0, builtin_exit_command());
     commands.insert(0, builtin_memory_command());
     commands.insert(0, builtin_mjconfig_command());
+    commands.insert(0, builtin_effort_command());
+    commands.insert(0, builtin_model_command());
     commands.insert(0, builtin_diff_command());
     commands.insert(0, builtin_adversarial_review_command());
     commands.insert(0, builtin_discrete_review_command());
@@ -391,6 +411,8 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_SIDE_COMMAND,
             BUILTIN_DIFF_COMMAND,
             BUILTIN_MJCONFIG_COMMAND,
+            BUILTIN_MODEL_COMMAND,
+            BUILTIN_EFFORT_COMMAND,
             BUILTIN_AGENTS_COMMAND,
             BUILTIN_SUBAGENTS_COMMAND,
             RETIRED_REVIEW_COMMAND,
@@ -404,6 +426,8 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
     });
     commands.insert(0, builtin_side_command());
     commands.insert(0, builtin_export_command());
+    commands.insert(0, builtin_effort_command());
+    commands.insert(0, builtin_model_command());
     commands.insert(0, builtin_exit_side_command());
 }
 
@@ -834,7 +858,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Fullscreen,
     },
     FeatureHint {
-        text: "Choose models and reasoning effort per seat under /mjconfig.",
+        text: "Use /model, /effort, or their /mjconfig entries to change the active session directly.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -1325,6 +1349,7 @@ fn number_field(
 #[derive(Debug, Clone)]
 pub struct MjConfigMenu {
     pub editor: SettingsEditor,
+    initial_config: crate::config::Config,
     orig_theme: TerminalThemeKind,
     orig_spinner: SpinnerStyle,
     orig_thought_output: crate::config::ThoughtOutput,
@@ -2466,6 +2491,7 @@ impl AppState {
         config.thought_output = self.thought_output;
         let notice = config.newer_build_notice();
         self.mjconfig_menu = Some(MjConfigMenu {
+            initial_config: config.clone(),
             editor: SettingsEditor::new(config, self.model_choices.clone(), notice)
                 .with_active_models(self.active_models.clone())
                 .with_active_session_config(self.session_config_options.clone())
@@ -2516,8 +2542,12 @@ impl AppState {
     }
 
     /// Close the menu, keeping its live appearance preview.
-    pub fn mjconfig_menu_accept(&mut self) -> Option<crate::config::Config> {
-        self.mjconfig_menu.take().map(|menu| menu.editor.config)
+    pub fn mjconfig_menu_accept(
+        &mut self,
+    ) -> Option<(crate::config::Config, crate::config::Config)> {
+        self.mjconfig_menu
+            .take()
+            .map(|menu| (menu.initial_config, menu.editor.config))
     }
 
     /// Close the menu and restore the theme and spinner that were active when
@@ -3955,7 +3985,6 @@ impl AppState {
 
     /// Open the value picker for one config option. Returns `true` if it
     /// became visible.
-    #[cfg(test)]
     pub fn open_config_value_picker(&mut self, option_index: usize) -> bool {
         if self.runtime_closed {
             return false;
@@ -5846,13 +5875,6 @@ impl AppState {
                 !self
                     .hidden_session_config_ids
                     .contains(&option.id.to_string())
-                    && !matches!(
-                        option.category,
-                        Some(
-                            SessionConfigOptionCategory::Model
-                                | SessionConfigOptionCategory::ThoughtLevel
-                        )
-                    )
             })
             .unzip();
         self.session_config_targets = targets;
@@ -8540,8 +8562,10 @@ mod tests {
     }
 
     #[test]
-    fn config_option_update_refreshes_session_state() {
+    fn config_option_update_preserves_live_model_controls_without_changing_route_identity() {
         let mut s = AppState::new();
+        s.active_models.primary = "claude-opus-4-8".to_string();
+        s.primary_reasoning_effort = None;
         let options = vec![
             SessionConfigOption::select(
                 "mode",
@@ -8563,14 +8587,23 @@ mod tests {
                 ],
             )
             .category(Some(SessionConfigOptionCategory::Model)),
+            SessionConfigOption::select(
+                crate::acp::REASONING_EFFORT_CONFIG_ID,
+                "Reasoning effort",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            )
+            .category(Some(SessionConfigOptionCategory::ThoughtLevel)),
         ];
 
         s.apply_event(UiEvent::SessionUpdate(SessionUpdate::ConfigOptionUpdate(
             ConfigOptionUpdate::new(options),
         )));
 
-        assert_eq!(s.session_config_options.len(), 1);
+        assert_eq!(s.session_config_options.len(), 3);
         assert_eq!(s.current_mode.as_deref(), Some("ask"));
+        assert_eq!(s.active_models.primary, "claude-opus-4-8");
+        assert_eq!(s.primary_reasoning_effort, None);
         assert!(s.status_line.is_none());
     }
 
@@ -8665,7 +8698,7 @@ mod tests {
     }
 
     #[test]
-    fn config_option_update_hides_thought_level_from_primary_shortcuts() {
+    fn config_option_update_keeps_thought_level_for_the_live_effort_picker() {
         let mut s = AppState::new();
         let options = vec![
             SessionConfigOption::select(
@@ -8684,8 +8717,9 @@ mod tests {
             ConfigOptionUpdate::new(options),
         )));
 
-        assert!(s.session_config_options.is_empty());
-        assert!(s.current_mode.is_none());
+        assert_eq!(s.session_config_options.len(), 1);
+        assert_eq!(s.current_mode.as_deref(), Some("medium"));
+        assert_eq!(s.primary_reasoning_effort, None);
     }
 
     #[test]
@@ -10483,6 +10517,8 @@ mod tests {
                 "discrete-review",
                 "adversarial-review",
                 "diff",
+                "model",
+                "effort",
                 "mjconfig",
                 "memory",
                 "exit"
@@ -10544,6 +10580,8 @@ mod tests {
                 "discrete-review",
                 "adversarial-review",
                 "diff",
+                "model",
+                "effort",
                 "mjconfig",
                 "memory",
                 "exit",
@@ -10595,6 +10633,8 @@ mod tests {
                 "discrete-review",
                 "adversarial-review",
                 "diff",
+                "model",
+                "effort",
                 "mjconfig",
                 "memory",
                 "exit",
@@ -10662,6 +10702,8 @@ mod tests {
                 "discrete-review",
                 "adversarial-review",
                 "diff",
+                "model",
+                "effort",
                 "mjconfig",
                 "memory",
                 "exit",

@@ -88,7 +88,8 @@ pub fn session_option_is_editable(
     option: &SessionConfigOption,
 ) -> bool {
     if !matches!(option.kind, SessionConfigKind::Select(_))
-        || matches!(option.category, Some(SessionConfigOptionCategory::Model))
+        || (matches!(option.category, Some(SessionConfigOptionCategory::Model))
+            && option.id.to_string() != crate::acp::REASONING_EFFORT_CONFIG_ID)
     {
         return false;
     }

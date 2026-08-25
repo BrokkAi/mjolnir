@@ -93,8 +93,11 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |
 | `voice_auto_send` | `off` (default), `two_seconds`, `four_seconds`, `six_seconds`, or `eight_seconds`; submit a recognized voice prompt after that much detected silence |
 
-Explicit model IDs can be selected in `/mjconfig`; availability is checked
-when the next session starts. A `max_parallel` above 16 is a configuration
+In an active primary session, model and reasoning-effort entries in `/mjconfig`
+and the `/model` and `/effort` commands update the current ACP session without
+a restart when the connected agent advertises the corresponding selectors;
+changes made during a turn apply after it finishes. Team and ACP routing changes
+still apply to a new session. A `max_parallel` above 16 is a configuration
 error, not a silently clamped value.
 
 Onboarding, the **Team** tab in `/mjconfig`, and **Shift+Tab** during a session

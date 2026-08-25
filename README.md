@@ -156,8 +156,11 @@ mj
 First launch discovers available provider credentials and opens setup on the
 team those credentials support: **Claude coder + Codex reviewer** with both
 providers signed in, or that provider's own team with one. Press **Shift+Tab**
-to switch teams later, or open the **Team** tab in `/mjconfig`. Team, model,
-and adapter changes apply to a new session.
+to switch teams later, or open the **Team** tab in `/mjconfig`. Team and
+adapter route changes apply to a new session. In an active session, `/model`,
+`/effort`, and their `/mjconfig` entries change the model or reasoning effort
+without restarting when the connected ACP agent advertises the corresponding
+control; choices made during a turn apply after that turn completes.
 
 ## Try it
 
