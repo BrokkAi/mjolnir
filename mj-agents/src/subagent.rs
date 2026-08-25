@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 use mj_core::acp::{self, AcpRuntimeConfig, RuntimeAccessMode};
 use mj_core::agent_usage::{Record, Seat};
+use mj_core::config::SelectedAgent;
 use mj_core::event::{
     InternalMessage, InternalMessageKind, PromptImage, SubagentEvent, SubagentOutcome,
     SubagentStatusKind, UiCommand, UiEvent, content_block_text,
@@ -183,6 +184,7 @@ pub struct Config {
     debrief: bool,
     warm: Arc<WarmPool>,
     controller: Controller,
+    session_cleanup: SessionCleanup,
 }
 
 #[derive(Default)]
@@ -193,18 +195,114 @@ struct WarmPool {
 struct WarmRuntime {
     context: RunContext,
     role_key: String,
+    /// The launch this runtime's session was created through. Session cleanup
+    /// must go back through the same adapter, which can differ from the
+    /// pool's current one when a stale prewarm is discarded after a role
+    /// change.
+    agent: SelectedAgent,
+    /// Captured at spawn so every discard path — explicit or pool drop — can
+    /// delete this runtime's session without reaching back into a `Config`.
+    cleanup: SessionCleanup,
     events: mpsc::UnboundedReceiver<UiEvent>,
     commands: mpsc::UnboundedSender<UiCommand>,
     task: JoinHandle<Result<()>>,
     cancel: CancellationToken,
 }
 
+/// How a worker's persisted session is removed from the agent's session store
+/// once its runtime is reaped. Injectable so tests can observe cleanup without
+/// spawning an adapter process.
+type SessionCleanup = Arc<dyn Fn(SelectedAgent, String) + Send + Sync>;
+
+/// Ceiling on one background deletion of a worker's persisted session,
+/// adapter spawn included.
+const WORKER_SESSION_DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Delete one finished worker's session from the agent's persisted store.
+///
+/// A worker session is unreachable once its runtime is reaped: resume rides
+/// the live runtime, never the agent's stored session, so leaving the session
+/// behind only floods the agent's resume picker with one dead entry per
+/// review lane or subagent. Mirrors `mj_core::side::discard`, which deletes a
+/// discarded side conversation the same way.
+fn spawn_worker_session_delete(
+    agent: SelectedAgent,
+    agent_stderr: Option<PathBuf>,
+    session_id: String,
+) {
+    tokio::spawn(async move {
+        let deleted = tokio::time::timeout(
+            WORKER_SESSION_DELETE_TIMEOUT,
+            mj_core::session::delete_session(&agent, session_id.clone(), agent_stderr.as_deref()),
+        )
+        .await;
+        match deleted {
+            Ok(Ok(())) => tracing::info!(
+                event = "subagent_session_deleted",
+                session_id = %session_id,
+                "deleted the finished worker's session from the agent's session store"
+            ),
+            Ok(Err(error)) => tracing::warn!(
+                event = "subagent_session_delete_failed",
+                session_id = %session_id,
+                error = %format!("{error:#}"),
+                "could not delete the finished worker's session"
+            ),
+            Err(_) => tracing::warn!(
+                event = "subagent_session_delete_timeout",
+                session_id = %session_id,
+                "timed out deleting the finished worker's session"
+            ),
+        }
+    });
+}
+
+/// Shut down a warm runtime the pool can no longer use, then delete the
+/// session its prewarm already opened so the discard does not leave a dead
+/// entry in the agent's session store.
+///
+/// Cleanup is best-effort: it needs a live tokio runtime to wait for the
+/// reap, so a discard during process teardown only cancels and shuts down,
+/// exactly as before.
+fn discard_warm_runtime(mut runtime: WarmRuntime) {
+    runtime.cancel.cancel();
+    let _ = runtime.commands.send(UiCommand::Shutdown);
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        // Never abort `acp::run`: its tail owns process-tree termination
+        // and reaping. A runtime that outlives this wait keeps its
+        // session; losing one cleanup beats interrupting the reap.
+        if tokio::time::timeout(WORKER_SESSION_DELETE_TIMEOUT, &mut runtime.task)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        // The runtime is gone, so its whole event backlog is buffered;
+        // the session id, when `session/new` completed, is in there.
+        let mut session_id = None;
+        while let Ok(event) = runtime.events.try_recv() {
+            if let UiEvent::SessionStarted {
+                session_id: started,
+                ..
+            } = event
+            {
+                session_id = Some(started);
+            }
+        }
+        if let Some(session_id) = session_id {
+            (runtime.cleanup)(runtime.agent, session_id);
+        }
+    });
+}
+
 impl Drop for WarmPool {
     fn drop(&mut self) {
         let slot = self.slot.get_mut().expect("subagent warm pool poisoned");
-        if let Some(runtime) = slot.as_ref() {
-            runtime.cancel.cancel();
-            let _ = runtime.commands.send(UiCommand::Shutdown);
+        if let Some(runtime) = slot.take() {
+            discard_warm_runtime(runtime);
         }
     }
 }
@@ -229,6 +327,7 @@ impl Config {
         role_pool: Option<crate::quota::RolePool>,
     ) -> Self {
         let reasoning_effort = role.reasoning_effort.clone();
+        let cleanup_stderr = agent_stderr.clone();
         Self {
             display_label: format!("subagent · {}", role.model.model),
             command: role.launch.command,
@@ -263,6 +362,9 @@ impl Config {
             debrief: true,
             warm: Arc::default(),
             controller: Controller::default(),
+            session_cleanup: Arc::new(move |agent, session_id| {
+                spawn_worker_session_delete(agent, cleanup_stderr.clone(), session_id);
+            }),
         }
     }
 
@@ -370,8 +472,7 @@ impl Config {
             .is_some_and(|runtime| runtime.context != context || runtime.role_key != role_key)
         {
             let stale = slot.take().expect("checked warm slot disappeared");
-            stale.cancel.cancel();
-            let _ = stale.commands.send(UiCommand::Shutdown);
+            discard_warm_runtime(stale);
         }
         if slot.is_none() {
             *slot = Some(spawn_subagent_runtime(
@@ -390,8 +491,7 @@ impl Config {
             .is_some_and(|runtime| runtime.task.is_finished())
         {
             let failed = slot.take().expect("finished warm slot disappeared");
-            failed.cancel.cancel();
-            let _ = failed.commands.send(UiCommand::Shutdown);
+            discard_warm_runtime(failed);
         }
         let role_key = self.role_key();
         if slot
@@ -970,10 +1070,18 @@ fn spawn_subagent_runtime(
         side_prompt_policy: false,
         termination: Some(cancel.clone()),
     };
+    let agent = SelectedAgent {
+        source_id: runtime_config.agent_source_id.clone().unwrap_or_default(),
+        program: runtime_config.command.clone(),
+        args: runtime_config.args.clone(),
+        env: runtime_config.env.clone(),
+    };
     let task = tokio::spawn(acp::run(runtime_config, event_tx, command_rx));
     WarmRuntime {
         context,
         role_key: config.role_key(),
+        agent,
+        cleanup: config.session_cleanup.clone(),
         events,
         commands,
         task,
@@ -2628,6 +2736,8 @@ async fn run(
 
     let warm = use_warm.then(|| config.take_warm(&context)).flatten();
     let WarmRuntime {
+        agent: runtime_agent,
+        cleanup: runtime_cleanup,
         events: mut nested_event_rx,
         commands: nested_cmd_tx,
         task: mut runtime,
@@ -3160,6 +3270,12 @@ async fn run(
             subagent_id,
             "subagent process tree reaped"
         );
+    }
+    // The runtime is reaped, so nothing can resume or write this session
+    // again; drop it from the agent's store before delivering the results
+    // below so worker lanes stop flooding the resume picker.
+    if let Some(session_id) = session_id {
+        runtime_cleanup(runtime_agent, session_id);
     }
 
     if terminal_finished_pending && turn_reported {
@@ -3742,6 +3858,16 @@ mod tests {
             debrief: true,
             warm: Arc::default(),
             controller: Controller::default(),
+            session_cleanup: Arc::new(|_, _| {}),
+        }
+    }
+
+    fn test_selected_agent() -> SelectedAgent {
+        SelectedAgent {
+            source_id: "codex-acp".to_string(),
+            program: PathBuf::from("unused"),
+            args: Vec::new(),
+            env: HashMap::new(),
         }
     }
 
@@ -4866,6 +4992,8 @@ mod tests {
         *config.warm.slot.lock().unwrap() = Some(WarmRuntime {
             context: context.clone(),
             role_key: config.role_key(),
+            agent: test_selected_agent(),
+            cleanup: config.session_cleanup.clone(),
             events,
             commands,
             task,
@@ -4893,6 +5021,8 @@ mod tests {
         *config.warm.slot.lock().unwrap() = Some(WarmRuntime {
             context: context.clone(),
             role_key: config.role_key(),
+            agent: test_selected_agent(),
+            cleanup: config.session_cleanup.clone(),
             events,
             commands,
             task,
@@ -4917,6 +5047,7 @@ mod tests {
         nested_events: mpsc::UnboundedSender<UiEvent>,
         nested_commands: mpsc::UnboundedReceiver<UiCommand>,
         ui_events: mpsc::UnboundedReceiver<UiEvent>,
+        session_cleanups: mpsc::UnboundedReceiver<(SelectedAgent, String)>,
         workspace: tempfile::TempDir,
     }
 
@@ -4976,6 +5107,10 @@ mod tests {
         config.reports = Some(bus.clone());
         config.retain_after_completion = retain_after_completion;
         config.debrief = debrief;
+        let (cleanup_tx, session_cleanups) = mpsc::unbounded_channel();
+        config.session_cleanup = Arc::new(move |agent, session_id| {
+            let _ = cleanup_tx.send((agent, session_id));
+        });
 
         let (commands, nested_commands) = mpsc::unbounded_channel();
         let (nested_events, events) = mpsc::unbounded_channel();
@@ -4990,6 +5125,8 @@ mod tests {
         *config.warm.slot.lock().unwrap() = Some(WarmRuntime {
             context: context.clone(),
             role_key: config.role_key(),
+            agent: test_selected_agent(),
+            cleanup: config.session_cleanup.clone(),
             events,
             commands,
             task,
@@ -5028,6 +5165,7 @@ mod tests {
             nested_events,
             nested_commands,
             ui_events,
+            session_cleanups,
             workspace,
         }
     }
@@ -5201,6 +5339,182 @@ mod tests {
         let text = tool_result_text(&cancelled_tool_result(&result));
         assert!(text.contains("the retry now backs off"));
         assert!(text.contains("VERIFIED: cargo test"));
+    }
+
+    /// Once the runtime is reaped nothing can resume the worker's persisted
+    /// session, so teardown must drop it from the agent's session store
+    /// instead of leaving one dead resume-picker entry per worker lane.
+    #[tokio::test]
+    async fn teardown_deletes_the_worker_session_from_the_agent_store() {
+        let mut run = spawn_fake_run_with(Vec::new(), false).await;
+        run.nested_events
+            .send(UiEvent::SessionStarted {
+                session_id: "s1".to_string(),
+                resumed: false,
+            })
+            .expect("session started");
+        let _ = run.nested_commands.recv().await.expect("task prompt");
+        run.nested_events
+            .send(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new("done"))),
+            )))
+            .expect("final message");
+        run.nested_events
+            .send(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            })
+            .expect("turn done");
+        let _ = tokio::time::timeout(Duration::from_secs(5), run.reports.recv())
+            .await
+            .expect("report")
+            .expect("report value");
+
+        let (agent, session_id) =
+            tokio::time::timeout(Duration::from_secs(5), run.session_cleanups.recv())
+                .await
+                .expect("teardown requests session cleanup")
+                .expect("cleanup request value");
+        assert_eq!(session_id, "s1");
+        assert_eq!(agent.program, PathBuf::from("unused"));
+    }
+
+    /// Releasing a retained session reaps the worker; its stored session is
+    /// as dead as any other finished worker's and gets the same cleanup.
+    #[tokio::test]
+    async fn releasing_a_retained_worker_deletes_its_session() {
+        let mut run = spawn_fake_run().await;
+        run.nested_events
+            .send(UiEvent::SessionStarted {
+                session_id: "s2".to_string(),
+                resumed: false,
+            })
+            .expect("session started");
+        let _ = run.nested_commands.recv().await.expect("task prompt");
+        run.nested_events
+            .send(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new("done"))),
+            )))
+            .expect("final message");
+        run.nested_events
+            .send(UiEvent::PromptDone {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            })
+            .expect("turn done");
+        let _ = tokio::time::timeout(Duration::from_secs(5), run.reports.recv())
+            .await
+            .expect("report")
+            .expect("report value");
+
+        let released = run.registry.take(run.subagent_id).expect("retained run");
+        let (respond, response) = oneshot::channel();
+        released
+            .control
+            .send(WorkerRequest::Cancel { respond })
+            .expect("release the retained session");
+        let _ = tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .expect("release settles");
+
+        let (_, session_id) =
+            tokio::time::timeout(Duration::from_secs(5), run.session_cleanups.recv())
+                .await
+                .expect("release requests session cleanup")
+                .expect("cleanup request value");
+        assert_eq!(session_id, "s2");
+    }
+
+    /// A discarded prewarm already completed `session/new`; dropping the
+    /// runtime without deleting that session would leak one store entry per
+    /// role or context change.
+    #[tokio::test]
+    async fn discarding_a_dead_warm_runtime_deletes_its_prewarmed_session() {
+        let mut config = test_config();
+        let (cleanup_tx, mut session_cleanups) = mpsc::unbounded_channel();
+        config.session_cleanup = Arc::new(move |agent, session_id| {
+            let _ = cleanup_tx.send((agent, session_id));
+        });
+
+        let (commands, _command_rx) = mpsc::unbounded_channel();
+        let (events_tx, events) = mpsc::unbounded_channel();
+        events_tx
+            .send(UiEvent::SessionStarted {
+                session_id: "warm-1".to_string(),
+                resumed: false,
+            })
+            .expect("prewarmed session id");
+        let task: JoinHandle<Result<()>> = tokio::spawn(async { Ok(()) });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        *config.warm.slot.lock().unwrap() = Some(WarmRuntime {
+            context: test_context(),
+            role_key: config.role_key(),
+            agent: test_selected_agent(),
+            cleanup: config.session_cleanup.clone(),
+            events,
+            commands,
+            task,
+            cancel: CancellationToken::new(),
+        });
+
+        assert!(
+            config.take_warm(&test_context()).is_none(),
+            "a dead warm runtime is discarded, not handed out"
+        );
+        let (agent, session_id) =
+            tokio::time::timeout(Duration::from_secs(5), session_cleanups.recv())
+                .await
+                .expect("discard requests session cleanup")
+                .expect("cleanup request value");
+        assert_eq!(session_id, "warm-1");
+        assert_eq!(agent.source_id, "codex-acp");
+    }
+
+    /// Dropping the last `Config` clone drops the warm pool with a prewarm
+    /// still parked in it; that prewarm's session gets the same cleanup as an
+    /// explicit discard instead of quietly outliving the pool.
+    #[tokio::test]
+    async fn dropping_the_warm_pool_deletes_its_prewarmed_session() {
+        let mut config = test_config();
+        let (cleanup_tx, mut session_cleanups) = mpsc::unbounded_channel();
+        config.session_cleanup = Arc::new(move |agent, session_id| {
+            let _ = cleanup_tx.send((agent, session_id));
+        });
+
+        let (commands, _command_rx) = mpsc::unbounded_channel();
+        let (events_tx, events) = mpsc::unbounded_channel();
+        events_tx
+            .send(UiEvent::SessionStarted {
+                session_id: "warm-2".to_string(),
+                resumed: false,
+            })
+            .expect("prewarmed session id");
+        let cancel = CancellationToken::new();
+        // Ends when the drop-path discard cancels it, like a real runtime.
+        let cancel_signal = cancel.clone();
+        let task: JoinHandle<Result<()>> = tokio::spawn(async move {
+            cancel_signal.cancelled().await;
+            Ok(())
+        });
+        *config.warm.slot.lock().unwrap() = Some(WarmRuntime {
+            context: test_context(),
+            role_key: config.role_key(),
+            agent: test_selected_agent(),
+            cleanup: config.session_cleanup.clone(),
+            events,
+            commands,
+            task,
+            cancel,
+        });
+
+        drop(config);
+        let (_, session_id) = tokio::time::timeout(Duration::from_secs(5), session_cleanups.recv())
+            .await
+            .expect("pool drop requests session cleanup")
+            .expect("cleanup request value");
+        assert_eq!(session_id, "warm-2");
     }
 
     /// The MCP layer has to tell the orchestrator that this report already
