@@ -2,7 +2,7 @@
 
 `brokk-mj-desktop` is Mjolnir's native desktop shell for its remote viewer. It
 provides the platform WebView and certificate-verification boundary used by the
-optional desktop application.
+default `mj app` desktop application on supported desktop platforms.
 
 This crate is primarily published so the Mjolnir workspace components can be
 versioned and distributed together. Its Rust crate name is `mj_desktop`, and

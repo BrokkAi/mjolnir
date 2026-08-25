@@ -1,7 +1,7 @@
 //! Native desktop shell for the existing remote viewer.
 //!
-//! The CLI wiring lands in #727. Keeping policy and TLS verification here lets
-//! the server work in #728 depend on a small, security-reviewed interface.
+//! The shell keeps its browser policy and TLS verification separate from the
+//! server runtime so both can remain security-reviewed interfaces.
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::net::TcpStream;
@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
+#[cfg(not(target_os = "android"))]
+use tao::dpi::LogicalSize;
 #[cfg(not(target_os = "android"))]
 use tao::event::{Event, WindowEvent};
 #[cfg(not(target_os = "android"))]
@@ -21,6 +23,14 @@ use tao::window::{Icon, WindowBuilder};
 use wry::{NewWindowResponse, WebView, WebViewBuilder};
 
 const TLS_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(target_os = "android"))]
+const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
+#[cfg(not(target_os = "android"))]
+const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
+#[cfg(not(target_os = "android"))]
+const MINIMUM_WINDOW_WIDTH: f64 = 900.0;
+#[cfg(not(target_os = "android"))]
+const MINIMUM_WINDOW_HEIGHT: f64 = 600.0;
 
 #[derive(Debug, Clone)]
 pub struct DesktopShellOptions {
@@ -187,6 +197,14 @@ pub fn run(
     let window = WindowBuilder::new()
         .with_title("Mjolnir")
         .with_window_icon(Some(application_icon()?))
+        .with_inner_size(LogicalSize::new(
+            DEFAULT_WINDOW_WIDTH,
+            DEFAULT_WINDOW_HEIGHT,
+        ))
+        .with_min_inner_size(LogicalSize::new(
+            MINIMUM_WINDOW_WIDTH,
+            MINIMUM_WINDOW_HEIGHT,
+        ))
         .build(&event_loop)
         .context("create Mjolnir desktop window")?;
 
@@ -777,6 +795,19 @@ mod tests {
         assert_eq!(
             decode_certificate_pem(&pem).as_deref(),
             Some(bytes.as_slice())
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_window_uses_a_normal_initial_size() {
+        assert_eq!(
+            (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+            (1280.0, 800.0)
+        );
+        assert_eq!(
+            (MINIMUM_WINDOW_WIDTH, MINIMUM_WINDOW_HEIGHT),
+            (900.0, 600.0)
         );
     }
 

@@ -12,9 +12,9 @@ publish = true
 members = ["mj-core", "mj-agents", "mj-anvil", "mj-tui", "mj-desktop", "mj-remote", "voice-worker"]
 # Bare `cargo test`/`cargo clippy`/`cargo build` must cover the binary and every
 # crate its code was extracted into, or those crates lose their lint and test
-# gate. `mj-desktop` and `voice-worker` stay out so an ordinary contributor does
-# not need WebKitGTK or ALSA to build: each has its own CI job, and the
-# `desktop-app` feature still pulls `mj-desktop` in when it is requested.
+# gate. `mj-desktop` and `voice-worker` keep their own CI jobs because their
+# tests need native desktop and audio dependencies; the default `mj` binary
+# still links the desktop shell on supported desktop platforms.
 # `mj-anvil` only ships in the Android binary, so it also stays out of the
 # default set; the Android CI job carries its lint and test gate.
 default-members = [".", "mj-core", "mj-agents", "mj-tui", "mj-remote"]
@@ -47,9 +47,9 @@ name = "mj"
 path = "src/main.rs"
 
 [features]
-default = []
-# Kept opt-in until the `mj app` CLI and release packaging land in #727.
-# Android deliberately has no dependency entries for this feature.
+default = ["desktop-app"]
+# Android deliberately has no dependency entries for this feature, and the
+# `mj app` command is excluded from its CLI.
 desktop-app = ["dep:mj-desktop"]
 
 [dependencies]

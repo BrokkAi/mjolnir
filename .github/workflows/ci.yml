@@ -103,19 +103,18 @@ jobs:
       run: cargo fmt --check
 
     - name: Run Clippy lints
-      run: cargo clippy --all-targets --features desktop-app -- -D warnings
+      run: cargo clippy --all-targets -- -D warnings
 
-    # `--features desktop-app` only pulls `mj-desktop` in as a library dependency,
-    # so its test targets never compile above. It is a workspace member but not a
-    # default member, so it needs its own gate like `voice-worker` and `mj-anvil`.
+    # `mj-desktop` is linked into the default desktop binary but remains outside
+    # the default workspace members, so its own test targets need this gate.
     - name: Lint desktop crate
       run: cargo clippy -p brokk-mj-desktop --all-targets -- -D warnings
 
     - name: Build mjolnir
-      run: cargo build --release --features desktop-app
+      run: cargo build --release
 
     - name: Run tests
-      run: cargo test --features desktop-app
+      run: cargo test
 
     - name: Test desktop crate
       run: cargo test -p brokk-mj-desktop
@@ -184,4 +183,4 @@ jobs:
         echo "AR_aarch64_linux_android=$ndk_path/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> "$GITHUB_ENV"
 
     - name: Check Android target
-      run: cargo check --locked --target aarch64-linux-android
+      run: cargo check --locked --no-default-features --target aarch64-linux-android
