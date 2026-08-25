@@ -42,10 +42,10 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - name: Install Linux native dependencies
+      - name: Install Linux WebKitGTK runtime for smoke test
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-0
 
       - name: Confirm the tag owns the Cargo release version
         run: |

@@ -118,6 +118,9 @@ brew install brokkai/tap/mjolnir
 **npm or npx:** macOS, Linux, Windows, and Android with Node.js 18 or later:
 
 ```bash
+# Linux: install the WebKitGTK 4.1 runtime first.
+# Ubuntu/Debian: sudo apt-get install libwebkit2gtk-4.1-0
+# Fedora: sudo dnf install webkit2gtk4.1
 npm install -g @brokkai/mjolnir
 # Or run without a global install:
 npx -y @brokkai/mjolnir
