@@ -11493,10 +11493,17 @@ mod tests {
     }
 
     #[test]
-    fn embedded_viewer_renders_the_review_ledger_and_full_evidence_reader() {
+    fn embedded_viewer_moves_review_findings_to_the_full_evidence_reader() {
         let viewer = include_str!("remote_viewer.html");
-        assert!(viewer.contains("id=\"review-board\""));
+        assert!(viewer.contains("id=\"review-issues-button\""));
         assert!(viewer.contains("id=\"review-issues-modal\""));
+        assert!(
+            viewer.contains("reviewIssuesButtonEl.addEventListener(\"click\", openReviewIssues)")
+        );
+        assert!(
+            !viewer.contains("id=\"review-board\""),
+            "review findings must not reserve transcript space"
+        );
 
         let review_start = viewer
             .find("      const REVIEW_STATUS = {")
@@ -11507,8 +11514,8 @@ mod tests {
         let review_source = &viewer[review_start..review_end];
 
         // Execute the exact browser rendering functions with a deliberately
-        // small DOM shim. This verifies the visible board and the evidence
-        // reader instead of merely checking that their source text exists.
+        // small DOM shim. This verifies the compact launcher and the complete
+        // evidence reader instead of merely checking their source text exists.
         let mut script = String::from(
             r##"
 class FixtureNode {
@@ -11541,7 +11548,7 @@ globalThis.document = {
   createDocumentFragment() { return new FixtureNode("#fragment"); },
 };
 
-const reviewBoardEl = new FixtureNode("section");
+const reviewIssuesButtonEl = new FixtureNode("button");
 const reviewIssuesBodyEl = new FixtureNode("div");
 const reviewIssuesModalEl = new FixtureNode("section");
 reviewIssuesModalEl.hidden = true;
@@ -11578,23 +11585,13 @@ function renderRichText(text) {
         script.push_str(review_source);
         script.push_str(
             r##"
-renderReviewBoard(fixtureSession);
-if (!reviewBoardEl.innerText.includes("Review · degraded")) {
-  throw new Error(`review board did not render degraded workflow: ${reviewBoardEl.innerText}`);
+renderReviewIssuesButton(fixtureSession);
+if (reviewIssuesButtonEl.hidden || reviewIssuesButtonEl.textContent !== "Reviews · 1 issue") {
+  throw new Error(`review launcher did not summarize the ledger: ${reviewIssuesButtonEl.textContent}`);
 }
-if (!reviewBoardEl.innerText.includes("#1 P1 mj-remote/src/remote.rs")) {
-  throw new Error(`review board did not render finding summary: ${reviewBoardEl.innerText}`);
-}
-if (!reviewBoardEl.innerText.includes("verification pending")) {
-  throw new Error(`review board did not render finding status: ${reviewBoardEl.innerText}`);
-}
-const fullEvidence = reviewBoardEl.children[0].children.find((child) => child.textContent === "Full evidence");
-if (!fullEvidence) {
-  throw new Error("review board did not render full evidence action");
-}
-fullEvidence.click();
+openReviewIssues();
 if (reviewIssuesModalEl.hidden) {
-  throw new Error("full evidence action did not open the evidence reader");
+  throw new Error("review launcher did not open the evidence reader");
 }
 const evidence = reviewIssuesBodyEl.innerText;
 for (const expected of [

@@ -2287,50 +2287,17 @@
         letter-spacing: 0.06em;
       }
 
-      /* Review output is a first-class session record, not a vague system
-         notice. Keep the current or latest board above the transcript where a
-         finding cannot be lost, and let its reader carry the full evidence
-         without forcing a user to leave the web session. */
-      .review-board {
-        display: flex;
-        flex-direction: column;
-        gap: 7px;
-        padding: 10px 12px 11px;
-        border: 1px solid rgb(235 63 51 / 0.42);
-        border-left: 3px solid var(--red);
-        background:
-          linear-gradient(90deg, rgb(235 63 51 / 0.1), transparent 58%),
-          var(--surface-terminal);
-
-        &:empty {
-          display: none;
-        }
-      }
-
-      .review-board-head {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: baseline;
-        gap: 5px 12px;
-      }
-
-      .review-board-title {
-        color: var(--red-hot);
-        font: 700 10px/1 var(--font-mono);
-        letter-spacing: 0.13em;
-        text-transform: uppercase;
-      }
-
-      .review-board-tally {
-        flex: 1 1 220px;
-        color: var(--muted);
-        font: 400 10.5px/1.4 var(--font-mono);
-      }
-
-      .review-board-details {
-        border: 0;
-        background: transparent;
-        padding: 2px 0;
+      /* Reviews are durable evidence, but they must not push the active
+         transcript downward. The header launches the full ledger instead. */
+      .review-issues-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 30px;
+        flex: 0 0 auto;
+        border: 1px solid var(--line-strong);
+        background: var(--surface-terminal);
+        padding: 0 10px;
         color: var(--text-control);
         cursor: pointer;
         font: 700 10px/1 var(--font-mono);
@@ -2338,46 +2305,9 @@
         text-transform: uppercase;
 
         &:hover {
+          border-color: var(--red);
           color: var(--button-hover-text);
         }
-      }
-
-      .review-board-row {
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto;
-        align-items: baseline;
-        gap: 8px;
-        width: 100%;
-        border: 0;
-        border-top: 1px solid var(--line-row);
-        background: transparent;
-        padding: 7px 0 0;
-        color: var(--text-control);
-        cursor: pointer;
-        font: 400 11.5px/1.45 var(--font-mono);
-        text-align: left;
-
-        &:hover .review-board-summary {
-          color: var(--button-hover-text);
-        }
-      }
-
-      .review-board-glyph {
-        font-weight: 700;
-      }
-
-      .review-board-summary {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .review-board-state {
-        color: var(--dim);
-        font-size: 10px;
-        text-align: right;
-        white-space: nowrap;
       }
 
       .review-state[data-status="validated"],
@@ -3436,6 +3366,7 @@
           <span id="archive-badge" class="archive-badge" hidden>archived</span>
           <span id="side-badge" class="side-badge" hidden>side</span>
           <span id="approval-badge" class="approval-badge" hidden>needs approval</span>
+          <button id="review-issues-button" class="review-issues-button" type="button" aria-haspopup="dialog" hidden>Reviews</button>
           <div class="mobile-chat-actions">
             <button id="mobile-new-session-button" class="primary sidebar-new-button" type="button">New</button>
             <button id="mobile-logout-button" class="ghost-danger" type="button">Log out</button>
@@ -3443,7 +3374,6 @@
           <button id="workspace-diff-button" class="icon-button" type="button" aria-label="Show uncommitted changes">±</button>
           <button id="settings-button" class="icon-button" type="button" aria-label="Open viewer settings">⚙</button>
         </header>
-        <section id="review-board" class="review-board" aria-label="Review findings"></section>
         <div class="transcript-wrap">
           <div id="transcript" role="log" aria-label="Session transcript"></div>
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
@@ -3670,7 +3600,7 @@
       const workspaceDiffRefreshEl = $("workspace-diff-refresh");
       const workspaceDiffNoticeEl = $("workspace-diff-notice");
       const workspaceDiffBodyEl = $("workspace-diff-body");
-      const reviewBoardEl = $("review-board");
+      const reviewIssuesButtonEl = $("review-issues-button");
       const reviewIssuesModalEl = $("review-issues-modal");
       const reviewIssuesCloseEl = $("review-issues-close");
       const reviewIssuesBodyEl = $("review-issues-body");
@@ -7485,11 +7415,6 @@
         };
       }
 
-      function reviewSummaryLine(summary) {
-        const first = String(summary || "").split("\n").find((line) => line.trim());
-        return first?.trim() || "Review finding";
-      }
-
       function reviewIssueTally(issues) {
         const tally = {
           found: issues.length,
@@ -7532,13 +7457,6 @@
         return parts.join(" · ");
       }
 
-      function visibleReviewWorkflow(session) {
-        const workflows = reviewWorkflows(session)
-          .filter((workflow) => workflow.issues.length);
-        const active = workflows.filter((workflow) => !workflow.outcome);
-        return active[active.length - 1] || workflows[workflows.length - 1] || null;
-      }
-
       function openReviewIssues() {
         paintReviewIssues(selectedSession());
         reviewIssuesModalEl.hidden = false;
@@ -7549,77 +7467,18 @@
         reviewIssuesModalEl.hidden = true;
       }
 
-      function renderReviewBoard(session) {
-        reviewBoardEl.replaceChildren();
-        const workflow = visibleReviewWorkflow(session);
-        if (!workflow) {
+      function renderReviewIssuesButton(session) {
+        const workflows = reviewWorkflows(session);
+        const issueCount = workflows.reduce((count, workflow) => count + workflow.issues.length, 0);
+        reviewIssuesButtonEl.hidden = !workflows.length;
+        if (!workflows.length) {
           return;
         }
-
-        const head = document.createElement("div");
-        head.className = "review-board-head";
-        const title = document.createElement("span");
-        title.className = "review-board-title";
-        title.textContent = workflow.outcome ? `⚖ Review · ${workflow.outcome}` : "⚖ Review";
-        const tally = document.createElement("span");
-        tally.className = "review-board-tally";
-        tally.textContent = reviewTallyText(workflow.issues);
-        const details = document.createElement("button");
-        details.className = "review-board-details";
-        details.type = "button";
-        details.textContent = "Full evidence";
-        details.addEventListener("click", openReviewIssues);
-        head.append(title, tally, details);
-        reviewBoardEl.appendChild(head);
-
-        const visible = workflow.issues
-          .slice()
-          .sort((left, right) => reviewIssueRank(left) - reviewIssueRank(right) || (left.id || 0) - (right.id || 0));
-        const maxRows = 5;
-        for (const issue of visible.slice(0, maxRows)) {
-          const status = reviewStatus(issue);
-          const row = document.createElement("button");
-          row.className = "review-board-row";
-          row.type = "button";
-          row.setAttribute("aria-label", `Review issue ${issue.id}: ${reviewSummaryLine(issue.summary)} — ${status.label}. Open full evidence.`);
-          row.addEventListener("click", openReviewIssues);
-
-          const glyph = document.createElement("span");
-          glyph.className = "review-board-glyph review-state";
-          glyph.dataset.status = status.status;
-          glyph.setAttribute("aria-hidden", "true");
-          glyph.textContent = status.glyph;
-          const summary = document.createElement("span");
-          summary.className = "review-board-summary";
-          summary.title = issue.summary || "";
-          summary.textContent = `#${issue.id} ${reviewSummaryLine(issue.summary)}`;
-          const state = document.createElement("span");
-          state.className = "review-board-state review-state";
-          state.dataset.status = status.status;
-          state.textContent = status.label;
-          row.append(glyph, summary, state);
-          reviewBoardEl.appendChild(row);
-        }
-        if (visible.length > maxRows) {
-          const more = document.createElement("button");
-          more.className = "review-board-details";
-          more.type = "button";
-          more.textContent = `… ${visible.length - maxRows} more issue${visible.length - maxRows === 1 ? "" : "s"} · full evidence`;
-          more.addEventListener("click", openReviewIssues);
-          reviewBoardEl.appendChild(more);
-        }
-      }
-
-      function reviewIssueRank(issue) {
-        switch (issue?.status) {
-          case "validated": return 0;
-          case "deferred by correction threshold": return 1;
-          case "corrected; verification pending": return 2;
-          case "unresolved": return 3;
-          case "invalidated": return 4;
-          case "verified fixed": return 5;
-          default: return 0;
-        }
+        const issueText = issueCount
+          ? `${issueCount} issue${issueCount === 1 ? "" : "s"}`
+          : `${workflows.length} review${workflows.length === 1 ? "" : "s"}`;
+        reviewIssuesButtonEl.textContent = `Reviews · ${issueText}`;
+        reviewIssuesButtonEl.setAttribute("aria-label", `Open ${issueText} in the review ledger`);
       }
 
       function appendReviewDetail(parent, label, content, voice = "prose") {
@@ -9339,7 +9198,7 @@
         renderStatusLine(session);
         renderTranscript(session, archived);
         renderConfig(readOnly || sideActive ? null : session);
-        renderReviewBoard(session);
+        renderReviewIssuesButton(session);
         renderSubagents(session);
         renderPermissions(readOnly ? null : session);
         renderQueue(readOnly ? null : session);
@@ -9710,6 +9569,7 @@
         }
       });
       workspaceDiffButtonEl.addEventListener("click", openWorkspaceDiff);
+      reviewIssuesButtonEl.addEventListener("click", openReviewIssues);
       workspaceDiffRefreshEl.addEventListener("click", () => {
         void requestWorkspaceDiffRefresh();
       });
