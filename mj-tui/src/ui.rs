@@ -19985,12 +19985,15 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed_thought_output = state.thought_output;
 
-        // Reviewer tab: toggle discrete review, deepen the review tier, lower
-        // the automatic correction threshold, and apply the policy live.
+        // Reviewer tab: toggle discrete review and Bifrost analysis, deepen
+        // the review tier, lower the automatic correction threshold, and
+        // apply the policy live.
         let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
         editor.tab = crate::settings::SettingsTab::Reviewer;
         editor.selected = 0;
         state.mjconfig_menu_key(KeyCode::Down);
+        state.mjconfig_menu_key(KeyCode::Down);
+        state.mjconfig_menu_key(KeyCode::Char(' '));
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Char(' '));
         // Skip the Bifrost version row; this test changes review policy only.
@@ -20018,6 +20021,7 @@ mod tests {
             crate::config::AcpServerPolicy::Disabled
         );
         assert!(!saved.agent.discrete_review);
+        assert!(!saved.agent.bifrost_analysis);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
         assert!(!saved.agent.review_tier_from_team_default);
         assert_eq!(

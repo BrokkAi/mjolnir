@@ -5123,6 +5123,7 @@ struct MjTeamPresetEntry {
 struct MjAgentsPanel {
     roles: Vec<MjRoleEntry>,
     discrete_review: bool,
+    bifrost_analysis: bool,
     review_tier: String,
     review_tiers: Vec<MjReviewTierEntry>,
     correction_threshold: String,
@@ -5307,6 +5308,7 @@ struct MjConfigApplyRequest {
     review_permission: Option<String>,
     subagents_permission: Option<String>,
     discrete_review: Option<bool>,
+    bifrost_analysis: Option<bool>,
     /// `quick` | `extended`.
     review_tier: Option<String>,
     /// `p0` | `p1` | `p2` | `p3`.
@@ -5769,6 +5771,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         agents: MjAgentsPanel {
             roles,
             discrete_review: config.agent.discrete_review,
+            bifrost_analysis: config.agent.bifrost_analysis,
             review_tier: config.agent.review_tier.as_str().to_string(),
             review_tiers: config::ReviewTier::ALL
                 .into_iter()
@@ -5987,6 +5990,9 @@ fn mjconfig_apply_edits(
     }
     if let Some(enabled) = request.discrete_review {
         config.agent.discrete_review = enabled;
+    }
+    if let Some(enabled) = request.bifrost_analysis {
+        config.agent.bifrost_analysis = enabled;
     }
     if let Some(tier) = request.review_tier {
         let tier = tier
@@ -11376,6 +11382,7 @@ mod tests {
                     "review_permission": "manual",
                     "subagents_permission": "yolo",
                     "discrete_review": false,
+                    "bifrost_analysis": false,
                     "review_tier": "extended",
                     "correction_threshold": "p1",
                     "bifrost_version": "0.9.9",
@@ -11412,6 +11419,7 @@ mod tests {
             "not reported this session"
         );
         assert_eq!(snapshot["agents"]["discrete_review"], false);
+        assert_eq!(snapshot["agents"]["bifrost_analysis"], false);
         assert_eq!(snapshot["agents"]["review_tier"], "extended");
         assert_eq!(snapshot["agents"]["review_tiers"][0]["tier"], "quick");
         assert_eq!(snapshot["agents"]["correction_threshold"], "p1");
@@ -11442,6 +11450,7 @@ mod tests {
         let saved = config::Config::load(&config_path).expect("reload saved config");
         assert_eq!(saved.agent.model, "gpt-5-6-terra");
         assert!(!saved.agent.discrete_review);
+        assert!(!saved.agent.bifrost_analysis);
         assert_eq!(saved.agent.review_tier, config::ReviewTier::Extended);
         assert!(!saved.agent.review_tier_from_team_default);
         assert_eq!(

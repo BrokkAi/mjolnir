@@ -63,7 +63,8 @@ full-access presets.
 `[agent]` is the primary agent: the session that owns every user turn. It cannot
 be disabled. `[review]` configures the discrete-review model; review
 is still enabled or disabled with `agent.discrete_review`, its depth is
-chosen with `agent.review_tier`, and `agent.correction_threshold` controls
+chosen with `agent.review_tier`, and its optional Bifrost preprocessing is
+controlled by `agent.bifrost_analysis`. `agent.correction_threshold` controls
 which validated priorities receive automatic correction. `[subagents]`
 configures the default backing for `create_subagent`; set `model = "disabled"`
 (or `"none"`) to turn subagents off entirely.
@@ -75,6 +76,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.session_defaults` | Per-ACP saved session-option defaults for new primary sessions |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
+| `agent.bifrost_analysis` | Precompute semantic diff context with Bifrost before review (default `true`). Set to `false` to use the bounded raw Git patch while keeping Bifrost navigation tools available. |
 | `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand specialist lanes and spends far more tokens |
 | `agent.correction_threshold` | Automatically correct validated findings through `p0`, `p1`, `p2`, or `p3` (default). Findings below the selected threshold remain tracked as deferred, and the Review Board records that policy reason. |
 | `agent.max_correction_rounds` | Optional override for review passes over findings-driven corrections; omitted defaults to `0` for Quick and `1` for Extended |

@@ -71,6 +71,12 @@ chooses the **Bifrost version** and **review tier**. Bifrost follows npm's
 as exact pins. These settings are read when a review dispatches, so a change
 applies to the next reviewed turn.
 
+The **Bifrost diff analysis** switch on that tab controls the one-shot
+`analyze_diff` preprocessing step. Turning it off keeps discrete review enabled
+and keeps Bifrost navigation tools attached to reviewers; the review packet
+uses a bounded raw Git patch and raw file/line totals instead. The setting is
+stored as `bifrost_analysis = false` under `[agent]`.
+
 The Reviewer tab has an independent **Permissions** setting. Its default,
 `Auto`, starts Codex with its native **Approve for me** policy and Claude Code
 with its native Auto policy; Mjolnir does not auto-answer approval requests.
@@ -103,9 +109,10 @@ thorough than Quick and spends far more tokens:
 2. A first-class internal review supervisor on the configured review model receives
    Bifrost core navigation tools and an immutable change packet. It runs in a
    detached session but is not a subagent. Changes under 200 lines
-   include the complete captured diff; larger changes include the complete
-   semantic file totals and `patch_symbols` from `analyze_diff` for the
-   captured base and target trees.
+   include the complete captured diff. With Bifrost diff analysis enabled,
+   larger changes include semantic file totals and `patch_symbols` from
+   `analyze_diff` for the captured base and target trees. With it disabled,
+   the supervisor receives a bounded raw Git patch and raw file/line totals.
 3. The supervisor forms a risk map from the change packet and targeted source
    inspection. It launches a specialist reviewer only for a concrete
    unresolved hypothesis that the lane can investigate: Control flow,
