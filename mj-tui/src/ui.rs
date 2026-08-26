@@ -35,7 +35,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use ratatui::backend::{Backend, ClearType};
-use ratatui::layout::{Constraint, Direction, Layout, Position, Rect, Size};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect, Size};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
@@ -7598,6 +7598,12 @@ fn draw(
                 .split(chunks[0]);
             draw_transcript(f, split[0], state, transcript_scroll);
             draw_review_board(f, split[1], state);
+        } else if transcript_is_pristine(state) && state.transcript_search.is_none() {
+            // A pristine session has no scrollback: a wheel event while the
+            // pane is up must not park the transcript at a phantom offset
+            // (draw_transcript's reconcile would have clamped it to 0).
+            state.scroll_offset = 0;
+            draw_welcome_pane(f, chunks[0], state);
         } else {
             draw_transcript(f, chunks[0], state, transcript_scroll);
         }
@@ -9242,29 +9248,37 @@ fn draw_status_line(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     );
 }
 
-fn status_line(state: &AppState, width: usize) -> Line<'static> {
-    if width == 0 {
-        return Line::default();
-    }
-
+/// Display name for the active primary model, falling back through the
+/// role label and the ACP adapter id while launch details are still
+/// unresolved. Shared by the status line and the welcome pane.
+fn primary_model_display(state: &AppState) -> String {
     let model_name = state.active_models.primary.trim();
     let model_name = if !model_name.is_empty() && model_name != "auto" {
         model_name
     } else {
         state.agent_label.trim()
     };
-    // The adapter is visible in /model; the status line shows only the model
-    // name, using the adapter solely as a stand-in until a model is known.
-    let model_name = if model_name.is_empty() {
+    // The adapter is visible in /model; here only the model name is shown,
+    // using the adapter solely as a stand-in until a model is known.
+    if model_name.is_empty() {
         state
             .active_models
             .primary_source
             .as_deref()
             .filter(|source| !source.is_empty())
             .unwrap_or(state.agent_source_id.as_str())
+            .to_string()
     } else {
-        model_name
-    };
+        model_name.to_string()
+    }
+}
+
+fn status_line(state: &AppState, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+
+    let model_name = primary_model_display(state);
     let effort = state
         .primary_reasoning_effort
         .as_deref()
@@ -9335,7 +9349,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
             return status_line_from_fields(
                 vec![
                     (
-                        compact_middle_display(model_name, model_width),
+                        compact_middle_display(&model_name, model_width),
                         state.theme.primary,
                     ),
                     (pr, state.theme.accent),
@@ -9351,7 +9365,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
 
     status_line_from_fields(
         vec![(
-            compact_middle_display(model_name, width),
+            compact_middle_display(&model_name, width),
             state.theme.primary,
         )],
         state.theme.muted,
@@ -9518,6 +9532,83 @@ fn compact_status_count(value: u64) -> String {
         .map(|whole| format!("{whole}k"))
         .or_else(|| value.strip_suffix(".0m").map(|whole| format!("{whole}m")))
         .unwrap_or(value)
+}
+
+/// A session is pristine while its transcript holds nothing but session
+/// boundary rules: nothing has been said yet, so the transcript region can
+/// be covered by the welcome pane. Any real entry — including a `System`
+/// error — must surface, so only boundaries qualify.
+fn transcript_is_pristine(state: &AppState) -> bool {
+    state
+        .transcript
+        .iter()
+        .all(|entry| matches!(entry, Entry::SessionBoundary(_)))
+}
+
+/// Cover for a pristine session: instead of a blank transcript region, a
+/// centered welcome shows what is loaded (model, effort, project) and the
+/// bindings that matter before the first prompt. It is not a modal — the
+/// input stays live, and the first real transcript entry replaces the pane
+/// with the ordinary transcript.
+fn draw_welcome_pane(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let theme = state.theme;
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .title(transcript_block_title(state));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let muted = Style::default().ink(theme.muted);
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "M J O L N I R",
+            Style::default()
+                .ink(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(mjolnir_version_label(), muted)),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(
+                primary_model_display(state),
+                Style::default().ink(theme.primary),
+            ),
+            Span::styled(
+                format!(
+                    " · effort {}",
+                    state
+                        .primary_reasoning_effort
+                        .as_deref()
+                        .unwrap_or("default")
+                ),
+                muted,
+            ),
+        ]),
+    ];
+    let project = state.project_label.trim();
+    if !project.is_empty() {
+        lines.push(Line::from(Span::styled(
+            compact_middle_display(project, usize::from(inner.width)),
+            muted,
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        format!("Enter send · {PROMPT_NEWLINE_HINT} newline · Shift-Tab team · F10 help"),
+        muted,
+    )));
+
+    // Center vertically; on panes too short to fit, pin to the top and clip.
+    let pad = inner.height.saturating_sub(lines.len() as u16) / 2;
+    let target = Rect {
+        y: inner.y + pad,
+        height: inner.height - pad,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), target);
 }
 
 fn draw_transcript(
@@ -15863,6 +15954,53 @@ mod tests {
             "the directly adjacent session line must name itself:\n{}",
             lines.join("\n")
         );
+    }
+
+    #[test]
+    fn welcome_pane_covers_a_pristine_session() {
+        let mut state = AppState::new();
+        state.agent_label = "claude".to_string();
+        state.push_session_boundary("new claude session started");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut TranscriptScrollState::default(),
+                    UiMode::FullscreenTui,
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(rendered.contains("M J O L N I R"), "{rendered}");
+        assert!(rendered.contains("claude · effort default"), "{rendered}");
+        assert!(rendered.contains("Shift-Tab team"), "{rendered}");
+    }
+
+    #[test]
+    fn welcome_pane_yields_to_the_first_real_entry() {
+        let mut state = AppState::new();
+        state.push_session_boundary("new claude session started");
+        // A system note (say, a runtime failure) is real content that must
+        // surface; only boundary rules keep the pane up.
+        state.push_system_message("runtime failed to start");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &mut TranscriptScrollState::default(),
+                    UiMode::FullscreenTui,
+                )
+            })
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(!rendered.contains("M J O L N I R"), "{rendered}");
+        assert!(rendered.contains("runtime failed to start"), "{rendered}");
     }
 
     #[test]
