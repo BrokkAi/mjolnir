@@ -32,10 +32,11 @@ of them before returning. Each probe opens an ACP connection and creates a
 disposable session to collect models and session options. Mjolnir does not
 persist or reuse ACP capability results between resolutions.
 
-The live DeepSWE ranking is separate from adapter capabilities and remains
-cached for 24 hours. A bundled snapshot is available when the ranking endpoint
-cannot be refreshed. Read [Storage and network activity](/storage-network/)
-for paths and endpoints.
+The live DeepSWE v1.1 ranking is separate from adapter capabilities and remains
+cached for 24 hours. At roster resolution Mjolnir uses a fresh cache first,
+then the live endpoint, then a stale valid cache if refresh fails, and finally
+the snapshot bundled with the release. Read
+[Storage and network activity](/storage-network/) for paths and endpoints.
 
 `mj models refresh` performs an immediate roster resolution, probes every
 enabled adapter, and reports the available model count. Normal startup and
@@ -51,12 +52,27 @@ subagent seats to `gpt-5-6-luna` at `xhigh` effort and selects extended
 review; the other teams leave model selection on Auto and preserve the
 selected review tier (Quick by default).
 
-- The primary prefers the strongest launchable eligible row.
-- The review supervisor and default subagent model exclude the primary first,
-  then prefer the cheapest cost-efficient model on the current quality frontier
-  that meets the Sonnet quality floor. If no distinct model clears that floor,
-  they choose the strongest distinct frontier model that costs less than the
-  primary; otherwise, they reuse the primary.
+Auto uses DeepSWE's program-verified Pass@1 and per-task mean cost. LMArena
+human-preference scores are not roster inputs or UI metadata and do not control
+Auto. For models with effort-specific rows, only the exact `high` row is
+eligible; a model without effort rows uses its strongest default row. A seat's
+configured runtime reasoning effort does not rewrite or interpolate the
+benchmark score.
+
+| Seat | Controlling objective | Cost and fallback policy |
+| --- | --- | --- |
+| Primary | Highest Pass@1 among launchable eligible rows | Mean cost breaks an exact Pass@1 tie; model id breaks a remaining tie. There are no model-specific overrides. |
+| Review supervisor | A model distinct from the primary on the DeepSWE quality/cost Pareto frontier | Choose the cheapest model at or above the Sonnet quality floor. Otherwise choose the strongest distinct frontier model cheaper than the primary, then reuse the primary. |
+| Default subagent | The same policy as the review supervisor | The same cost, fallback, and distinctness rules as review. |
+
+Before primary ranking, a Team or saved ACP-source constraint limits the
+eligible provider. For an unconstrained primary, when both native clients
+report subscription tiers and one tier has strictly more capacity, Auto ranks
+within that provider so the larger plan can carry the session. Equal or
+one-sided detected tiers do not affect ranking.
+
+- Code-level model-specific overrides are not allowed in Auto. An explicit
+  user model selection bypasses Auto and is the supported way to pin a product.
 - When several adapters offer the selected model, the primary, review, and
   subagent seats apply their independent ACP priority lists. All lists default
   to Codex, then Claude.

@@ -642,7 +642,9 @@ fn preferred_route<'a>(
         })
 }
 
-/// Apply primary-only product ranking policy within an optional adapter.
+/// Pick the highest verified-completion row within an optional adapter.
+/// Cost and model id are deterministic tie-breakers; Auto has no
+/// model-specific product overrides.
 fn preferred_primary_candidate(
     available: &[ResolvedAgent],
     adapter: Option<AdapterKind>,
@@ -650,42 +652,13 @@ fn preferred_primary_candidate(
     let eligible = |candidate: &&ResolvedAgent| {
         candidate.ranked && adapter.is_none_or(|kind| candidate.launch.kind == kind)
     };
-    let strongest_opus = available
-        .iter()
-        .filter(eligible)
-        .filter(|candidate| is_claude_opus(&candidate.model.model))
-        .map(|candidate| candidate.model.pass_at_1)
-        .max_by(f64::total_cmp);
     available.iter().filter(eligible).max_by(|a, b| {
-        primary_ranking_score(&a.model.model, a.model.pass_at_1, strongest_opus)
-            .total_cmp(&primary_ranking_score(
-                &b.model.model,
-                b.model.pass_at_1,
-                strongest_opus,
-            ))
+        a.model
+            .pass_at_1
+            .total_cmp(&b.model.pass_at_1)
             .then_with(|| b.model.mean_cost_usd.total_cmp(&a.model.mean_cost_usd))
             .then_with(|| b.model.model.cmp(&a.model.model))
     })
-}
-
-fn primary_ranking_score(model: &str, pass_at_1: f64, strongest_opus: Option<f64>) -> f64 {
-    if is_claude_fable_5(model) {
-        // Fable 5 is the Claude flagship for the primary seat. Lift it only
-        // enough to outrank Opus without changing review or subagent scoring.
-        strongest_opus.map_or(pass_at_1, |opus| pass_at_1.max(opus + f64::EPSILON))
-    } else {
-        pass_at_1
-    }
-}
-
-fn is_claude_fable_5(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    model == "claude-fable-5" || model.starts_with("claude-fable-5-")
-}
-
-fn is_claude_opus(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    model == "claude-opus" || model.starts_with("claude-opus-")
 }
 
 /// Resolve the automatic primary model when the seat is constrained to one
@@ -698,22 +671,12 @@ pub fn auto_primary_model_for_source<'a>(
     let eligible = |choice: &&ModelChoice| {
         choice.available && choice.ranked && choice.adapter.as_deref() == Some(source)
     };
-    let strongest_opus = choices
-        .iter()
-        .filter(eligible)
-        .filter(|choice| is_claude_opus(&choice.model))
-        .map(|choice| choice.pass_at_1)
-        .max_by(f64::total_cmp);
     choices
         .iter()
         .filter(eligible)
         .max_by(|a, b| {
-            primary_ranking_score(&a.model, a.pass_at_1, strongest_opus)
-                .total_cmp(&primary_ranking_score(
-                    &b.model,
-                    b.pass_at_1,
-                    strongest_opus,
-                ))
+            a.pass_at_1
+                .total_cmp(&b.pass_at_1)
                 .then_with(|| b.mean_cost_usd.total_cmp(&a.mean_cost_usd))
                 .then_with(|| b.model.cmp(&a.model))
         })
@@ -1532,17 +1495,22 @@ mod tests {
         let choices = vec![
             choice("gpt-5-6-terra", 0.65, "codex-acp"),
             choice("gpt-5-6-sol", 0.70, "codex-acp"),
-            choice("claude-fable-5", 0.99, "claude-acp"),
+            choice("claude-fable-5", 0.65, "claude-acp"),
+            choice("claude-opus-5", 0.75, "claude-acp"),
         ];
 
         assert_eq!(
             auto_primary_model_for_source(&choices, "codex-acp"),
             Some("gpt-5-6-sol")
         );
+        assert_eq!(
+            auto_primary_model_for_source(&choices, "claude-acp"),
+            Some("claude-opus-5")
+        );
     }
 
     #[test]
-    fn auto_primary_prefers_fable_5_when_opus_would_otherwise_win() {
+    fn auto_primary_has_no_fable_over_opus_product_override() {
         let available = vec![
             role("claude-opus-5", 0.75),
             role("claude-fable-5", 0.65),
@@ -1555,9 +1523,66 @@ mod tests {
                     .expect("primary model")
                     .model
                     .model,
-                "claude-fable-5"
+                "claude-opus-5"
             );
         }
+    }
+
+    #[test]
+    fn auto_primary_uses_cost_only_to_break_completion_ties() {
+        let stronger_expensive = vec![
+            role_at("claude-opus-5", 0.75, 20.0),
+            role_at("claude-fable-5", 0.74, 1.0),
+        ];
+        assert_eq!(
+            choose_primary_auto(&stronger_expensive, &Subscriptions::default(), &[])
+                .expect("strongest model")
+                .model
+                .model,
+            "claude-opus-5"
+        );
+
+        let tied = vec![
+            role_at("claude-opus-5", 0.75, 20.0),
+            role_at("gpt-5-6-sol", 0.75, 2.0),
+        ];
+        assert_eq!(
+            choose_primary_auto(&tied, &Subscriptions::default(), &[])
+                .expect("lower-cost tied model")
+                .model
+                .model,
+            "gpt-5-6-sol"
+        );
+    }
+
+    #[test]
+    fn explicit_primary_model_bypasses_auto_ranking() {
+        let opus = role("claude-opus-5", 0.75);
+        let fable = role("claude-fable-5", 0.65);
+        let rows = vec![opus.model.clone(), fable.model.clone()];
+        let discovery = Discovery {
+            available: vec![opus, fable],
+            adapter_errors: HashMap::new(),
+            session_config: HashMap::new(),
+        };
+        let mut config = Config::default();
+        config.agent.model = "claude-fable-5".to_string();
+        config.subagents.model = crate::config::DISABLED_MODEL.to_string();
+
+        let roster = assemble_roster(
+            &config,
+            &rows,
+            &Availability {
+                codex_credentials: false,
+                claude_status: ClaudeAuthStatus::NotLoggedIn,
+                subscriptions: Subscriptions::default(),
+            },
+            AcpInventory::default(),
+            discovery,
+        )
+        .expect("explicit primary model");
+
+        assert_eq!(roster.primary.model.model, "claude-fable-5");
     }
 
     #[test]
