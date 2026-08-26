@@ -80,6 +80,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand specialist lanes and spends far more tokens |
 | `agent.correction_threshold` | Automatically correct validated findings through `p0`, `p1`, `p2`, or `p3` (default). Findings below the selected threshold remain tracked as deferred, and the Review Board records that policy reason. |
 | `agent.max_correction_rounds` | Optional override for review passes over findings-driven corrections; omitted defaults to `0` for Quick and `1` for Extended |
+| `agent.runtime_stall_minutes` | Minutes without an ACP update before an active primary, review, or subagent runtime is shown as stalled; default `5`, `0` disables. Config file only |
 | `review.model` | Review supervisor model, or `auto` |
 | `review.acp_priority` | ACP source preference for the review supervisor model |
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |

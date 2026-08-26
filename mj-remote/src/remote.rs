@@ -234,6 +234,17 @@ pub struct SessionRecord {
     /// is already running.
     #[serde(default)]
     pub steering_supported: bool,
+    /// Configured silence threshold used by the viewer. `0` disables runtime
+    /// stall warnings.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub runtime_stall_seconds: u64,
+    /// Most recent primary ACP update during the active turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_last_activity_at: Option<String>,
+    /// Active nested runtimes, including hidden review coordinators that do
+    /// not belong in the ordinary subagent roster.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_activities: Vec<RuntimeActivityRecord>,
     /// Permission prompts currently waiting for an answer in this session.
     #[serde(default)]
     pub pending_permissions: Vec<PendingPermissionRecord>,
@@ -370,6 +381,37 @@ pub struct TrackerStatusSeed {
     /// Working directory published as session provenance and probed for the
     /// current branch's open pull request. `None` disables both.
     pub cwd: Option<PathBuf>,
+    pub runtime_stall_minutes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeActivityRecord {
+    pub subagent_id: u64,
+    pub label: String,
+    pub runtime: String,
+    pub last_activity_at: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub waiting_for_user_action: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct RuntimeActivitySnapshot {
+    #[serde(default)]
+    runtime_stall_seconds: u64,
+    #[serde(default)]
+    primary_last_activity_at: Option<String>,
+    #[serde(default)]
+    runtime_activities: Vec<RuntimeActivityRecord>,
+}
+
+impl From<&SessionRecord> for RuntimeActivitySnapshot {
+    fn from(session: &SessionRecord) -> Self {
+        Self {
+            runtime_stall_seconds: session.runtime_stall_seconds,
+            primary_last_activity_at: session.primary_last_activity_at.clone(),
+            runtime_activities: session.runtime_activities.clone(),
+        }
+    }
 }
 
 /// One background subagent as the viewer sees it: keyed by `subagent_id`,
@@ -1518,6 +1560,8 @@ struct TrackerState {
     open_agent_actors: HashSet<String>,
     prompt_in_flight: bool,
     prompt_turn_started_at: Option<String>,
+    primary_last_activity_at: Option<String>,
+    runtime_stall_seconds: u64,
     side_prompt_in_flight: bool,
     side_prompt_turn_started_at: Option<String>,
     side_state: RemoteSideState,
@@ -1528,6 +1572,7 @@ struct TrackerState {
     /// Live per-subagent status rows, keyed by `subagent_id` and ordered by it
     /// (ids are monotonic in spawn order).
     subagents: BTreeMap<u64, SubagentStatusRecord>,
+    runtime_activities: BTreeMap<u64, RuntimeActivityRecord>,
     /// Runtime roles for nested review actors. Internal coordinators share the
     /// runner but stay out of the user-facing subagent roster.
     nested_roles: HashMap<u64, mj_core::workflow::WorkflowActorRole>,
@@ -1739,6 +1784,8 @@ impl TrackerState {
             open_agent_actors: HashSet::new(),
             prompt_in_flight: false,
             prompt_turn_started_at: None,
+            primary_last_activity_at: None,
+            runtime_stall_seconds: 0,
             side_prompt_in_flight: false,
             side_prompt_turn_started_at: None,
             side_state: RemoteSideState::Inactive,
@@ -1747,6 +1794,7 @@ impl TrackerState {
             terminal_outputs: HashMap::new(),
             tool_transcript_entries: HashMap::new(),
             subagents: BTreeMap::new(),
+            runtime_activities: BTreeMap::new(),
             nested_roles: HashMap::new(),
             workflows: mj_core::workflow::WorkflowStore::default(),
             workspace_diff: None,
@@ -1832,11 +1880,13 @@ impl TrackerState {
         self.open_agent_actors.clear();
         self.prompt_in_flight = false;
         self.prompt_turn_started_at = None;
+        self.primary_last_activity_at = None;
         self.side_prompt_in_flight = false;
         self.side_prompt_turn_started_at = None;
         self.side_state = RemoteSideState::Inactive;
         self.side_initial_prompt_pending = false;
         self.transcript.clear();
+        self.runtime_activities.clear();
         self.terminal_outputs.clear();
         self.tool_transcript_entries.clear();
         self.subagents.clear();
@@ -1997,6 +2047,7 @@ impl TrackerState {
                 self.touch();
             }
             UiEvent::TerminalOutput(snapshot) => {
+                self.note_primary_activity();
                 self.observe_terminal_output(snapshot);
             }
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } => {
@@ -2005,7 +2056,10 @@ impl TrackerState {
             // The steered text already entered this transcript when the
             // `SteerPrompt` command was observed; delivery confirmation only
             // feeds the orchestrator's user-message history.
-            UiEvent::SteeredPromptDelivered { .. } => {}
+            UiEvent::SteeredPromptDelivered { .. } => {
+                self.note_primary_activity();
+                self.touch();
+            }
             UiEvent::Fatal(message) => {
                 self.end_prompt_turn();
                 self.record_status_notice(StatusKind::Fatal, message);
@@ -2073,6 +2127,11 @@ impl TrackerState {
                 self.record_status_notice(StatusKind::Warning, message);
             }
             UiEvent::InternalMessage(message) => {
+                if let Some(subagent_id) = message.owner_subagent_id {
+                    self.note_nested_activity(subagent_id);
+                } else {
+                    self.note_primary_activity();
+                }
                 self.push_actor_transcript_entry(
                     "system",
                     &message.source.to_ascii_lowercase(),
@@ -2263,6 +2322,7 @@ impl TrackerState {
                 resumed,
                 label,
                 model,
+                agent,
                 objective,
                 ..
             } => {
@@ -2271,6 +2331,20 @@ impl TrackerState {
                 let internal = role
                     .as_ref()
                     .is_some_and(|role| role.is_internal_review_session());
+                self.runtime_activities.insert(
+                    *subagent_id,
+                    RuntimeActivityRecord {
+                        subagent_id: *subagent_id,
+                        label: role
+                            .as_ref()
+                            .map_or_else(|| label.clone(), |role| role.display_label().to_string()),
+                        runtime: model
+                            .as_ref()
+                            .map_or_else(|| agent.clone(), |model| format!("{agent}/{model}")),
+                        last_activity_at: now.clone(),
+                        waiting_for_user_action: false,
+                    },
+                );
                 if !internal {
                     self.subagents.insert(
                         *subagent_id,
@@ -2310,16 +2384,21 @@ impl TrackerState {
                 subagent_id,
                 activity,
             } => {
+                self.note_nested_activity(*subagent_id);
                 if let Some(record) = self.subagents.get_mut(subagent_id) {
                     record.activity = activity.clone();
-                    self.touch();
                 }
+                self.touch();
             }
-            SubagentEvent::SessionStarted { .. } => {}
+            SubagentEvent::SessionStarted { subagent_id, .. } => {
+                self.note_nested_activity(*subagent_id);
+                self.touch();
+            }
             SubagentEvent::Finished {
                 subagent_id,
                 outcome,
             } => {
+                self.note_nested_activity(*subagent_id);
                 let role = self.nested_roles.get(subagent_id).cloned();
                 let internal = role
                     .as_ref()
@@ -2359,12 +2438,14 @@ impl TrackerState {
                     if internal { "review" } else { "subagent" },
                     text,
                 );
+                self.runtime_activities.remove(subagent_id);
                 self.touch();
             }
             SubagentEvent::SessionUpdate {
                 subagent_id,
                 update,
             } => {
+                self.note_nested_activity(*subagent_id);
                 let actor = remote_nested_actor(*subagent_id, self.nested_roles.get(subagent_id));
                 self.observe_session_update_as(update, &actor, Some(&actor));
             }
@@ -2372,12 +2453,22 @@ impl TrackerState {
                 subagent_id,
                 snapshot,
             } => {
+                self.note_nested_activity(*subagent_id);
                 let actor = remote_nested_actor(*subagent_id, self.nested_roles.get(subagent_id));
                 let mut snapshot = snapshot.clone();
                 snapshot.terminal_id = namespace_remote_id(Some(&actor), &snapshot.terminal_id);
                 self.observe_terminal_output(&snapshot);
             }
-            _ => {}
+            SubagentEvent::PermissionRequest { subagent_id, .. }
+            | SubagentEvent::ElicitationRequest { subagent_id, .. } => {
+                self.note_nested_user_wait(*subagent_id);
+                self.touch();
+            }
+            SubagentEvent::CancelPendingPermissions { subagent_id }
+            | SubagentEvent::Status { subagent_id, .. } => {
+                self.note_nested_activity(*subagent_id);
+                self.touch();
+            }
         }
     }
 
@@ -2410,6 +2501,7 @@ impl TrackerState {
     }
 
     fn observe_session_update(&mut self, update: &SessionUpdate) {
+        self.note_primary_activity();
         self.observe_session_update_as(update, "primary", None);
     }
 
@@ -2636,6 +2728,7 @@ impl TrackerState {
         } else {
             self.prompt_in_flight = true;
             self.prompt_turn_started_at = Some(now_rfc3339());
+            self.note_primary_activity();
         }
         if self
             .last_prompt_at
@@ -2672,6 +2765,9 @@ impl TrackerState {
         } else if !self.prompt_in_flight {
             self.prompt_in_flight = true;
             self.prompt_turn_started_at = Some(now_rfc3339());
+        }
+        if actor == "primary" {
+            self.note_primary_activity();
         }
         if self
             .last_prompt_at
@@ -2840,6 +2936,9 @@ impl TrackerState {
             },
             prompt_images_supported: self.prompt_images_supported,
             steering_supported: self.steering_supported,
+            runtime_stall_seconds: self.runtime_stall_seconds,
+            primary_last_activity_at: self.primary_last_activity_at.clone(),
+            runtime_activities: self.runtime_activities.values().cloned().collect(),
             pending_permissions: self.pending_permissions.clone(),
             session_config: self.session_config.clone(),
             native_mode: self.native_mode.clone(),
@@ -2928,6 +3027,24 @@ impl TrackerState {
 
     fn touch(&mut self) {
         self.last_update = Some(now_rfc3339());
+    }
+
+    fn note_primary_activity(&mut self) {
+        self.primary_last_activity_at = Some(now_rfc3339());
+    }
+
+    fn note_nested_activity(&mut self, subagent_id: u64) {
+        if let Some(runtime) = self.runtime_activities.get_mut(&subagent_id) {
+            runtime.last_activity_at = now_rfc3339();
+            runtime.waiting_for_user_action = false;
+        }
+    }
+
+    fn note_nested_user_wait(&mut self, subagent_id: u64) {
+        if let Some(runtime) = self.runtime_activities.get_mut(&subagent_id) {
+            runtime.last_activity_at = now_rfc3339();
+            runtime.waiting_for_user_action = true;
+        }
     }
 
     fn reserve_remote_prompt_slot(&mut self) -> Option<String> {
@@ -3031,6 +3148,7 @@ impl RemoteSessionTracker {
         state.worktree = worktree;
         state.model_source = status.model_source;
         state.reasoning_effort = status.reasoning_effort;
+        state.runtime_stall_seconds = status.runtime_stall_minutes.saturating_mul(60);
         state.cwd = status.cwd.clone();
         let tracker = Self {
             remote_dir: Arc::new(dir),
@@ -3177,6 +3295,9 @@ impl RemoteSessionTracker {
             requested_at: now_rfc3339(),
         };
         if let Ok(mut state) = self.state.lock() {
+            if actor.is_none() {
+                state.note_primary_activity();
+            }
             state.push_pending_permission(record);
         }
         self.request_flush();
@@ -3235,6 +3356,9 @@ impl RemoteSessionTracker {
             requested_at: now_rfc3339(),
         };
         if let Ok(mut state) = self.state.lock() {
+            if owner_prefix.is_none() {
+                state.note_primary_activity();
+            }
             state.push_pending_permission(record);
         }
         self.request_flush();
@@ -5128,6 +5252,52 @@ struct MjTeamPresetEntry {
     id: String,
     label: String,
     description: String,
+    primary: MjTeamRoleEntry,
+    review: MjTeamRoleEntry,
+    subagents: MjTeamRoleEntry,
+    discrete_review: bool,
+    review_tier: String,
+    auto_failover: bool,
+}
+
+impl MjTeamPresetEntry {
+    /// The panel-visible settings a Team selection decides, read from a
+    /// config the team has been applied to. The viewer previews these while
+    /// the selection is staged, so every field the save will overwrite has
+    /// to ship here.
+    fn from_team_config(
+        id: String,
+        label: String,
+        description: String,
+        config: &config::Config,
+    ) -> Self {
+        Self {
+            id,
+            label,
+            description,
+            primary: MjTeamRoleEntry {
+                model: config.agent.model.clone(),
+                source: config.agent.acp_source.clone(),
+            },
+            review: MjTeamRoleEntry {
+                model: config.review.model.clone(),
+                source: config.review.acp_source.clone(),
+            },
+            subagents: MjTeamRoleEntry {
+                model: config.subagents.model.clone(),
+                source: config.subagents.acp_source.clone(),
+            },
+            discrete_review: config.agent.discrete_review,
+            review_tier: config.agent.review_tier.as_str().to_string(),
+            auto_failover: config.subagents.auto_failover,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct MjTeamRoleEntry {
+    model: String,
+    source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -5760,21 +5930,26 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     let team = match roster::external_adapter() {
         Some(external) => MjTeamPanel {
             selected: Some(external.id.clone()),
-            presets: vec![MjTeamPresetEntry {
-                id: external.id.clone(),
-                label: external.label.clone(),
-                description: "Provided by this platform; other teams are unavailable here."
-                    .to_string(),
-            }],
+            presets: vec![MjTeamPresetEntry::from_team_config(
+                external.id.clone(),
+                external.label.clone(),
+                "Provided by this platform; other teams are unavailable here.".to_string(),
+                config,
+            )],
         },
         None => MjTeamPanel {
             selected: config::TeamPreset::from_config(config).map(|preset| preset.id().to_string()),
             presets: config::TeamPreset::ALL
                 .into_iter()
-                .map(|preset| MjTeamPresetEntry {
-                    id: preset.id().to_string(),
-                    label: preset.label().to_string(),
-                    description: preset.description().to_string(),
+                .map(|preset| {
+                    let mut staged = config.clone();
+                    preset.apply(&mut staged);
+                    MjTeamPresetEntry::from_team_config(
+                        preset.id().to_string(),
+                        preset.label().to_string(),
+                        preset.description().to_string(),
+                        &staged,
+                    )
                 })
                 .collect(),
         },
@@ -5977,7 +6152,9 @@ fn mjconfig_apply_edits(
     config: &mut config::Config,
     request: MjConfigApplyRequest,
     inventory: &roster::AcpInventory,
-) -> std::result::Result<(), (StatusCode, String)> {
+    choices: &[roster::ModelChoice],
+    active_models: Option<&config::ModelsConfig>,
+) -> std::result::Result<Vec<String>, (StatusCode, String)> {
     let bad_request = |message: String| (StatusCode::UNPROCESSABLE_ENTITY, message);
     if let Some(team) = request.team {
         if let Some(external) = roster::external_adapter() {
@@ -6084,6 +6261,14 @@ fn mjconfig_apply_edits(
             config.set_acp_server_policy(&id, policy);
         }
     }
+    // A policy edit may invalidate an explicit model before provider-scoped
+    // defaults are applied. Resolve that fallback first so reasoning effort is
+    // synchronized from the provider the seat will actually use after save.
+    let reroute_notices = crate::settings::reset_unroutable_models(config, choices);
+    // Discovery reflects the configuration before this request. Rebuild the
+    // inventory selection from the staged policies/Team while retaining its
+    // probed models and session options.
+    let effective_inventory = roster::rediscover_inventory(config, inventory);
     for (defaults, seat) in [
         (
             request.primary_session_defaults,
@@ -6099,11 +6284,33 @@ fn mjconfig_apply_edits(
         ),
     ] {
         let Some(defaults) = defaults else { continue };
+        // The same resolver that bound the seat's option panel in the
+        // snapshot, on the staged config: the panel the user edited and the
+        // save that interprets the edit must agree on the seat's provider.
+        let selected_source = mj_core::settings::selected_seat_session_source(
+            config,
+            seat,
+            active_models,
+            choices,
+            &effective_inventory,
+        );
         for (server_id, options) in defaults {
             for (option_key, value) in options {
                 // Mirror the TUI's role panels: a thought-level
-                // option also updates the seat's reasoning-effort default.
-                if mjconfig_option_controls_reasoning_effort(inventory, &server_id, &option_key) {
+                // option from the final seat provider also updates the
+                // seat-wide reasoning-effort default. Defaults staged for a
+                // provider the user switched away from remain provider-scoped,
+                // while an indeterminate resolution (nothing probed yet) keeps
+                // the pre-gate behavior of syncing rather than dropping.
+                if selected_source
+                    .as_deref()
+                    .is_none_or(|source| source == server_id.as_str())
+                    && mjconfig_option_controls_reasoning_effort(
+                        &effective_inventory,
+                        &server_id,
+                        &option_key,
+                    )
+                {
                     match seat {
                         crate::settings::SessionDefaultsSeat::Primary => {
                             config.agent.reasoning_effort = Some(value.clone());
@@ -6134,7 +6341,7 @@ fn mjconfig_apply_edits(
             }
         }
     }
-    Ok(())
+    Ok(reroute_notices)
 }
 
 fn mjconfig_option_controls_reasoning_effort(
@@ -6166,18 +6373,27 @@ async fn mjconfig_apply(
         return Err((StatusCode::CONFLICT, warning));
     }
     // Scoped so the guard is provably dead before the refresh await below.
-    let (inventory, choices) = {
+    let (inventory, choices, active_models) = {
         let discovery = state
             .mjconfig
             .discovery
             .lock()
             .expect("mjconfig discovery lock");
-        (discovery.inventory.clone(), discovery.choices.clone())
+        (
+            discovery.inventory.clone(),
+            discovery.choices.clone(),
+            discovery.active_models.clone(),
+        )
     };
-    mjconfig_apply_edits(&mut config, request, &inventory)?;
     // Same guard as the TUI's save: a policy edit that strands a pinned seat
     // model flips that seat to auto, with a notice instead of a later failure.
-    let reroute_notices = crate::settings::reset_unroutable_models(&mut config, &choices);
+    let reroute_notices = mjconfig_apply_edits(
+        &mut config,
+        request,
+        &inventory,
+        &choices,
+        active_models.as_ref(),
+    )?;
     config::save_user_config_preserving_session_routes(&state.mjconfig.config_path, &mut config)
         .map_err(|error| internal_error(format!("save config: {error:#}")))?;
     let notice = if reroute_notices.is_empty() {
@@ -8393,6 +8609,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
     ensure_sessions_column(&conn, "review_workflows_json", "text not null default '[]'")?;
+    ensure_sessions_column(&conn, "runtime_activity_json", "text not null default '{}'")?;
     ensure_table_column(
         &conn,
         "queued_prompts",
@@ -8624,6 +8841,8 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
         .context("serialize remote-control workspace diff")?;
     let review_workflows_json = serde_json::to_string(&session.review_workflows)
         .context("serialize remote-control review workflows")?;
+    let runtime_activity_json = serde_json::to_string(&RuntimeActivitySnapshot::from(session))
+        .context("serialize remote-control runtime activity")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     let prompt_images_supported = if session.prompt_images_supported {
@@ -8660,9 +8879,10 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             status_json,
             workspace_diff_json,
             review_workflows_json,
+            runtime_activity_json,
             lease_id,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -8688,6 +8908,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
             review_workflows_json = excluded.review_workflows_json,
+            runtime_activity_json = excluded.runtime_activity_json,
             lease_id = excluded.lease_id,
             connected = 1
         where excluded.last_update >= sessions.last_update
@@ -8723,6 +8944,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             status_json,
             workspace_diff_json,
             review_workflows_json,
+            runtime_activity_json,
             session.lease_id,
         ],
     )
@@ -8961,7 +9183,8 @@ const SESSION_RECORD_SELECT: &str = "select
     subagents_json,
     status_json,
     workspace_diff_json,
-    review_workflows_json
+    review_workflows_json,
+    runtime_activity_json
 from sessions";
 
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
@@ -9114,7 +9337,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 subagents_json,
                 status_json,
                 workspace_diff_json,
-                review_workflows_json
+                review_workflows_json,
+                runtime_activity_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -9145,6 +9369,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let status_json: Option<String> = row.get(18)?;
     let workspace_diff_json: Option<String> = row.get(19)?;
     let review_workflows_json: String = row.get(20)?;
+    let runtime_activity_json: String = row.get(21)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -9152,6 +9377,8 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let available_commands = serde_json::from_str(&available_commands_json).unwrap_or_default();
     let subagents = serde_json::from_str(&subagents_json).unwrap_or_default();
     let review_workflows = serde_json::from_str(&review_workflows_json).unwrap_or_default();
+    let runtime_activity: RuntimeActivitySnapshot =
+        serde_json::from_str(&runtime_activity_json).unwrap_or_default();
     let last_prompt_at: Option<String> = row
         .get::<_, Option<String>>(4)?
         .filter(|value| !value.is_empty())
@@ -9173,6 +9400,9 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         prompt_in_flight: prompt_in_flight != 0,
         prompt_images_supported: prompt_images_supported != 0,
         steering_supported: steering_supported != 0,
+        runtime_stall_seconds: runtime_activity.runtime_stall_seconds,
+        primary_last_activity_at: runtime_activity.primary_last_activity_at,
+        runtime_activities: runtime_activity.runtime_activities,
         pending_permissions,
         session_config,
         native_mode: None,
@@ -9887,6 +10117,10 @@ fn format_diff_summary(diff: &Diff) -> String {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 fn transcript_diffs(content: &[ToolCallContent]) -> Vec<TranscriptDiff> {
@@ -11285,6 +11519,34 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
 
+        let teams = snapshot["team"]["presets"]
+            .as_array()
+            .expect("team presets");
+        let codex_team = teams
+            .iter()
+            .find(|team| team["id"] == "codex")
+            .expect("Codex team");
+        for seat in ["primary", "review", "subagents"] {
+            assert_eq!(codex_team[seat]["model"], "auto", "{seat} model");
+            assert_eq!(codex_team[seat]["source"], "codex-acp", "{seat} source");
+        }
+        let featured_team = teams
+            .iter()
+            .find(|team| team["id"] == "claude_codex")
+            .expect("Claude coder and Codex reviewer team");
+        assert_eq!(featured_team["primary"]["model"], "auto");
+        assert_eq!(featured_team["primary"]["source"], "claude-acp");
+        for seat in ["review", "subagents"] {
+            assert_eq!(featured_team[seat]["model"], "gpt-5-6-luna");
+            assert_eq!(featured_team[seat]["source"], "codex-acp");
+        }
+        // A staged Team also decides these panel settings, so the snapshot
+        // ships them for the viewer's preview.
+        assert_eq!(codex_team["discrete_review"], true);
+        assert_eq!(codex_team["auto_failover"], true);
+        assert_eq!(codex_team["review_tier"], "quick");
+        assert_eq!(featured_team["review_tier"], "extended");
+
         for role in snapshot["agents"]["roles"]
             .as_array()
             .expect("role entries")
@@ -11328,7 +11590,8 @@ mod tests {
     async fn mjconfig_apply_syncs_custom_thought_level_with_reviewer_effort() {
         let runtime = test_mjconfig_runtime();
         let config_path = runtime.config_path.clone();
-        let config = roster::config_with_a_visible_builtin();
+        let mut config = roster::config_with_a_visible_builtin();
+        config::TeamPreset::Codex.apply(&mut config);
         config.save(&config_path).expect("seed config");
         let mut inventory = roster::discover_inventory(&config);
         let server = inventory.servers.first_mut().expect("visible ACP server");
@@ -11394,6 +11657,212 @@ mod tests {
         let discovery = runtime.discovery.lock().expect("discovery lock");
         assert_eq!(discovery.bifrost_versions, ["0.9.10"]);
         assert_eq!(discovery.bifrost_versions_error, None);
+    }
+
+    #[tokio::test]
+    async fn mjconfig_apply_syncs_reasoning_effort_only_from_the_selected_provider() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let runtime = test_mjconfig_runtime();
+        let config_path = runtime.config_path.clone();
+        let mut config = roster::config_with_a_visible_builtin();
+        config.set_acp_server_policy("claude-acp", config::AcpServerPolicy::Enabled);
+        config::TeamPreset::Codex.apply(&mut config);
+        config.save(&config_path).expect("seed config");
+
+        let mut inventory = roster::discover_inventory(&config);
+        for (server_id, option) in [
+            (
+                "claude-acp",
+                SessionConfigOption::select(
+                    "thinking",
+                    "Thinking",
+                    "medium",
+                    vec![
+                        SessionConfigSelectOption::new("medium", "Medium"),
+                        SessionConfigSelectOption::new("high", "High"),
+                    ],
+                )
+                .category(SessionConfigOptionCategory::ThoughtLevel),
+            ),
+            (
+                "codex-acp",
+                SessionConfigOption::select(
+                    acp::REASONING_EFFORT_CONFIG_ID,
+                    "Reasoning effort",
+                    "medium",
+                    vec![
+                        SessionConfigSelectOption::new("medium", "Medium"),
+                        SessionConfigSelectOption::new("high", "High"),
+                    ],
+                ),
+            ),
+        ] {
+            inventory
+                .servers
+                .iter_mut()
+                .find(|server| server.id == server_id)
+                .expect("built-in ACP server")
+                .session_config = vec![option];
+        }
+        let choices = vec![
+            roster::ModelChoice {
+                model: "gpt-provider-model".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            },
+            roster::ModelChoice {
+                model: "claude-provider-model".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("claude-acp".to_string()),
+                ranked: true,
+            },
+        ];
+        {
+            let mut discovery = runtime.discovery.lock().expect("discovery lock");
+            discovery.inventory = inventory;
+            discovery.choices = choices;
+        }
+
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({
+                    "primary_model": "claude-provider-model",
+                    "primary_session_defaults": {
+                        "claude-acp": { "config:thinking": "medium" },
+                        "codex-acp": { "config:reasoning_effort": "high" }
+                    }
+                })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let saved = config::Config::load(&config_path).expect("reload saved config");
+        assert_eq!(saved.agent.model, "claude-provider-model");
+        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            saved.agent.session_defaults["claude-acp"]["config:thinking"],
+            "medium"
+        );
+        assert_eq!(
+            saved.agent.session_defaults["codex-acp"]["config:reasoning_effort"],
+            "high"
+        );
+    }
+
+    #[tokio::test]
+    async fn mjconfig_apply_syncs_reasoning_effort_from_the_active_session_provider() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let runtime = test_mjconfig_runtime();
+        let config_path = runtime.config_path.clone();
+        // Team-less auto seat: no source pin survives a load, so the seat's
+        // provider comes from the live session, not the priority fallback.
+        let mut config = roster::config_with_a_visible_builtin();
+        config.set_acp_server_policy("claude-acp", config::AcpServerPolicy::Enabled);
+        config.save(&config_path).expect("seed config");
+
+        let mut inventory = roster::discover_inventory(&config);
+        for server in &mut inventory.servers {
+            server.session_config = vec![
+                SessionConfigOption::select(
+                    "thinking",
+                    "Thinking",
+                    "medium",
+                    vec![
+                        SessionConfigSelectOption::new("medium", "Medium"),
+                        SessionConfigSelectOption::new("high", "High"),
+                    ],
+                )
+                .category(SessionConfigOptionCategory::ThoughtLevel),
+            ];
+        }
+        {
+            let mut discovery = runtime.discovery.lock().expect("discovery lock");
+            discovery.inventory = inventory;
+            // The default priority would resolve codex-acp; the live session
+            // the panel was rendered against runs on claude-acp.
+            discovery.active_models = Some(config::ModelsConfig {
+                primary: "auto".to_string(),
+                primary_source: Some("claude-acp".to_string()),
+                ..config::ModelsConfig::default()
+            });
+        }
+
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({
+                    "primary_session_defaults": {
+                        "claude-acp": { "config:thinking": "medium" },
+                        "codex-acp": { "config:thinking": "high" }
+                    }
+                })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let saved = config::Config::load(&config_path).expect("reload saved config");
+        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            saved.agent.session_defaults["codex-acp"]["config:thinking"],
+            "high"
+        );
+    }
+
+    #[tokio::test]
+    async fn mjconfig_apply_syncs_literal_reasoning_effort_when_no_provider_resolves() {
+        let runtime = test_mjconfig_runtime();
+        let config_path = runtime.config_path.clone();
+        // Both builtins disabled keeps default-team adoption from pinning a
+        // source on load regardless of the host's credentials, so the fresh
+        // machine's genuinely indeterminate resolution is what this covers.
+        let mut config = config::Config::default();
+        config.set_acp_server_policy("codex-acp", config::AcpServerPolicy::Disabled);
+        config.set_acp_server_policy("claude-acp", config::AcpServerPolicy::Disabled);
+        config.save(&config_path).expect("seed config");
+
+        // Nothing probed and no live session: seat resolution is
+        // indeterminate, which must not withhold the seat-wide sync the
+        // literal reasoning-effort key always carried.
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+        let response = app
+            .oneshot(mjconfig_request(
+                "POST",
+                Some(token),
+                Some(serde_json::json!({
+                    "primary_session_defaults": {
+                        "codex-acp": { "config:reasoning_effort": "high" }
+                    }
+                })),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let saved = config::Config::load(&config_path).expect("reload saved config");
+        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[tokio::test]
@@ -11873,6 +12342,25 @@ mod tests {
             "review findings must not reserve transcript space"
         );
 
+        // The reopen top-reset must land after the modal is visible: while
+        // [hidden] the body has no box, scroll writes are dropped, and the
+        // engine restores the pre-close offset when the box returns. The
+        // fixture cannot model that, so pin the statement order here.
+        let open_fn_start = viewer
+            .find("function openReviewIssues()")
+            .expect("openReviewIssues");
+        let open_fn = &viewer[open_fn_start..];
+        let open_fn = &open_fn[..open_fn
+            .find("function closeReviewIssues")
+            .expect("open end")];
+        let unhide = open_fn
+            .find("reviewIssuesModalEl.hidden = false")
+            .expect("open unhides the modal");
+        let reset = open_fn
+            .find("reviewIssuesBodyEl.scrollTop = 0")
+            .expect("open resets the reader to the top");
+        assert!(unhide < reset, "scroll reset must follow the unhide");
+
         let review_start = viewer
             .find("      const REVIEW_STATUS = {")
             .expect("embedded viewer review ledger");
@@ -11898,10 +12386,11 @@ class FixtureNode {
     this.type = "";
     this.attributes = {};
     this.listeners = {};
+    this.scrollTop = 0;
   }
   append(...nodes) { this.children.push(...nodes); }
   appendChild(node) { this.children.push(node); return node; }
-  replaceChildren(...nodes) { this.children = [...nodes]; }
+  replaceChildren(...nodes) { this.children = [...nodes]; this.scrollTop = 0; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   addEventListener(name, handler) { this.listeners[name] = handler; }
   click() { this.listeners.click?.({ target: this }); }
@@ -11922,6 +12411,7 @@ const reviewIssuesModalEl = new FixtureNode("section");
 reviewIssuesModalEl.hidden = true;
 const reviewIssuesCloseEl = new FixtureNode("button");
 const fixtureSession = {
+  session_id: "s-review-1",
   review_workflows: [{
     turn_id: 7,
     operation: 1,
@@ -11960,6 +12450,36 @@ if (reviewIssuesButtonEl.hidden || reviewIssuesButtonEl.textContent !== "Reviews
 openReviewIssues();
 if (reviewIssuesModalEl.hidden) {
   throw new Error("review launcher did not open the evidence reader");
+}
+reviewIssuesBodyEl.scrollTop = 420;
+const paintedGroup = reviewIssuesBodyEl.children[0];
+paintReviewIssues(fixtureSession);
+if (reviewIssuesBodyEl.children[0] !== paintedGroup) {
+  throw new Error("an unchanged snapshot rebuilt the open ledger");
+}
+if (reviewIssuesBodyEl.scrollTop !== 420) {
+  throw new Error(`snapshot repaint reset review scroll to ${reviewIssuesBodyEl.scrollTop}`);
+}
+fixtureSession.review_workflows[0].issues[0].resolution_reason = "the correction was verified";
+paintReviewIssues(fixtureSession);
+if (reviewIssuesBodyEl.children[0] === paintedGroup) {
+  throw new Error("a changed snapshot skipped the ledger repaint");
+}
+if (reviewIssuesBodyEl.scrollTop !== 420) {
+  throw new Error(`a content update lost the reader's place: ${reviewIssuesBodyEl.scrollTop}`);
+}
+paintReviewIssues({ ...fixtureSession, session_id: "s-review-2" });
+if (reviewIssuesBodyEl.scrollTop !== 0) {
+  throw new Error(`another session's ledger inherited stale scroll ${reviewIssuesBodyEl.scrollTop}`);
+}
+closeReviewIssues();
+reviewIssuesBodyEl.scrollTop = 420;
+openReviewIssues();
+if (reviewIssuesModalEl.hidden) {
+  throw new Error("review launcher did not reopen the evidence reader");
+}
+if (reviewIssuesBodyEl.scrollTop !== 0) {
+  throw new Error(`reopened review reader retained stale scroll ${reviewIssuesBodyEl.scrollTop}`);
 }
 const evidence = reviewIssuesBodyEl.innerText;
 for (const expected of [
@@ -12344,6 +12864,12 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         assert!(viewer.contains("Discovering ACP session options"));
         assert!(viewer.contains("openMjConfig(\"agents\")"));
         assert!(viewer.contains("function renderMjTeam()"));
+        // Re-choosing the persisted team unstages the destructive re-apply.
+        assert!(viewer.contains("delete mjcfg.edits.team;"));
+        // A staged Team previews the panel settings its save will overwrite.
+        assert!(viewer.contains("mjStagedTeamPreset()?.discrete_review ?? panel.discrete_review"));
+        assert!(viewer.contains("mjStagedTeamPreset()?.review_tier ?? panel.review_tier"));
+        assert!(viewer.contains("mjStagedTeamPreset()?.auto_failover ?? panel.auto_failover"));
         assert!(viewer.contains("function renderMjInput()"));
         assert!(viewer.contains("function mjRolePermissionRow(role, field)"));
         assert!(viewer.contains("review_permission"));
@@ -12359,7 +12885,7 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
     fn embedded_viewer_switches_staged_model_session_options_immediately() {
         let viewer = include_str!("remote_viewer.html");
         let start = viewer
-            .find("      function mjSeatOptionGroup")
+            .find("      function mjStagedTeamRole")
             .expect("provider option-group helper");
         let end = viewer[start..]
             .find("      // Session options for one seat's bound ACP source")
@@ -12373,6 +12899,23 @@ const claude = {{ server_id: "claude-acp", options: ["claude"] }};
 const mjcfg = {{
   edits: {{}},
   snapshot: {{
+    team: {{
+      selected: "codex",
+      presets: [
+        {{
+          id: "codex",
+          primary: {{ model: "gpt-provider-model", source: "codex-acp" }},
+          review: {{ model: "gpt-provider-model", source: "codex-acp" }},
+          subagents: {{ model: "gpt-provider-model", source: "codex-acp" }},
+        }},
+        {{
+          id: "claude",
+          primary: {{ model: "auto", source: "claude-acp" }},
+          review: {{ model: "auto", source: "claude-acp" }},
+          subagents: {{ model: "auto", source: "claude-acp" }},
+        }},
+      ],
+    }},
     session_options: {{
       primary: [codex, claude],
       review: [codex, claude],
@@ -12389,6 +12932,7 @@ const role = {{
   choices: [
     {{ model: "gpt-provider-model", source: "codex-acp" }},
     {{ model: "claude-provider-model", source: "claude-acp" }},
+    {{ model: "auto", source: "codex-acp" }},
     {{ model: "disabled", source: null }},
   ],
 }};
@@ -12401,6 +12945,22 @@ for (const [field, seat] of [
   if (mjSeatOptionGroup(role, field, seat, codex) !== codex) {{
     throw new Error(`${{seat}} did not retain its saved provider options`);
   }}
+  mjcfg.edits.team = "claude";
+  if (mjEffectiveRoleModel(role, field, seat) !== "auto") {{
+    throw new Error(`${{seat}} did not preview the staged Team model`);
+  }}
+  if (mjSeatOptionGroup(role, field, seat, codex) !== claude) {{
+    throw new Error(`${{seat}} did not preview the staged Team provider options`);
+  }}
+  mjcfg.edits[field] = "auto";
+  if (mjSeatOptionGroup(role, field, seat, codex) !== claude) {{
+    throw new Error(`${{seat}} dropped the staged Team's source pin for an explicit auto edit`);
+  }}
+  mjcfg.edits[field] = "gpt-provider-model";
+  if (mjSeatOptionGroup(role, field, seat, codex) !== codex) {{
+    throw new Error(`${{seat}} ignored a staged model edit under a staged Team`);
+  }}
+  mjcfg.edits = {{}};
   mjcfg.edits[field] = "claude-provider-model";
   if (mjSeatOptionGroup(role, field, seat, codex) !== claude) {{
     throw new Error(`${{seat}} did not switch to the staged model's provider options`);
@@ -13318,6 +13878,110 @@ for (const [field, seat] of [
                 .filter(|entry| entry.actor.as_deref() == Some("subagent"))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn tracker_publishes_primary_and_hidden_review_runtime_activity() {
+        use mj_core::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = TrackerState::new("proj".to_string(), "opus".to_string());
+        state.runtime_stall_seconds = 300;
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "review this".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+
+        let workflow_id = WorkflowId::review(1);
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        )));
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(42),
+                role: WorkflowActorRole::ReviewSupervisor,
+            },
+        )));
+        state.observe_event(&started_subagent(
+            42,
+            "hidden-review",
+            "synthesize findings",
+        ));
+        state
+            .runtime_activities
+            .get_mut(&42)
+            .expect("hidden runtime")
+            .last_activity_at = "2020-01-01T00:00:00Z".to_string();
+        state.last_update = Some("2020-01-01T00:00:00Z".to_string());
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::Activity {
+            subagent_id: 42,
+            activity: "checking edge cases".to_string(),
+        }));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.runtime_stall_seconds, 300);
+        assert!(snapshot.primary_last_activity_at.is_some());
+        assert!(
+            snapshot.subagents.is_empty(),
+            "internal review stays hidden"
+        );
+        assert_eq!(snapshot.runtime_activities.len(), 1);
+        assert_eq!(snapshot.runtime_activities[0].label, "review supervisor");
+        assert_eq!(snapshot.runtime_activities[0].runtime, "codex-acp/gpt-5.6");
+        assert_ne!(
+            snapshot.runtime_activities[0].last_activity_at,
+            "2020-01-01T00:00:00Z"
+        );
+        assert_ne!(snapshot.last_update, "2020-01-01T00:00:00Z");
+
+        let (prompt, _decision) = permission_prompt("hidden-review-permission");
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::PermissionRequest {
+            subagent_id: 42,
+            prompt,
+        }));
+        assert!(
+            state
+                .snapshot()
+                .expect("waiting snapshot")
+                .runtime_activities[0]
+                .waiting_for_user_action
+        );
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::Status {
+            subagent_id: 42,
+            kind: mj_core::event::SubagentStatusKind::Info,
+            message: "permission resolved".to_string(),
+        }));
+        assert!(
+            !state
+                .snapshot()
+                .expect("resumed snapshot")
+                .runtime_activities[0]
+                .waiting_for_user_action
+        );
+
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::Finished {
+            subagent_id: 42,
+            outcome: SubagentOutcome::Completed,
+        }));
+        assert!(
+            state
+                .snapshot()
+                .expect("finished snapshot")
+                .runtime_activities
+                .is_empty()
         );
     }
 
@@ -14736,6 +15400,15 @@ for (const [field, seat] of [
             prompt_in_flight: true,
             prompt_images_supported: true,
             steering_supported: true,
+            runtime_stall_seconds: 300,
+            primary_last_activity_at: Some("2026-06-03T10:00:18Z".to_string()),
+            runtime_activities: vec![RuntimeActivityRecord {
+                subagent_id: 3,
+                label: "fix-tests".to_string(),
+                runtime: "codex-acp/gpt-5.6".to_string(),
+                last_activity_at: "2026-06-03T10:00:19Z".to_string(),
+                waiting_for_user_action: false,
+            }],
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: vec![command_record(
@@ -14831,6 +15504,12 @@ for (const [field, seat] of [
         assert!(sessions[0].prompt_in_flight);
         assert!(sessions[0].prompt_images_supported);
         assert!(sessions[0].steering_supported);
+        assert_eq!(sessions[0].runtime_stall_seconds, 300);
+        assert_eq!(
+            sessions[0].primary_last_activity_at.as_deref(),
+            Some("2026-06-03T10:00:18Z")
+        );
+        assert_eq!(sessions[0].runtime_activities, session.runtime_activities);
         assert_eq!(sessions[0].start_time, "2026-06-03T10:00:00Z");
         assert_eq!(sessions[0].last_update, "2026-06-03T10:00:40Z");
         assert_eq!(
@@ -15343,6 +16022,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -16407,6 +17089,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -17512,6 +18197,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: vec![pending.clone()],
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -18972,6 +19660,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),

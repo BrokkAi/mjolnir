@@ -508,6 +508,7 @@ fn start_server_agent_session(
             model_source,
             reasoning_effort,
             cwd: Some(cwd.clone()),
+            runtime_stall_minutes: app_config.agent.runtime_stall_minutes,
         },
         Some(server_cmd_tx.clone()),
         Some(remote_event_tx),

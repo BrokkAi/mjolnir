@@ -52,12 +52,13 @@ impl MjConfigCatalog {
     }
 
     pub fn selected_session_source(&self, seat: SessionDefaultsSeat) -> Option<String> {
-        let model = match seat {
-            SessionDefaultsSeat::Primary => self.config.agent.model.as_str(),
-            SessionDefaultsSeat::Review => self.config.review.model.as_str(),
-            SessionDefaultsSeat::Subagents => self.config.subagents.model.as_str(),
-        };
-        self.session_source_for_model(seat, model)
+        mj_core::settings::selected_seat_session_source(
+            &self.config,
+            seat,
+            self.active_models.as_ref(),
+            &self.choices,
+            &self.inventory,
+        )
     }
 
     pub fn session_source_for_model(
@@ -65,47 +66,11 @@ impl MjConfigCatalog {
         seat: SessionDefaultsSeat,
         model: &str,
     ) -> Option<String> {
-        let (model, configured_source, priority, active_model, active_source) = match seat {
-            SessionDefaultsSeat::Primary => (
-                model,
-                self.config.agent.acp_source.as_deref(),
-                self.config.agent.acp_priority.as_slice(),
-                self.active_models
-                    .as_ref()
-                    .map(|models| models.primary.as_str()),
-                self.active_models
-                    .as_ref()
-                    .and_then(|models| models.primary_source.as_deref()),
-            ),
-            SessionDefaultsSeat::Review => (
-                model,
-                self.config.review.acp_source.as_deref(),
-                self.config.review.acp_priority.as_slice(),
-                self.active_models
-                    .as_ref()
-                    .map(|models| models.review.as_str()),
-                self.active_models
-                    .as_ref()
-                    .and_then(|models| models.review_source.as_deref()),
-            ),
-            SessionDefaultsSeat::Subagents => (
-                model,
-                self.config.subagents.acp_source.as_deref(),
-                self.config.subagents.acp_priority.as_slice(),
-                self.active_models
-                    .as_ref()
-                    .map(|models| models.subagent.as_str()),
-                self.active_models
-                    .as_ref()
-                    .and_then(|models| models.subagent_source.as_deref()),
-            ),
-        };
-        mj_core::settings::session_source_for_model(
+        mj_core::settings::seat_session_source_for_model(
+            &self.config,
+            seat,
             model,
-            configured_source,
-            priority,
-            active_model,
-            active_source,
+            self.active_models.as_ref(),
             &self.choices,
             &self.inventory,
         )
