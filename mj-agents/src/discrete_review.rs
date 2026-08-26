@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +41,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
@@ -53,7 +55,10 @@ use crate::{
     workspace_snapshot::ReviewSnapshot,
 };
 use mj_core::{
-    acp::{PreparedAgentCommand, RuntimeAccessMode},
+    acp::{
+        PreparedAgentCommand, RuntimeAccessMode, SpawnIsolation, configure_isolated_child,
+        kill_agent_tree,
+    },
     agent_usage::Seat,
     config::PermissionPreset,
     event::{InternalMessage, InternalMessageKind, SubagentOutcome, UiEvent},
@@ -709,6 +714,60 @@ impl BifrostCommand {
     }
 }
 
+struct AnalyzeDiffTask {
+    cancellation: CancellationToken,
+    handle: tokio::task::JoinHandle<Result<AnalyzeDiffResult, String>>,
+}
+
+impl AnalyzeDiffTask {
+    fn spawn(bifrost: BifrostCommand, snapshot: ReviewSnapshot) -> Self {
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let handle = tokio::spawn(async move {
+            analyze_diff_at_root_cancellable(&bifrost, &snapshot, &task_cancellation).await
+        });
+        Self {
+            cancellation,
+            handle,
+        }
+    }
+
+    fn request_cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    async fn wait(self) {
+        if let Err(error) = self.handle.await {
+            tracing::warn!(%error, "wait for cancelled Bifrost analysis task");
+        }
+    }
+
+    async fn cancel_and_wait(self) {
+        self.request_cancel();
+        self.wait().await;
+    }
+}
+
+async fn cancel_analysis_tasks(
+    focus: Option<AnalyzeDiffTask>,
+    cumulative: Option<AnalyzeDiffTask>,
+) {
+    if let Some(task) = focus.as_ref() {
+        task.request_cancel();
+    }
+    if let Some(task) = cumulative.as_ref() {
+        task.request_cancel();
+    }
+    match (focus, cumulative) {
+        (Some(focus), Some(cumulative)) => {
+            tokio::join!(focus.wait(), cumulative.wait());
+        }
+        (Some(focus), None) => focus.wait().await,
+        (None, Some(cumulative)) => cumulative.wait().await,
+        (None, None) => {}
+    }
+}
+
 /// One Bifrost MCP process rooted at the reviewed workspace and speaking MCP
 /// over stdio. Specialist lanes receive analyzers plus navigation; the
 /// supervisor receives the narrower core navigation surface.
@@ -952,12 +1011,7 @@ async fn run_async(
         intent
     };
     if cancel.is_cancelled() {
-        if let Some(task) = focus_analysis_task {
-            task.abort();
-        }
-        if let Some(task) = cumulative_analysis_task {
-            task.abort();
-        }
+        cancel_analysis_tasks(focus_analysis_task, cumulative_analysis_task.take()).await;
         return ReviewVerdict::Failed {
             reason: "the review was cancelled".to_string(),
         };
@@ -989,20 +1043,21 @@ async fn run_async(
             Some(mut focus_analysis_task) => {
                 let focus_analysis = match tokio::select! {
                     _ = cancel.cancelled() => {
-                        focus_analysis_task.abort();
-                        if let Some(task) = cumulative_analysis_task {
-                            task.abort();
-                        }
+                        cancel_analysis_tasks(
+                            Some(focus_analysis_task),
+                            cumulative_analysis_task.take(),
+                        )
+                        .await;
                         return ReviewVerdict::Failed {
                             reason: "the review was cancelled".to_string(),
                         };
                     }
-                    result = &mut focus_analysis_task => result,
+                    result = &mut focus_analysis_task.handle => result,
                 } {
                     Ok(Ok(analysis)) => analysis,
                     Ok(Err(reason)) => {
                         if let Some(task) = cumulative_analysis_task.take() {
-                            task.abort();
+                            task.cancel_and_wait().await;
                         }
                         return ReviewVerdict::Failed {
                             reason: format!("bifrost analyze_diff failed: {reason}"),
@@ -1010,7 +1065,7 @@ async fn run_async(
                     }
                     Err(error) => {
                         if let Some(task) = cumulative_analysis_task.take() {
-                            task.abort();
+                            task.cancel_and_wait().await;
                         }
                         return ReviewVerdict::Failed {
                             reason: format!("bifrost analyze_diff task failed: {error}"),
@@ -1037,12 +1092,12 @@ async fn run_async(
                     Some(mut task) => {
                         let result = tokio::select! {
                             _ = cancel.cancelled() => {
-                                task.abort();
+                                task.cancel_and_wait().await;
                                 return ReviewVerdict::Failed {
                                     reason: "the review was cancelled".to_string(),
                                 };
                             }
-                            result = &mut task => result,
+                            result = &mut task.handle => result,
                         };
                         match result {
                             Ok(Ok(analysis)) => analysis.diffstat(),
@@ -2386,13 +2441,32 @@ fn start_analyze_diff_task(
     enabled: bool,
     bifrost: BifrostCommand,
     snapshot: ReviewSnapshot,
-) -> Option<tokio::task::JoinHandle<Result<AnalyzeDiffResult, String>>> {
-    enabled.then(|| tokio::spawn(async move { analyze_diff_at_root(&bifrost, &snapshot).await }))
+) -> Option<AnalyzeDiffTask> {
+    enabled.then(|| AnalyzeDiffTask::spawn(bifrost, snapshot))
 }
 
+#[cfg(test)]
 async fn analyze_diff_at_root(
     bifrost: &BifrostCommand,
     snapshot: &ReviewSnapshot,
+) -> Result<AnalyzeDiffResult, String> {
+    let cancellation = CancellationToken::new();
+    analyze_diff_at_root_with_control(bifrost, snapshot, ANALYZE_DIFF_TIMEOUT, &cancellation).await
+}
+
+async fn analyze_diff_at_root_cancellable(
+    bifrost: &BifrostCommand,
+    snapshot: &ReviewSnapshot,
+    cancellation: &CancellationToken,
+) -> Result<AnalyzeDiffResult, String> {
+    analyze_diff_at_root_with_control(bifrost, snapshot, ANALYZE_DIFF_TIMEOUT, cancellation).await
+}
+
+async fn analyze_diff_at_root_with_control(
+    bifrost: &BifrostCommand,
+    snapshot: &ReviewSnapshot,
+    timeout: Duration,
+    cancellation: &CancellationToken,
 ) -> Result<AnalyzeDiffResult, String> {
     tracing::info!(
         event = "review_analyze_diff_started",
@@ -2420,15 +2494,24 @@ async fn analyze_diff_at_root(
         .arg(snapshot.object_dir())
         .args(["--tool", "analyze_diff", "--args"])
         .arg(args);
-    let output = tokio::time::timeout(ANALYZE_DIFF_TIMEOUT, command_output_retry(&mut command))
-        .await
-        .map_err(|_| {
-            format!(
+    let output = match command_output_retry(&mut command, timeout, cancellation).await {
+        Ok(output) => output,
+        Err(BifrostCommandOutputError::TimedOut) => {
+            return Err(format!(
                 "analysis exceeded its {}s budget",
-                ANALYZE_DIFF_TIMEOUT.as_secs()
-            )
-        })?
-        .map_err(|error| format!("could not launch bifrost: {error}"))?;
+                timeout.as_secs()
+            ));
+        }
+        Err(BifrostCommandOutputError::Cancelled) => {
+            return Err("analysis was cancelled".to_string());
+        }
+        Err(BifrostCommandOutputError::Launch(error)) => {
+            return Err(format!("could not launch bifrost: {error}"));
+        }
+        Err(BifrostCommandOutputError::Runtime(reason)) => {
+            return Err(format!("could not run bifrost: {reason}"));
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -2442,17 +2525,98 @@ async fn analyze_diff_at_root(
     Ok(envelope.structured_content)
 }
 
-async fn command_output_retry(command: &mut Command) -> std::io::Result<std::process::Output> {
+enum BifrostCommandOutputError {
+    TimedOut,
+    Cancelled,
+    Launch(std::io::Error),
+    Runtime(String),
+}
+
+enum BifrostCommandCompletion {
+    Exited(std::io::Result<std::process::ExitStatus>),
+    TimedOut,
+    Cancelled,
+}
+
+async fn command_output_retry(
+    command: &mut Command,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<Output, BifrostCommandOutputError> {
     const TEXT_FILE_BUSY: i32 = 26;
-    for attempt in 0..3 {
-        match command.output().await {
-            Err(error) if error.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < 2 => {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            result => return result,
+    configure_isolated_child(command, SpawnIsolation::ProcessGroup);
+    command.stdin(Stdio::null()).stderr(Stdio::piped());
+
+    let mut attempt = 0;
+    let mut child = loop {
+        if cancellation.is_cancelled() {
+            return Err(BifrostCommandOutputError::Cancelled);
         }
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < 2 => {
+                attempt += 1;
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        return Err(BifrostCommandOutputError::Cancelled);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+            Err(error) => return Err(BifrostCommandOutputError::Launch(error)),
+        }
+    };
+
+    let pid = child.id();
+    let mut stdout = child
+        .stdout
+        .take()
+        .expect("isolated Bifrost command must capture stdout");
+    let mut stderr = child
+        .stderr
+        .take()
+        .expect("isolated Bifrost command must capture stderr");
+    let stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+
+    let completion = tokio::select! {
+        _ = cancellation.cancelled() => BifrostCommandCompletion::Cancelled,
+        result = tokio::time::timeout(timeout, child.wait()) => match result {
+            Ok(status) => BifrostCommandCompletion::Exited(status),
+            Err(_) => BifrostCommandCompletion::TimedOut,
+        },
+    };
+    let teardown = kill_agent_tree(&mut child, pid).await;
+    let (stdout, stderr) = tokio::join!(stdout_task, stderr_task);
+    let stdout = stdout
+        .map_err(|error| BifrostCommandOutputError::Runtime(error.to_string()))?
+        .map_err(|error| BifrostCommandOutputError::Runtime(error.to_string()))?;
+    let stderr = stderr
+        .map_err(|error| BifrostCommandOutputError::Runtime(error.to_string()))?
+        .map_err(|error| BifrostCommandOutputError::Runtime(error.to_string()))?;
+    teardown.map_err(|error| {
+        BifrostCommandOutputError::Runtime(format!("reap Bifrost process tree: {error:#}"))
+    })?;
+
+    match completion {
+        BifrostCommandCompletion::Exited(status) => {
+            let status =
+                status.map_err(|error| BifrostCommandOutputError::Runtime(error.to_string()))?;
+            Ok(Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+        BifrostCommandCompletion::TimedOut => Err(BifrostCommandOutputError::TimedOut),
+        BifrostCommandCompletion::Cancelled => Err(BifrostCommandOutputError::Cancelled),
     }
-    unreachable!("the bounded retry loop always returns on its final attempt")
 }
 
 fn format_changed_functions(analysis: &AnalyzeDiffResult) -> String {
@@ -2804,6 +2968,58 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    #[cfg(unix)]
+    fn descendant_spawning_bifrost(
+        temp: &tempfile::TempDir,
+        name: &str,
+    ) -> (BifrostCommand, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = temp.path().join(name);
+        let child_pid = temp.path().join(format!("{name}.child.pid"));
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nsleep 30 &\necho \"$!\" > \"$MJ_BIFROST_CHILD_PID\"\nwait\n",
+        )
+        .expect("write fake Bifrost wrapper");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake Bifrost wrapper executable");
+        let bifrost = BifrostCommand::from_prepared(PreparedAgentCommand {
+            command: executable,
+            env: HashMap::from([(
+                "MJ_BIFROST_CHILD_PID".to_string(),
+                child_pid.to_string_lossy().into_owned(),
+            )]),
+        });
+        (bifrost, child_pid)
+    }
+
+    #[cfg(unix)]
+    async fn recorded_child_pid(path: &Path) -> libc::pid_t {
+        for _ in 0..100 {
+            if let Ok(pid) = std::fs::read_to_string(path)
+                && let Ok(pid) = pid.trim().parse()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fake Bifrost wrapper did not record its child pid");
+    }
+
+    #[cfg(unix)]
+    async fn assert_process_gone(pid: libc::pid_t) {
+        for _ in 0..20 {
+            // SAFETY: signal 0 only checks whether the recorded process exists.
+            let result = unsafe { libc::kill(pid, 0) };
+            if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("Bifrost descendant {pid} survived process-tree cleanup");
     }
 
     fn test_agent(command: PathBuf, args: Vec<String>) -> ResolvedAgent {
@@ -4427,8 +4643,75 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("slow analysis must time out"),
         };
-        assert_eq!(started.elapsed(), Duration::from_secs(600));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(600) && elapsed <= Duration::from_secs(601),
+            "timeout cleanup took {elapsed:?}"
+        );
         assert_eq!(error, "analysis exceeded its 600s budget");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn analyze_diff_timeout_reaps_wrapper_descendant() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bifrost, child_pid) = descendant_spawning_bifrost(&temp, "timeout-bifrost");
+        let snapshot = ReviewSnapshot::for_test(
+            temp.path().to_path_buf(),
+            "base-tree",
+            "target-tree",
+            "diff",
+        );
+        let cancellation = CancellationToken::new();
+
+        let error = match analyze_diff_at_root_with_control(
+            &bifrost,
+            &snapshot,
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("slow analysis must time out"),
+        };
+
+        assert_eq!(error, "analysis exceeded its 1s budget");
+        assert_process_gone(recorded_child_pid(&child_pid).await).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn analyze_diff_cancellation_reaps_wrapper_descendant() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bifrost, child_pid) = descendant_spawning_bifrost(&temp, "cancelled-bifrost");
+        let snapshot = ReviewSnapshot::for_test(
+            temp.path().to_path_buf(),
+            "base-tree",
+            "target-tree",
+            "diff",
+        );
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let analysis = tokio::spawn(async move {
+            analyze_diff_at_root_with_control(
+                &bifrost,
+                &snapshot,
+                Duration::from_secs(30),
+                &task_cancellation,
+            )
+            .await
+        });
+
+        let pid = recorded_child_pid(&child_pid).await;
+        cancellation.cancel();
+        let error = match analysis.await.expect("analysis task") {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled analysis must fail"),
+        };
+
+        assert_eq!(error, "analysis was cancelled");
+        assert_process_gone(pid).await;
     }
 
     #[tokio::test]

@@ -27,5 +27,6 @@ tokio-util = { version = "0.7", features = ["compat", "rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
