@@ -11735,6 +11735,25 @@ mod tests {
             "review findings must not reserve transcript space"
         );
 
+        // The reopen top-reset must land after the modal is visible: while
+        // [hidden] the body has no box, scroll writes are dropped, and the
+        // engine restores the pre-close offset when the box returns. The
+        // fixture cannot model that, so pin the statement order here.
+        let open_fn_start = viewer
+            .find("function openReviewIssues()")
+            .expect("openReviewIssues");
+        let open_fn = &viewer[open_fn_start..];
+        let open_fn = &open_fn[..open_fn
+            .find("function closeReviewIssues")
+            .expect("open end")];
+        let unhide = open_fn
+            .find("reviewIssuesModalEl.hidden = false")
+            .expect("open unhides the modal");
+        let reset = open_fn
+            .find("reviewIssuesBodyEl.scrollTop = 0")
+            .expect("open resets the reader to the top");
+        assert!(unhide < reset, "scroll reset must follow the unhide");
+
         let review_start = viewer
             .find("      const REVIEW_STATUS = {")
             .expect("embedded viewer review ledger");
@@ -11785,6 +11804,7 @@ const reviewIssuesModalEl = new FixtureNode("section");
 reviewIssuesModalEl.hidden = true;
 const reviewIssuesCloseEl = new FixtureNode("button");
 const fixtureSession = {
+  session_id: "s-review-1",
   review_workflows: [{
     turn_id: 7,
     operation: 1,
@@ -11825,12 +11845,32 @@ if (reviewIssuesModalEl.hidden) {
   throw new Error("review launcher did not open the evidence reader");
 }
 reviewIssuesBodyEl.scrollTop = 420;
+const paintedGroup = reviewIssuesBodyEl.children[0];
 paintReviewIssues(fixtureSession);
+if (reviewIssuesBodyEl.children[0] !== paintedGroup) {
+  throw new Error("an unchanged snapshot rebuilt the open ledger");
+}
 if (reviewIssuesBodyEl.scrollTop !== 420) {
   throw new Error(`snapshot repaint reset review scroll to ${reviewIssuesBodyEl.scrollTop}`);
 }
-closeReviewIssues();
+fixtureSession.review_workflows[0].issues[0].resolution_reason = "the correction was verified";
 paintReviewIssues(fixtureSession);
+if (reviewIssuesBodyEl.children[0] === paintedGroup) {
+  throw new Error("a changed snapshot skipped the ledger repaint");
+}
+if (reviewIssuesBodyEl.scrollTop !== 420) {
+  throw new Error(`a content update lost the reader's place: ${reviewIssuesBodyEl.scrollTop}`);
+}
+paintReviewIssues({ ...fixtureSession, session_id: "s-review-2" });
+if (reviewIssuesBodyEl.scrollTop !== 0) {
+  throw new Error(`another session's ledger inherited stale scroll ${reviewIssuesBodyEl.scrollTop}`);
+}
+closeReviewIssues();
+reviewIssuesBodyEl.scrollTop = 420;
+openReviewIssues();
+if (reviewIssuesModalEl.hidden) {
+  throw new Error("review launcher did not reopen the evidence reader");
+}
 if (reviewIssuesBodyEl.scrollTop !== 0) {
   throw new Error(`reopened review reader retained stale scroll ${reviewIssuesBodyEl.scrollTop}`);
 }

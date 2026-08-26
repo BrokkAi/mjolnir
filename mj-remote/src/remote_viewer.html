@@ -7514,6 +7514,10 @@
       function openReviewIssues() {
         paintReviewIssues(selectedSession());
         reviewIssuesModalEl.hidden = false;
+        // While [hidden] the body has no box, so scroll writes are dropped
+        // and the engine restores the pre-close offset once the box returns.
+        // The fresh-open top reset only sticks after the modal is visible.
+        reviewIssuesBodyEl.scrollTop = 0;
         reviewIssuesCloseEl.focus();
       }
 
@@ -7551,18 +7555,31 @@
         parent.appendChild(section);
       }
 
+      // The session and content the ledger currently shows, so a poll that
+      // changed nothing skips the rebuild entirely.
+      let reviewIssuesPaintKey = "";
+
       function paintReviewIssues(session) {
-        // Snapshot polls repaint an open ledger, so retain the reader's place.
-        // Opening a previously closed ledger still starts from the top.
-        const scrollTop = reviewIssuesModalEl.hidden ? 0 : reviewIssuesBodyEl.scrollTop;
-        reviewIssuesBodyEl.replaceChildren();
         const workflows = reviewWorkflows(session);
-        if (!workflows.length) {
-          reviewIssuesBodyEl.appendChild(emptyNote("No review issues recorded yet."));
-          reviewIssuesBodyEl.scrollTop = scrollTop;
+        const sessionKey = `${session?.session_id}\n`;
+        const paintKey = `${sessionKey}${JSON.stringify(workflows)}`;
+        // Rebuilding identical content would wipe the reader's scroll
+        // position and text selection on every snapshot poll.
+        if (paintKey === reviewIssuesPaintKey) {
           return;
         }
-
+        // An update to the ledger the reader is viewing retains their place;
+        // content swapped in from another session starts from the top, as
+        // does a paint while the reader is closed.
+        const scrollTop =
+          reviewIssuesModalEl.hidden || !reviewIssuesPaintKey.startsWith(sessionKey)
+            ? 0
+            : reviewIssuesBodyEl.scrollTop;
+        reviewIssuesPaintKey = paintKey;
+        reviewIssuesBodyEl.replaceChildren();
+        if (!workflows.length) {
+          reviewIssuesBodyEl.appendChild(emptyNote("No review issues recorded yet."));
+        }
         for (const workflow of workflows) {
           const group = document.createElement("section");
           group.className = "review-workflow";
