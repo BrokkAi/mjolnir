@@ -6934,10 +6934,7 @@ fn stage_primary_session_handoff(
     }
 }
 
-fn primary_session_handoff_prompt(
-    state: &AppState,
-    detail: HandoffDetail,
-) -> Option<String> {
+fn primary_session_handoff_prompt(state: &AppState, detail: HandoffDetail) -> Option<String> {
     if !state.transcript.iter().any(|entry| {
         matches!(
             entry,
@@ -19123,7 +19120,8 @@ mod tests {
             "tool output needed for the next primary".to_string(),
         );
 
-        let handoff = primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("handoff prompt");
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("handoff prompt");
 
         assert!(handoff.contains("gpt-test via codex-acp"));
         assert!(handoff.contains("add the handoff"));
@@ -19144,7 +19142,8 @@ mod tests {
         let complete_history = format!("original request {}", "x".repeat(120_001));
         state.transcript = vec![Entry::UserPrompt(complete_history.clone())];
 
-        let handoff = primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("handoff prompt");
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("handoff prompt");
 
         assert!(handoff.contains(&complete_history));
     }
@@ -19179,7 +19178,8 @@ mod tests {
         state.apply_event(replay_complete);
 
         assert_eq!(state.exit_reason, Some(UiExitReason::ImportSession));
-        let handoff = primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("import handoff");
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("import handoff");
         assert!(handoff.contains("replayed request"));
         assert!(handoff.contains("replayed answer"));
     }
@@ -19230,12 +19230,12 @@ mod tests {
             state
                 .transcript
                 .push(Entry::AgentMessage(format!("agent reply {i}")));
-            state.transcript.push(Entry::AgentThought(
-                crate::app::ThoughtEntry {
+            state
+                .transcript
+                .push(Entry::AgentThought(crate::app::ThoughtEntry {
                     text: format!("thinking about {i}"),
                     completed: true,
-                },
-            ));
+                }));
             let tool_id = format!("tool-read-{i}");
             insert_tool_with_kind(
                 &mut state,
@@ -19351,9 +19351,8 @@ mod tests {
         assert!(handoff.contains("Earlier turns are condensed"));
 
         let short_state = build_multi_turn_state(3);
-        let short_handoff =
-            primary_session_handoff_prompt(&short_state, HandoffDetail::Condensed)
-                .expect("handoff");
+        let short_handoff = primary_session_handoff_prompt(&short_state, HandoffDetail::Condensed)
+            .expect("handoff");
         assert!(!short_handoff.contains("Earlier turns are condensed"));
     }
 

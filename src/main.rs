@@ -1647,10 +1647,7 @@ fn session_import_roster(
     import
 }
 
-fn pick_handoff_detail(
-    full: Option<String>,
-    condensed: Option<String>,
-) -> Option<String> {
+fn pick_handoff_detail(full: Option<String>, condensed: Option<String>) -> Option<String> {
     let (Some(full), Some(condensed)) = (full, condensed) else {
         return None;
     };
