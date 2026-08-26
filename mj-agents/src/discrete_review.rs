@@ -2844,11 +2844,6 @@ mod tests {
     }
 
     #[test]
-    fn analyze_diff_budget_allows_large_changesets_ten_minutes() {
-        assert_eq!(ANALYZE_DIFF_TIMEOUT, Duration::from_secs(10 * 60));
-    }
-
-    #[test]
     fn review_agent_catalog_maps_every_wire_id_to_its_lane() {
         let expected = [
             (ReviewAgentId::ControlFlow, "control_flow"),
@@ -4203,6 +4198,37 @@ mod tests {
         assert!(args.contains("base-tree"));
         assert!(args.contains("target-tree"));
         assert!(args.contains("--diff-snapshot-object-dir"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn analyze_diff_reports_ten_minute_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executable = temp.path().join("slow-bifrost");
+        std::fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 601\n")
+            .expect("write fake bifrost");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake bifrost metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make fake bifrost executable");
+
+        let snapshot = ReviewSnapshot::for_test(
+            temp.path().to_path_buf(),
+            "base-tree",
+            "target-tree",
+            "diff",
+        );
+        let started = tokio::time::Instant::now();
+        let error = match analyze_diff_at_root(&BifrostCommand::direct(executable), &snapshot).await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("slow analysis must time out"),
+        };
+        assert_eq!(started.elapsed(), Duration::from_secs(600));
+        assert_eq!(error, "analysis exceeded its 600s budget");
     }
 
     #[tokio::test]
