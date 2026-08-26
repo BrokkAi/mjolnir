@@ -4212,8 +4212,8 @@
         return button;
       }
 
-      function mjRoleModelRow(role, field) {
-        const value = mjEditedValue(field, role.model);
+      function mjRoleModelRow(role, field, seat) {
+        const value = mjEffectiveRoleModel(role, field, seat);
         const row = mjRow(role.label);
         row.appendChild(
           mjCombo(
@@ -4270,12 +4270,34 @@
         return row;
       }
 
+      function mjStagedTeamRole(seat) {
+        if (!Object.hasOwn(mjcfg.edits, "team")) {
+          return null;
+        }
+        const preset = (mjcfg.snapshot?.team?.presets || []).find(
+          (candidate) => candidate.id === mjcfg.edits.team,
+        );
+        return preset?.[seat] || null;
+      }
+
+      function mjEffectiveRoleModel(role, modelField, seat) {
+        if (Object.hasOwn(mjcfg.edits, modelField)) {
+          return mjcfg.edits[modelField];
+        }
+        return mjStagedTeamRole(seat)?.model || role.model;
+      }
+
       function mjSeatOptionGroup(role, modelField, seat, fallbackGroup) {
-        const model = mjEditedValue(modelField, role.model);
-        if (model === role.model) {
+        const model = mjEffectiveRoleModel(role, modelField, seat);
+        const teamRole = mjStagedTeamRole(seat);
+        if (model === role.model && !teamRole) {
           return fallbackGroup;
         }
-        const source = role.choices.find((choice) => choice.model === model)?.source;
+        const source = model === "auto" && teamRole
+          ? teamRole.source
+          : (!Object.hasOwn(mjcfg.edits, modelField) && teamRole
+            ? teamRole.source
+            : role.choices.find((choice) => choice.model === model)?.source);
         if (!source) {
           return null;
         }
@@ -4345,7 +4367,7 @@
       function renderMjAgents() {
         const panel = mjcfg.snapshot.agents;
         const role = panel.roles[0];
-        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "primary_model"));
+        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "primary_model", "primary"));
         const options = mjSeatOptionGroup(
           role,
           "primary_model",
@@ -4360,7 +4382,7 @@
       function renderMjReviewer() {
         const panel = mjcfg.snapshot.agents;
         const role = panel.roles[1];
-        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "review_model"));
+        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "review_model", "review"));
         const permissionRow = mjRolePermissionRow(role, "review_permission");
         if (permissionRow) {
           mjconfigBodyEl.appendChild(permissionRow);
@@ -4453,7 +4475,7 @@
       function renderMjSubagents() {
         const panel = mjcfg.snapshot.agents;
         const role = panel.roles[2];
-        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "subagents_model"));
+        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "subagents_model", "subagents"));
         const permissionRow = mjRolePermissionRow(role, "subagents_permission");
         if (permissionRow) {
           mjconfigBodyEl.appendChild(permissionRow);
