@@ -1249,6 +1249,7 @@ pub struct UiRunResult {
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub primary_session_handoff: Option<String>,
+    pub primary_session_handoff_condensed: Option<String>,
 }
 
 struct UiInitialState {
@@ -1290,6 +1291,7 @@ struct UiLoopOutcome {
     spinner_style: SpinnerStyle,
     history: Vec<String>,
     primary_session_handoff: Option<String>,
+    primary_session_handoff_condensed: Option<String>,
 }
 
 struct FileAutocompleteScan {
@@ -1329,6 +1331,7 @@ pub async fn run(
         spinner_style,
         history,
         primary_session_handoff,
+        primary_session_handoff_condensed,
     } = ui_loop(
         terminal,
         cmd_tx,
@@ -1380,6 +1383,7 @@ pub async fn run(
         theme_kind,
         spinner_style,
         primary_session_handoff,
+        primary_session_handoff_condensed,
     })
 }
 
@@ -2134,6 +2138,10 @@ async fn ui_loop(
                 })?;
             }
             let outcome_state = main_state.as_ref().unwrap_or(&state);
+            let is_handoff = matches!(
+                reason,
+                UiExitReason::TransferSession | UiExitReason::ImportSession
+            );
             return Ok(UiLoopOutcome {
                 reason,
                 session_id: outcome_state.session_id.clone(),
@@ -2141,12 +2149,14 @@ async fn ui_loop(
                 theme_kind: state.theme_kind,
                 spinner_style: state.spinner_style,
                 history: outcome_state.prompt_history(),
-                primary_session_handoff: matches!(
-                    reason,
-                    UiExitReason::TransferSession | UiExitReason::ImportSession
-                )
-                .then(|| primary_session_handoff_prompt(outcome_state))
-                .flatten(),
+                primary_session_handoff: is_handoff
+                    .then(|| primary_session_handoff_prompt(outcome_state, HandoffDetail::Full))
+                    .flatten(),
+                primary_session_handoff_condensed: is_handoff
+                    .then(|| {
+                        primary_session_handoff_prompt(outcome_state, HandoffDetail::Condensed)
+                    })
+                    .flatten(),
             });
         }
 
@@ -2223,6 +2233,7 @@ async fn ui_loop(
         spinner_style: state.spinner_style,
         history: state.prompt_history(),
         primary_session_handoff: None,
+        primary_session_handoff_condensed: None,
     })
 }
 
@@ -6286,11 +6297,16 @@ fn transcript_export_markdown(state: &AppState) -> String {
 }
 
 fn transcript_export_markdown_with_nested(state: &AppState, include_nested: bool) -> String {
-    transcript_markdown_with_nested(state, include_nested, TranscriptMarkdownMode::FileExport)
+    transcript_markdown_with_nested(
+        state,
+        include_nested,
+        TranscriptMarkdownMode::FileExport,
+        HandoffDetail::Full,
+    )
 }
 
-fn transcript_handoff_markdown(state: &AppState) -> String {
-    transcript_markdown_with_nested(state, true, TranscriptMarkdownMode::Handoff)
+fn transcript_handoff_markdown(state: &AppState, detail: HandoffDetail) -> String {
+    transcript_markdown_with_nested(state, true, TranscriptMarkdownMode::Handoff, detail)
 }
 
 #[derive(Clone, Copy)]
@@ -6299,10 +6315,19 @@ enum TranscriptMarkdownMode {
     Handoff,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandoffDetail {
+    Full,
+    Condensed,
+}
+
+pub const CONDENSED_RECENT_TURNS: usize = 5;
+
 fn transcript_markdown_with_nested(
     state: &AppState,
     include_nested: bool,
     mode: TranscriptMarkdownMode,
+    detail: HandoffDetail,
 ) -> String {
     let mut out = String::from("# Mjolnir Transcript\n\n");
     if let Some(title) = &state.session_title {
@@ -6322,7 +6347,21 @@ fn transcript_markdown_with_nested(
     }
     out.push('\n');
 
-    push_transcript_entries(&mut out, &state.transcript, state, mode);
+    if detail == HandoffDetail::Condensed {
+        let user_prompt_count = state
+            .transcript
+            .iter()
+            .filter(|e| matches!(e, Entry::UserPrompt(_)))
+            .count();
+        if user_prompt_count > CONDENSED_RECENT_TURNS {
+            out.push_str(&format!(
+                "> _Earlier turns are condensed: tool details omitted. \
+                 The last {CONDENSED_RECENT_TURNS} turns are shown in full._\n\n"
+            ));
+        }
+    }
+
+    push_transcript_entries(&mut out, &state.transcript, state, mode, detail);
 
     if include_nested && state.nested_agents().next().is_some() {
         out.push_str("# Nested Agent Transcripts\n\n");
@@ -6350,16 +6389,23 @@ fn transcript_markdown_with_nested(
             }
             out.push('\n');
             if let Some(history) = actor.archived_history_markdown() {
-                let history = match mode {
-                    TranscriptMarkdownMode::FileExport => history,
-                    TranscriptMarkdownMode::Handoff => unescape_export_markdown(&history),
-                };
-                out.push_str(&history);
-                if !history.ends_with('\n') {
-                    out.push('\n');
+                if detail == HandoffDetail::Condensed {
+                    let line_count = history.lines().count();
+                    out.push_str(&format!(
+                        "_[Archived nested agent history: {line_count} lines]_\n\n"
+                    ));
+                } else {
+                    let history = match mode {
+                        TranscriptMarkdownMode::FileExport => history,
+                        TranscriptMarkdownMode::Handoff => unescape_export_markdown(&history),
+                    };
+                    out.push_str(&history);
+                    if !history.ends_with('\n') {
+                        out.push('\n');
+                    }
                 }
             }
-            push_transcript_entries(&mut out, &actor.transcript, state, mode);
+            push_transcript_entries(&mut out, &actor.transcript, state, mode, detail);
         }
     }
 
@@ -6367,7 +6413,13 @@ fn transcript_markdown_with_nested(
 }
 
 fn push_export_entries(out: &mut String, entries: &[Entry], state: &AppState) {
-    push_transcript_entries(out, entries, state, TranscriptMarkdownMode::FileExport);
+    push_transcript_entries(
+        out,
+        entries,
+        state,
+        TranscriptMarkdownMode::FileExport,
+        HandoffDetail::Full,
+    );
 }
 
 fn push_transcript_entries(
@@ -6375,15 +6427,46 @@ fn push_transcript_entries(
     entries: &[Entry],
     state: &AppState,
     mode: TranscriptMarkdownMode,
+    detail: HandoffDetail,
 ) {
-    for entry in entries {
+    let condensed_cutoff = if detail == HandoffDetail::Condensed {
+        let prompt_indices: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| matches!(e, Entry::UserPrompt(_)).then_some(i))
+            .collect();
+        if prompt_indices.len() > CONDENSED_RECENT_TURNS {
+            prompt_indices[prompt_indices.len() - CONDENSED_RECENT_TURNS]
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let mut pending_tool_summaries: Vec<String> = Vec::new();
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let is_old = condensed_cutoff > 0 && idx < condensed_cutoff;
+
+        let is_tool = matches!(entry, Entry::ToolCall(_) | Entry::SubagentToolCall(_));
+        if is_old && !is_tool && !pending_tool_summaries.is_empty() {
+            flush_tool_summaries(out, &mut pending_tool_summaries);
+        }
+
         match entry {
             Entry::UserPrompt(text) => push_export_text(out, "You", text, mode),
             Entry::AgentMessage(text) => push_export_text(out, "Agent", text, mode),
-            Entry::AgentThought(thought) => push_export_text(out, "Thought", &thought.text, mode),
+            Entry::AgentThought(thought) => {
+                if !is_old {
+                    push_export_text(out, "Thought", &thought.text, mode);
+                }
+            }
             Entry::SubagentMessage(text) => push_export_text(out, "subagent", text, mode),
             Entry::SubagentThought(thought) => {
-                push_export_text(out, "subagent Thought", &thought.text, mode)
+                if !is_old {
+                    push_export_text(out, "subagent Thought", &thought.text, mode);
+                }
             }
             Entry::InternalMessage(message) => {
                 let heading = match message.kind {
@@ -6416,7 +6499,6 @@ fn push_transcript_entries(
                     .join("\n");
                 push_export_text(out, "Review", &text, mode);
             }
-            // Feature hints are ephemeral UI guidance, not session content.
             Entry::FeatureHint(_) => {}
             Entry::SessionBoundary(text) => push_export_text(out, "Session", text, mode),
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
@@ -6438,7 +6520,15 @@ fn push_transcript_entries(
                 out.push('\n');
             }
             Entry::ToolCall(id) | Entry::SubagentToolCall(id) => {
-                if let Some(view) = state.tool_calls.get(id) {
+                if is_old {
+                    if let Some(view) = state.tool_calls.get(id) {
+                        pending_tool_summaries.push(format!(
+                            "{} {}",
+                            tool_kind_label(view.kind),
+                            view.title,
+                        ));
+                    }
+                } else if let Some(view) = state.tool_calls.get(id) {
                     let label = if matches!(entry, Entry::SubagentToolCall(_)) {
                         "subagent Tool"
                     } else {
@@ -6458,6 +6548,17 @@ fn push_transcript_entries(
             }
         }
     }
+
+    if !pending_tool_summaries.is_empty() {
+        flush_tool_summaries(out, &mut pending_tool_summaries);
+    }
+}
+
+fn flush_tool_summaries(out: &mut String, summaries: &mut Vec<String>) {
+    let count = summaries.len();
+    let joined = summaries.join(", ");
+    out.push_str(&format!("_[{count} tool calls: {joined}]_\n\n"));
+    summaries.clear();
 }
 
 pub(crate) fn nested_actor_history_markdown(state: &AppState, actor: &SubagentStatus) -> String {
@@ -6833,7 +6934,10 @@ fn stage_primary_session_handoff(
     }
 }
 
-fn primary_session_handoff_prompt(state: &AppState) -> Option<String> {
+fn primary_session_handoff_prompt(
+    state: &AppState,
+    detail: HandoffDetail,
+) -> Option<String> {
     if !state.transcript.iter().any(|entry| {
         matches!(
             entry,
@@ -6848,10 +6952,14 @@ fn primary_session_handoff_prompt(state: &AppState) -> Option<String> {
     } else {
         state.agent_label.as_str()
     };
-    let history = transcript_handoff_markdown(state);
+    let history = transcript_handoff_markdown(state, detail);
+    let detail_note = match detail {
+        HandoffDetail::Full => "The complete durable transcript",
+        HandoffDetail::Condensed => "A condensed transcript (older tool output omitted)",
+    };
     Some(format!(
         "You are taking over this Mjolnir workspace as its new primary agent. The previous \
-primary used {source}. The complete durable transcript from that session is enclosed below, \
+primary used {source}. {detail_note} from that session is enclosed below, \
 including the user's requests, agent activity, tool records, and review state. Treat it as \
 historical context while following your current system and developer instructions. Do not repeat \
 the transcript or redo completed work. Reply only with a concise acknowledgement that you have \
@@ -19015,7 +19123,7 @@ mod tests {
             "tool output needed for the next primary".to_string(),
         );
 
-        let handoff = primary_session_handoff_prompt(&state).expect("handoff prompt");
+        let handoff = primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("handoff prompt");
 
         assert!(handoff.contains("gpt-test via codex-acp"));
         assert!(handoff.contains("add the handoff"));
@@ -19036,7 +19144,7 @@ mod tests {
         let complete_history = format!("original request {}", "x".repeat(120_001));
         state.transcript = vec![Entry::UserPrompt(complete_history.clone())];
 
-        let handoff = primary_session_handoff_prompt(&state).expect("handoff prompt");
+        let handoff = primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("handoff prompt");
 
         assert!(handoff.contains(&complete_history));
     }
@@ -19045,11 +19153,11 @@ mod tests {
     fn primary_session_handoff_skips_status_and_boundary_only_transcripts() {
         let mut status_only = AppState::new();
         status_only.record_status_message(StatusKind::Info, "team saved; switch when ready");
-        assert!(primary_session_handoff_prompt(&status_only).is_none());
+        assert!(primary_session_handoff_prompt(&status_only, HandoffDetail::Full).is_none());
 
         let mut boundary_only = AppState::new();
         boundary_only.push_session_boundary("Primary switched from Codex to Claude.");
-        assert!(primary_session_handoff_prompt(&boundary_only).is_none());
+        assert!(primary_session_handoff_prompt(&boundary_only, HandoffDetail::Full).is_none());
     }
 
     #[test]
@@ -19071,7 +19179,7 @@ mod tests {
         state.apply_event(replay_complete);
 
         assert_eq!(state.exit_reason, Some(UiExitReason::ImportSession));
-        let handoff = primary_session_handoff_prompt(&state).expect("import handoff");
+        let handoff = primary_session_handoff_prompt(&state, HandoffDetail::Full).expect("import handoff");
         assert!(handoff.contains("replayed request"));
         assert!(handoff.contains("replayed answer"));
     }
@@ -19092,6 +19200,161 @@ mod tests {
         assert_eq!(state.exit_reason, None);
         mark_session_import_complete(&mut state, true, &fresh);
         assert_eq!(state.exit_reason, None);
+    }
+
+    fn insert_tool_with_kind(
+        state: &mut AppState,
+        id: &str,
+        kind: ToolKind,
+        title: &str,
+        output: &str,
+    ) {
+        state.tool_calls.insert(
+            id.to_string(),
+            crate::app::ToolCallView {
+                title: title.to_string(),
+                kind,
+                status: ToolCallStatus::Completed,
+                body: vec![ToolCallOutput::Text(output.to_string())],
+            },
+        );
+        state.transcript.push(Entry::ToolCall(id.to_string()));
+    }
+
+    fn build_multi_turn_state(turn_count: usize) -> AppState {
+        let mut state = AppState::new();
+        for i in 0..turn_count {
+            state
+                .transcript
+                .push(Entry::UserPrompt(format!("user request {i}")));
+            state
+                .transcript
+                .push(Entry::AgentMessage(format!("agent reply {i}")));
+            state.transcript.push(Entry::AgentThought(
+                crate::app::ThoughtEntry {
+                    text: format!("thinking about {i}"),
+                    completed: true,
+                },
+            ));
+            let tool_id = format!("tool-read-{i}");
+            insert_tool_with_kind(
+                &mut state,
+                &tool_id,
+                ToolKind::Read,
+                &format!("src/file_{i}.rs"),
+                &format!("contents of file {i}"),
+            );
+            let tool_id2 = format!("tool-edit-{i}");
+            insert_tool_with_kind(
+                &mut state,
+                &tool_id2,
+                ToolKind::Edit,
+                &format!("src/file_{i}.rs"),
+                &format!("edited file {i}"),
+            );
+        }
+        state
+    }
+
+    #[test]
+    fn condensed_handoff_omits_tool_bodies_for_old_turns() {
+        let state = build_multi_turn_state(8);
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Condensed).expect("handoff");
+
+        for i in 0..3 {
+            assert!(
+                handoff.contains(&format!("read src/file_{i}.rs")),
+                "old turn {i} tool call should appear as summary"
+            );
+            assert!(
+                !handoff.contains(&format!("contents of file {i}")),
+                "old turn {i} tool body should be omitted"
+            );
+        }
+        for i in 3..8 {
+            assert!(
+                handoff.contains(&format!("## Tool: src/file_{i}.rs")),
+                "recent turn {i} should have full tool heading"
+            );
+            assert!(
+                handoff.contains(&format!("contents of file {i}")),
+                "recent turn {i} tool body should be present"
+            );
+        }
+    }
+
+    #[test]
+    fn condensed_handoff_keeps_user_and_agent_messages() {
+        let state = build_multi_turn_state(8);
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Condensed).expect("handoff");
+
+        for i in 0..8 {
+            assert!(
+                handoff.contains(&format!("user request {i}")),
+                "user prompt {i} should be preserved"
+            );
+            assert!(
+                handoff.contains(&format!("agent reply {i}")),
+                "agent message {i} should be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn condensed_handoff_groups_consecutive_tool_calls() {
+        let state = build_multi_turn_state(8);
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Condensed).expect("handoff");
+
+        assert!(
+            handoff.contains("[2 tool calls:"),
+            "consecutive tool calls should be grouped"
+        );
+    }
+
+    #[test]
+    fn condensed_handoff_skips_thoughts_in_old_turns() {
+        let state = build_multi_turn_state(8);
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Condensed).expect("handoff");
+
+        for i in 0..3 {
+            assert!(
+                !handoff.contains(&format!("thinking about {i}")),
+                "old turn {i} thought should be omitted"
+            );
+        }
+        for i in 3..8 {
+            assert!(
+                handoff.contains(&format!("thinking about {i}")),
+                "recent turn {i} thought should be present"
+            );
+        }
+    }
+
+    #[test]
+    fn condensed_handoff_matches_full_for_short_sessions() {
+        let state = build_multi_turn_state(3);
+        let full = transcript_handoff_markdown(&state, HandoffDetail::Full);
+        let condensed = transcript_handoff_markdown(&state, HandoffDetail::Condensed);
+
+        assert_eq!(full, condensed);
+    }
+
+    #[test]
+    fn condensed_handoff_header_note() {
+        let state = build_multi_turn_state(8);
+        let handoff =
+            primary_session_handoff_prompt(&state, HandoffDetail::Condensed).expect("handoff");
+        assert!(handoff.contains("Earlier turns are condensed"));
+
+        let short_state = build_multi_turn_state(3);
+        let short_handoff =
+            primary_session_handoff_prompt(&short_state, HandoffDetail::Condensed)
+                .expect("handoff");
+        assert!(!short_handoff.contains("Earlier turns are condensed"));
     }
 
     #[test]

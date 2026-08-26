@@ -1647,6 +1647,42 @@ fn session_import_roster(
     import
 }
 
+fn pick_handoff_detail(
+    full: Option<String>,
+    condensed: Option<String>,
+) -> Option<String> {
+    let (Some(full), Some(condensed)) = (full, condensed) else {
+        return None;
+    };
+    if full == condensed {
+        return Some(full);
+    }
+    let options = [
+        mj_tui::menu::MenuOption {
+            label: "Condensed",
+            hint: format!(
+                "recent {} turns in full, older turns summarized (recommended)",
+                mj_tui::ui::CONDENSED_RECENT_TURNS,
+            ),
+            shortcuts: &['c'],
+        },
+        mj_tui::menu::MenuOption {
+            label: "Full transcript",
+            hint: "entire session history verbatim".to_string(),
+            shortcuts: &['f'],
+        },
+    ];
+    match mj_tui::menu::select_inline(
+        "How should the session history be loaded?",
+        "\u{2191}/\u{2193} choose \u{00b7} enter confirm \u{00b7} esc condensed",
+        &options,
+        0,
+    ) {
+        Ok(Some(1)) => Some(full),
+        _ => Some(condensed),
+    }
+}
+
 struct RunSessionResult {
     reason: UiExitReason,
     session_id: Option<String>,
@@ -1654,6 +1690,7 @@ struct RunSessionResult {
     theme_kind: theme::TerminalThemeKind,
     spinner_style: spinner::SpinnerStyle,
     primary_session_handoff: Option<String>,
+    primary_session_handoff_condensed: Option<String>,
 }
 
 async fn start_new_session_loading() -> Option<(CancellationToken, tokio::task::JoinHandle<()>)> {
@@ -1709,6 +1746,7 @@ impl From<ui::UiRunResult> for RunSessionResult {
             theme_kind: result.theme_kind,
             spinner_style: result.spinner_style,
             primary_session_handoff: result.primary_session_handoff,
+            primary_session_handoff_condensed: result.primary_session_handoff_condensed,
         }
     }
 }
@@ -1938,7 +1976,10 @@ async fn run_app(
                 primary_agent = selected_agent_for_role(&roster.primary);
                 mode = effective_ui_mode(fullscreen_tui, &cfg);
                 initial_agent = Some(primary_agent.clone());
-                pending_primary_session_handoff = session_result.primary_session_handoff;
+                pending_primary_session_handoff = pick_handoff_detail(
+                    session_result.primary_session_handoff,
+                    session_result.primary_session_handoff_condensed,
+                );
                 pending_session_title = session_result.session_title;
                 pending_models_boundary = Some(if handoff_loaded {
                     format!(
@@ -1961,7 +2002,10 @@ async fn run_app(
                     .expect("session import exits only from a staged source route");
                 let handoff_loaded = session_result.primary_session_handoff.is_some();
                 initial_agent = Some(primary_agent.clone());
-                pending_primary_session_handoff = session_result.primary_session_handoff;
+                pending_primary_session_handoff = pick_handoff_detail(
+                    session_result.primary_session_handoff,
+                    session_result.primary_session_handoff_condensed,
+                );
                 pending_session_title = session_result.session_title;
                 pending_models_boundary = Some(if handoff_loaded {
                     format!(
@@ -3256,6 +3300,7 @@ async fn run_session(
                 theme_kind,
                 spinner_style,
                 primary_session_handoff: None,
+                primary_session_handoff_condensed: None,
             });
         };
 
@@ -3271,6 +3316,7 @@ async fn run_session(
                 theme_kind,
                 spinner_style,
                 primary_session_handoff: None,
+                primary_session_handoff_condensed: None,
             });
         }
 
@@ -3310,6 +3356,7 @@ async fn run_session(
                     theme_kind,
                     spinner_style,
                     primary_session_handoff: None,
+                    primary_session_handoff_condensed: None,
                 });
             }
         }
@@ -4297,6 +4344,7 @@ mod tests {
             theme_kind: theme::TerminalThemeKind::Ansi,
             spinner_style: spinner::SpinnerStyle::Bars,
             primary_session_handoff: None,
+            primary_session_handoff_condensed: None,
         };
 
         apply_session_result_to_config(&mut cfg, &result);
@@ -4314,6 +4362,7 @@ mod tests {
             theme_kind: theme::TerminalThemeKind::Adaptive,
             spinner_style: spinner::SpinnerStyle::Globe,
             primary_session_handoff: None,
+            primary_session_handoff_condensed: None,
         });
 
         assert_eq!(result.reason, UiExitReason::SwitchSession);
