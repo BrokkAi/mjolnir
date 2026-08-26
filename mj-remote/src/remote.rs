@@ -11760,10 +11760,11 @@ class FixtureNode {
     this.type = "";
     this.attributes = {};
     this.listeners = {};
+    this.scrollTop = 0;
   }
   append(...nodes) { this.children.push(...nodes); }
   appendChild(node) { this.children.push(node); return node; }
-  replaceChildren(...nodes) { this.children = [...nodes]; }
+  replaceChildren(...nodes) { this.children = [...nodes]; this.scrollTop = 0; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   addEventListener(name, handler) { this.listeners[name] = handler; }
   click() { this.listeners.click?.({ target: this }); }
@@ -11822,6 +11823,16 @@ if (reviewIssuesButtonEl.hidden || reviewIssuesButtonEl.textContent !== "Reviews
 openReviewIssues();
 if (reviewIssuesModalEl.hidden) {
   throw new Error("review launcher did not open the evidence reader");
+}
+reviewIssuesBodyEl.scrollTop = 420;
+paintReviewIssues(fixtureSession);
+if (reviewIssuesBodyEl.scrollTop !== 420) {
+  throw new Error(`snapshot repaint reset review scroll to ${reviewIssuesBodyEl.scrollTop}`);
+}
+closeReviewIssues();
+paintReviewIssues(fixtureSession);
+if (reviewIssuesBodyEl.scrollTop !== 0) {
+  throw new Error(`reopened review reader retained stale scroll ${reviewIssuesBodyEl.scrollTop}`);
 }
 const evidence = reviewIssuesBodyEl.innerText;
 for (const expected of [

@@ -7552,10 +7552,14 @@
       }
 
       function paintReviewIssues(session) {
+        // Snapshot polls repaint an open ledger, so retain the reader's place.
+        // Opening a previously closed ledger still starts from the top.
+        const scrollTop = reviewIssuesModalEl.hidden ? 0 : reviewIssuesBodyEl.scrollTop;
         reviewIssuesBodyEl.replaceChildren();
         const workflows = reviewWorkflows(session);
         if (!workflows.length) {
           reviewIssuesBodyEl.appendChild(emptyNote("No review issues recorded yet."));
+          reviewIssuesBodyEl.scrollTop = scrollTop;
           return;
         }
 
@@ -7607,6 +7611,7 @@
           }
           reviewIssuesBodyEl.appendChild(group);
         }
+        reviewIssuesBodyEl.scrollTop = scrollTop;
       }
 
       function appendToolDiffs(body, entry) {
