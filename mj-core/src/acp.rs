@@ -3703,8 +3703,7 @@ pub async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) -> Resul
             unsafe {
                 if libc::killpg(pid as libc::pid_t, libc::SIGTERM) != 0 {
                     let errno = std::io::Error::last_os_error();
-                    // ESRCH just means the group is already gone.
-                    if errno.raw_os_error() != Some(libc::ESRCH) {
+                    if !unix_group_signal_error_is_ignorable(&errno) {
                         failures.push(format!("killpg SIGTERM agent group {pid}: {errno}"));
                     }
                 }
@@ -3726,7 +3725,7 @@ pub async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) -> Resul
             unsafe {
                 if libc::killpg(pid as libc::pid_t, libc::SIGKILL) != 0 {
                     let errno = std::io::Error::last_os_error();
-                    if errno.raw_os_error() != Some(libc::ESRCH) {
+                    if !unix_group_signal_error_is_ignorable(&errno) {
                         failures.push(format!("killpg SIGKILL agent group {pid}: {errno}"));
                     }
                 }
@@ -3797,6 +3796,23 @@ pub async fn kill_agent_tree(child: &mut Child, agent_pid: Option<u32>) -> Resul
     }
 
     teardown_result(failures)
+}
+
+#[cfg(unix)]
+fn unix_group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return true;
+    }
+    // Darwin excludes zombies while counting signalable process-group
+    // members, then returns EPERM when that count is zero. Because this helper
+    // targets a process group it created and owns, EPERM therefore means only
+    // exiting descendants remain. The later group-existence poll already
+    // treats that zombie-only residue as complete teardown.
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(libc::EPERM) {
+        return true;
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -6723,6 +6739,22 @@ mod tests {
         kill_agent_tree(&mut child, pid)
             .await
             .expect("teardown of an already-exited tree must be clean");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_signal_error_only_ignores_a_gone_owned_group() {
+        let missing = std::io::Error::from_raw_os_error(libc::ESRCH);
+        assert!(unix_group_signal_error_is_ignorable(&missing));
+
+        let invalid = std::io::Error::from_raw_os_error(libc::EINVAL);
+        assert!(!unix_group_signal_error_is_ignorable(&invalid));
+
+        let denied = std::io::Error::from_raw_os_error(libc::EPERM);
+        #[cfg(target_os = "macos")]
+        assert!(unix_group_signal_error_is_ignorable(&denied));
+        #[cfg(not(target_os = "macos"))]
+        assert!(!unix_group_signal_error_is_ignorable(&denied));
     }
 
     #[test]
