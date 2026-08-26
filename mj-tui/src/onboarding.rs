@@ -299,7 +299,7 @@ mod tests {
             "automatically reviews generated code",
             "Mix Codex and Claude",
             "Auto models can reduce review cost",
-            "Featured team",
+            "Recommended team",
             "Extended review",
             "Luna xhigh",
             "Choose one of the four Mjolnir Teams before saving",

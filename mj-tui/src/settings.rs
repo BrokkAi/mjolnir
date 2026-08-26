@@ -1544,7 +1544,7 @@ fn draw_team(
             Style::default().ink(theme.muted),
         ),
         Line::styled(
-            "Featured team: Claude coder + Codex reviewer defaults to extended Luna xhigh review.",
+            "Recommended team: Claude coder + Codex reviewer defaults to extended Luna xhigh review.",
             Style::default()
                 .ink(theme.primary)
                 .add_modifier(Modifier::BOLD),
@@ -1558,18 +1558,12 @@ fn draw_team(
         ),
     ];
     for preset in TeamPreset::ALL {
-        let featured = preset == TeamPreset::ClaudeWithCodexReviewer;
-        let marker = if Some(preset) == active {
-            "*"
-        } else if featured {
-            "!"
-        } else {
-            " "
-        };
+        let recommended = preset == TeamPreset::ClaudeWithCodexReviewer;
+        let marker = if Some(preset) == active { "*" } else { " " };
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {marker} {:<31}", preset.label()),
-                Style::default().ink(if Some(preset) == active || featured {
+                Style::default().ink(if Some(preset) == active || recommended {
                     theme.primary
                 } else {
                     theme.text
@@ -2937,12 +2931,16 @@ mod tests {
 
         let rendered = terminal.backend().to_string();
         assert!(!rendered.contains("ACP Priority"), "rendered:\n{rendered}");
-        for expected in ["Featured team", "Extended review", "Luna xhigh"] {
+        for expected in ["Recommended team", "Extended review", "Luna xhigh"] {
             assert!(
                 rendered.contains(expected),
                 "missing {expected:?}:\n{rendered}"
             );
         }
+        assert!(
+            !rendered.contains("! Claude coder + Codex reviewer"),
+            "ambiguous recommendation marker remains:\n{rendered}"
+        );
         for preset in TeamPreset::ALL {
             assert!(rendered.contains(preset.label()), "rendered:\n{rendered}");
         }
