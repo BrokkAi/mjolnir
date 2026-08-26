@@ -2229,6 +2229,33 @@
         }
       }
 
+      .runtime-stall {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px 8px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--red) 45%, var(--line-row));
+        background: color-mix(in srgb, var(--red) 10%, var(--surface-terminal));
+        color: var(--red);
+        font: 700 11.5px/1.4 var(--font-mono);
+
+        & span {
+          flex: 1 1 auto;
+          min-width: 0;
+        }
+
+        & button {
+          flex: 0 0 auto;
+          padding: 5px 8px;
+          border: 1px solid color-mix(in srgb, var(--red) 55%, var(--line-strong));
+          background: transparent;
+          color: var(--red);
+          cursor: pointer;
+          font: 700 10px/1 var(--font-mono);
+          text-transform: uppercase;
+        }
+      }
+
       .subagent-row {
         display: flex;
         align-items: baseline;
@@ -3379,6 +3406,10 @@
           <button id="jump-to-latest" class="jump-to-latest" type="button" hidden>Jump to latest</button>
         </div>
         <section id="composer" class="composer">
+          <div id="runtime-stall" class="runtime-stall" role="status" aria-live="polite" hidden>
+            <span id="runtime-stall-text"></span>
+            <button id="nudge-runtime" type="button" hidden>Nudge</button>
+          </div>
           <div id="subagents" class="subagent-list" role="status" aria-label="Subagent status"></div>
           <div id="permissions" class="permission-list"></div>
           <div id="queue-list" class="queue-list"></div>
@@ -3650,6 +3681,9 @@
       const backButtonEl = $("back-button");
       const permissionsEl = $("permissions");
       const subagentsEl = $("subagents");
+      const runtimeStallEl = $("runtime-stall");
+      const runtimeStallTextEl = $("runtime-stall-text");
+      const nudgeRuntimeEl = $("nudge-runtime");
       const sessionConfigEl = $("session-config");
       const queueInputEl = $("queue-input");
       const attachmentListEl = $("attachment-list");
@@ -5671,6 +5705,78 @@
         }
         const activity = activityBySessionId.get(session.session_id);
         return Boolean(activity) && Date.now() - activity.at < WORKING_WINDOW_MS;
+      }
+
+      function runtimeStalls(session) {
+        const thresholdMs = Number(session?.runtime_stall_seconds || 0) * 1000;
+        if (!session || thresholdMs <= 0) {
+          return [];
+        }
+        const now = Date.now();
+        const stalls = [];
+        const primaryAt = new Date(session.primary_last_activity_at || "").getTime();
+        const awaitingVisibleApproval = Array.isArray(session.pending_permissions)
+          && session.pending_permissions.length > 0;
+        if (
+          sessionHasActiveTurn(session)
+          && !sessionHasCommand(session, "exit")
+          && !awaitingVisibleApproval
+          && !Number.isNaN(primaryAt)
+          && now - primaryAt >= thresholdMs
+        ) {
+          stalls.push({
+            kind: "primary",
+            label: session.status?.model_source || session.agent || "primary runtime",
+            inactiveMs: now - primaryAt,
+          });
+        }
+        const runtimes = Array.isArray(session.runtime_activities)
+          ? session.runtime_activities
+          : [];
+        for (const runtime of runtimes) {
+          if (runtime.waiting_for_user_action) {
+            continue;
+          }
+          const activityAt = new Date(runtime.last_activity_at || "").getTime();
+          if (!Number.isNaN(activityAt) && now - activityAt >= thresholdMs) {
+            stalls.push({
+              kind: "nested",
+              label: runtime.runtime || runtime.label || "nested runtime",
+              role: runtime.label || "nested runtime",
+              inactiveMs: now - activityAt,
+            });
+          }
+        }
+        return stalls.sort((left, right) => right.inactiveMs - left.inactiveMs);
+      }
+
+      function inactiveDuration(milliseconds) {
+        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+        if (seconds < 60) {
+          return `${seconds}s`;
+        }
+        const minutes = Math.floor(seconds / 60);
+        return `${minutes}m`;
+      }
+
+      function renderRuntimeStall(session) {
+        const stalls = runtimeStalls(session);
+        const stall = stalls[0];
+        runtimeStallEl.hidden = !stall;
+        if (!stall) {
+          runtimeStallTextEl.textContent = "";
+          nudgeRuntimeEl.hidden = true;
+          nudgeRuntimeEl.disabled = true;
+          return;
+        }
+        const role = stall.kind === "nested" ? `${stall.role} · ` : "";
+        const extra = stalls.length > 1 ? ` · ${stalls.length - 1} more stalled` : "";
+        runtimeStallTextEl.textContent = `No activity from ${stall.label} for ${inactiveDuration(stall.inactiveMs)} · ${role}Stop cancels the active workflow${extra}`;
+        const canNudge = stall.kind === "primary"
+          && Boolean(session.steering_supported)
+          && Number(session.queued_prompt_count || 0) === 0;
+        nudgeRuntimeEl.hidden = !canNudge;
+        nudgeRuntimeEl.disabled = !canNudge;
       }
 
       function renderActiveSessionCount() {
@@ -9301,6 +9407,7 @@
         renderTranscript(session, archived);
         renderConfig(readOnly || sideActive ? null : session);
         renderReviewIssuesButton(session);
+        renderRuntimeStall(readOnly ? null : session);
         renderSubagents(session);
         renderPermissions(readOnly ? null : session);
         renderQueue(readOnly ? null : session);
@@ -9609,6 +9716,45 @@
         }
       }
 
+      async function nudgeActiveRuntime() {
+        const sessionId = selectedSessionId;
+        const session = sessions.find((candidate) => candidate.session_id === sessionId) || null;
+        if (
+          !sessionId
+          || !sessionHasActiveTurn(session)
+          || !session.steering_supported
+          || Number(session.queued_prompt_count || 0) > 0
+        ) {
+          return;
+        }
+        nudgeRuntimeEl.disabled = true;
+        const nudge = "Please report your current status, then continue the active task.";
+        try {
+          const queued = await apiFetch("/api/queued-prompts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, text: nudge, images: [] }),
+          });
+          if (!queued.ok) {
+            throw new Error(`HTTP ${queued.status}`);
+          }
+          const steered = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+            method: "POST",
+          });
+          if (!steered.ok) {
+            throw new Error(`HTTP ${steered.status}`);
+          }
+          setQueueStatus("Nudge queued for the active runtime.");
+          await refreshSessions();
+        } catch (error) {
+          if (error.message !== "HTTP 401") {
+            setQueueStatus(`Nudge failed: ${error.message}`, true);
+          }
+          nudgeRuntimeEl.disabled = false;
+          await refreshQueuedPrompts();
+        }
+      }
+
       async function submitAuth(event) {
         event.preventDefault();
         const code = authTokenEl.value;
@@ -9755,6 +9901,9 @@
       backButtonEl.addEventListener("click", navigateToList);
       stopTurnEl.addEventListener("click", () => {
         void stopActiveTurn();
+      });
+      nudgeRuntimeEl.addEventListener("click", () => {
+        void nudgeActiveRuntime();
       });
       window.addEventListener("hashchange", applyRoute);
       window.addEventListener("online", retryPendingViewerSession);

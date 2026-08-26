@@ -106,6 +106,13 @@ pub struct SubagentStatus {
     /// Stamped UI-side on `Started`, so elapsed time is measured against the
     /// same clock that renders it.
     pub started_at: Instant,
+    /// Most recent lifecycle or ACP update from this actor. Unlike
+    /// `started_at`, this advances throughout a live turn and drives the
+    /// explicit stalled-runtime state.
+    last_activity_at: Instant,
+    /// Permission and elicitation prompts are visible user waits, not silent
+    /// runtime stalls.
+    waiting_for_user_action: bool,
     /// Outcome and the moment it landed, once the subagent is done.
     pub finished: Option<(SubagentOutcome, Instant)>,
 }
@@ -131,8 +138,46 @@ impl SubagentStatus {
             plan_index: None,
             activity: "starting".to_string(),
             started_at: now,
+            last_activity_at: now,
+            waiting_for_user_action: false,
             finished: None,
         }
+    }
+
+    fn note_activity_at(&mut self, now: Instant) {
+        self.last_activity_at = now;
+        self.waiting_for_user_action = false;
+    }
+
+    fn note_user_wait_at(&mut self, now: Instant) {
+        self.last_activity_at = now;
+        self.waiting_for_user_action = true;
+    }
+
+    fn runtime_label(&self) -> String {
+        match (self.adapter.trim(), self.model.as_deref().map(str::trim)) {
+            ("", None | Some("")) => self.label.clone(),
+            (adapter, None | Some("")) => adapter.to_string(),
+            ("", Some(model)) => model.to_string(),
+            (adapter, Some(model)) => format!("{adapter}/{model}"),
+        }
+    }
+
+    fn runtime_stall_at(&self, now: Instant, threshold: Duration) -> Option<RuntimeStall> {
+        if self.finished.is_some()
+            || self.waiting_for_user_action
+            || !matches!(
+                self.lifecycle,
+                Some(crate::workflow::WorkflowActorLifecycle::Running)
+            )
+        {
+            return None;
+        }
+        let inactive_for = now.saturating_duration_since(self.last_activity_at);
+        (inactive_for >= threshold).then(|| RuntimeStall {
+            label: self.runtime_label(),
+            inactive_for,
+        })
     }
 
     /// Wall-clock the row displays: still counting while running, frozen at the
@@ -211,9 +256,16 @@ struct WorkflowClock {
     finished_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStall {
+    pub label: String,
+    pub inactive_for: Duration,
+}
+
 const BUILTIN_NEW_COMMAND: &str = "new";
 const BUILTIN_CLEAR_COMMAND: &str = "clear";
 const BUILTIN_COMPACT_COMMAND: &str = "compact";
+const BUILTIN_NUDGE_COMMAND: &str = "nudge";
 const BUILTIN_LOAD_COMMAND: &str = "load";
 const BUILTIN_FORK_COMMAND: &str = "fork";
 const BUILTIN_SIDE_COMMAND: &str = "side";
@@ -247,6 +299,13 @@ fn builtin_compact_command() -> AvailableCommand {
     AvailableCommand::new(
         BUILTIN_COMPACT_COMMAND,
         "compact the primary agent's session where supported",
+    )
+}
+
+fn builtin_nudge_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BUILTIN_NUDGE_COMMAND,
+        "ask a quiet active runtime to report status and continue",
     )
 }
 
@@ -362,6 +421,7 @@ fn install_builtin_commands(
         command.name != BUILTIN_NEW_COMMAND
             && command.name != BUILTIN_CLEAR_COMMAND
             && command.name != BUILTIN_COMPACT_COMMAND
+            && command.name != BUILTIN_NUDGE_COMMAND
             && command.name != BUILTIN_LOAD_COMMAND
             && command.name != BUILTIN_FORK_COMMAND
             && command.name != BUILTIN_SIDE_COMMAND
@@ -398,6 +458,7 @@ fn install_builtin_commands(
     commands.insert(0, builtin_agents_command());
     commands.insert(0, builtin_export_command());
     commands.insert(0, builtin_load_command());
+    commands.insert(0, builtin_nudge_command());
     commands.insert(0, builtin_compact_command());
     commands.insert(0, builtin_clear_command());
     commands.insert(0, builtin_new_command());
@@ -409,6 +470,7 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
             BUILTIN_NEW_COMMAND,
             BUILTIN_CLEAR_COMMAND,
             BUILTIN_COMPACT_COMMAND,
+            BUILTIN_NUDGE_COMMAND,
             BUILTIN_LOAD_COMMAND,
             BUILTIN_FORK_COMMAND,
             BUILTIN_SIDE_COMMAND,
@@ -429,6 +491,7 @@ fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
     });
     commands.insert(0, builtin_side_command());
     commands.insert(0, builtin_export_command());
+    commands.insert(0, builtin_nudge_command());
     commands.insert(0, builtin_effort_command());
     commands.insert(0, builtin_model_command());
     commands.insert(0, builtin_exit_side_command());
@@ -1559,6 +1622,13 @@ pub struct AppState {
     pub voice_input_level: Option<f32>,
     /// Timing for the active or most recently completed prompt turn.
     turn_started_at: Option<Instant>,
+    /// Most recent ACP activity from the primary runtime while its turn is
+    /// active. This is distinct from the turn start so long, healthy turns do
+    /// not look stalled while they continue to stream updates.
+    primary_last_activity_at: Option<Instant>,
+    /// `None` disables stall reporting. Configured in whole minutes and held
+    /// as a duration here so every render path uses the same threshold.
+    runtime_stall_threshold: Option<Duration>,
     last_turn_elapsed: Option<Duration>,
     prompt_turns: Vec<PromptTurn>,
     active_prompt_turn: Option<usize>,
@@ -2326,6 +2396,10 @@ impl AppState {
             voice_input_range: None,
             voice_input_level: None,
             turn_started_at: None,
+            primary_last_activity_at: None,
+            runtime_stall_threshold: Some(Duration::from_secs(
+                crate::config::default_runtime_stall_minutes() * 60,
+            )),
             last_turn_elapsed: None,
             prompt_turns: Vec::new(),
             active_prompt_turn: None,
@@ -2386,6 +2460,7 @@ impl AppState {
         side.primary_acp_name = self.primary_acp_name.clone();
         side.agent_source_id = self.agent_source_id.clone();
         side.primary_reasoning_effort = self.primary_reasoning_effort.clone();
+        side.runtime_stall_threshold = self.runtime_stall_threshold;
         side.current_branch_pull_request = self.current_branch_pull_request.clone();
         side.current_branch_pull_request_branch = self.current_branch_pull_request_branch.clone();
         side.transcript_export_dir = self.transcript_export_dir.clone();
@@ -3380,6 +3455,60 @@ impl AppState {
         self.connection_state
     }
 
+    pub fn set_runtime_stall_minutes(&mut self, minutes: u64) {
+        self.runtime_stall_threshold =
+            (minutes > 0).then(|| Duration::from_secs(minutes.saturating_mul(60)));
+    }
+
+    fn note_primary_activity_at(&mut self, now: Instant) {
+        self.primary_last_activity_at = Some(now);
+    }
+
+    pub fn primary_runtime_stall_at(&self, now: Instant) -> Option<RuntimeStall> {
+        if self.connection_state != ConnectionState::Streaming
+            || self.has_pending_permission()
+            || self.has_pending_elicitation()
+        {
+            return None;
+        }
+        let threshold = self.runtime_stall_threshold?;
+        let inactive_for = now.saturating_duration_since(self.primary_last_activity_at?);
+        (inactive_for >= threshold).then(|| RuntimeStall {
+            label: if self.primary_acp_name.trim().is_empty() {
+                self.agent_label.clone()
+            } else {
+                self.primary_acp_name.clone()
+            },
+            inactive_for,
+        })
+    }
+
+    pub fn workflow_runtime_stall_at(
+        &self,
+        workflow: &crate::workflow::WorkflowState,
+        now: Instant,
+    ) -> Option<RuntimeStall> {
+        let threshold = self.runtime_stall_threshold?;
+        workflow
+            .actors
+            .iter()
+            .filter_map(|(actor_id, actor)| {
+                if !matches!(
+                    actor.lifecycle,
+                    crate::workflow::WorkflowActorLifecycle::Running
+                ) {
+                    return None;
+                }
+                let crate::workflow::WorkflowActorId::Subagent(subagent_id) = actor_id else {
+                    return None;
+                };
+                self.subagents
+                    .get(subagent_id)
+                    .and_then(|status| status.runtime_stall_at(now, threshold))
+            })
+            .max_by_key(|stall| stall.inactive_for)
+    }
+
     /// Sanitize an agent-supplied session title (stripping control characters
     /// and collapsing whitespace) and store it. Returns `true` when a
     /// non-empty title was set; empty/whitespace-only titles are ignored so
@@ -3995,8 +4124,10 @@ impl AppState {
         self.active_prompt_turn = Some(prompt_index);
         self.record_prompt_history_with_resources(text, resources);
         self.bump_transcript_revision();
+        let now = Instant::now();
         self.set_connection_state(ConnectionState::Streaming);
-        self.turn_started_at = Some(Instant::now());
+        self.turn_started_at = Some(now);
+        self.note_primary_activity_at(now);
         self.last_turn_elapsed = None;
         self.input_cursor = 0;
         self.scroll_offset = 0;
@@ -4506,11 +4637,13 @@ impl AppState {
                 }
             }
             UiEvent::SessionUpdate(u) => {
+                self.note_primary_activity_at(Instant::now());
                 self.apply_session_update(u);
                 self.apply_known_terminal_outputs();
             }
             UiEvent::ContextCompacted => {}
             UiEvent::TerminalOutput(snapshot) => {
+                self.note_primary_activity_at(Instant::now());
                 self.finalize_thinking(EntryKind::Thought);
                 self.terminal_outputs
                     .insert(snapshot.terminal_id.clone(), snapshot);
@@ -4525,6 +4658,7 @@ impl AppState {
                 self.apply_connected_session_config_options(options, targets);
             }
             UiEvent::InternalMessage(message) => {
+                let now = Instant::now();
                 // An internal message starts a fresh orchestrator-initiated
                 // exchange. The previous turn's completion may have been
                 // deliberately withheld (a Findings verdict drops it and lets
@@ -4548,9 +4682,12 @@ impl AppState {
                 }
                 match message.owner_subagent_id {
                     Some(subagent_id) => {
+                        self.ensure_subagent_state(subagent_id)
+                            .note_activity_at(now);
                         self.append_nested_internal_message(subagent_id, message);
                     }
                     None => {
+                        self.note_primary_activity_at(now);
                         // Primary-owned orchestration packets are model input,
                         // not user transcript. Their visible state is carried
                         // by typed workflow transitions and adjacent
@@ -4578,6 +4715,7 @@ impl AppState {
                 self.workspace_diff_scroll_offset = 0;
             }
             UiEvent::PermissionRequest(prompt) => {
+                self.note_primary_activity_at(Instant::now());
                 self.finalize_thinking(EntryKind::Thought);
                 // Append to the queue rather than replacing the current
                 // pending prompt: overwriting would drop the prior
@@ -4599,6 +4737,7 @@ impl AppState {
                 self.update_autocomplete();
             }
             UiEvent::ElicitationRequest(prompt) => {
+                self.note_primary_activity_at(Instant::now());
                 self.finalize_thinking(EntryKind::Thought);
                 // Append to the queue rather than replacing the front prompt:
                 // overwriting would drop the prior oneshot responder, which the
@@ -4708,7 +4847,9 @@ impl AppState {
             // The transcript already shows the steered message from the
             // user's own submission; delivery confirmation feeds the
             // orchestrator's user-message history, not the TUI.
-            UiEvent::SteeredPromptDelivered { .. } => {}
+            UiEvent::SteeredPromptDelivered { .. } => {
+                self.note_primary_activity_at(Instant::now());
+            }
             UiEvent::Warning(msg) => {
                 self.record_status_message(StatusKind::Warning, msg);
             }
@@ -4762,6 +4903,7 @@ impl AppState {
                         .or_insert_with(|| SubagentStatus::placeholder(Some(role.clone()), now));
                     state.role = Some(role.clone());
                     state.lifecycle = Some(WorkflowActorLifecycle::Running);
+                    state.note_activity_at(now);
                     if state.label_is_placeholder {
                         state.label = nested_role_label(role);
                     }
@@ -4772,8 +4914,9 @@ impl AppState {
                 retained_session_id,
             } => {
                 if let WorkflowActorId::Subagent(subagent_id) = actor_id {
-                    self.ensure_subagent_state(*subagent_id).session_id =
-                        Some(retained_session_id.clone());
+                    let state = self.ensure_subagent_state(*subagent_id);
+                    state.session_id = Some(retained_session_id.clone());
+                    state.note_activity_at(Instant::now());
                 }
             }
             WorkflowTransition::ActorWaiting {
@@ -4783,29 +4926,33 @@ impl AppState {
                 requires_user_action,
             } => {
                 if let WorkflowActorId::Subagent(subagent_id) = actor_id {
-                    self.ensure_subagent_state(*subagent_id).lifecycle =
-                        Some(WorkflowActorLifecycle::Waiting {
-                            dependency: dependency.clone(),
-                            remaining: *remaining,
-                            requires_user_action: *requires_user_action,
-                        });
+                    let state = self.ensure_subagent_state(*subagent_id);
+                    state.lifecycle = Some(WorkflowActorLifecycle::Waiting {
+                        dependency: dependency.clone(),
+                        remaining: *remaining,
+                        requires_user_action: *requires_user_action,
+                    });
+                    state.note_activity_at(Instant::now());
                 }
             }
             WorkflowTransition::ActorResumed { actor_id } => {
                 if let WorkflowActorId::Subagent(subagent_id) = actor_id {
-                    self.ensure_subagent_state(*subagent_id).lifecycle =
-                        Some(WorkflowActorLifecycle::Running);
+                    let state = self.ensure_subagent_state(*subagent_id);
+                    state.lifecycle = Some(WorkflowActorLifecycle::Running);
+                    state.note_activity_at(Instant::now());
                 }
             }
             WorkflowTransition::ActorFinished { actor_id, outcome } => {
                 if let WorkflowActorId::Subagent(subagent_id) = actor_id {
-                    self.ensure_subagent_state(*subagent_id).lifecycle = Some(match outcome {
+                    let state = self.ensure_subagent_state(*subagent_id);
+                    state.lifecycle = Some(match outcome {
                         SubagentOutcome::Completed => WorkflowActorLifecycle::Completed,
                         SubagentOutcome::Cancelled => WorkflowActorLifecycle::Cancelled,
                         SubagentOutcome::Failed(message) => {
                             WorkflowActorLifecycle::Failed(message.clone())
                         }
                     });
+                    state.note_activity_at(Instant::now());
                 }
             }
             WorkflowTransition::Waiting {
@@ -4938,6 +5085,8 @@ impl AppState {
                         };
                         status.lifecycle = Some(crate::workflow::WorkflowActorLifecycle::Running);
                         status.started_at = now;
+                        status.last_activity_at = now;
+                        status.waiting_for_user_action = false;
                         status.finished = None;
                     })
                     .or_insert_with(|| SubagentStatus {
@@ -4955,6 +5104,8 @@ impl AppState {
                         plan_index: None,
                         activity: objective.clone(),
                         started_at: now,
+                        last_activity_at: now,
+                        waiting_for_user_action: false,
                         finished: None,
                     });
                 let role = row.role.clone();
@@ -5017,13 +5168,16 @@ impl AppState {
                 // already-flushed inline scrollback.
                 if let Some(state) = self.subagents.get_mut(&subagent_id) {
                     state.activity = activity;
+                    state.note_activity_at(Instant::now());
                 }
             }
             SubagentEvent::SessionStarted {
                 subagent_id,
                 session_id,
             } => {
-                self.ensure_subagent_state(subagent_id).session_id = Some(session_id);
+                let state = self.ensure_subagent_state(subagent_id);
+                state.session_id = Some(session_id);
+                state.note_activity_at(Instant::now());
             }
             SubagentEvent::SessionUpdate {
                 subagent_id,
@@ -5033,6 +5187,8 @@ impl AppState {
                 subagent_id,
                 mut snapshot,
             } => {
+                self.ensure_subagent_state(subagent_id)
+                    .note_activity_at(Instant::now());
                 self.finalize_subagent_thinking(subagent_id);
                 snapshot.terminal_id = format!(
                     "{}{}",
@@ -5047,6 +5203,8 @@ impl AppState {
                 subagent_id,
                 mut prompt,
             } => {
+                self.ensure_subagent_state(subagent_id)
+                    .note_user_wait_at(Instant::now());
                 self.finalize_subagent_thinking(subagent_id);
                 self.help_overlay = false;
                 let local_id = prompt.tool_call.tool_call_id.to_string();
@@ -5063,6 +5221,8 @@ impl AppState {
                 subagent_id,
                 prompt,
             } => {
+                self.ensure_subagent_state(subagent_id)
+                    .note_user_wait_at(Instant::now());
                 self.finalize_subagent_thinking(subagent_id);
                 self.help_overlay = false;
                 self.elicitation_queue
@@ -5070,6 +5230,8 @@ impl AppState {
                 self.update_autocomplete();
             }
             SubagentEvent::CancelPendingPermissions { subagent_id } => {
+                self.ensure_subagent_state(subagent_id)
+                    .note_activity_at(Instant::now());
                 self.finalize_subagent_thinking(subagent_id);
                 self.cancel_subagent_prompts(subagent_id);
                 self.mark_subagent_tools_failed(subagent_id, "tool call cancelled");
@@ -5083,6 +5245,7 @@ impl AppState {
                 self.finalize_subagent_message(subagent_id);
                 let state = self.ensure_subagent_state(subagent_id);
                 state.activity = message.clone();
+                state.note_activity_at(Instant::now());
                 state.transcript.push(Entry::System(message.clone()));
                 if kind == SubagentStatusKind::Warning {
                     let role = state.role.clone();
@@ -5453,6 +5616,7 @@ impl AppState {
         self.finalize_subagent_thinking(subagent_id);
         self.finalize_subagent_message(subagent_id);
         let state = self.ensure_subagent_state(subagent_id);
+        state.note_activity_at(Instant::now());
         if state.objective.is_empty()
             && matches!(message.kind, crate::event::InternalMessageKind::Delegation)
         {
@@ -5463,6 +5627,8 @@ impl AppState {
     }
 
     fn apply_subagent_update(&mut self, subagent_id: u64, update: SessionUpdate) {
+        self.ensure_subagent_state(subagent_id)
+            .note_activity_at(Instant::now());
         let prefix = Self::subagent_id_prefix(subagent_id);
         let prefix = prefix.as_str();
         match update {
@@ -6217,6 +6383,110 @@ mod tests {
             subagent_id,
             activity: activity.to_string(),
         })
+    }
+
+    #[test]
+    fn primary_runtime_stall_tracks_silence_and_updates() {
+        let mut state = AppState::new();
+        state.set_runtime_stall_minutes(1);
+        state.set_primary_acp_name("claude-acp".to_string());
+        state.record_user_prompt("keep working".to_string());
+        let now = Instant::now();
+        state.primary_last_activity_at = Some(now - Duration::from_secs(61));
+
+        assert_eq!(
+            state.primary_runtime_stall_at(now),
+            Some(RuntimeStall {
+                label: "claude-acp".to_string(),
+                inactive_for: Duration::from_secs(61),
+            })
+        );
+
+        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
+            text_chunk("still working"),
+        )));
+        assert!(state.primary_runtime_stall_at(Instant::now()).is_none());
+        state.set_runtime_stall_minutes(0);
+        state.primary_last_activity_at = Some(now - Duration::from_secs(600));
+        assert!(state.primary_runtime_stall_at(now).is_none());
+    }
+
+    #[test]
+    fn visible_permission_wait_is_not_reported_as_runtime_stall() {
+        let mut state = AppState::new();
+        state.set_runtime_stall_minutes(1);
+        state.record_user_prompt("run a command".to_string());
+        state.primary_last_activity_at = Some(Instant::now() - Duration::from_secs(61));
+        let (prompt, _decision) = permission_prompt_with_id("permission-stall");
+        state.apply_event(UiEvent::PermissionRequest(prompt));
+
+        assert!(
+            state
+                .primary_runtime_stall_at(Instant::now() + Duration::from_secs(120))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn workflow_runtime_stall_uses_nested_acp_activity() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowId, WorkflowKind, WorkflowPhase,
+            WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        state.set_runtime_stall_minutes(1);
+        let workflow_id = WorkflowId::review(1);
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(7),
+                role: WorkflowActorRole::ReviewSupervisor,
+            },
+        );
+        state.apply_event(subagent_started(7, "review", "inspect changes"));
+        let now = Instant::now();
+        state
+            .subagents
+            .get_mut(&7)
+            .expect("review actor")
+            .last_activity_at = now - Duration::from_secs(61);
+
+        let workflow = state.workflows.get(workflow_id).expect("workflow");
+        let stall = state
+            .workflow_runtime_stall_at(workflow, now)
+            .expect("stalled review runtime");
+        assert_eq!(stall.label, "codex-acp/gpt-y");
+        assert_eq!(stall.inactive_for, Duration::from_secs(61));
+
+        state.apply_event(subagent_activity(7, "reviewing tests"));
+        let workflow = state.workflows.get(workflow_id).expect("workflow");
+        assert!(
+            state
+                .workflow_runtime_stall_at(workflow, Instant::now())
+                .is_none()
+        );
+
+        let (prompt, _decision) = permission_prompt_with_id("nested-permission-stall");
+        state.apply_event(UiEvent::Subagent(SubagentEvent::PermissionRequest {
+            subagent_id: 7,
+            prompt,
+        }));
+        let workflow = state.workflows.get(workflow_id).expect("workflow");
+        assert!(
+            state
+                .workflow_runtime_stall_at(workflow, Instant::now() + Duration::from_secs(120))
+                .is_none()
+        );
     }
 
     fn finished_subagent(subagent_id: u64, outcome: SubagentOutcome) -> UiEvent {
@@ -10542,6 +10812,7 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
+                "nudge",
                 "load",
                 "export",
                 "agents",
@@ -10605,6 +10876,7 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
+                "nudge",
                 "load",
                 "export",
                 "agents",
@@ -10658,6 +10930,7 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
+                "nudge",
                 "load",
                 "export",
                 "agents",
@@ -10686,14 +10959,18 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[3].description,
-            "load a previous session into the current primary"
+            "ask a quiet active runtime to report status and continue"
         );
         assert_eq!(
             s.available_commands[4].description,
-            "export primary transcript; add full for nested agents"
+            "load a previous session into the current primary"
         );
         assert_eq!(
             s.available_commands[5].description,
+            "export primary transcript; add full for nested agents"
+        );
+        assert_eq!(
+            s.available_commands[6].description,
             "show active model selections and usage"
         );
         assert_eq!(
@@ -10727,6 +11004,7 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
+                "nudge",
                 "load",
                 "export",
                 "agents",

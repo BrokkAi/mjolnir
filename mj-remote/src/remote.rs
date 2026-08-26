@@ -234,6 +234,17 @@ pub struct SessionRecord {
     /// is already running.
     #[serde(default)]
     pub steering_supported: bool,
+    /// Configured silence threshold used by the viewer. `0` disables runtime
+    /// stall warnings.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub runtime_stall_seconds: u64,
+    /// Most recent primary ACP update during the active turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_last_activity_at: Option<String>,
+    /// Active nested runtimes, including hidden review coordinators that do
+    /// not belong in the ordinary subagent roster.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_activities: Vec<RuntimeActivityRecord>,
     /// Permission prompts currently waiting for an answer in this session.
     #[serde(default)]
     pub pending_permissions: Vec<PendingPermissionRecord>,
@@ -370,6 +381,37 @@ pub struct TrackerStatusSeed {
     /// Working directory published as session provenance and probed for the
     /// current branch's open pull request. `None` disables both.
     pub cwd: Option<PathBuf>,
+    pub runtime_stall_minutes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeActivityRecord {
+    pub subagent_id: u64,
+    pub label: String,
+    pub runtime: String,
+    pub last_activity_at: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub waiting_for_user_action: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct RuntimeActivitySnapshot {
+    #[serde(default)]
+    runtime_stall_seconds: u64,
+    #[serde(default)]
+    primary_last_activity_at: Option<String>,
+    #[serde(default)]
+    runtime_activities: Vec<RuntimeActivityRecord>,
+}
+
+impl From<&SessionRecord> for RuntimeActivitySnapshot {
+    fn from(session: &SessionRecord) -> Self {
+        Self {
+            runtime_stall_seconds: session.runtime_stall_seconds,
+            primary_last_activity_at: session.primary_last_activity_at.clone(),
+            runtime_activities: session.runtime_activities.clone(),
+        }
+    }
 }
 
 /// One background subagent as the viewer sees it: keyed by `subagent_id`,
@@ -1518,6 +1560,8 @@ struct TrackerState {
     open_agent_actors: HashSet<String>,
     prompt_in_flight: bool,
     prompt_turn_started_at: Option<String>,
+    primary_last_activity_at: Option<String>,
+    runtime_stall_seconds: u64,
     side_prompt_in_flight: bool,
     side_prompt_turn_started_at: Option<String>,
     side_state: RemoteSideState,
@@ -1528,6 +1572,7 @@ struct TrackerState {
     /// Live per-subagent status rows, keyed by `subagent_id` and ordered by it
     /// (ids are monotonic in spawn order).
     subagents: BTreeMap<u64, SubagentStatusRecord>,
+    runtime_activities: BTreeMap<u64, RuntimeActivityRecord>,
     /// Runtime roles for nested review actors. Internal coordinators share the
     /// runner but stay out of the user-facing subagent roster.
     nested_roles: HashMap<u64, mj_core::workflow::WorkflowActorRole>,
@@ -1739,6 +1784,8 @@ impl TrackerState {
             open_agent_actors: HashSet::new(),
             prompt_in_flight: false,
             prompt_turn_started_at: None,
+            primary_last_activity_at: None,
+            runtime_stall_seconds: 0,
             side_prompt_in_flight: false,
             side_prompt_turn_started_at: None,
             side_state: RemoteSideState::Inactive,
@@ -1747,6 +1794,7 @@ impl TrackerState {
             terminal_outputs: HashMap::new(),
             tool_transcript_entries: HashMap::new(),
             subagents: BTreeMap::new(),
+            runtime_activities: BTreeMap::new(),
             nested_roles: HashMap::new(),
             workflows: mj_core::workflow::WorkflowStore::default(),
             workspace_diff: None,
@@ -1832,11 +1880,13 @@ impl TrackerState {
         self.open_agent_actors.clear();
         self.prompt_in_flight = false;
         self.prompt_turn_started_at = None;
+        self.primary_last_activity_at = None;
         self.side_prompt_in_flight = false;
         self.side_prompt_turn_started_at = None;
         self.side_state = RemoteSideState::Inactive;
         self.side_initial_prompt_pending = false;
         self.transcript.clear();
+        self.runtime_activities.clear();
         self.terminal_outputs.clear();
         self.tool_transcript_entries.clear();
         self.subagents.clear();
@@ -1997,6 +2047,7 @@ impl TrackerState {
                 self.touch();
             }
             UiEvent::TerminalOutput(snapshot) => {
+                self.note_primary_activity();
                 self.observe_terminal_output(snapshot);
             }
             UiEvent::PromptDone { .. } | UiEvent::PromptFailed { .. } => {
@@ -2005,7 +2056,10 @@ impl TrackerState {
             // The steered text already entered this transcript when the
             // `SteerPrompt` command was observed; delivery confirmation only
             // feeds the orchestrator's user-message history.
-            UiEvent::SteeredPromptDelivered { .. } => {}
+            UiEvent::SteeredPromptDelivered { .. } => {
+                self.note_primary_activity();
+                self.touch();
+            }
             UiEvent::Fatal(message) => {
                 self.end_prompt_turn();
                 self.record_status_notice(StatusKind::Fatal, message);
@@ -2073,6 +2127,11 @@ impl TrackerState {
                 self.record_status_notice(StatusKind::Warning, message);
             }
             UiEvent::InternalMessage(message) => {
+                if let Some(subagent_id) = message.owner_subagent_id {
+                    self.note_nested_activity(subagent_id);
+                } else {
+                    self.note_primary_activity();
+                }
                 self.push_actor_transcript_entry(
                     "system",
                     &message.source.to_ascii_lowercase(),
@@ -2263,6 +2322,7 @@ impl TrackerState {
                 resumed,
                 label,
                 model,
+                agent,
                 objective,
                 ..
             } => {
@@ -2271,6 +2331,20 @@ impl TrackerState {
                 let internal = role
                     .as_ref()
                     .is_some_and(|role| role.is_internal_review_session());
+                self.runtime_activities.insert(
+                    *subagent_id,
+                    RuntimeActivityRecord {
+                        subagent_id: *subagent_id,
+                        label: role
+                            .as_ref()
+                            .map_or_else(|| label.clone(), |role| role.display_label().to_string()),
+                        runtime: model
+                            .as_ref()
+                            .map_or_else(|| agent.clone(), |model| format!("{agent}/{model}")),
+                        last_activity_at: now.clone(),
+                        waiting_for_user_action: false,
+                    },
+                );
                 if !internal {
                     self.subagents.insert(
                         *subagent_id,
@@ -2310,16 +2384,21 @@ impl TrackerState {
                 subagent_id,
                 activity,
             } => {
+                self.note_nested_activity(*subagent_id);
                 if let Some(record) = self.subagents.get_mut(subagent_id) {
                     record.activity = activity.clone();
-                    self.touch();
                 }
+                self.touch();
             }
-            SubagentEvent::SessionStarted { .. } => {}
+            SubagentEvent::SessionStarted { subagent_id, .. } => {
+                self.note_nested_activity(*subagent_id);
+                self.touch();
+            }
             SubagentEvent::Finished {
                 subagent_id,
                 outcome,
             } => {
+                self.note_nested_activity(*subagent_id);
                 let role = self.nested_roles.get(subagent_id).cloned();
                 let internal = role
                     .as_ref()
@@ -2359,12 +2438,14 @@ impl TrackerState {
                     if internal { "review" } else { "subagent" },
                     text,
                 );
+                self.runtime_activities.remove(subagent_id);
                 self.touch();
             }
             SubagentEvent::SessionUpdate {
                 subagent_id,
                 update,
             } => {
+                self.note_nested_activity(*subagent_id);
                 let actor = remote_nested_actor(*subagent_id, self.nested_roles.get(subagent_id));
                 self.observe_session_update_as(update, &actor, Some(&actor));
             }
@@ -2372,12 +2453,22 @@ impl TrackerState {
                 subagent_id,
                 snapshot,
             } => {
+                self.note_nested_activity(*subagent_id);
                 let actor = remote_nested_actor(*subagent_id, self.nested_roles.get(subagent_id));
                 let mut snapshot = snapshot.clone();
                 snapshot.terminal_id = namespace_remote_id(Some(&actor), &snapshot.terminal_id);
                 self.observe_terminal_output(&snapshot);
             }
-            _ => {}
+            SubagentEvent::PermissionRequest { subagent_id, .. }
+            | SubagentEvent::ElicitationRequest { subagent_id, .. } => {
+                self.note_nested_user_wait(*subagent_id);
+                self.touch();
+            }
+            SubagentEvent::CancelPendingPermissions { subagent_id }
+            | SubagentEvent::Status { subagent_id, .. } => {
+                self.note_nested_activity(*subagent_id);
+                self.touch();
+            }
         }
     }
 
@@ -2410,6 +2501,7 @@ impl TrackerState {
     }
 
     fn observe_session_update(&mut self, update: &SessionUpdate) {
+        self.note_primary_activity();
         self.observe_session_update_as(update, "primary", None);
     }
 
@@ -2636,6 +2728,7 @@ impl TrackerState {
         } else {
             self.prompt_in_flight = true;
             self.prompt_turn_started_at = Some(now_rfc3339());
+            self.note_primary_activity();
         }
         if self
             .last_prompt_at
@@ -2672,6 +2765,9 @@ impl TrackerState {
         } else if !self.prompt_in_flight {
             self.prompt_in_flight = true;
             self.prompt_turn_started_at = Some(now_rfc3339());
+        }
+        if actor == "primary" {
+            self.note_primary_activity();
         }
         if self
             .last_prompt_at
@@ -2840,6 +2936,9 @@ impl TrackerState {
             },
             prompt_images_supported: self.prompt_images_supported,
             steering_supported: self.steering_supported,
+            runtime_stall_seconds: self.runtime_stall_seconds,
+            primary_last_activity_at: self.primary_last_activity_at.clone(),
+            runtime_activities: self.runtime_activities.values().cloned().collect(),
             pending_permissions: self.pending_permissions.clone(),
             session_config: self.session_config.clone(),
             native_mode: self.native_mode.clone(),
@@ -2928,6 +3027,24 @@ impl TrackerState {
 
     fn touch(&mut self) {
         self.last_update = Some(now_rfc3339());
+    }
+
+    fn note_primary_activity(&mut self) {
+        self.primary_last_activity_at = Some(now_rfc3339());
+    }
+
+    fn note_nested_activity(&mut self, subagent_id: u64) {
+        if let Some(runtime) = self.runtime_activities.get_mut(&subagent_id) {
+            runtime.last_activity_at = now_rfc3339();
+            runtime.waiting_for_user_action = false;
+        }
+    }
+
+    fn note_nested_user_wait(&mut self, subagent_id: u64) {
+        if let Some(runtime) = self.runtime_activities.get_mut(&subagent_id) {
+            runtime.last_activity_at = now_rfc3339();
+            runtime.waiting_for_user_action = true;
+        }
     }
 
     fn reserve_remote_prompt_slot(&mut self) -> Option<String> {
@@ -3031,6 +3148,7 @@ impl RemoteSessionTracker {
         state.worktree = worktree;
         state.model_source = status.model_source;
         state.reasoning_effort = status.reasoning_effort;
+        state.runtime_stall_seconds = status.runtime_stall_minutes.saturating_mul(60);
         state.cwd = status.cwd.clone();
         let tracker = Self {
             remote_dir: Arc::new(dir),
@@ -3177,6 +3295,9 @@ impl RemoteSessionTracker {
             requested_at: now_rfc3339(),
         };
         if let Ok(mut state) = self.state.lock() {
+            if actor.is_none() {
+                state.note_primary_activity();
+            }
             state.push_pending_permission(record);
         }
         self.request_flush();
@@ -3235,6 +3356,9 @@ impl RemoteSessionTracker {
             requested_at: now_rfc3339(),
         };
         if let Ok(mut state) = self.state.lock() {
+            if owner_prefix.is_none() {
+                state.note_primary_activity();
+            }
             state.push_pending_permission(record);
         }
         self.request_flush();
@@ -8289,6 +8413,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "status_json", "text")?;
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
     ensure_sessions_column(&conn, "review_workflows_json", "text not null default '[]'")?;
+    ensure_sessions_column(&conn, "runtime_activity_json", "text not null default '{}'")?;
     ensure_table_column(
         &conn,
         "queued_prompts",
@@ -8520,6 +8645,8 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
         .context("serialize remote-control workspace diff")?;
     let review_workflows_json = serde_json::to_string(&session.review_workflows)
         .context("serialize remote-control review workflows")?;
+    let runtime_activity_json = serde_json::to_string(&RuntimeActivitySnapshot::from(session))
+        .context("serialize remote-control runtime activity")?;
     let last_prompt_at = session_last_prompt_at(session);
     let prompt_in_flight = if session.prompt_in_flight { 1_i64 } else { 0 };
     let prompt_images_supported = if session.prompt_images_supported {
@@ -8556,9 +8683,10 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             status_json,
             workspace_diff_json,
             review_workflows_json,
+            runtime_activity_json,
             lease_id,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -8584,6 +8712,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             status_json = excluded.status_json,
             workspace_diff_json = excluded.workspace_diff_json,
             review_workflows_json = excluded.review_workflows_json,
+            runtime_activity_json = excluded.runtime_activity_json,
             lease_id = excluded.lease_id,
             connected = 1
         where excluded.last_update >= sessions.last_update
@@ -8619,6 +8748,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             status_json,
             workspace_diff_json,
             review_workflows_json,
+            runtime_activity_json,
             session.lease_id,
         ],
     )
@@ -8857,7 +8987,8 @@ const SESSION_RECORD_SELECT: &str = "select
     subagents_json,
     status_json,
     workspace_diff_json,
-    review_workflows_json
+    review_workflows_json,
+    runtime_activity_json
 from sessions";
 
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
@@ -9010,7 +9141,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 subagents_json,
                 status_json,
                 workspace_diff_json,
-                review_workflows_json
+                review_workflows_json,
+                runtime_activity_json
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -9041,6 +9173,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let status_json: Option<String> = row.get(18)?;
     let workspace_diff_json: Option<String> = row.get(19)?;
     let review_workflows_json: String = row.get(20)?;
+    let runtime_activity_json: String = row.get(21)?;
     let transcript: Vec<TranscriptEntry> =
         serde_json::from_str(&transcript_json).unwrap_or_default();
     let pending_permissions = serde_json::from_str(&pending_permissions_json).unwrap_or_default();
@@ -9048,6 +9181,8 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
     let available_commands = serde_json::from_str(&available_commands_json).unwrap_or_default();
     let subagents = serde_json::from_str(&subagents_json).unwrap_or_default();
     let review_workflows = serde_json::from_str(&review_workflows_json).unwrap_or_default();
+    let runtime_activity: RuntimeActivitySnapshot =
+        serde_json::from_str(&runtime_activity_json).unwrap_or_default();
     let last_prompt_at: Option<String> = row
         .get::<_, Option<String>>(4)?
         .filter(|value| !value.is_empty())
@@ -9069,6 +9204,9 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         prompt_in_flight: prompt_in_flight != 0,
         prompt_images_supported: prompt_images_supported != 0,
         steering_supported: steering_supported != 0,
+        runtime_stall_seconds: runtime_activity.runtime_stall_seconds,
+        primary_last_activity_at: runtime_activity.primary_last_activity_at,
+        runtime_activities: runtime_activity.runtime_activities,
         pending_permissions,
         session_config,
         native_mode: None,
@@ -9783,6 +9921,10 @@ fn format_diff_summary(diff: &Diff) -> String {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 fn transcript_diffs(content: &[ToolCallContent]) -> Vec<TranscriptDiff> {
@@ -13184,6 +13326,110 @@ for (const [field, seat] of [
     }
 
     #[test]
+    fn tracker_publishes_primary_and_hidden_review_runtime_activity() {
+        use mj_core::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = TrackerState::new("proj".to_string(), "opus".to_string());
+        state.runtime_stall_seconds = 300;
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        state.observe_command(&UiCommand::SendPrompt {
+            text: "review this".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+        });
+
+        let workflow_id = WorkflowId::review(1);
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::Supervision),
+            },
+        )));
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(42),
+                role: WorkflowActorRole::ReviewSupervisor,
+            },
+        )));
+        state.observe_event(&started_subagent(
+            42,
+            "hidden-review",
+            "synthesize findings",
+        ));
+        state
+            .runtime_activities
+            .get_mut(&42)
+            .expect("hidden runtime")
+            .last_activity_at = "2020-01-01T00:00:00Z".to_string();
+        state.last_update = Some("2020-01-01T00:00:00Z".to_string());
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::Activity {
+            subagent_id: 42,
+            activity: "checking edge cases".to_string(),
+        }));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.runtime_stall_seconds, 300);
+        assert!(snapshot.primary_last_activity_at.is_some());
+        assert!(
+            snapshot.subagents.is_empty(),
+            "internal review stays hidden"
+        );
+        assert_eq!(snapshot.runtime_activities.len(), 1);
+        assert_eq!(snapshot.runtime_activities[0].label, "review supervisor");
+        assert_eq!(snapshot.runtime_activities[0].runtime, "codex-acp/gpt-5.6");
+        assert_ne!(
+            snapshot.runtime_activities[0].last_activity_at,
+            "2020-01-01T00:00:00Z"
+        );
+        assert_ne!(snapshot.last_update, "2020-01-01T00:00:00Z");
+
+        let (prompt, _decision) = permission_prompt("hidden-review-permission");
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::PermissionRequest {
+            subagent_id: 42,
+            prompt,
+        }));
+        assert!(
+            state
+                .snapshot()
+                .expect("waiting snapshot")
+                .runtime_activities[0]
+                .waiting_for_user_action
+        );
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::Status {
+            subagent_id: 42,
+            kind: mj_core::event::SubagentStatusKind::Info,
+            message: "permission resolved".to_string(),
+        }));
+        assert!(
+            !state
+                .snapshot()
+                .expect("resumed snapshot")
+                .runtime_activities[0]
+                .waiting_for_user_action
+        );
+
+        state.observe_event(&UiEvent::Subagent(SubagentEvent::Finished {
+            subagent_id: 42,
+            outcome: SubagentOutcome::Completed,
+        }));
+        assert!(
+            state
+                .snapshot()
+                .expect("finished snapshot")
+                .runtime_activities
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn tracker_marks_finished_subagents_done_and_keeps_failure_text() {
         let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
         state.observe_event(&UiEvent::SessionStarted {
@@ -14598,6 +14844,15 @@ for (const [field, seat] of [
             prompt_in_flight: true,
             prompt_images_supported: true,
             steering_supported: true,
+            runtime_stall_seconds: 300,
+            primary_last_activity_at: Some("2026-06-03T10:00:18Z".to_string()),
+            runtime_activities: vec![RuntimeActivityRecord {
+                subagent_id: 3,
+                label: "fix-tests".to_string(),
+                runtime: "codex-acp/gpt-5.6".to_string(),
+                last_activity_at: "2026-06-03T10:00:19Z".to_string(),
+                waiting_for_user_action: false,
+            }],
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: vec![command_record(
@@ -14693,6 +14948,12 @@ for (const [field, seat] of [
         assert!(sessions[0].prompt_in_flight);
         assert!(sessions[0].prompt_images_supported);
         assert!(sessions[0].steering_supported);
+        assert_eq!(sessions[0].runtime_stall_seconds, 300);
+        assert_eq!(
+            sessions[0].primary_last_activity_at.as_deref(),
+            Some("2026-06-03T10:00:18Z")
+        );
+        assert_eq!(sessions[0].runtime_activities, session.runtime_activities);
         assert_eq!(sessions[0].start_time, "2026-06-03T10:00:00Z");
         assert_eq!(sessions[0].last_update, "2026-06-03T10:00:40Z");
         assert_eq!(
@@ -15205,6 +15466,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -16269,6 +16533,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -17374,6 +17641,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: vec![pending.clone()],
             session_config: Vec::new(),
             available_commands: Vec::new(),
@@ -18834,6 +19104,9 @@ for (const [field, seat] of [
             prompt_in_flight: false,
             prompt_images_supported: false,
             steering_supported: false,
+            runtime_stall_seconds: 0,
+            primary_last_activity_at: None,
+            runtime_activities: Vec::new(),
             pending_permissions: Vec::new(),
             session_config: Vec::new(),
             available_commands: Vec::new(),

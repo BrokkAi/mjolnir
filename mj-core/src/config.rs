@@ -963,6 +963,13 @@ pub struct AgentConfig {
     /// Quick uses zero and Extended uses one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_correction_rounds: Option<u32>,
+    /// Minutes without an ACP update before an active primary, review, or
+    /// subagent runtime is surfaced as stalled. `0` disables stall warnings.
+    #[serde(
+        default = "default_runtime_stall_minutes",
+        skip_serializing_if = "is_default_runtime_stall_minutes"
+    )]
+    pub runtime_stall_minutes: u64,
 }
 
 impl Default for AgentConfig {
@@ -979,8 +986,17 @@ impl Default for AgentConfig {
             review_tier_from_team_default: false,
             correction_threshold: ReviewCorrectionThreshold::default(),
             max_correction_rounds: None,
+            runtime_stall_minutes: default_runtime_stall_minutes(),
         }
     }
+}
+
+pub const fn default_runtime_stall_minutes() -> u64 {
+    5
+}
+
+fn is_default_runtime_stall_minutes(value: &u64) -> bool {
+    *value == default_runtime_stall_minutes()
 }
 
 impl AgentConfig {
@@ -2494,6 +2510,7 @@ kimi = "disabled"
                 review_tier_from_team_default: false,
                 correction_threshold: ReviewCorrectionThreshold::P1,
                 max_correction_rounds: Some(1),
+                runtime_stall_minutes: 9,
             },
             subagents: SubagentsConfig {
                 auto_failover: false,
@@ -2512,7 +2529,36 @@ kimi = "disabled"
             loaded.agent.correction_threshold,
             ReviewCorrectionThreshold::P1
         );
+        assert_eq!(loaded.agent.runtime_stall_minutes, 9);
         assert!(!loaded.subagents.auto_failover);
+    }
+
+    #[test]
+    fn runtime_stall_threshold_defaults_and_can_be_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, format!("version = {CONFIG_VERSION}\n"))
+            .expect("write default config");
+        assert_eq!(
+            Config::load(&path)
+                .expect("load default")
+                .agent
+                .runtime_stall_minutes,
+            5
+        );
+
+        std::fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\n[agent]\nruntime_stall_minutes = 0\n"),
+        )
+        .expect("write disabled config");
+        assert_eq!(
+            Config::load(&path)
+                .expect("load disabled")
+                .agent
+                .runtime_stall_minutes,
+            0
+        );
     }
 
     #[test]

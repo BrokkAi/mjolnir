@@ -1237,6 +1237,7 @@ pub struct UiRunOptions<'a> {
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
     pub correction_threshold: crate::config::ReviewCorrectionThreshold,
+    pub runtime_stall_minutes: u64,
     pub primary_acp_name: String,
     pub primary_reasoning_effort: Option<String>,
     pub termination: CancellationToken,
@@ -1276,6 +1277,7 @@ struct UiInitialState {
     review_enabled: bool,
     review_tier: crate::config::ReviewTier,
     correction_threshold: crate::config::ReviewCorrectionThreshold,
+    runtime_stall_minutes: u64,
     primary_acp_name: String,
     primary_reasoning_effort: Option<String>,
 }
@@ -1361,6 +1363,7 @@ pub async fn run(
             review_enabled: options.review_enabled,
             review_tier: options.review_tier,
             correction_threshold: options.correction_threshold,
+            runtime_stall_minutes: options.runtime_stall_minutes,
             primary_acp_name: options.primary_acp_name,
             primary_reasoning_effort: options.primary_reasoning_effort,
         },
@@ -1624,6 +1627,7 @@ async fn ui_loop(
     state.review_enabled = initial.review_enabled;
     state.review_tier = initial.review_tier;
     state.correction_threshold = initial.correction_threshold;
+    state.set_runtime_stall_minutes(initial.runtime_stall_minutes);
     state.set_primary_acp_name(initial.primary_acp_name);
     state.primary_reasoning_effort = initial.primary_reasoning_effort;
     state.transcript_export_dir = initial.transcript_export_dir;
@@ -5362,6 +5366,7 @@ fn input_text_with_attachments(
 }
 
 fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    const RUNTIME_NUDGE: &str = "Please report your current status, then continue the active task.";
     let combined =
         input_text_with_attachments(&state.input, &state.attachments, &state.file_attachments);
 
@@ -5430,6 +5435,34 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
         state.scroll_input_to_bottom();
         let _ = cmd_tx.send(UiCommand::CompactPrimary);
         state.record_status_message(StatusKind::Info, "compacting agent context…");
+        return;
+    }
+
+    if plain_text_only && text == "/nudge" {
+        state.input.clear();
+        clear_attachments(state);
+        state.input_cursor = 0;
+        state.scroll_input_to_bottom();
+        if state.runtime_closed {
+            state.record_status_message(StatusKind::Warning, "the ACP runtime is closed");
+        } else if state.session_id.is_none() {
+            state.announce_waiting_for_primary();
+        } else if !state.is_busy() {
+            state.record_status_message(StatusKind::Info, "the runtime is idle");
+        } else if !state.can_steer() {
+            state.record_status_message(
+                StatusKind::Warning,
+                "this runtime cannot accept a mid-turn nudge; use Ctrl-C to cancel",
+            );
+        } else {
+            state.record_steered_prompt(RUNTIME_NUDGE.to_string(), Vec::new());
+            let _ = cmd_tx.send(UiCommand::SteerPrompt {
+                text: RUNTIME_NUDGE.to_string(),
+                images: Vec::new(),
+                resources: Vec::new(),
+            });
+            state.record_status_message(StatusKind::Info, "nudge sent to the active runtime");
+        }
         return;
     }
 
@@ -9276,6 +9309,27 @@ fn primary_model_display(state: &AppState) -> String {
 fn status_line(state: &AppState, width: usize) -> Line<'static> {
     if width == 0 {
         return Line::default();
+    }
+
+    if let Some(stall) = state.primary_runtime_stall_at(Instant::now()) {
+        let action = if state.can_steer() {
+            "/nudge or Ctrl-C"
+        } else {
+            "Ctrl-C to cancel"
+        };
+        return Line::from(Span::styled(
+            fit_width(
+                format!(
+                    " ⚠ no activity from {} for {} · {action} ",
+                    stall.label,
+                    format_duration(stall.inactive_for)
+                ),
+                width,
+            ),
+            Style::default()
+                .ink(state.theme.error)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
 
     let model_name = primary_model_display(state);
@@ -13460,6 +13514,7 @@ fn draw_workflow_progress_rows(f: &mut ratatui::Frame, area: Rect, state: &AppSt
                 workflow,
                 spinner,
                 state.workflow_elapsed_at(workflow.id, now),
+                state.workflow_runtime_stall_at(workflow, now),
                 width,
                 state.theme,
                 show_details,
@@ -13479,6 +13534,7 @@ fn workflow_progress_line(
     workflow: &crate::workflow::WorkflowState,
     spinner: &str,
     elapsed: Duration,
+    runtime_stall: Option<crate::app::RuntimeStall>,
     width: usize,
     theme: TerminalTheme,
     show_details: bool,
@@ -13527,6 +13583,16 @@ fn workflow_progress_line(
     let head = fit_width(head, width);
     let head_width = head.width();
     let mut details = vec![phase.to_string()];
+    if let Some(stall) = runtime_stall.as_ref() {
+        details.insert(
+            0,
+            format!(
+                "no activity from {} for {} · Ctrl-C to cancel",
+                stall.label,
+                format_duration(stall.inactive_for)
+            ),
+        );
+    }
     if let Some(waiting) = workflow.waiting.as_ref() {
         if waiting.requires_user_action {
             details.push("waiting for user action".to_string());
@@ -13609,7 +13675,10 @@ fn workflow_progress_line(
         .waiting
         .as_ref()
         .is_some_and(|waiting| waiting.requires_user_action);
-    let detail_color = if failed > 0 || workflow.outcome == Some(WorkflowOutcome::Failed) {
+    let detail_color = if runtime_stall.is_some()
+        || failed > 0
+        || workflow.outcome == Some(WorkflowOutcome::Failed)
+    {
         theme.error
     } else if cancelled > 0
         || requires_user_action
@@ -13627,6 +13696,7 @@ fn workflow_progress_line(
         Some(WorkflowOutcome::Completed | WorkflowOutcome::Clean) => theme.success,
         Some(WorkflowOutcome::Degraded | WorkflowOutcome::Cancelled) => theme.warning,
         Some(WorkflowOutcome::Failed) => theme.error,
+        None if runtime_stall.is_some() => theme.error,
         None => theme.accent,
     };
     let detail = fit_width(
@@ -17780,11 +17850,31 @@ mod tests {
             state.visible_workflows().next().expect("workflow"),
             "⠋",
             Duration::ZERO,
+            None,
             180,
             state.theme,
             true,
         );
         assert!(line_text(&line).contains("waiting for user action"));
+
+        let stalled = workflow_progress_line(
+            state.visible_workflows().next().expect("workflow"),
+            "⠋",
+            Duration::ZERO,
+            Some(crate::app::RuntimeStall {
+                label: "claude-acp/opus".to_string(),
+                inactive_for: Duration::from_secs(301),
+            }),
+            180,
+            state.theme,
+            true,
+        );
+        let stalled = line_text(&stalled);
+        assert!(
+            stalled.contains("no activity from claude-acp/opus for 5m01s"),
+            "{stalled}"
+        );
+        assert!(stalled.contains("Ctrl-C to cancel"), "{stalled}");
 
         apply_workflow(
             &mut state,
@@ -17798,6 +17888,7 @@ mod tests {
             state.visible_workflows().next().expect("terminal workflow"),
             "⠋",
             Duration::ZERO,
+            None,
             180,
             state.theme,
             true,
@@ -29184,6 +29275,29 @@ mod tests {
         state.session_id = Some("session-1".to_string());
         state.set_connection_state(ConnectionState::Ready);
         state
+    }
+
+    #[test]
+    fn nudge_command_steers_the_active_runtime() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("long task".to_string());
+        state.input = "/nudge".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(state.input.is_empty());
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SteerPrompt { text, .. })
+                if text == "Please report your current status, then continue the active task."
+        ));
+        assert!(state.transcript.iter().any(|entry| matches!(
+            entry,
+            Entry::UserPrompt(text)
+                if text == "Please report your current status, then continue the active task."
+        )));
     }
 
     fn type_string(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>, text: &str) {
