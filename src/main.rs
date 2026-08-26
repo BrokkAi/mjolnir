@@ -2792,6 +2792,7 @@ async fn run_session(
                             snapshot_exclusions: runtime_options.snapshot_exclusions.clone(),
                             fs_max_text_bytes: runtime_options.fs_max_text_bytes,
                             permission: review_config.permission,
+                            bifrost_version: review_config.bifrost_version.clone(),
                             id_allocator: subagent_ids.clone(),
                         },
                     ))
@@ -3062,6 +3063,7 @@ async fn run_session(
                                     .clone(),
                                 fs_max_text_bytes: side_fs_max_text_bytes,
                                 permission: updated_config.review.permission,
+                                bifrost_version: updated_config.review.bifrost_version.clone(),
                                 id_allocator: command_live_subagent_options.id_allocator.clone(),
                             }),
                         )

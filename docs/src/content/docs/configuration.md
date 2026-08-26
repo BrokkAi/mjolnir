@@ -9,8 +9,8 @@ tabs. Team and adapter changes apply to a new session. Credentials and adapter
 capabilities are probed whenever a new session roster is resolved;
 `mj models refresh` runs that probe as a standalone diagnostic.
 
-The config schema is versioned. The current schema is `version = 6`; versions 3,
-4, and 5 files are migrated in memory on load and reach disk in the current schema
+The config schema is versioned. The current schema is `version = 7`; versions 3
+through 6 are migrated in memory on load and reach disk in the current schema
 the next time settings are saved — merely reading the file never rewrites it,
 so older and newer mj builds can share one config until someone actually saves.
 A file written by a *newer* build loads best-effort and is read-only: its
@@ -29,7 +29,7 @@ canceling fresh setup leaves onboarding incomplete.
 What the **Codex coder + Claude reviewer** team writes:
 
 ```toml
-version = 6
+version = 7
 team = "codex_claude"
 
 [agent]
@@ -83,6 +83,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `review.permission` | Provider-native permissions for review sessions: `manual`, `auto` (default), or `yolo` |
 | `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions, except Mode, which `review.permission` controls |
+| `review.bifrost_version` | Optional exact Bifrost npm version. Omit it (the default) to follow the `latest` tag. `/mjconfig` offers `latest` and the five newest stable releases. |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |

@@ -4873,6 +4873,9 @@ struct MjConfigDiscovery {
     /// A completed in-panel login must refresh even when the account was
     /// already detected (for example, signing into a different account).
     refresh_requested: bool,
+    bifrost_versions: Vec<String>,
+    bifrost_versions_probing: bool,
+    bifrost_versions_attempted: bool,
 }
 
 impl MjConfigRuntime {
@@ -4892,6 +4895,9 @@ impl MjConfigRuntime {
                 revision: 0,
                 generation: 0,
                 refresh_requested: false,
+                bifrost_versions: Vec::new(),
+                bifrost_versions_probing: false,
+                bifrost_versions_attempted: false,
             }),
             login: Mutex::new(None),
             credential_detector: mj_core::auth::detect,
@@ -4971,6 +4977,37 @@ impl MjConfigRuntime {
             discovery.probing = false;
         }
     }
+
+    fn begin_bifrost_version_discovery(&self) -> bool {
+        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+        if discovery.bifrost_versions_attempted {
+            return false;
+        }
+        discovery.bifrost_versions_attempted = true;
+        discovery.bifrost_versions_probing = true;
+        discovery.revision = discovery.revision.wrapping_add(1);
+        true
+    }
+
+    fn finish_bifrost_version_discovery(&self, result: Result<Vec<String>>) {
+        let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+        discovery.bifrost_versions_probing = false;
+        match result {
+            Ok(versions) => discovery.bifrost_versions = versions,
+            Err(error) => warn!("discover recent Bifrost versions: {error:#}"),
+        }
+        discovery.revision = discovery.revision.wrapping_add(1);
+    }
+
+    #[cfg(test)]
+    fn with_bifrost_versions(self, versions: Vec<String>) -> Self {
+        {
+            let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
+            discovery.bifrost_versions = versions;
+            discovery.bifrost_versions_attempted = true;
+        }
+        self
+    }
 }
 
 fn inventory_discovery_inputs_equal(
@@ -5038,6 +5075,8 @@ struct MjConfigSnapshot {
     /// True while adapters are still being probed for model and session-option
     /// capabilities. The browser polls until the final inventory is available.
     probing: bool,
+    /// True while the npm registry is loading recent Bifrost versions.
+    bifrost_versions_probing: bool,
     /// Changes whenever an incremental probe snapshot updates the inventory.
     discovery_revision: u64,
     /// One-shot message produced while applying an edit.
@@ -5088,6 +5127,8 @@ struct MjAgentsPanel {
     review_tiers: Vec<MjReviewTierEntry>,
     correction_threshold: String,
     correction_thresholds: Vec<MjCorrectionThresholdEntry>,
+    bifrost_version: String,
+    bifrost_versions: Vec<String>,
     max_parallel: usize,
     max_parallel_limit: usize,
     auto_failover: bool,
@@ -5270,6 +5311,8 @@ struct MjConfigApplyRequest {
     review_tier: Option<String>,
     /// `p0` | `p1` | `p2` | `p3`.
     correction_threshold: Option<String>,
+    /// `latest` or an exact semantic version from the npm catalog.
+    bifrost_version: Option<String>,
     max_parallel: Option<usize>,
     auto_failover: Option<bool>,
     theme: Option<String>,
@@ -5315,7 +5358,13 @@ fn mjconfig_load(state: &ServerState) -> config::Config {
 fn mjconfig_catalog(
     state: &ServerState,
     config: config::Config,
-) -> (crate::settings::MjConfigCatalog, bool, u64) {
+) -> (
+    crate::settings::MjConfigCatalog,
+    bool,
+    bool,
+    u64,
+    Vec<String>,
+) {
     let discovery = state
         .mjconfig
         .discovery
@@ -5328,13 +5377,21 @@ fn mjconfig_catalog(
     let mut catalog = crate::settings::MjConfigCatalog::new(config, discovery.choices.clone())
         .with_inventory(inventory);
     let probing = discovery.probing;
+    let bifrost_versions_probing = discovery.bifrost_versions_probing;
     let discovery_revision = discovery.revision;
+    let bifrost_versions = discovery.bifrost_versions.clone();
     let active_models = discovery.active_models.clone();
     drop(discovery);
     if let Some(models) = active_models {
         catalog = catalog.with_active_models(models);
     }
-    (catalog, probing, discovery_revision)
+    (
+        catalog,
+        probing,
+        bifrost_versions_probing,
+        discovery_revision,
+        bifrost_versions,
+    )
 }
 
 /// Mirror of the TUI's server-row status line in `settings::draw_servers`.
@@ -5433,8 +5490,10 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     // active until a later response can start the refresh.
     let login = mjconfig_login_status(state);
     refresh_mjconfig_discovery_if_needed(state);
+    refresh_mjconfig_bifrost_versions_if_needed(state);
     let config = mjconfig_load(state);
-    let (catalog, probing, discovery_revision) = mjconfig_catalog(state, config);
+    let (catalog, probing, bifrost_versions_probing, discovery_revision, bifrost_versions) =
+        mjconfig_catalog(state, config);
     let config = &catalog.config;
     let inventory = catalog.inventory();
 
@@ -5728,6 +5787,15 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     description: threshold.description().to_string(),
                 })
                 .collect(),
+            bifrost_version: config
+                .review
+                .bifrost_version
+                .clone()
+                .unwrap_or_else(|| mj_core::bifrost::DEFAULT_VERSION.to_string()),
+            bifrost_versions: mj_core::bifrost::version_choices(
+                config.review.bifrost_version.as_deref(),
+                &bifrost_versions,
+            ),
             max_parallel: config.subagents.max_parallel,
             max_parallel_limit: 16,
             auto_failover: config.subagents.auto_failover,
@@ -5741,6 +5809,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         appearance,
         login,
         probing,
+        bifrost_versions_probing,
         discovery_revision,
         notice,
         setup,
@@ -5830,7 +5899,7 @@ fn mjconfig_setup_message(
 
 fn current_mjconfig_setup(state: &ServerState) -> Option<MjSetupPanel> {
     let config = mjconfig_load(state);
-    let (catalog, _, _) = mjconfig_catalog(state, config);
+    let (catalog, _, _, _, _) = mjconfig_catalog(state, config);
     let config = &catalog.config;
     let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
     mjconfig_setup_panel(
@@ -5864,6 +5933,16 @@ fn refresh_mjconfig_discovery_if_needed(state: &ServerState) {
         }
         runtime.finish_discovery(generation);
     });
+}
+
+fn refresh_mjconfig_bifrost_versions_if_needed(state: &ServerState) {
+    if !state.mjconfig.begin_bifrost_version_discovery() {
+        return;
+    }
+    let runtime = Arc::clone(&state.mjconfig);
+    std::mem::drop(tokio::spawn(async move {
+        runtime.finish_bifrost_version_discovery(mj_core::bifrost::fetch_recent_versions().await);
+    }));
 }
 
 async fn mjconfig_snapshot(State(state): State<ServerState>) -> Json<MjConfigSnapshot> {
@@ -5921,6 +6000,15 @@ fn mjconfig_apply_edits(
                 "unknown automatic correction threshold: {threshold}"
             ))
         })?;
+    }
+    if let Some(version) = request.bifrost_version {
+        if version == mj_core::bifrost::DEFAULT_VERSION {
+            config.review.bifrost_version = None;
+        } else if !mj_core::bifrost::is_valid_explicit_version(&version) {
+            return Err(bad_request(format!("invalid Bifrost version: {version}")));
+        } else {
+            config.review.bifrost_version = Some(version);
+        }
     }
     if let Some(max_parallel) = request.max_parallel {
         if max_parallel > 16 {
@@ -10339,12 +10427,15 @@ mod tests {
             "config-{}.toml",
             COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
-        Arc::new(MjConfigRuntime::new(
-            config_path,
-            Vec::new(),
-            None,
-            roster::AcpInventory::default(),
-        ))
+        Arc::new(
+            MjConfigRuntime::new(
+                config_path,
+                Vec::new(),
+                None,
+                roster::AcpInventory::default(),
+            )
+            .with_bifrost_versions(vec!["0.9.10".to_string(), "0.9.9".to_string()]),
+        )
     }
 
     fn test_credentials_available(
@@ -10378,6 +10469,7 @@ mod tests {
                 Some(models_config_from_roster(&roster)),
                 roster.inventory.clone(),
             )
+            .with_bifrost_versions(vec!["0.9.10".to_string(), "0.9.9".to_string()])
             .with_credential_detector(test_credentials_available),
         )
     }
@@ -11286,6 +11378,7 @@ mod tests {
                     "discrete_review": false,
                     "review_tier": "extended",
                     "correction_threshold": "p1",
+                    "bifrost_version": "0.9.9",
                     "max_parallel": 4,
                     "theme": "ansi",
                     "spinner": "wave",
@@ -11322,6 +11415,8 @@ mod tests {
         assert_eq!(snapshot["agents"]["review_tier"], "extended");
         assert_eq!(snapshot["agents"]["review_tiers"][0]["tier"], "quick");
         assert_eq!(snapshot["agents"]["correction_threshold"], "p1");
+        assert_eq!(snapshot["agents"]["bifrost_version"], "0.9.9");
+        assert_eq!(snapshot["agents"]["bifrost_versions"][0], "latest");
         assert_eq!(
             snapshot["agents"]["correction_thresholds"][3]["threshold"],
             "p3"
@@ -11353,6 +11448,7 @@ mod tests {
             saved.agent.correction_threshold,
             config::ReviewCorrectionThreshold::P1
         );
+        assert_eq!(saved.review.bifrost_version.as_deref(), Some("0.9.9"));
         assert_eq!(saved.subagents.max_parallel, 4);
         assert_eq!(saved.theme, mj_core::theme::TerminalThemeKind::Ansi);
         assert_eq!(saved.spinner, mj_core::spinner::SpinnerStyle::Wave);
@@ -11490,6 +11586,7 @@ mod tests {
             serde_json::json!({ "thought_output": "summary" }),
             serde_json::json!({ "review_tier": "thorough" }),
             serde_json::json!({ "correction_threshold": "p4" }),
+            serde_json::json!({ "bifrost_version": "next" }),
             serde_json::json!({ "review_permission": "always" }),
             serde_json::json!({ "subagents_permission": "ask" }),
             serde_json::json!({ "interface": "windowed" }),

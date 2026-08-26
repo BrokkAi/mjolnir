@@ -51,6 +51,7 @@ enum SettingsRow {
         option_index: usize,
     },
     DiscreteReview,
+    BifrostVersion,
     ReviewTier,
     CorrectionThreshold,
     MaxParallelSubagents,
@@ -67,6 +68,9 @@ pub struct SettingsEditor {
     active_models: Option<ModelsConfig>,
     active_session_config: Vec<SessionConfigOption>,
     inventory: AcpInventory,
+    bifrost_versions: Vec<String>,
+    bifrost_versions_loading: bool,
+    bifrost_versions_error: Option<String>,
 }
 
 impl SettingsEditor {
@@ -82,6 +86,9 @@ impl SettingsEditor {
             active_models: None,
             active_session_config: Vec::new(),
             inventory,
+            bifrost_versions: Vec::new(),
+            bifrost_versions_loading: false,
+            bifrost_versions_error: None,
         }
     }
 
@@ -100,6 +107,25 @@ impl SettingsEditor {
     pub fn with_active_session_config(mut self, options: Vec<SessionConfigOption>) -> Self {
         self.active_session_config = options;
         self
+    }
+
+    pub fn start_bifrost_version_discovery(&mut self) {
+        self.bifrost_versions_loading = true;
+        self.bifrost_versions_error = None;
+    }
+
+    pub fn finish_bifrost_version_discovery(
+        &mut self,
+        result: std::result::Result<Vec<String>, String>,
+    ) {
+        self.bifrost_versions_loading = false;
+        match result {
+            Ok(versions) => {
+                self.bifrost_versions = versions;
+                self.bifrost_versions_error = None;
+            }
+            Err(error) => self.bifrost_versions_error = Some(error),
+        }
     }
 
     /// Replace the model and ACP catalog without discarding staged settings.
@@ -219,6 +245,7 @@ impl SettingsEditor {
                 }
                 SettingsRow::ReviewTier => self.cycle_review_tier(delta),
                 SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(delta),
+                SettingsRow::BifrostVersion => self.cycle_bifrost_version(delta),
                 SettingsRow::DiscreteReview | SettingsRow::AutomaticQuotaFailover => {
                     return SettingsAction::None;
                 }
@@ -325,6 +352,7 @@ impl SettingsEditor {
                 // left/right keys do rather than doing nothing here.
                 SettingsRow::ReviewTier => self.cycle_review_tier(1),
                 SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(1),
+                SettingsRow::BifrostVersion => self.cycle_bifrost_version(1),
                 SettingsRow::AutomaticQuotaFailover => {
                     self.config.subagents.auto_failover = !self.config.subagents.auto_failover;
                 }
@@ -389,6 +417,7 @@ impl SettingsEditor {
                         }),
                 );
                 rows.push(SettingsRow::DiscreteReview);
+                rows.push(SettingsRow::BifrostVersion);
                 rows.push(SettingsRow::ReviewTier);
                 rows.push(SettingsRow::CorrectionThreshold);
                 rows
@@ -632,6 +661,26 @@ impl SettingsEditor {
             .unwrap_or(0);
         let next = (current as i32 + delta).rem_euclid(tiers.len() as i32) as usize;
         self.config.agent.set_review_tier(tiers[next]);
+    }
+
+    fn cycle_bifrost_version(&mut self, delta: i32) {
+        let choices = mj_core::bifrost::version_choices(
+            self.config.review.bifrost_version.as_deref(),
+            &self.bifrost_versions,
+        );
+        let selected = self
+            .config
+            .review
+            .bifrost_version
+            .as_deref()
+            .unwrap_or(mj_core::bifrost::DEFAULT_VERSION);
+        let current = choices
+            .iter()
+            .position(|version| version == selected)
+            .unwrap_or(0);
+        let next = (current as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+        self.config.review.bifrost_version =
+            (choices[next] != mj_core::bifrost::DEFAULT_VERSION).then(|| choices[next].clone());
     }
 
     fn cycle_correction_threshold(&mut self, delta: i32) {
@@ -1120,6 +1169,7 @@ fn draw_agents(
             | SettingsRow::SubagentModel
             | SettingsRow::SubagentPermissions
             | SettingsRow::DiscreteReview
+            | SettingsRow::BifrostVersion
             | SettingsRow::ReviewTier
             | SettingsRow::CorrectionThreshold
             | SettingsRow::MaxParallelSubagents
@@ -1205,6 +1255,36 @@ fn draw_reviewer(
                 ),
                 theme,
             )),
+            SettingsRow::BifrostVersion => {
+                let version = editor
+                    .config
+                    .review
+                    .bifrost_version
+                    .as_deref()
+                    .unwrap_or(mj_core::bifrost::DEFAULT_VERSION);
+                lines.push(selected_line(
+                    selected,
+                    format!("Bifrost version < {version} >"),
+                    theme,
+                ));
+                let detail = if editor.bifrost_versions_loading {
+                    "loading recent versions…".to_string()
+                } else if let Some(error) = &editor.bifrost_versions_error {
+                    format!("couldn't load recent versions: {error}")
+                } else if editor.config.review.bifrost_version.is_some() {
+                    "uses this exact npm version".to_string()
+                } else {
+                    "tracks npm's latest tag".to_string()
+                };
+                lines.push(Line::styled(
+                    format!("  {detail}"),
+                    Style::default().ink(if editor.bifrost_versions_error.is_some() {
+                        theme.warning
+                    } else {
+                        theme.muted
+                    }),
+                ));
+            }
             SettingsRow::ReviewTier => {
                 let tier = editor.config.agent.review_tier;
                 lines.push(selected_line(
@@ -1347,6 +1427,7 @@ fn draw_subagents(
             | SettingsRow::ReviewModel
             | SettingsRow::ReviewPermissions
             | SettingsRow::DiscreteReview
+            | SettingsRow::BifrostVersion
             | SettingsRow::ReviewTier
             | SettingsRow::CorrectionThreshold => {}
         }
@@ -2475,11 +2556,20 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::ReviewTier)
             .expect("review tier row");
+        let bifrost = rows
+            .iter()
+            .position(|row| *row == SettingsRow::BifrostVersion)
+            .expect("Bifrost version row");
         let threshold = rows
             .iter()
             .position(|row| *row == SettingsRow::CorrectionThreshold)
             .expect("correction threshold row");
-        assert_eq!(tier, review + 1, "the tier belongs beside the switch");
+        assert_eq!(
+            bifrost,
+            review + 1,
+            "the Bifrost pin belongs beside the switch"
+        );
+        assert_eq!(tier, bifrost + 1, "the tier follows the Bifrost pin");
         assert_eq!(
             threshold,
             tier + 1,
@@ -2518,6 +2608,33 @@ mod tests {
             SettingsAction::Changed
         );
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Extended);
+    }
+
+    #[test]
+    fn bifrost_version_defaults_to_latest_and_cycles_through_recent_versions() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor
+            .finish_bifrost_version_discovery(Ok(vec!["0.9.10".to_string(), "0.9.9".to_string()]));
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = editor
+            .settings_rows(SettingsTab::Reviewer)
+            .iter()
+            .position(|row| *row == SettingsRow::BifrostVersion)
+            .expect("Bifrost version row");
+
+        assert_eq!(editor.config.review.bifrost_version, None);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.review.bifrost_version.as_deref(),
+            Some("0.9.10")
+        );
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.review.bifrost_version.as_deref(),
+            Some("0.9.9")
+        );
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(editor.config.review.bifrost_version, None);
     }
 
     #[test]

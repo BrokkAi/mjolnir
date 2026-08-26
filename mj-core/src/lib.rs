@@ -4,6 +4,7 @@ pub mod acp;
 pub mod agent_usage;
 pub mod archive;
 pub mod auth;
+pub mod bifrost;
 pub mod claude_token;
 pub mod claude_usage;
 pub mod codex_token;

@@ -1653,6 +1653,9 @@ async fn ui_loop(
     let mut dictation_cancel_tx: Option<std_mpsc::Sender<()>> = None;
     let (current_pr_tx, mut current_pr_rx) = mpsc::unbounded_channel::<CurrentBranchPrProbe>();
     let mut current_pr_probe_in_flight = false;
+    let (bifrost_version_tx, mut bifrost_version_rx) = mpsc::unbounded_channel();
+    let mut bifrost_version_probe_in_flight = false;
+    let mut bifrost_version_result: Option<std::result::Result<Vec<String>, String>> = None;
     let (file_scan_tx, mut file_scan_rx) = mpsc::unbounded_channel::<FileAutocompleteScan>();
     let mut inline_height = INLINE_CHAT_HEIGHT;
     // Wake-up timers so queued input can render at the interactive cadence
@@ -1692,6 +1695,7 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
+                        let mjconfig_was_open = state.mjconfig_menu.is_some();
                         if mode == UiMode::InlineChat
                             && let CtEvent::Resize(width, height) = &ev
                         {
@@ -1711,6 +1715,25 @@ async fn ui_loop(
                         let inline_reader_was_open =
                             mode == UiMode::InlineChat && inline_reader_is_open(&state);
                         let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
+                        if !mjconfig_was_open && state.mjconfig_menu.is_some() {
+                            if let Some(result) = bifrost_version_result.clone() {
+                                if let Some(menu) = state.mjconfig_menu.as_mut() {
+                                    menu.editor.finish_bifrost_version_discovery(result);
+                                }
+                            } else if !bifrost_version_probe_in_flight {
+                                bifrost_version_probe_in_flight = true;
+                                if let Some(menu) = state.mjconfig_menu.as_mut() {
+                                    menu.editor.start_bifrost_version_discovery();
+                                }
+                                let tx = bifrost_version_tx.clone();
+                                std::mem::drop(tokio::spawn(async move {
+                                    let result = mj_core::bifrost::fetch_recent_versions()
+                                        .await
+                                        .map_err(|error| format!("{error:#}"));
+                                    let _ = tx.send(result);
+                                }));
+                            }
+                        }
                         if mode == UiMode::InlineChat
                             && inline_reader_was_active != inline_reader_accepts_input(&state)
                         {
@@ -1776,6 +1799,16 @@ async fn ui_loop(
                     && apply_current_branch_pr_probe(&mut state, probe)
                 {
                     pending_redraw.mark_interactive();
+                }
+            }
+            maybe_versions = bifrost_version_rx.recv() => {
+                bifrost_version_probe_in_flight = false;
+                if let Some(result) = maybe_versions {
+                    bifrost_version_result = Some(result.clone());
+                    if let Some(menu) = state.mjconfig_menu.as_mut() {
+                        menu.editor.finish_bifrost_version_discovery(result);
+                        pending_redraw.mark_interactive();
+                    }
                 }
             }
             maybe_scan = file_scan_rx.recv() => {
@@ -19960,6 +19993,8 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Char(' '));
+        // Skip the Bifrost version row; this test changes review policy only.
+        state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
         state.mjconfig_menu_key(KeyCode::Down);

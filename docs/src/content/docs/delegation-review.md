@@ -66,9 +66,10 @@ releasing it. On a mixed [team](/teams/), the review seat runs on the other
 provider, so the model challenging the change is not the model that made it.
 
 Discrete review is toggled on the Reviewer tab of `/mjconfig`. The same tab
-chooses the **review tier** — how much machinery one review may spend. The
-tier is read when a review dispatches, so a change applies to the next
-reviewed turn.
+chooses the **Bifrost version** and **review tier**. Bifrost follows npm's
+`latest` tag by default; the picker also offers the five newest stable versions
+as exact pins. These settings are read when a review dispatches, so a change
+applies to the next reviewed turn.
 
 The Reviewer tab has an independent **Permissions** setting. Its default,
 `Auto`, starts Codex with its native **Approve for me** policy and Claude Code

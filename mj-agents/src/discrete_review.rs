@@ -125,8 +125,6 @@ const SUPERVISOR_BIFROST_TOOLSET: &str = "core";
 /// analyzer is a token-heavy lead generator whose payoff is a specialist lane
 /// chasing it, which is exactly what this tier trades away.
 const QUICK_BIFROST_TOOLSET: &str = "core";
-const BIFROST_NPX_PACKAGE: &str = "@brokkai/bifrost";
-
 /// Every analyzer the `slopcop` toolset exposes (bifrost 0.7.5). The lane
 /// roster is validated against this at test time so a typo cannot silently
 /// ship a lane that advertises a tool the server never offers.
@@ -268,6 +266,8 @@ pub struct FanoutConfig {
     pub fs_max_text_bytes: u64,
     /// Provider-native policy applied to reviewer and supervisor sessions.
     pub permission: PermissionPreset,
+    /// Exact Bifrost npm version, or `None` to follow npm's `latest` tag.
+    pub bifrost_version: Option<String>,
     /// Shared with the subagent pool so a lane's status row cannot land on the
     /// same id as a running subagent's. Lanes are *not* pool members: they keep
     /// their own [`MAX_PARALLEL_LANES`] semaphore and never occupy a slot.
@@ -671,7 +671,10 @@ struct BifrostCommand {
 }
 
 impl BifrostCommand {
-    async fn prepare(events: &UnboundedSender<UiEvent>) -> Result<Self, String> {
+    async fn prepare(
+        events: &UnboundedSender<UiEvent>,
+        version: Option<&str>,
+    ) -> Result<Self, String> {
         let prepared = mj_core::acp::prepare_agent_command_for_spawn(
             Path::new("npx"),
             &HashMap::new(),
@@ -679,13 +682,13 @@ impl BifrostCommand {
         )
         .await
         .map_err(|error| format!("could not prepare npx for Bifrost: {error}"))?;
-        Ok(Self::from_prepared(prepared))
+        Ok(Self::from_prepared(prepared, version))
     }
 
-    fn from_prepared(prepared: PreparedAgentCommand) -> Self {
+    fn from_prepared(prepared: PreparedAgentCommand, version: Option<&str>) -> Self {
         Self {
             command: prepared.command,
-            prefix_args: vec!["-y".to_string(), BIFROST_NPX_PACKAGE.to_string()],
+            prefix_args: vec!["-y".to_string(), mj_core::bifrost::package_spec(version)],
             env: prepared.env,
         }
     }
@@ -844,7 +847,7 @@ async fn run_async(
         Ok(diff) => diff,
         Err(reason) => return ReviewVerdict::Failed { reason },
     };
-    let bifrost = match BifrostCommand::prepare(events).await {
+    let bifrost = match BifrostCommand::prepare(events, config.bifrost_version.as_deref()).await {
         Ok(bifrost) => bifrost,
         Err(reason) => return ReviewVerdict::Failed { reason },
     };
@@ -2722,6 +2725,7 @@ mod tests {
             snapshot_exclusions: Vec::new(),
             fs_max_text_bytes: 1_000_000,
             permission: PermissionPreset::Auto,
+            bifrost_version: None,
             id_allocator: SubagentIdAllocator::default(),
         }
     }
@@ -4180,10 +4184,13 @@ mod tests {
             "target-tree",
             "diff",
         );
-        let bifrost = BifrostCommand::from_prepared(PreparedAgentCommand {
-            command: executable,
-            env: HashMap::from([("MJ_TEST_MANAGED_NODE".to_string(), "enabled".to_string())]),
-        });
+        let bifrost = BifrostCommand::from_prepared(
+            PreparedAgentCommand {
+                command: executable,
+                env: HashMap::from([("MJ_TEST_MANAGED_NODE".to_string(), "enabled".to_string())]),
+            },
+            None,
+        );
         let output = analyze_diff_at_root(&bifrost, &snapshot)
             .await
             .expect("analyze diff");
@@ -4191,7 +4198,7 @@ mod tests {
         assert!(format_changed_functions(&output).contains("introduced: src/work.rs:1-3"));
         let args = std::fs::read_to_string(invocation).expect("read invocation");
         assert!(args.contains("managed=enabled"));
-        assert!(args.contains(&format!("-y {BIFROST_NPX_PACKAGE}")));
+        assert!(args.contains(&format!("-y {}", mj_core::bifrost::NPX_PACKAGE)));
         assert!(args.contains("--tool analyze_diff"));
         assert!(args.contains("--root"));
         assert!(args.contains("--args"));
@@ -4766,10 +4773,16 @@ mod tests {
 
     #[test]
     fn bifrost_mcp_server_uses_managed_npx_and_targets_the_reviewed_root() {
-        let bifrost = BifrostCommand::from_prepared(PreparedAgentCommand {
-            command: PathBuf::from("/usr/bin/npx"),
-            env: HashMap::from([("PATH".to_string(), "/managed/node/bin:/usr/bin".to_string())]),
-        });
+        let bifrost = BifrostCommand::from_prepared(
+            PreparedAgentCommand {
+                command: PathBuf::from("/usr/bin/npx"),
+                env: HashMap::from([(
+                    "PATH".to_string(),
+                    "/managed/node/bin:/usr/bin".to_string(),
+                )]),
+            },
+            Some("0.9.10"),
+        );
         let McpServer::Stdio(server) = bifrost_mcp_server(
             "bifrost",
             &bifrost,
@@ -4784,7 +4797,7 @@ mod tests {
             server.args,
             vec![
                 "-y",
-                BIFROST_NPX_PACKAGE,
+                "@brokkai/bifrost@0.9.10",
                 "--root",
                 "/repo",
                 "--mcp",
@@ -4808,7 +4821,7 @@ mod tests {
             lane.args,
             vec![
                 "-y",
-                BIFROST_NPX_PACKAGE,
+                "@brokkai/bifrost@0.9.10",
                 "--root",
                 "/repo",
                 "--mcp",

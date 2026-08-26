@@ -250,6 +250,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                                 snapshot_exclusions: cfg.snapshot_exclusions.clone(),
                                 fs_max_text_bytes: cfg.fs_max_text_bytes,
                                 permission: review_permission,
+                                bifrost_version: app_config.review.bifrost_version.clone(),
                                 id_allocator: subagent_ids.clone(),
                             },
                         ),

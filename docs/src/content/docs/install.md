@@ -21,11 +21,13 @@ using a private repository.
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
 | Build from source | Rust-supported development hosts | The workspace members you build |
 
-Discrete review runs Bifrost through `npx -y @brokkai/bifrost`. On Linux,
-macOS, and Windows, Mjolnir uses `npx` from `PATH` when available and otherwise
-installs an embedded Node.js 24 runtime automatically. Android users already
-need Node.js/npm for the built-in ACP bridges; the npm installation route
-provides that prerequisite by construction.
+Discrete review runs Bifrost through `npx -y @brokkai/bifrost` by default. An
+exact version selected on the Reviewer tab of `/mjconfig` uses
+`npx -y @brokkai/bifrost@VERSION` for both CLI analysis and MCP servers. On
+Linux, macOS, and Windows, Mjolnir uses `npx` from `PATH` when available and
+otherwise installs an embedded Node.js 24 runtime automatically. Android users
+already need Node.js/npm for the built-in ACP bridges; the npm installation
+route provides that prerequisite by construction.
 
 ### npm and npx
 
