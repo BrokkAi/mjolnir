@@ -4271,33 +4271,42 @@
       }
 
       function mjStagedTeamRole(seat) {
+        return mjStagedTeamPreset()?.[seat] || null;
+      }
+
+      function mjStagedTeamPreset() {
         if (!Object.hasOwn(mjcfg.edits, "team")) {
           return null;
         }
-        const preset = (mjcfg.snapshot?.team?.presets || []).find(
+        return (mjcfg.snapshot?.team?.presets || []).find(
           (candidate) => candidate.id === mjcfg.edits.team,
-        );
-        return preset?.[seat] || null;
+        ) || null;
+      }
+
+      // Precedence for a seat's model and provider, decided once: a staged
+      // model edit wins, then a staged Team, then the saved role. The staged
+      // Team also decides the provider whenever it decided the model — and
+      // for an explicit "auto" edit, because auto retains the Team's source
+      // pin on save.
+      function mjEffectiveRoleRoute(role, modelField, seat) {
+        const teamRole = mjStagedTeamRole(seat);
+        const modelEdited = Object.hasOwn(mjcfg.edits, modelField);
+        const model = modelEdited ? mjcfg.edits[modelField] : (teamRole?.model || role.model);
+        const source = teamRole && (!modelEdited || model === "auto")
+          ? teamRole.source
+          : role.choices.find((choice) => choice.model === model)?.source;
+        return { model, source, teamRole };
       }
 
       function mjEffectiveRoleModel(role, modelField, seat) {
-        if (Object.hasOwn(mjcfg.edits, modelField)) {
-          return mjcfg.edits[modelField];
-        }
-        return mjStagedTeamRole(seat)?.model || role.model;
+        return mjEffectiveRoleRoute(role, modelField, seat).model;
       }
 
       function mjSeatOptionGroup(role, modelField, seat, fallbackGroup) {
-        const model = mjEffectiveRoleModel(role, modelField, seat);
-        const teamRole = mjStagedTeamRole(seat);
+        const { model, source, teamRole } = mjEffectiveRoleRoute(role, modelField, seat);
         if (model === role.model && !teamRole) {
           return fallbackGroup;
         }
-        const source = model === "auto" && teamRole
-          ? teamRole.source
-          : (!Object.hasOwn(mjcfg.edits, modelField) && teamRole
-            ? teamRole.source
-            : role.choices.find((choice) => choice.model === model)?.source);
         if (!source) {
           return null;
         }
@@ -4398,7 +4407,7 @@
         }
         const reviewRow = mjRow("Discrete review");
         reviewRow.appendChild(
-          mjToggle(mjEditedValue("discrete_review", panel.discrete_review), (next) => {
+          mjToggle(mjEditedValue("discrete_review", mjStagedTeamPreset()?.discrete_review ?? panel.discrete_review), (next) => {
             mjcfg.edits.discrete_review = next;
             renderMjConfig();
           }),
@@ -4426,7 +4435,7 @@
         mjconfigBodyEl.appendChild(analysisRow);
 
         const tierRow = mjRow("Review depth");
-        const tier = mjEditedValue("review_tier", panel.review_tier);
+        const tier = mjEditedValue("review_tier", mjStagedTeamPreset()?.review_tier ?? panel.review_tier);
         tierRow.appendChild(
           mjCombo(
             panel.review_tiers.map((entry) => ({
@@ -4518,7 +4527,7 @@
 
         const failoverRow = mjRow("Automatic quota failover");
         failoverRow.appendChild(
-          mjToggle(mjEditedValue("auto_failover", panel.auto_failover), (next) => {
+          mjToggle(mjEditedValue("auto_failover", mjStagedTeamPreset()?.auto_failover ?? panel.auto_failover), (next) => {
             mjcfg.edits.auto_failover = next;
             renderMjConfig();
           }),
@@ -4672,7 +4681,14 @@
           const row = mjRow(preset.label);
           const active = selected === preset.id;
           const button = mjButton(active ? "Selected" : "Choose", () => {
-            mjcfg.edits.team = preset.id;
+            // Re-choosing the persisted team unstages the edit instead of
+            // staging a destructive re-apply of the preset over any
+            // customized seat models.
+            if (preset.id === (panel.selected || "")) {
+              delete mjcfg.edits.team;
+            } else {
+              mjcfg.edits.team = preset.id;
+            }
             renderMjConfig();
           });
           button.disabled = active;

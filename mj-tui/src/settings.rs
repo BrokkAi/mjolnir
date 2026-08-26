@@ -420,47 +420,10 @@ impl SettingsEditor {
     }
 
     pub(crate) fn selected_session_source(&self, seat: SessionDefaultsSeat) -> Option<String> {
-        let (model, configured_source, priority, active_model, active_source) = match seat {
-            SessionDefaultsSeat::Primary => (
-                self.config.agent.model.as_str(),
-                self.config.agent.acp_source.as_deref(),
-                self.config.agent.acp_priority.as_slice(),
-                self.active_models
-                    .as_ref()
-                    .map(|models| models.primary.as_str()),
-                self.active_models
-                    .as_ref()
-                    .and_then(|models| models.primary_source.as_deref()),
-            ),
-            SessionDefaultsSeat::Review => (
-                self.config.review.model.as_str(),
-                self.config.review.acp_source.as_deref(),
-                self.config.review.acp_priority.as_slice(),
-                self.active_models
-                    .as_ref()
-                    .map(|models| models.review.as_str()),
-                self.active_models
-                    .as_ref()
-                    .and_then(|models| models.review_source.as_deref()),
-            ),
-            SessionDefaultsSeat::Subagents => (
-                self.config.subagents.model.as_str(),
-                self.config.subagents.acp_source.as_deref(),
-                self.config.subagents.acp_priority.as_slice(),
-                self.active_models
-                    .as_ref()
-                    .map(|models| models.subagent.as_str()),
-                self.active_models
-                    .as_ref()
-                    .and_then(|models| models.subagent_source.as_deref()),
-            ),
-        };
-        mj_core::settings::session_source_for_model(
-            model,
-            configured_source,
-            priority,
-            active_model,
-            active_source,
+        mj_core::settings::selected_seat_session_source(
+            &self.config,
+            seat,
+            self.active_models.as_ref(),
             &self.choices,
             &self.inventory,
         )
@@ -591,6 +554,13 @@ impl SettingsEditor {
     }
 
     fn cycle_model(&mut self, role: usize, delta: i32) {
+        let seat = match role {
+            0 => SessionDefaultsSeat::Primary,
+            1 => SessionDefaultsSeat::Review,
+            2 => SessionDefaultsSeat::Subagents,
+            _ => return,
+        };
+        let previous_source = self.selected_session_source(seat);
         let choices = self.model_choices(role);
         let current = match role {
             0 => &self.config.agent.model,
@@ -627,6 +597,40 @@ impl SettingsEditor {
                 1 => self.config.review.acp_source = Some(source),
                 2 => self.config.subagents.acp_source = Some(source),
                 _ => {}
+            }
+        }
+
+        // The seat-wide reasoning effort mirrors the selected provider's
+        // thought-level default, so a provider switch re-derives it from the
+        // new provider's stored default instead of carrying the previous
+        // provider's value into a route that never saw it.
+        let new_source = self.selected_session_source(seat);
+        if new_source != previous_source {
+            let effort = new_source.as_deref().and_then(|source| {
+                let defaults = self.session_defaults(seat).get(source)?;
+                let literal_key = format!("config:{}", crate::acp::REASONING_EFFORT_CONFIG_ID);
+                if let Some(value) = defaults.get(&literal_key) {
+                    return Some(value.clone());
+                }
+                let server = self
+                    .inventory
+                    .servers
+                    .iter()
+                    .find(|server| server.id == source)?;
+                server.session_config.iter().find_map(|option| {
+                    session_option_controls_reasoning_effort(option)
+                        .then(|| {
+                            defaults
+                                .get(&crate::acp::session_config_option_key(&option.id))
+                                .cloned()
+                        })
+                        .flatten()
+                })
+            });
+            match seat {
+                SessionDefaultsSeat::Primary => self.config.agent.reasoning_effort = effort,
+                SessionDefaultsSeat::Review => self.config.review.reasoning_effort = effort,
+                SessionDefaultsSeat::Subagents => self.config.subagents.reasoning_effort = effort,
             }
         }
     }
@@ -1950,6 +1954,64 @@ mod tests {
 
         assert_eq!(editor.config.agent.model, "gpt-5-6-terra");
         assert_eq!(editor.config.agent.acp_source.as_deref(), Some("codex-acp"));
+    }
+
+    #[test]
+    fn cycling_the_seat_model_across_providers_rederives_reasoning_effort() {
+        let mut config = crate::roster::config_with_a_visible_builtin();
+        config.set_acp_server_policy("claude-acp", AcpServerPolicy::Enabled);
+        config.agent.model = "claude-model".to_string();
+        config.agent.acp_source = Some("claude-acp".to_string());
+        // An earlier thought-level edit on the Claude route synced the
+        // seat-wide effort; the Codex route carries its own stored default.
+        config
+            .agent
+            .session_defaults
+            .entry("claude-acp".to_string())
+            .or_default()
+            .insert("config:thinking".to_string(), "high".to_string());
+        config
+            .agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:reasoning_effort".to_string(), "low".to_string());
+        config.agent.reasoning_effort = Some("high".to_string());
+        let choice = |model: &str, adapter: &str| ModelChoice {
+            model: model.to_string(),
+            pass_at_1: 0.5,
+            mean_cost_usd: 1.0,
+            available: true,
+            disabled_reason: None,
+            adapter: Some(adapter.to_string()),
+            ranked: true,
+        };
+        let mut editor = SettingsEditor::new(
+            config,
+            vec![
+                choice("claude-model", "claude-acp"),
+                choice("gpt-model", "codex-acp"),
+            ],
+            None,
+        );
+
+        editor.cycle_model(0, 1);
+
+        assert_eq!(editor.config.agent.model, "gpt-model");
+        assert_eq!(editor.config.agent.acp_source.as_deref(), Some("codex-acp"));
+        // The effort synced from the Claude option does not outlive the
+        // switch: it re-derives from the Codex route's stored default.
+        assert_eq!(editor.config.agent.reasoning_effort.as_deref(), Some("low"));
+
+        // A provider with no stored thought-level default clears the stale
+        // value instead of carrying it into a route that never saw it.
+        editor.config.agent.session_defaults.remove("codex-acp");
+        editor.config.agent.reasoning_effort = Some("high".to_string());
+        editor.config.agent.model = "claude-model".to_string();
+        editor.config.agent.acp_source = Some("claude-acp".to_string());
+        editor.cycle_model(0, 1);
+        assert_eq!(editor.config.agent.model, "gpt-model");
+        assert_eq!(editor.config.agent.reasoning_effort, None);
     }
 
     #[test]

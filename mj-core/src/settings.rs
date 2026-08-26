@@ -151,6 +151,67 @@ pub fn session_source_for_model(
         .cloned()
 }
 
+/// [`session_source_for_model`] with the seat's route read from the config.
+///
+/// Every frontend resolves a seat's provider through this one function so the
+/// panel a user edits and the save that interprets the edit agree on the
+/// route. `active_models` carries the live session's routing when the caller
+/// has one; without it an `auto` seat can only fall back to the priority scan.
+pub fn seat_session_source_for_model(
+    config: &crate::config::Config,
+    seat: SessionDefaultsSeat,
+    model: &str,
+    active_models: Option<&crate::config::ModelsConfig>,
+    choices: &[ModelChoice],
+    inventory: &AcpInventory,
+) -> Option<String> {
+    let (configured_source, priority, active_model, active_source) = match seat {
+        SessionDefaultsSeat::Primary => (
+            config.agent.acp_source.as_deref(),
+            config.agent.acp_priority.as_slice(),
+            active_models.map(|models| models.primary.as_str()),
+            active_models.and_then(|models| models.primary_source.as_deref()),
+        ),
+        SessionDefaultsSeat::Review => (
+            config.review.acp_source.as_deref(),
+            config.review.acp_priority.as_slice(),
+            active_models.map(|models| models.review.as_str()),
+            active_models.and_then(|models| models.review_source.as_deref()),
+        ),
+        SessionDefaultsSeat::Subagents => (
+            config.subagents.acp_source.as_deref(),
+            config.subagents.acp_priority.as_slice(),
+            active_models.map(|models| models.subagent.as_str()),
+            active_models.and_then(|models| models.subagent_source.as_deref()),
+        ),
+    };
+    session_source_for_model(
+        model,
+        configured_source,
+        priority,
+        active_model,
+        active_source,
+        choices,
+        inventory,
+    )
+}
+
+/// [`seat_session_source_for_model`] for the seat's configured model.
+pub fn selected_seat_session_source(
+    config: &crate::config::Config,
+    seat: SessionDefaultsSeat,
+    active_models: Option<&crate::config::ModelsConfig>,
+    choices: &[ModelChoice],
+    inventory: &AcpInventory,
+) -> Option<String> {
+    let model = match seat {
+        SessionDefaultsSeat::Primary => config.agent.model.as_str(),
+        SessionDefaultsSeat::Review => config.review.model.as_str(),
+        SessionDefaultsSeat::Subagents => config.subagents.model.as_str(),
+    };
+    seat_session_source_for_model(config, seat, model, active_models, choices, inventory)
+}
+
 /// Whether a discovered ACP option belongs in this seat's `/mjconfig` panel.
 ///
 /// The delegated Codex and Claude `mode` control is the provider's permission
