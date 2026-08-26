@@ -4928,6 +4928,7 @@
         pendingSessionActions.clear();
         activityBySessionId.clear();
         sentDecisions.clear();
+        permissionCards.clear();
         sentConfigChanges.clear();
         renderedSessionId = null;
         renderedEntries = [];
@@ -8545,8 +8546,13 @@
         }
       }
 
+      // Snapshot polls re-render every couple of seconds. Rebuilding a card the
+      // user is answering would wipe the half-filled elicitation form and steal
+      // focus, so each pending request keeps its live DOM until the request
+      // itself changes or leaves the snapshot.
+      const permissionCards = new Map();
+
       function renderPermissions(session) {
-        permissionsEl.replaceChildren();
         const pending = sessionPendingPermissions(session);
         // Forget sent decisions once their request leaves the snapshot.
         if (session) {
@@ -8564,53 +8570,96 @@
           workingBadgeEl.hidden = true;
           syncWorkingSpinner();
         }
+        const live = new Set();
+        const cards = [];
         for (const request of pending) {
-          const card = cloneTemplate(permissionTpl);
-          card.querySelector(".permission-label").textContent = request.elicitation
-            ? "Input needed"
-            : "Permission needed";
-          card.querySelector(".permission-title").textContent = request.title || request.request_id;
-          setTimestamp(card.querySelector(".permission-time"), request.requested_at || "");
-          const optionsEl = card.querySelector(".permission-options");
-          const sent = sentDecisions.has(decisionKey(session.session_id, request.request_id));
-          if (request.elicitation) {
-            renderElicitationControls(optionsEl, session, request, sent);
+          const key = decisionKey(session.session_id, request.request_id);
+          const signature = JSON.stringify(request);
+          live.add(key);
+          let entry = permissionCards.get(key);
+          if (!entry || entry.signature !== signature) {
+            entry = buildPermissionCard(session, request);
+            entry.signature = signature;
+            permissionCards.set(key, entry);
           }
-          for (const option of request.options || []) {
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "permission-option";
-            button.dataset.kind = option.kind || "other";
-            button.textContent = option.label || option.option_id;
-            button.disabled = sent;
-            button.addEventListener("click", () => {
-              void submitPermissionDecision(session.session_id, request.request_id, option.option_id);
-            });
-            optionsEl.appendChild(button);
-          }
-          card.querySelector(".permission-status").textContent = sent
-            ? "Decision sent — waiting for the session to apply it…"
-            : "";
-          permissionsEl.appendChild(card);
+          entry.setSent(sentDecisions.has(key));
+          cards.push(entry.card);
         }
+        for (const key of [...permissionCards.keys()]) {
+          if (!live.has(key)) {
+            permissionCards.delete(key);
+          }
+        }
+        // Re-attaching identical nodes would drop focus mid-keystroke, so only
+        // touch the list when the rendered cards actually differ.
+        const mounted = [...permissionsEl.children];
+        const unchanged = mounted.length === cards.length
+          && cards.every((card, index) => mounted[index] === card);
+        if (!unchanged) {
+          permissionsEl.replaceChildren(...cards);
+        }
+      }
+
+      function buildPermissionCard(session, request) {
+        const card = cloneTemplate(permissionTpl);
+        card.querySelector(".permission-label").textContent = request.elicitation
+          ? "Input needed"
+          : "Permission needed";
+        card.querySelector(".permission-title").textContent = request.title || request.request_id;
+        setTimestamp(card.querySelector(".permission-time"), request.requested_at || "");
+        const optionsEl = card.querySelector(".permission-options");
+        const statusEl = card.querySelector(".permission-status");
+        // Every control a sent decision has to lock out, collected as it is built
+        // so `setSent` can re-run on later polls without rebuilding the card.
+        const gated = [];
+        const register = (control) => {
+          gated.push(control);
+          return control;
+        };
+        if (request.elicitation) {
+          renderElicitationControls(optionsEl, session, request, register);
+        }
+        for (const option of request.options || []) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "permission-option";
+          button.dataset.kind = option.kind || "other";
+          button.textContent = option.label || option.option_id;
+          button.addEventListener("click", () => {
+            void submitPermissionDecision(session.session_id, request.request_id, option.option_id);
+          });
+          register(button);
+          optionsEl.appendChild(button);
+        }
+        return {
+          card,
+          setSent(sent) {
+            for (const control of gated) {
+              control.disabled = sent;
+            }
+            statusEl.textContent = sent
+              ? "Decision sent — waiting for the session to apply it…"
+              : "";
+          },
+        };
       }
 
       function elicitationAccept(content) {
         return `elicitation:accept:${JSON.stringify(content)}`;
       }
 
-      function appendElicitationButton(container, label, kind, disabled, onClick) {
+      function appendElicitationButton(container, label, kind, register, onClick) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "permission-option";
         button.dataset.kind = kind;
         button.textContent = label;
-        button.disabled = disabled;
         button.addEventListener("click", onClick);
+        register(button);
         container.appendChild(button);
       }
 
-      function renderElicitationControls(container, session, request, sent) {
+      function renderElicitationControls(container, session, request, register) {
         const elicitation = request.elicitation;
         const submit = (optionId) => {
           void submitPermissionDecision(session.session_id, request.request_id, optionId);
@@ -8628,7 +8677,7 @@
         }
         if (elicitation.mode === "select") {
           for (const option of elicitation.options || []) {
-            appendElicitationButton(container, option.label || option.value, "allow_once", sent, () => {
+            appendElicitationButton(container, option.label || option.value, "allow_once", register, () => {
               submit(elicitationAccept({ [elicitation.property_name]: option.value }));
             });
           }
@@ -8640,7 +8689,7 @@
           link.rel = "noopener noreferrer";
           link.textContent = elicitation.url;
           container.appendChild(link);
-          appendElicitationButton(container, "Continue", "allow_once", sent, () => {
+          appendElicitationButton(container, "Continue", "allow_once", register, () => {
             submit(elicitationAccept({}));
           });
         } else {
@@ -8681,7 +8730,7 @@
               if (field.minimum !== undefined && field.minimum !== null) control.min = field.minimum;
               if (field.maximum !== undefined && field.maximum !== null) control.max = field.maximum;
             }
-            control.disabled = sent;
+            register(control);
             control.required = Boolean(field.required);
             if (field.kind === "multi_select") {
               const validateSelectionCount = () => {
@@ -8714,7 +8763,7 @@
           submitButton.className = "permission-option";
           submitButton.dataset.kind = "allow_once";
           submitButton.textContent = "Submit";
-          submitButton.disabled = sent;
+          register(submitButton);
           form.appendChild(submitButton);
           form.addEventListener("submit", (event) => {
             event.preventDefault();
@@ -8739,10 +8788,10 @@
           });
           container.appendChild(form);
         }
-        appendElicitationButton(container, "Cancel", "reject_once", sent, () => {
+        appendElicitationButton(container, "Cancel", "reject_once", register, () => {
           submit("elicitation:cancel");
         });
-        appendElicitationButton(container, "Decline", "reject_always", sent, () => {
+        appendElicitationButton(container, "Decline", "reject_always", register, () => {
           submit("elicitation:decline");
         });
       }

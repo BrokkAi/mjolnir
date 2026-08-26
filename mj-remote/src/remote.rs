@@ -11820,6 +11820,165 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
     }
 
     #[test]
+    fn embedded_viewer_keeps_elicitation_answers_across_snapshot_polls() {
+        let viewer = include_str!("remote_viewer.html");
+        let start = viewer
+            .find("      const permissionCards = new Map();")
+            .expect("permission card cache");
+        let end = viewer[start..]
+            .find("      async function submitPermissionDecision")
+            .map(|offset| start + offset)
+            .expect("permission rendering boundary");
+        let source = &viewer[start..end];
+        let dom = r#"
+const created = [];
+let replaceCalls = 0;
+class Option {
+  constructor(label, value) {
+    this.label = label;
+    this.value = value;
+  }
+}
+function makeEl(tag) {
+  const el = {
+    tagName: tag.toUpperCase(),
+    children: [],
+    dataset: {},
+    className: "",
+    textContent: "",
+    disabled: false,
+    value: "",
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    append(...kids) {
+      this.children.push(...kids);
+    },
+    replaceChildren(...kids) {
+      replaceCalls += 1;
+      this.children = kids;
+    },
+    addEventListener() {},
+    setAttribute() {},
+    setCustomValidity() {},
+    reportValidity() {
+      return true;
+    },
+    querySelector(selector) {
+      const wanted = selector.slice(1);
+      for (const child of this.children) {
+        if (child.className === wanted) return child;
+        const nested = child.querySelector ? child.querySelector(selector) : null;
+        if (nested) return nested;
+      }
+      return null;
+    },
+  };
+  created.push(el);
+  return el;
+}
+const document = { createElement: makeEl };
+const permissionsEl = makeEl("div");
+const approvalBadgeEl = { hidden: true };
+const workingBadgeEl = { hidden: true };
+function syncWorkingSpinner() {}
+function setTimestamp() {}
+const sentDecisions = new Set();
+function decisionKey(sessionId, requestId) {
+  return `${sessionId}|${requestId}`;
+}
+function sessionPendingPermissions(session) {
+  return session && Array.isArray(session.pending_permissions) ? session.pending_permissions : [];
+}
+const permissionTpl = null;
+function cloneTemplate() {
+  const card = makeEl("section");
+  for (const cls of [
+    "permission-label",
+    "permission-time",
+    "permission-title",
+    "permission-options",
+    "permission-status",
+  ]) {
+    const child = makeEl("div");
+    child.className = cls;
+    card.appendChild(child);
+  }
+  return card;
+}
+async function submitPermissionDecision() {}
+"#;
+        let checks = r#"
+const request = {
+  request_id: "elicitation:1",
+  title: "How should the empty transcript window be covered?",
+  options: [],
+  requested_at: "2026-08-26T00:00:00Z",
+  elicitation: {
+    mode: "form",
+    title: "Splash",
+    fields: [
+      {
+        property_name: "splash",
+        label: "Splash style",
+        kind: "select",
+        required: false,
+        options: [{ value: "aurora", label: "Aurora" }, { value: "embers", label: "Embers" }],
+      },
+      { property_name: "other", label: "Other", kind: "text", required: false },
+    ],
+  },
+};
+const session = { session_id: "s1", pending_permissions: [request] };
+renderPermissions(session);
+const card = permissionsEl.children[0];
+const select = created.find((el) => el.tagName === "SELECT");
+const text = created.find((el) => el.tagName === "INPUT");
+select.value = "aurora";
+text.value = "keep me";
+const attachments = replaceCalls;
+renderPermissions(session);
+if (permissionsEl.children[0] !== card) {
+  throw new Error("a poll rebuilt the pending card");
+}
+if (select.value !== "aurora" || text.value !== "keep me") {
+  throw new Error("a poll wiped the half-filled answer");
+}
+if (replaceCalls !== attachments) {
+  throw new Error("a poll re-attached an unchanged card and dropped focus");
+}
+sentDecisions.add(decisionKey("s1", request.request_id));
+renderPermissions(session);
+if (permissionsEl.children[0] !== card) {
+  throw new Error("a sent decision rebuilt the card");
+}
+if (!select.disabled || !text.disabled) {
+  throw new Error("a sent decision left the controls live");
+}
+if (select.value !== "aurora") {
+  throw new Error("a sent decision wiped the answer");
+}
+renderPermissions({ session_id: "s1", pending_permissions: [] });
+if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
+  throw new Error("a resolved request stayed rendered");
+}
+"#;
+        let script = format!("{dom}\n{source}\n{checks}");
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer permission rendering test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
     fn embedded_viewer_contains_gated_image_prompt_controls() {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("id=\"image-picker\""));
