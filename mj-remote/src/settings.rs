@@ -52,9 +52,22 @@ impl MjConfigCatalog {
     }
 
     pub fn selected_session_source(&self, seat: SessionDefaultsSeat) -> Option<String> {
+        let model = match seat {
+            SessionDefaultsSeat::Primary => self.config.agent.model.as_str(),
+            SessionDefaultsSeat::Review => self.config.review.model.as_str(),
+            SessionDefaultsSeat::Subagents => self.config.subagents.model.as_str(),
+        };
+        self.session_source_for_model(seat, model)
+    }
+
+    pub fn session_source_for_model(
+        &self,
+        seat: SessionDefaultsSeat,
+        model: &str,
+    ) -> Option<String> {
         let (model, configured_source, priority, active_model, active_source) = match seat {
             SessionDefaultsSeat::Primary => (
-                self.config.agent.model.as_str(),
+                model,
                 self.config.agent.acp_source.as_deref(),
                 self.config.agent.acp_priority.as_slice(),
                 self.active_models
@@ -65,7 +78,7 @@ impl MjConfigCatalog {
                     .and_then(|models| models.primary_source.as_deref()),
             ),
             SessionDefaultsSeat::Review => (
-                self.config.review.model.as_str(),
+                model,
                 self.config.review.acp_source.as_deref(),
                 self.config.review.acp_priority.as_slice(),
                 self.active_models
@@ -76,7 +89,7 @@ impl MjConfigCatalog {
                     .and_then(|models| models.review_source.as_deref()),
             ),
             SessionDefaultsSeat::Subagents => (
-                self.config.subagents.model.as_str(),
+                model,
                 self.config.subagents.acp_source.as_deref(),
                 self.config.subagents.acp_priority.as_slice(),
                 self.active_models
@@ -87,68 +100,15 @@ impl MjConfigCatalog {
                     .and_then(|models| models.subagent_source.as_deref()),
             ),
         };
-        if model == mj_core::config::DISABLED_MODEL {
-            return None;
-        }
-        if let Some(source) = configured_source
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source)
-        {
-            return Some(source.to_string());
-        }
-        if (model == "auto" || active_model == Some(model))
-            && let Some(source) = active_source
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source)
-        {
-            return Some(source.to_string());
-        }
-        if model != "auto"
-            && let Some(source) = priority.iter().find(|source| {
-                self.choices.iter().any(|choice| {
-                    choice.available
-                        && choice.model == model
-                        && choice.adapter.as_deref() == Some(source.as_str())
-                })
-            })
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source.as_str())
-        {
-            return Some(source.clone());
-        }
-        if model != "auto"
-            && let Some(source) = self
-                .choices
-                .iter()
-                .find(|choice| choice.available && choice.model == model)
-                .and_then(|choice| choice.adapter.as_deref())
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source)
-        {
-            return Some(source.to_string());
-        }
-        priority
-            .iter()
-            .find(|source| {
-                self.inventory.servers.iter().any(|server| {
-                    server.id == source.as_str()
-                        && server.policy != AcpServerPolicy::Disabled
-                        && !server.session_config.is_empty()
-                })
-            })
-            .cloned()
+        mj_core::settings::session_source_for_model(
+            model,
+            configured_source,
+            priority,
+            active_model,
+            active_source,
+            &self.choices,
+            &self.inventory,
+        )
     }
 
     pub fn session_option_rows(&self, seat: SessionDefaultsSeat) -> Vec<(usize, usize)> {

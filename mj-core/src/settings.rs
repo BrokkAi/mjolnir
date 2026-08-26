@@ -8,7 +8,7 @@ use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
 };
 
-use crate::roster::AdapterKind;
+use crate::roster::{AcpInventory, AdapterKind, ModelChoice};
 
 /// Built-in ACP servers whose enablement belongs in `/mjconfig`.
 ///
@@ -74,6 +74,81 @@ pub enum SessionDefaultsSeat {
     Primary,
     Review,
     Subagents,
+}
+
+/// Resolve the ACP source whose session options belong beside a seat model.
+///
+/// Concrete models route through the adapter that actually advertises them;
+/// a Team source pin constrains only `auto`. This mirrors roster resolution so
+/// `/mjconfig` never shows one provider's options beside another provider's
+/// explicit model.
+#[allow(clippy::too_many_arguments)]
+pub fn session_source_for_model(
+    model: &str,
+    configured_source: Option<&str>,
+    priority: &[String],
+    active_model: Option<&str>,
+    active_source: Option<&str>,
+    choices: &[ModelChoice],
+    inventory: &AcpInventory,
+) -> Option<String> {
+    if model == crate::config::DISABLED_MODEL {
+        return None;
+    }
+    let source_exists = |source: &str| inventory.servers.iter().any(|server| server.id == source);
+    let advertised_source = |source: &str| {
+        choices.iter().any(|choice| {
+            choice.available && choice.model == model && choice.adapter.as_deref() == Some(source)
+        })
+    };
+
+    if model != "auto" {
+        if active_model == Some(model)
+            && let Some(source) = active_source
+            && source_exists(source)
+        {
+            return Some(source.to_string());
+        }
+        if let Some(source) = priority
+            .iter()
+            .find(|source| advertised_source(source) && source_exists(source))
+        {
+            return Some(source.clone());
+        }
+        if let Some(source) = choices
+            .iter()
+            .find(|choice| choice.available && choice.model == model)
+            .and_then(|choice| choice.adapter.as_deref())
+            .filter(|source| source_exists(source))
+        {
+            return Some(source.to_string());
+        }
+        if let Some(source) = crate::roster::native_source_id(model)
+            && source_exists(&source)
+        {
+            return Some(source);
+        }
+    }
+
+    if let Some(source) = configured_source.filter(|source| source_exists(source)) {
+        return Some(source.to_string());
+    }
+    if model == "auto"
+        && let Some(source) = active_source
+        && source_exists(source)
+    {
+        return Some(source.to_string());
+    }
+    priority
+        .iter()
+        .find(|source| {
+            inventory.servers.iter().any(|server| {
+                server.id == source.as_str()
+                    && server.policy != crate::config::AcpServerPolicy::Disabled
+                    && !server.session_config.is_empty()
+            })
+        })
+        .cloned()
 }
 
 /// Whether a discovered ACP option belongs in this seat's `/mjconfig` panel.
@@ -154,5 +229,48 @@ mod tests {
                 &effort
             ));
         }
+    }
+
+    #[test]
+    fn explicit_model_provider_beats_the_team_auto_source() {
+        let mut config = crate::roster::config_with_a_visible_builtin();
+        config.set_acp_server_policy("claude-acp", crate::config::AcpServerPolicy::Enabled);
+        let inventory = crate::roster::discover_inventory(&config);
+        let choices = vec![ModelChoice {
+            model: "gpt-provider-model".to_string(),
+            pass_at_1: 0.5,
+            mean_cost_usd: 1.0,
+            available: true,
+            disabled_reason: None,
+            adapter: Some("codex-acp".to_string()),
+            ranked: true,
+        }];
+
+        assert_eq!(
+            session_source_for_model(
+                "gpt-provider-model",
+                Some("claude-acp"),
+                &["claude-acp".to_string(), "codex-acp".to_string()],
+                None,
+                None,
+                &choices,
+                &inventory,
+            )
+            .as_deref(),
+            Some("codex-acp")
+        );
+        assert_eq!(
+            session_source_for_model(
+                "auto",
+                Some("claude-acp"),
+                &["claude-acp".to_string(), "codex-acp".to_string()],
+                None,
+                None,
+                &choices,
+                &inventory,
+            )
+            .as_deref(),
+            Some("claude-acp")
+        );
     }
 }

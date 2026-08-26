@@ -5024,6 +5024,10 @@ struct MjConfigSnapshot {
     review_options: Option<MjSessionOptionsGroup>,
     /// Session options for the subagent seat, mirroring the Subagents panel.
     subagent_options: Option<MjSessionOptionsGroup>,
+    /// Every probed provider's role-filtered session options. The browser
+    /// uses this catalog to preview a staged cross-provider model change
+    /// without saving it first.
+    session_options: MjSessionOptionsCatalog,
     input: MjInputPanel,
     appearance: MjAppearancePanel,
     login: Option<MjLoginStatus>,
@@ -5104,6 +5108,7 @@ struct MjRoleEntry {
 struct MjModelChoiceEntry {
     model: String,
     detail: String,
+    source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -5166,7 +5171,7 @@ struct MjServerEntry {
     detail: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct MjSessionOptionsGroup {
     server_id: String,
     server_label: String,
@@ -5174,6 +5179,13 @@ struct MjSessionOptionsGroup {
 }
 
 #[derive(Debug, Serialize)]
+struct MjSessionOptionsCatalog {
+    primary: Vec<MjSessionOptionsGroup>,
+    review: Vec<MjSessionOptionsGroup>,
+    subagents: Vec<MjSessionOptionsGroup>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct MjSessionOptionEntry {
     key: String,
     name: String,
@@ -5181,7 +5193,7 @@ struct MjSessionOptionEntry {
     choices: Vec<MjSessionOptionChoice>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct MjSessionOptionChoice {
     value: String,
     label: String,
@@ -5433,6 +5445,11 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         .iter()
         .enumerate()
         .map(|(index, (label, description))| {
+            let seat = match index {
+                0 => crate::settings::SessionDefaultsSeat::Primary,
+                1 => crate::settings::SessionDefaultsSeat::Review,
+                _ => crate::settings::SessionDefaultsSeat::Subagents,
+            };
             let model = match index {
                 0 => &config.agent.model,
                 1 => &config.review.model,
@@ -5452,6 +5469,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     .into_iter()
                     .map(|choice| MjModelChoiceEntry {
                         detail: catalog.staged_model_detail(&choice),
+                        source: catalog.session_source_for_model(seat, &choice),
                         model: choice,
                     })
                     .collect(),
@@ -5522,32 +5540,68 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         })
         .collect();
 
-    let seat_options = |seat: crate::settings::SessionDefaultsSeat| {
-        let rows = catalog.session_option_rows(seat);
-        let (server_index, _) = *rows.first()?;
-        let server = inventory.servers.get(server_index)?;
-        let options = rows
+    let seat_option_groups = |seat: crate::settings::SessionDefaultsSeat| {
+        inventory
+            .servers
             .iter()
-            .filter_map(|(_, option_index)| server.session_config.get(*option_index))
-            .map(|option| MjSessionOptionEntry {
-                key: acp::session_config_option_key(&option.id),
-                name: option.name.clone(),
-                value: catalog.saved_session_value(seat, &server.id, option),
-                choices: crate::settings::session_option_choices(option)
-                    .into_iter()
-                    .map(|(value, label)| MjSessionOptionChoice { value, label })
-                    .collect(),
+            .filter_map(|server| {
+                let options = server
+                    .session_config
+                    .iter()
+                    .filter(|option| {
+                        mj_core::settings::session_option_is_editable(
+                            seat,
+                            server.launch.kind,
+                            option,
+                        )
+                    })
+                    .map(|option| MjSessionOptionEntry {
+                        key: acp::session_config_option_key(&option.id),
+                        name: option.name.clone(),
+                        value: catalog.saved_session_value(seat, &server.id, option),
+                        choices: crate::settings::session_option_choices(option)
+                            .into_iter()
+                            .map(|(value, label)| MjSessionOptionChoice { value, label })
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>();
+                (!options.is_empty()).then(|| MjSessionOptionsGroup {
+                    server_id: server.id.clone(),
+                    server_label: server.label.clone(),
+                    options,
+                })
             })
-            .collect::<Vec<_>>();
-        (!options.is_empty()).then(|| MjSessionOptionsGroup {
-            server_id: server.id.clone(),
-            server_label: server.label.clone(),
-            options,
-        })
+            .collect::<Vec<_>>()
     };
-    let primary_options = seat_options(crate::settings::SessionDefaultsSeat::Primary);
-    let review_options = seat_options(crate::settings::SessionDefaultsSeat::Review);
-    let subagent_options = seat_options(crate::settings::SessionDefaultsSeat::Subagents);
+    let primary_option_sources = seat_option_groups(crate::settings::SessionDefaultsSeat::Primary);
+    let review_option_sources = seat_option_groups(crate::settings::SessionDefaultsSeat::Review);
+    let subagent_option_sources =
+        seat_option_groups(crate::settings::SessionDefaultsSeat::Subagents);
+    let selected_options = |seat: crate::settings::SessionDefaultsSeat,
+                            groups: &[MjSessionOptionsGroup]| {
+        let source = catalog.selected_session_source(seat)?;
+        groups
+            .iter()
+            .find(|group| group.server_id == source)
+            .cloned()
+    };
+    let primary_options = selected_options(
+        crate::settings::SessionDefaultsSeat::Primary,
+        &primary_option_sources,
+    );
+    let review_options = selected_options(
+        crate::settings::SessionDefaultsSeat::Review,
+        &review_option_sources,
+    );
+    let subagent_options = selected_options(
+        crate::settings::SessionDefaultsSeat::Subagents,
+        &subagent_option_sources,
+    );
+    let session_options = MjSessionOptionsCatalog {
+        primary: primary_option_sources,
+        review: review_option_sources,
+        subagents: subagent_option_sources,
+    };
 
     let appearance = MjAppearancePanel {
         theme: config.theme.to_string(),
@@ -5678,6 +5732,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         primary_options,
         review_options,
         subagent_options,
+        session_options,
         input,
         appearance,
         login,
@@ -11047,6 +11102,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mjconfig_snapshot_maps_models_to_every_provider_option_catalog() {
+        use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
+        let runtime = test_mjconfig_runtime();
+        let mut config = roster::config_with_a_visible_builtin();
+        config.set_acp_server_policy("claude-acp", config::AcpServerPolicy::Enabled);
+        config::TeamPreset::Codex.apply(&mut config);
+        config.agent.model = "claude-provider-model".to_string();
+        config.review.model = "claude-provider-model".to_string();
+        config.subagents.model = "claude-provider-model".to_string();
+        config.save(&runtime.config_path).expect("seed config");
+
+        let mut inventory = roster::discover_inventory(&config);
+        for (server_id, option_id) in [
+            ("codex-acp", "codex_service_tier"),
+            ("claude-acp", "claude_thinking_budget"),
+        ] {
+            let server = inventory
+                .servers
+                .iter_mut()
+                .find(|server| server.id == server_id)
+                .expect("built-in ACP server");
+            server.session_config = vec![SessionConfigOption::select(
+                option_id,
+                option_id,
+                "default",
+                vec![SessionConfigSelectOption::new("default", "Default")],
+            )];
+        }
+        let choices = vec![
+            roster::ModelChoice {
+                model: "gpt-provider-model".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            },
+            roster::ModelChoice {
+                model: "claude-provider-model".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("claude-acp".to_string()),
+                ranked: true,
+            },
+        ];
+        {
+            let mut discovery = runtime.discovery.lock().expect("discovery lock");
+            discovery.inventory = inventory;
+            discovery.choices = choices;
+        }
+
+        let token = "mjconfig-token";
+        let app = mjconfig_test_router(runtime, token);
+        let response = app
+            .oneshot(mjconfig_request("GET", Some(token), None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = json_body(response).await;
+
+        for role in snapshot["agents"]["roles"]
+            .as_array()
+            .expect("role entries")
+        {
+            let choices = role["choices"].as_array().expect("model choices");
+            let codex = choices
+                .iter()
+                .find(|choice| choice["model"] == "gpt-provider-model")
+                .expect("Codex model choice");
+            let claude = choices
+                .iter()
+                .find(|choice| choice["model"] == "claude-provider-model")
+                .expect("Claude model choice");
+            assert_eq!(codex["source"], "codex-acp");
+            assert_eq!(claude["source"], "claude-acp");
+            let automatic = choices
+                .iter()
+                .find(|choice| choice["model"] == "auto")
+                .expect("automatic model choice");
+            assert_eq!(automatic["source"], "codex-acp");
+        }
+        for seat in ["primary", "review", "subagents"] {
+            let groups = snapshot["session_options"][seat]
+                .as_array()
+                .expect("provider option groups");
+            assert!(groups.iter().any(|group| {
+                group["server_id"] == "codex-acp"
+                    && group["options"][0]["key"] == "config:codex_service_tier"
+            }));
+            assert!(groups.iter().any(|group| {
+                group["server_id"] == "claude-acp"
+                    && group["options"][0]["key"] == "config:claude_thinking_budget"
+            }));
+        }
+        for current in ["primary_options", "review_options", "subagent_options"] {
+            assert_eq!(snapshot[current]["server_id"], "claude-acp", "{current}");
+        }
+    }
+
+    #[tokio::test]
     async fn mjconfig_apply_syncs_custom_thought_level_with_reviewer_effort() {
         let runtime = test_mjconfig_runtime();
         let config_path = runtime.config_path.clone();
@@ -11856,6 +12014,8 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(viewer.contains("snapshot.primary_options"));
         assert!(viewer.contains("snapshot.review_options"));
         assert!(viewer.contains("snapshot.subagent_options"));
+        assert!(viewer.contains("snapshot?.session_options?.[seat]"));
+        assert!(viewer.contains("choice.model === model)?.source"));
         assert!(viewer.contains("review_session_defaults"));
         assert!(viewer.contains("active: ${activeLabel}"));
         assert!(viewer.contains("value !== role.active_model"));
@@ -11879,6 +12039,76 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert!(viewer.contains("Terminal interface"));
         assert!(!viewer.contains("ACP Priority"));
         assert!(!viewer.contains("renderMjPriority"));
+    }
+
+    #[test]
+    fn embedded_viewer_switches_staged_model_session_options_immediately() {
+        let viewer = include_str!("remote_viewer.html");
+        let start = viewer
+            .find("      function mjSeatOptionGroup")
+            .expect("provider option-group helper");
+        let end = viewer[start..]
+            .find("      // Session options for one seat's bound ACP source")
+            .map(|offset| start + offset)
+            .expect("provider option-group helper boundary");
+        let source = &viewer[start..end];
+        let script = format!(
+            r#"
+const codex = {{ server_id: "codex-acp", options: ["codex"] }};
+const claude = {{ server_id: "claude-acp", options: ["claude"] }};
+const mjcfg = {{
+  edits: {{}},
+  snapshot: {{
+    session_options: {{
+      primary: [codex, claude],
+      review: [codex, claude],
+      subagents: [codex, claude],
+    }},
+  }},
+}};
+function mjEditedValue(field, fallback) {{
+  return Object.hasOwn(mjcfg.edits, field) ? mjcfg.edits[field] : fallback;
+}}
+{source}
+const role = {{
+  model: "gpt-provider-model",
+  choices: [
+    {{ model: "gpt-provider-model", source: "codex-acp" }},
+    {{ model: "claude-provider-model", source: "claude-acp" }},
+    {{ model: "disabled", source: null }},
+  ],
+}};
+for (const [field, seat] of [
+  ["primary_model", "primary"],
+  ["review_model", "review"],
+  ["subagents_model", "subagents"],
+]) {{
+  mjcfg.edits = {{}};
+  if (mjSeatOptionGroup(role, field, seat, codex) !== codex) {{
+    throw new Error(`${{seat}} did not retain its saved provider options`);
+  }}
+  mjcfg.edits[field] = "claude-provider-model";
+  if (mjSeatOptionGroup(role, field, seat, codex) !== claude) {{
+    throw new Error(`${{seat}} did not switch to the staged model's provider options`);
+  }}
+  mjcfg.edits[field] = "disabled";
+  if (mjSeatOptionGroup(role, field, seat, codex) !== null) {{
+    throw new Error(`${{seat}} retained provider options while disabled`);
+  }}
+}}
+"#,
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(script)
+            .output()
+            .expect("Node.js is required to exercise the embedded web viewer");
+        assert!(
+            output.status.success(),
+            "embedded viewer provider option switching failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]

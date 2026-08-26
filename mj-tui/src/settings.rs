@@ -448,68 +448,15 @@ impl SettingsEditor {
                     .and_then(|models| models.subagent_source.as_deref()),
             ),
         };
-        if model == crate::config::DISABLED_MODEL {
-            return None;
-        }
-        if let Some(source) = configured_source
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source)
-        {
-            return Some(source.to_string());
-        }
-        if (model == "auto" || active_model == Some(model))
-            && let Some(source) = active_source
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source)
-        {
-            return Some(source.to_string());
-        }
-        if model != "auto"
-            && let Some(source) = priority.iter().find(|source| {
-                self.choices.iter().any(|choice| {
-                    choice.available
-                        && choice.model == model
-                        && choice.adapter.as_deref() == Some(source.as_str())
-                })
-            })
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source.as_str())
-        {
-            return Some(source.clone());
-        }
-        if model != "auto"
-            && let Some(source) = self
-                .choices
-                .iter()
-                .find(|choice| choice.available && choice.model == model)
-                .and_then(|choice| choice.adapter.as_deref())
-            && self
-                .inventory
-                .servers
-                .iter()
-                .any(|server| server.id == source)
-        {
-            return Some(source.to_string());
-        }
-        priority
-            .iter()
-            .find(|source| {
-                self.inventory.servers.iter().any(|server| {
-                    server.id == source.as_str()
-                        && server.policy != AcpServerPolicy::Disabled
-                        && !server.session_config.is_empty()
-                })
-            })
-            .cloned()
+        mj_core::settings::session_source_for_model(
+            model,
+            configured_source,
+            priority,
+            active_model,
+            active_source,
+            &self.choices,
+            &self.inventory,
+        )
     }
 
     pub(crate) fn session_option_rows(&self, seat: SessionDefaultsSeat) -> Vec<(usize, usize)> {
@@ -2212,6 +2159,94 @@ mod tests {
             editor.session_option_rows(SessionDefaultsSeat::Subagents),
             vec![(subagent_index, 0)]
         );
+    }
+
+    #[test]
+    fn switching_each_role_model_immediately_switches_its_session_options() {
+        let mut editor = SettingsEditor::new(
+            crate::roster::config_with_a_visible_builtin(),
+            Vec::new(),
+            None,
+        );
+        editor.inventory.servers.truncate(1);
+        ensure_two_inventory_servers(&mut editor);
+        let first_id = editor.inventory.servers[0].id.clone();
+        let second_id = editor.inventory.servers[1].id.clone();
+        editor.inventory.servers[0].session_config = vec![SessionConfigOption::select(
+            "first_option",
+            "First provider option",
+            "on",
+            vec![SessionConfigSelectOption::new("on", "On")],
+        )];
+        editor.inventory.servers[1].session_config = vec![SessionConfigOption::select(
+            "second_option",
+            "Second provider option",
+            "on",
+            vec![SessionConfigSelectOption::new("on", "On")],
+        )];
+        editor.choices = vec![
+            ModelChoice {
+                model: "model-a".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some(first_id.clone()),
+                ranked: true,
+            },
+            ModelChoice {
+                model: "model-b".to_string(),
+                pass_at_1: 0.5,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some(second_id.clone()),
+                ranked: true,
+            },
+        ];
+        editor.config.agent.model = "model-a".to_string();
+        editor.config.agent.acp_source = Some(first_id.clone());
+        editor.config.review.model = "model-a".to_string();
+        editor.config.review.acp_source = Some(first_id.clone());
+        editor.config.subagents.model = "model-a".to_string();
+        editor.config.subagents.acp_source = Some(first_id);
+
+        for (role, seat) in [
+            (0, SessionDefaultsSeat::Primary),
+            (1, SessionDefaultsSeat::Review),
+            (2, SessionDefaultsSeat::Subagents),
+        ] {
+            assert_eq!(editor.session_option_rows(seat), vec![(0, 0)]);
+            editor.cycle_model(role, 1);
+            assert_eq!(editor.session_option_rows(seat), vec![(1, 0)]);
+        }
+
+        assert_eq!(
+            editor.config.agent.acp_source.as_deref(),
+            Some(second_id.as_str())
+        );
+        assert_eq!(
+            editor.config.review.acp_source.as_deref(),
+            Some(second_id.as_str())
+        );
+        assert_eq!(
+            editor.config.subagents.acp_source.as_deref(),
+            Some(second_id.as_str())
+        );
+
+        // Team routes are runtime-only and are re-derived after a reload.
+        // An explicit model still resolves through its advertising provider,
+        // so the visible option panel must not fall back to the Team source.
+        editor.config.agent.acp_source = Some(editor.inventory.servers[0].id.clone());
+        editor.config.review.acp_source = Some(editor.inventory.servers[0].id.clone());
+        editor.config.subagents.acp_source = Some(editor.inventory.servers[0].id.clone());
+        for seat in [
+            SessionDefaultsSeat::Primary,
+            SessionDefaultsSeat::Review,
+            SessionDefaultsSeat::Subagents,
+        ] {
+            assert_eq!(editor.session_option_rows(seat), vec![(1, 0)]);
+        }
     }
 
     #[test]

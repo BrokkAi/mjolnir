@@ -4270,6 +4270,20 @@
         return row;
       }
 
+      function mjSeatOptionGroup(role, modelField, seat, fallbackGroup) {
+        const model = mjEditedValue(modelField, role.model);
+        if (model === role.model) {
+          return fallbackGroup;
+        }
+        const source = role.choices.find((choice) => choice.model === model)?.source;
+        if (!source) {
+          return null;
+        }
+        return (mjcfg.snapshot?.session_options?.[seat] || []).find(
+          (group) => group.server_id === source,
+        ) || null;
+      }
+
       // Session options for one seat's bound ACP source, staged into that
       // role's session_defaults map.
       function mjSeatOptionRows(group, editsField, seat) {
@@ -4330,20 +4344,34 @@
 
       function renderMjAgents() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[0], "primary_model"));
-        for (const row of mjSeatOptionRows(mjcfg.snapshot.primary_options, "primary_session_defaults", "primary")) {
+        const role = panel.roles[0];
+        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "primary_model"));
+        const options = mjSeatOptionGroup(
+          role,
+          "primary_model",
+          "primary",
+          mjcfg.snapshot.primary_options,
+        );
+        for (const row of mjSeatOptionRows(options, "primary_session_defaults", "primary")) {
           mjconfigBodyEl.appendChild(row);
         }
       }
 
       function renderMjReviewer() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[1], "review_model"));
-        const permissionRow = mjRolePermissionRow(panel.roles[1], "review_permission");
+        const role = panel.roles[1];
+        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "review_model"));
+        const permissionRow = mjRolePermissionRow(role, "review_permission");
         if (permissionRow) {
           mjconfigBodyEl.appendChild(permissionRow);
         }
-        for (const row of mjSeatOptionRows(mjcfg.snapshot.review_options, "review_session_defaults", "review")) {
+        const options = mjSeatOptionGroup(
+          role,
+          "review_model",
+          "review",
+          mjcfg.snapshot.review_options,
+        );
+        for (const row of mjSeatOptionRows(options, "review_session_defaults", "review")) {
           mjconfigBodyEl.appendChild(row);
         }
         const reviewRow = mjRow("Discrete review");
@@ -4404,12 +4432,19 @@
 
       function renderMjSubagents() {
         const panel = mjcfg.snapshot.agents;
-        mjconfigBodyEl.appendChild(mjRoleModelRow(panel.roles[2], "subagents_model"));
-        const permissionRow = mjRolePermissionRow(panel.roles[2], "subagents_permission");
+        const role = panel.roles[2];
+        mjconfigBodyEl.appendChild(mjRoleModelRow(role, "subagents_model"));
+        const permissionRow = mjRolePermissionRow(role, "subagents_permission");
         if (permissionRow) {
           mjconfigBodyEl.appendChild(permissionRow);
         }
-        for (const row of mjSeatOptionRows(mjcfg.snapshot.subagent_options, "subagent_session_defaults", "subagents")) {
+        const options = mjSeatOptionGroup(
+          role,
+          "subagents_model",
+          "subagents",
+          mjcfg.snapshot.subagent_options,
+        );
+        for (const row of mjSeatOptionRows(options, "subagent_session_defaults", "subagents")) {
           mjconfigBodyEl.appendChild(row);
         }
 
