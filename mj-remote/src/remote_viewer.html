@@ -4383,6 +4383,26 @@
         );
         mjconfigBodyEl.appendChild(reviewRow);
 
+        const analysisRow = mjRow("Bifrost diff analysis");
+        const analysisEnabled = mjEditedValue(
+          "bifrost_analysis",
+          panel.bifrost_analysis,
+        );
+        analysisRow.appendChild(
+          mjToggle(analysisEnabled, (next) => {
+            mjcfg.edits.bifrost_analysis = next;
+            renderMjConfig();
+          }),
+        );
+        analysisRow.appendChild(
+          mjDetail(
+            analysisEnabled
+              ? "Precompute semantic diff context before review."
+              : "Use the bounded raw Git diff; Bifrost navigation remains available.",
+          ),
+        );
+        mjconfigBodyEl.appendChild(analysisRow);
+
         const tierRow = mjRow("Review depth");
         const tier = mjEditedValue("review_tier", panel.review_tier);
         tierRow.appendChild(

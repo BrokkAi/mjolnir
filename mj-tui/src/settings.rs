@@ -51,6 +51,7 @@ enum SettingsRow {
         option_index: usize,
     },
     DiscreteReview,
+    BifrostAnalysis,
     ReviewTier,
     CorrectionThreshold,
     MaxParallelSubagents,
@@ -219,7 +220,9 @@ impl SettingsEditor {
                 }
                 SettingsRow::ReviewTier => self.cycle_review_tier(delta),
                 SettingsRow::CorrectionThreshold => self.cycle_correction_threshold(delta),
-                SettingsRow::DiscreteReview | SettingsRow::AutomaticQuotaFailover => {
+                SettingsRow::DiscreteReview
+                | SettingsRow::BifrostAnalysis
+                | SettingsRow::AutomaticQuotaFailover => {
                     return SettingsAction::None;
                 }
             }
@@ -321,6 +324,9 @@ impl SettingsEditor {
                 SettingsRow::DiscreteReview => {
                     self.config.agent.discrete_review = !self.config.agent.discrete_review;
                 }
+                SettingsRow::BifrostAnalysis => {
+                    self.config.agent.bifrost_analysis = !self.config.agent.bifrost_analysis;
+                }
                 // Two tiers, so the toggle key advances the same way the
                 // left/right keys do rather than doing nothing here.
                 SettingsRow::ReviewTier => self.cycle_review_tier(1),
@@ -389,6 +395,7 @@ impl SettingsEditor {
                         }),
                 );
                 rows.push(SettingsRow::DiscreteReview);
+                rows.push(SettingsRow::BifrostAnalysis);
                 rows.push(SettingsRow::ReviewTier);
                 rows.push(SettingsRow::CorrectionThreshold);
                 rows
@@ -1120,6 +1127,7 @@ fn draw_agents(
             | SettingsRow::SubagentModel
             | SettingsRow::SubagentPermissions
             | SettingsRow::DiscreteReview
+            | SettingsRow::BifrostAnalysis
             | SettingsRow::ReviewTier
             | SettingsRow::CorrectionThreshold
             | SettingsRow::MaxParallelSubagents
@@ -1205,6 +1213,28 @@ fn draw_reviewer(
                 ),
                 theme,
             )),
+            SettingsRow::BifrostAnalysis => {
+                lines.push(selected_line(
+                    selected,
+                    format!(
+                        "Bifrost diff analysis [{}]",
+                        on_off(editor.config.agent.bifrost_analysis)
+                    ),
+                    theme,
+                ));
+                lines.push(Line::styled(
+                    if editor.config.agent.bifrost_analysis {
+                        "  precompute semantic diff context before review"
+                    } else {
+                        "  use the bounded raw Git diff; Bifrost navigation stays available"
+                    },
+                    Style::default().ink(if editor.config.agent.discrete_review {
+                        theme.muted
+                    } else {
+                        theme.warning
+                    }),
+                ));
+            }
             SettingsRow::ReviewTier => {
                 let tier = editor.config.agent.review_tier;
                 lines.push(selected_line(
@@ -1347,6 +1377,7 @@ fn draw_subagents(
             | SettingsRow::ReviewModel
             | SettingsRow::ReviewPermissions
             | SettingsRow::DiscreteReview
+            | SettingsRow::BifrostAnalysis
             | SettingsRow::ReviewTier
             | SettingsRow::CorrectionThreshold => {}
         }
@@ -2463,7 +2494,7 @@ mod tests {
     }
 
     #[test]
-    fn review_tier_cycles_next_to_the_discrete_review_switch() {
+    fn review_controls_include_the_bifrost_analysis_toggle() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Reviewer;
         let rows = editor.settings_rows(SettingsTab::Reviewer);
@@ -2471,6 +2502,10 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::DiscreteReview)
             .expect("discrete review row");
+        let analysis = rows
+            .iter()
+            .position(|row| *row == SettingsRow::BifrostAnalysis)
+            .expect("Bifrost analysis row");
         let tier = rows
             .iter()
             .position(|row| *row == SettingsRow::ReviewTier)
@@ -2479,12 +2514,21 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::CorrectionThreshold)
             .expect("correction threshold row");
-        assert_eq!(tier, review + 1, "the tier belongs beside the switch");
+        assert_eq!(analysis, review + 1, "analysis belongs beside review");
+        assert_eq!(tier, analysis + 1, "the tier follows analysis");
         assert_eq!(
             threshold,
             tier + 1,
             "the correction policy belongs beside review depth"
         );
+
+        editor.selected = analysis;
+        assert!(editor.config.agent.bifrost_analysis);
+        assert_eq!(
+            editor.handle_key(KeyCode::Char(' ')),
+            SettingsAction::Changed
+        );
+        assert!(!editor.config.agent.bifrost_analysis);
 
         editor.selected = tier;
         assert_eq!(editor.config.agent.review_tier, ReviewTier::Quick);

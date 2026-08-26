@@ -939,6 +939,11 @@ pub struct AgentConfig {
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default = "default_true")]
     pub discrete_review: bool,
+    /// Precompute semantic diff context with Bifrost before dispatching a
+    /// review. When disabled, reviewers receive the bounded raw Git patch and
+    /// keep Bifrost's interactive navigation tools.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub bifrost_analysis: bool,
     /// How much review machinery each discrete review spends. Absent from an
     /// older config means the cheap default, so upgrading users land on
     /// `Quick` without editing anything.
@@ -969,6 +974,7 @@ impl Default for AgentConfig {
             reasoning_effort: None,
             session_defaults: BTreeMap::new(),
             discrete_review: true,
+            bifrost_analysis: true,
             review_tier: ReviewTier::default(),
             review_tier_from_team_default: false,
             correction_threshold: ReviewCorrectionThreshold::default(),
@@ -1881,6 +1887,7 @@ mod tests {
         assert_eq!(cfg.theme, TerminalThemeKind::Adaptive);
         assert_eq!(cfg.model_names(), ModelsConfig::default());
         assert!(cfg.agent.discrete_review);
+        assert!(cfg.agent.bifrost_analysis);
         assert_eq!(cfg.agent.max_correction_rounds, None);
         assert_eq!(cfg.agent.review_tier.default_correction_rounds(), 0);
         assert_eq!(cfg.subagents.model, "auto");
@@ -1926,6 +1933,34 @@ mod tests {
         assert_eq!(
             Config::load(&path).expect("reload").agent.review_tier,
             ReviewTier::Extended
+        );
+    }
+
+    #[test]
+    fn bifrost_analysis_defaults_on_and_persists_only_when_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\n[agent]\nmodel = \"auto\"\n"),
+        )
+        .expect("write old config");
+
+        let mut config = Config::load(&path).expect("load old config");
+        assert!(config.agent.bifrost_analysis);
+        config.save(&path).expect("save default");
+        let body = std::fs::read_to_string(&path).expect("read default");
+        assert!(!body.contains("bifrost_analysis"), "body: {body:?}");
+
+        config.agent.bifrost_analysis = false;
+        config.save(&path).expect("save disabled");
+        let body = std::fs::read_to_string(&path).expect("read disabled");
+        assert!(body.contains("bifrost_analysis = false"), "body: {body:?}");
+        assert!(
+            !Config::load(&path)
+                .expect("reload disabled")
+                .agent
+                .bifrost_analysis
         );
     }
 
@@ -2454,6 +2489,7 @@ kimi = "disabled"
                 reasoning_effort: None,
                 session_defaults: BTreeMap::new(),
                 discrete_review: false,
+                bifrost_analysis: false,
                 review_tier: ReviewTier::Extended,
                 review_tier_from_team_default: false,
                 correction_threshold: ReviewCorrectionThreshold::P1,
@@ -2470,6 +2506,7 @@ kimi = "disabled"
         assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert_eq!(loaded.agent.model, "gpt-5-6-sol");
         assert!(!loaded.agent.discrete_review);
+        assert!(!loaded.agent.bifrost_analysis);
         assert_eq!(loaded.agent.review_tier, ReviewTier::Extended);
         assert_eq!(
             loaded.agent.correction_threshold,

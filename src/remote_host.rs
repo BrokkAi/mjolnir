@@ -672,6 +672,7 @@ fn start_server_agent_session(
                                 agent_stderr: None,
                                 snapshot_exclusions: snapshot_exclusions.clone(),
                                 fs_max_text_bytes,
+                                bifrost_analysis: app_config.agent.bifrost_analysis,
                                 permission: app_config.review.permission,
                                 id_allocator: subagent_ids.clone(),
                             },
@@ -908,6 +909,7 @@ fn start_server_agent_session(
                                             snapshot_exclusions: command_snapshot_exclusions
                                                 .clone(),
                                             fs_max_text_bytes,
+                                            bifrost_analysis: updated_config.agent.bifrost_analysis,
                                             permission: updated_config.review.permission,
                                             id_allocator: command_live_subagent_options
                                                 .id_allocator
