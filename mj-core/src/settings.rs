@@ -238,6 +238,29 @@ pub fn session_option_is_editable(
     !(permissions_own_mode && option.id.to_string() == "mode")
 }
 
+/// Whether an ACP session option controls the model's reasoning effort.
+///
+/// Thought-level is the protocol-native category. Codex ACP currently tags
+/// its effort selector as a model option, so retain the stable config id as a
+/// compatibility fallback.
+pub fn session_option_controls_reasoning_effort(option: &SessionConfigOption) -> bool {
+    matches!(
+        option.category,
+        Some(SessionConfigOptionCategory::ThoughtLevel)
+    ) || option.id.to_string() == crate::acp::REASONING_EFFORT_CONFIG_ID
+}
+
+/// Read the effective reasoning effort reported by a live ACP session.
+pub fn session_reasoning_effort(options: &[SessionConfigOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|option| session_option_controls_reasoning_effort(option))
+        .and_then(|option| match &option.kind {
+            SessionConfigKind::Select(select) => Some(select.current_value.to_string()),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +313,33 @@ mod tests {
                 &effort
             ));
         }
+    }
+
+    #[test]
+    fn live_reasoning_effort_accepts_protocol_category_and_codex_config_id() {
+        let thought_level = SessionConfigOption::select(
+            "thinking",
+            "Thinking",
+            "high",
+            vec![SessionConfigSelectOption::new("high", "High")],
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel);
+        assert_eq!(
+            session_reasoning_effort(&[thought_level]),
+            Some("high".to_string())
+        );
+
+        let codex_effort = SessionConfigOption::select(
+            crate::acp::REASONING_EFFORT_CONFIG_ID,
+            "Reasoning effort",
+            "xhigh",
+            vec![SessionConfigSelectOption::new("xhigh", "Xhigh")],
+        )
+        .category(SessionConfigOptionCategory::Model);
+        assert_eq!(
+            session_reasoning_effort(&[codex_effort]),
+            Some("xhigh".to_string())
+        );
     }
 
     #[test]

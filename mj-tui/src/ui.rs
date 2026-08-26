@@ -1629,6 +1629,7 @@ async fn ui_loop(
     state.correction_threshold = initial.correction_threshold;
     state.set_runtime_stall_minutes(initial.runtime_stall_minutes);
     state.set_primary_acp_name(initial.primary_acp_name);
+    state.primary_route_reasoning_effort = initial.primary_reasoning_effort.clone();
     state.primary_reasoning_effort = initial.primary_reasoning_effort;
     state.transcript_export_dir = initial.transcript_export_dir;
     state.set_theme(initial.theme_kind);
@@ -6226,7 +6227,7 @@ fn primary_config_matches_active_route(state: &AppState, config: &config::Config
 
     state.active_models.primary_source.as_deref() == Some(source)
         && selected_model == Some(state.active_models.primary.as_str())
-        && state.primary_reasoning_effort == config.agent.reasoning_effort
+        && state.primary_route_reasoning_effort == config.agent.reasoning_effort
 }
 
 fn live_primary_session_config_updates(
@@ -16911,6 +16912,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn status_line_uses_the_effective_live_session_effort() {
+        let mut state = AppState::new();
+        state.active_models.primary = "gpt-5-6-sol".to_string();
+        state.primary_route_reasoning_effort = None;
+        state.apply_event(UiEvent::SessionConfigOptions {
+            options: vec![
+                SessionConfigOption::select(
+                    crate::acp::REASONING_EFFORT_CONFIG_ID,
+                    "Reasoning effort",
+                    "xhigh",
+                    vec![SessionConfigSelectOption::new("xhigh", "Xhigh")],
+                )
+                .category(SessionConfigOptionCategory::Model),
+            ],
+            targets: vec![SessionConfigTarget::ConfigOption {
+                config_id: crate::acp::REASONING_EFFORT_CONFIG_ID.into(),
+            }],
+            hidden_config_ids: Vec::new(),
+        });
+
+        let rendered = line_text(&status_line(&state, 120));
+        assert!(rendered.contains("effort: xhigh"), "{rendered}");
+        assert!(!rendered.contains("effort: default"), "{rendered}");
     }
 
     #[test]

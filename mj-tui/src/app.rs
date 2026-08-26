@@ -1468,8 +1468,11 @@ pub struct AppState {
     /// which is a *display* string; this is the stable id the model-score
     /// resolver keys on. Empty until the launch site fills it in.
     pub agent_source_id: String,
-    /// Reasoning effort resolved for the active primary session. `None`
-    /// means the ACP adapter selected its own default.
+    /// Reasoning-effort route seed used to decide whether the launched primary
+    /// still matches `/mjconfig`. Live ACP updates must not change it.
+    pub primary_route_reasoning_effort: Option<String>,
+    /// Effective reasoning effort reported by the active ACP session. `None`
+    /// means the adapter exposes no selected effort.
     pub primary_reasoning_effort: Option<String>,
     /// Score catalog for this UI run. It may be populated asynchronously after
     /// startup; render code reads through this explicit state rather than a
@@ -2332,6 +2335,7 @@ impl AppState {
             agent_label: String::new(),
             primary_acp_name: "ACP server".to_string(),
             agent_source_id: String::new(),
+            primary_route_reasoning_effort: None,
             primary_reasoning_effort: None,
             session: SessionState::new(now, {
                 let mut commands = Vec::new();
@@ -2459,6 +2463,7 @@ impl AppState {
         side.agent_label = format!("Side · {}", self.agent_label);
         side.primary_acp_name = self.primary_acp_name.clone();
         side.agent_source_id = self.agent_source_id.clone();
+        side.primary_route_reasoning_effort = self.primary_route_reasoning_effort.clone();
         side.primary_reasoning_effort = self.primary_reasoning_effort.clone();
         side.runtime_stall_threshold = self.runtime_stall_threshold;
         side.current_branch_pull_request = self.current_branch_pull_request.clone();
@@ -6067,6 +6072,8 @@ impl AppState {
             .unzip();
         self.session_config_targets = targets;
         self.session_config_options = options;
+        self.primary_reasoning_effort =
+            mj_core::settings::session_reasoning_effort(&self.session_config_options);
         self.refresh_config_picker();
 
         if let Some(mode_option) = self.session_config_options.iter().find(|option| {
@@ -8854,10 +8861,10 @@ mod tests {
     }
 
     #[test]
-    fn config_option_update_preserves_live_model_controls_without_changing_route_identity() {
+    fn config_option_update_tracks_live_effort_without_changing_route_identity() {
         let mut s = AppState::new();
         s.active_models.primary = "claude-opus-4-8".to_string();
-        s.primary_reasoning_effort = None;
+        s.primary_route_reasoning_effort = None;
         let options = vec![
             SessionConfigOption::select(
                 "mode",
@@ -8895,7 +8902,8 @@ mod tests {
         assert_eq!(s.session_config_options.len(), 3);
         assert_eq!(s.current_mode.as_deref(), Some("ask"));
         assert_eq!(s.active_models.primary, "claude-opus-4-8");
-        assert_eq!(s.primary_reasoning_effort, None);
+        assert_eq!(s.primary_route_reasoning_effort, None);
+        assert_eq!(s.primary_reasoning_effort.as_deref(), Some("high"));
         assert!(s.status_line.is_none());
     }
 
@@ -9011,7 +9019,7 @@ mod tests {
 
         assert_eq!(s.session_config_options.len(), 1);
         assert_eq!(s.current_mode.as_deref(), Some("medium"));
-        assert_eq!(s.primary_reasoning_effort, None);
+        assert_eq!(s.primary_reasoning_effort.as_deref(), Some("medium"));
     }
 
     #[test]

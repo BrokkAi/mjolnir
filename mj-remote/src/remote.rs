@@ -2003,6 +2003,7 @@ impl TrackerState {
                 targets,
                 hidden_config_ids,
             } => {
+                self.reasoning_effort = mj_core::settings::session_reasoning_effort(options);
                 self.native_mode = native_mode_record(options);
                 self.session_config = config_option_records(options, targets)
                     .into_iter()
@@ -17634,15 +17635,29 @@ for (const [field, seat] of [
             resumed: false,
         });
         tracker.observe_event(&UiEvent::SessionConfigOptions {
-            options: vec![SessionConfigOption::select(
-                "model",
-                "Model",
-                "gpt-5",
-                vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
-            )],
-            targets: vec![SessionConfigTarget::ConfigOption {
-                config_id: SessionConfigId::from("model".to_string()),
-            }],
+            options: vec![
+                SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    "gpt-5",
+                    vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
+                ),
+                SessionConfigOption::select(
+                    acp::REASONING_EFFORT_CONFIG_ID,
+                    "Reasoning effort",
+                    "xhigh",
+                    vec![SessionConfigSelectOption::new("xhigh", "Xhigh")],
+                )
+                .category(SessionConfigOptionCategory::Model),
+            ],
+            targets: vec![
+                SessionConfigTarget::ConfigOption {
+                    config_id: SessionConfigId::from("model".to_string()),
+                },
+                SessionConfigTarget::ConfigOption {
+                    config_id: SessionConfigId::from(acp::REASONING_EFFORT_CONFIG_ID),
+                },
+            ],
             hidden_config_ids: Vec::new(),
         });
 
@@ -17654,6 +17669,13 @@ for (const [field, seat] of [
             .expect("snapshot");
         assert_eq!(snapshot.session_config.len(), 1);
         assert_eq!(snapshot.session_config[0].current_value, "gpt-5");
+        assert_eq!(
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.reasoning_effort.as_deref()),
+            Some("xhigh")
+        );
 
         // Starting a fresh session drops the previous session's config so a
         // viewer never shows options the new agent did not advertise.

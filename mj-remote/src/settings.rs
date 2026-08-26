@@ -8,7 +8,9 @@ use agent_client_protocol::schema::v1::{
 use mj_core::config::{AcpServerPolicy, Config, ModelsConfig};
 use mj_core::roster::{AcpInventory, ModelChoice};
 use mj_core::settings::session_option_is_editable;
-pub use mj_core::settings::{SessionDefaultsSeat, is_configurable_acp_server};
+pub use mj_core::settings::{
+    SessionDefaultsSeat, is_configurable_acp_server, session_option_controls_reasoning_effort,
+};
 
 #[derive(Debug, Clone)]
 pub struct MjConfigCatalog {
@@ -348,11 +350,4 @@ pub fn session_option_current_value(option: &SessionConfigOption) -> String {
         SessionConfigKind::Select(select) => select.current_value.to_string(),
         _ => String::new(),
     }
-}
-
-pub fn session_option_controls_reasoning_effort(option: &SessionConfigOption) -> bool {
-    matches!(
-        option.category,
-        Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::ThoughtLevel)
-    ) || option.id.to_string() == mj_core::acp::REASONING_EFFORT_CONFIG_ID
 }

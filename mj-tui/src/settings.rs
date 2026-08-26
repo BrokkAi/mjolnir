@@ -21,7 +21,10 @@ use crate::palette::TerminalThemeKindExt;
 use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
 use crate::theme::TerminalThemeKind;
-pub(crate) use mj_core::settings::{SessionDefaultsSeat, SettingsTab, session_option_is_editable};
+pub(crate) use mj_core::settings::{
+    SessionDefaultsSeat, SettingsTab, session_option_controls_reasoning_effort,
+    session_option_is_editable,
+};
 
 const ACCOUNT_COUNT: usize = crate::auth::AuthVendor::ALL.len();
 pub(crate) const SETTINGS_PANEL_MIN_WIDTH: u16 = 28;
@@ -1008,13 +1011,6 @@ pub(crate) fn session_option_current_value(option: &SessionConfigOption) -> Stri
         SessionConfigKind::Select(select) => select.current_value.to_string(),
         _ => String::new(),
     }
-}
-
-pub(crate) fn session_option_controls_reasoning_effort(option: &SessionConfigOption) -> bool {
-    matches!(
-        option.category,
-        Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::ThoughtLevel)
-    ) || option.id.to_string() == crate::acp::REASONING_EFFORT_CONFIG_ID
 }
 
 fn draw_tabs(
