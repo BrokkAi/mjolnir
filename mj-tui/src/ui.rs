@@ -1676,6 +1676,7 @@ async fn ui_loop(
     let mut force_inline_repair = false;
     let mut force_soft_inline_repair = false;
     let mut restore_inline_after_reader = false;
+    let mut shutdown_deadline: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -1952,12 +1953,10 @@ async fn ui_loop(
                         }
                     }
                     None => {
-                        let was_shutting_down =
-                            state.connection_state() == ConnectionState::ShuttingDown;
                         state.mark_runtime_closed();
                         // Complete the shutdown the user already initiated, or
                         // auto-exit for process-level PTY tests.
-                        if was_shutting_down
+                        if shutdown_deadline.is_some()
                             || std::env::var_os("MJ_E2E_EXIT_ON_RUNTIME_CLOSE").is_some()
                         {
                             state.exit_reason = Some(UiExitReason::Quit);
@@ -2091,21 +2090,26 @@ async fn ui_loop(
             )?;
         }
 
+        if shutdown_deadline.is_some_and(|d| Instant::now() >= d) {
+            state.exit_reason = Some(UiExitReason::Quit);
+        }
+
         if let Some(reason) = state.exit_reason {
             // In fullscreen mode, a Quit while the runtime is still alive
             // enters ShuttingDown instead of returning immediately. The
             // spinner keeps animating while main.rs tears down the ACP
-            // runtime; the event channel closing (mark_runtime_closed)
-            // will set exit_reason = Quit again and we return then.
+            // runtime; the deadline expires after 3s (covering the 2s ACP
+            // abort timeout in main.rs).
             if reason == UiExitReason::Quit
                 && mode == UiMode::FullscreenTui
+                && shutdown_deadline.is_none()
                 && !state.runtime_closed
-                && state.connection_state() != ConnectionState::ShuttingDown
             {
                 state.set_connection_state(ConnectionState::ShuttingDown);
                 state.record_status_message(StatusKind::Info, "shutting down\u{2026}");
                 let _ = cmd_tx.send(UiCommand::Shutdown);
                 cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
+                shutdown_deadline = Some(Instant::now() + Duration::from_secs(3));
                 state.exit_reason = None;
                 pending_redraw.mark_interactive();
                 continue;

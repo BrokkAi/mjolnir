@@ -3514,13 +3514,10 @@ impl AppState {
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
         self.clear_queued_prompts();
-        // Preserve Fatal and ShuttingDown: a fatal event always supersedes
-        // a clean close, and ShuttingDown means the user already quit and
-        // the UI is waiting for teardown to finish.
-        if !matches!(
-            self.connection_state,
-            ConnectionState::Fatal | ConnectionState::ShuttingDown
-        ) {
+        // Preserve Fatal: a fatal event always supersedes a clean close,
+        // since the channel-drop that triggers this method follows the
+        // Fatal event by design.
+        if self.connection_state != ConnectionState::Fatal {
             self.set_connection_state(ConnectionState::Closed);
         }
 
@@ -8938,15 +8935,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_close_preserves_shutting_down_state() {
+    fn runtime_close_transitions_shutting_down_to_closed() {
         let mut s = AppState::new();
         s.set_connection_state(ConnectionState::ShuttingDown);
-        s.record_status_message(StatusKind::Info, "shutting down\u{2026}");
 
         s.mark_runtime_closed();
 
         assert!(s.runtime_closed);
-        assert_eq!(s.connection_state, ConnectionState::ShuttingDown);
+        assert_eq!(s.connection_state, ConnectionState::Closed);
     }
 
     #[test]
