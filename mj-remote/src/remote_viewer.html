@@ -4427,6 +4427,8 @@
         bifrostRow.appendChild(mjDetail(
           mjcfg.snapshot.bifrost_versions_probing
             ? "Loading recent versions…"
+            : panel.bifrost_versions_error
+            ? `Couldn't load recent versions: ${panel.bifrost_versions_error}`
             : bifrostVersion === "latest"
             ? "Tracks npm's latest tag."
             : "Pins every Bifrost CLI and MCP launch to this version.",

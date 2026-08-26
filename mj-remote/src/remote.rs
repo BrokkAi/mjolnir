@@ -4876,6 +4876,7 @@ struct MjConfigDiscovery {
     bifrost_versions: Vec<String>,
     bifrost_versions_probing: bool,
     bifrost_versions_attempted: bool,
+    bifrost_versions_error: Option<String>,
 }
 
 impl MjConfigRuntime {
@@ -4898,6 +4899,7 @@ impl MjConfigRuntime {
                 bifrost_versions: Vec::new(),
                 bifrost_versions_probing: false,
                 bifrost_versions_attempted: false,
+                bifrost_versions_error: None,
             }),
             login: Mutex::new(None),
             credential_detector: mj_core::auth::detect,
@@ -4993,8 +4995,17 @@ impl MjConfigRuntime {
         let mut discovery = self.discovery.lock().expect("mjconfig discovery lock");
         discovery.bifrost_versions_probing = false;
         match result {
-            Ok(versions) => discovery.bifrost_versions = versions,
-            Err(error) => warn!("discover recent Bifrost versions: {error:#}"),
+            Ok(versions) => {
+                discovery.bifrost_versions = versions;
+                discovery.bifrost_versions_error = None;
+            }
+            Err(error) => {
+                warn!("discover recent Bifrost versions: {error:#}");
+                // A failure is not terminal: the next snapshot fetch retries,
+                // and the panel shows why the list is short in the meantime.
+                discovery.bifrost_versions_attempted = false;
+                discovery.bifrost_versions_error = Some(format!("{error:#}"));
+            }
         }
         discovery.revision = discovery.revision.wrapping_add(1);
     }
@@ -5130,6 +5141,7 @@ struct MjAgentsPanel {
     correction_thresholds: Vec<MjCorrectionThresholdEntry>,
     bifrost_version: String,
     bifrost_versions: Vec<String>,
+    bifrost_versions_error: Option<String>,
     max_parallel: usize,
     max_parallel_limit: usize,
     auto_failover: bool,
@@ -5357,16 +5369,17 @@ fn mjconfig_load(state: &ServerState) -> config::Config {
     config
 }
 
-fn mjconfig_catalog(
-    state: &ServerState,
-    config: config::Config,
-) -> (
-    crate::settings::MjConfigCatalog,
-    bool,
-    bool,
-    u64,
-    Vec<String>,
-) {
+/// The catalog plus the discovery-derived state a snapshot reports beside it.
+struct MjConfigCatalogState {
+    catalog: crate::settings::MjConfigCatalog,
+    probing: bool,
+    bifrost_versions_probing: bool,
+    discovery_revision: u64,
+    bifrost_versions: Vec<String>,
+    bifrost_versions_error: Option<String>,
+}
+
+fn mjconfig_catalog(state: &ServerState, config: config::Config) -> MjConfigCatalogState {
     let discovery = state
         .mjconfig
         .discovery
@@ -5382,18 +5395,20 @@ fn mjconfig_catalog(
     let bifrost_versions_probing = discovery.bifrost_versions_probing;
     let discovery_revision = discovery.revision;
     let bifrost_versions = discovery.bifrost_versions.clone();
+    let bifrost_versions_error = discovery.bifrost_versions_error.clone();
     let active_models = discovery.active_models.clone();
     drop(discovery);
     if let Some(models) = active_models {
         catalog = catalog.with_active_models(models);
     }
-    (
+    MjConfigCatalogState {
         catalog,
         probing,
         bifrost_versions_probing,
         discovery_revision,
         bifrost_versions,
-    )
+        bifrost_versions_error,
+    }
 }
 
 /// Mirror of the TUI's server-row status line in `settings::draw_servers`.
@@ -5494,8 +5509,14 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     refresh_mjconfig_discovery_if_needed(state);
     refresh_mjconfig_bifrost_versions_if_needed(state);
     let config = mjconfig_load(state);
-    let (catalog, probing, bifrost_versions_probing, discovery_revision, bifrost_versions) =
-        mjconfig_catalog(state, config);
+    let MjConfigCatalogState {
+        catalog,
+        probing,
+        bifrost_versions_probing,
+        discovery_revision,
+        bifrost_versions,
+        bifrost_versions_error,
+    } = mjconfig_catalog(state, config);
     let config = &catalog.config;
     let inventory = catalog.inventory();
 
@@ -5790,15 +5811,15 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                     description: threshold.description().to_string(),
                 })
                 .collect(),
-            bifrost_version: config
-                .review
-                .bifrost_version
-                .clone()
-                .unwrap_or_else(|| mj_core::bifrost::DEFAULT_VERSION.to_string()),
+            bifrost_version: mj_core::bifrost::selection_label(
+                config.review.bifrost_version.as_deref(),
+            )
+            .to_string(),
             bifrost_versions: mj_core::bifrost::version_choices(
                 config.review.bifrost_version.as_deref(),
                 &bifrost_versions,
             ),
+            bifrost_versions_error,
             max_parallel: config.subagents.max_parallel,
             max_parallel_limit: 16,
             auto_failover: config.subagents.auto_failover,
@@ -5902,7 +5923,7 @@ fn mjconfig_setup_message(
 
 fn current_mjconfig_setup(state: &ServerState) -> Option<MjSetupPanel> {
     let config = mjconfig_load(state);
-    let (catalog, _, _, _, _) = mjconfig_catalog(state, config);
+    let catalog = mjconfig_catalog(state, config).catalog;
     let config = &catalog.config;
     let missing_authentication = missing_setup_authentication(&state.mjconfig, config);
     mjconfig_setup_panel(
@@ -6008,13 +6029,8 @@ fn mjconfig_apply_edits(
         })?;
     }
     if let Some(version) = request.bifrost_version {
-        if version == mj_core::bifrost::DEFAULT_VERSION {
-            config.review.bifrost_version = None;
-        } else if !mj_core::bifrost::is_valid_explicit_version(&version) {
-            return Err(bad_request(format!("invalid Bifrost version: {version}")));
-        } else {
-            config.review.bifrost_version = Some(version);
-        }
+        config.review.bifrost_version =
+            mj_core::bifrost::parse_selection(&version).map_err(bad_request)?;
     }
     if let Some(max_parallel) = request.max_parallel {
         if max_parallel > 16 {
@@ -11353,6 +11369,31 @@ mod tests {
             saved.review.session_defaults[&server_id]["config:thinking"],
             "high"
         );
+    }
+
+    #[test]
+    fn bifrost_version_discovery_retries_after_a_failure() {
+        // Not the shared helper: it pre-seeds versions with attempted=true.
+        let runtime = MjConfigRuntime::new(
+            std::env::temp_dir().join("bifrost-retry-config.toml"),
+            Vec::new(),
+            None,
+            roster::AcpInventory::default(),
+        );
+        assert!(runtime.begin_bifrost_version_discovery());
+        runtime.finish_bifrost_version_discovery(Err(anyhow::anyhow!("offline")));
+        {
+            let discovery = runtime.discovery.lock().expect("discovery lock");
+            assert_eq!(discovery.bifrost_versions_error.as_deref(), Some("offline"));
+        }
+        // One failed attempt is not terminal: the next snapshot retries, and
+        // a success clears the surfaced error.
+        assert!(runtime.begin_bifrost_version_discovery());
+        runtime.finish_bifrost_version_discovery(Ok(vec!["0.9.10".to_string()]));
+        assert!(!runtime.begin_bifrost_version_discovery());
+        let discovery = runtime.discovery.lock().expect("discovery lock");
+        assert_eq!(discovery.bifrost_versions, ["0.9.10"]);
+        assert_eq!(discovery.bifrost_versions_error, None);
     }
 
     #[tokio::test]

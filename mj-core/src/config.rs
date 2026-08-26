@@ -1514,14 +1514,17 @@ impl Config {
             self.subagents.max_parallel <= 16,
             "subagents.max_parallel must be between 0 and 16"
         );
-        if self.review.bifrost_version.as_deref() == Some(crate::bifrost::DEFAULT_VERSION) {
-            self.review.bifrost_version = None;
-        }
-        if let Some(version) = self.review.bifrost_version.as_deref() {
-            anyhow::ensure!(
-                crate::bifrost::is_valid_explicit_version(version),
-                "review.bifrost_version must be a semantic version"
-            );
+        // A pin this build cannot parse falls back to `latest` the way an
+        // unmappable team id falls back above: the field is hand-editable
+        // and a newer build may accept formats this one does not, so it must
+        // never cost the rest of the config.
+        if let Some(version) = self.review.bifrost_version.take() {
+            match crate::bifrost::parse_selection(&version) {
+                Ok(selection) => self.review.bifrost_version = selection,
+                Err(error) => {
+                    tracing::warn!("ignoring review.bifrost_version and tracking latest: {error}");
+                }
+            }
         }
 
         Ok(())
@@ -2436,17 +2439,24 @@ kimi = "disabled"
     }
 
     #[test]
-    fn invalid_bifrost_version_is_rejected() {
+    fn invalid_bifrost_version_falls_back_to_latest_without_failing_the_load() {
+        // The pin is hand-editable and a newer build may accept formats this
+        // one does not; a load failure here would abort startup on the CLI
+        // paths and stage a default config on the unwrap_or_default paths,
+        // where the next save wipes the user's real settings.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            format!("version = {CONFIG_VERSION}\n[review]\nbifrost_version = \"next\"\n"),
+            format!(
+                "version = {CONFIG_VERSION}\nteam = \"codex\"\n[review]\nbifrost_version = \"next\"\n"
+            ),
         )
         .expect("write config");
 
-        let error = Config::load(&path).expect_err("invalid pin must fail");
-        assert!(error.to_string().contains("semantic version"), "{error:#}");
+        let config = Config::load(&path).expect("invalid pin must not fail the load");
+        assert_eq!(config.review.bifrost_version, None);
+        assert_eq!(config.team.as_deref(), Some("codex"));
     }
 
     #[test]

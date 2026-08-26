@@ -16,16 +16,24 @@ const REGISTRY_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Deserialize)]
 struct RegistryPackage {
-    versions: HashMap<String, serde_json::Value>,
+    // Only the version keys matter; skip each version's manifest.
+    versions: HashMap<String, serde::de::IgnoredAny>,
 }
 
 /// Fetch the newest stable Bifrost versions advertised by npm.
 pub async fn fetch_recent_versions() -> Result<Vec<String>> {
     let body = reqwest::Client::builder()
+        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
         .timeout(REGISTRY_TIMEOUT)
         .build()
         .context("build npm registry client")?
         .get(REGISTRY_URL)
+        // The abbreviated document still carries the version keys at a
+        // fraction of the full packument's size.
+        .header(
+            reqwest::header::ACCEPT,
+            "application/vnd.npm.install-v1+json",
+        )
         .send()
         .await
         .context("query npm for Bifrost versions")?
@@ -82,6 +90,23 @@ pub fn is_valid_explicit_version(version: &str) -> bool {
     Version::parse(version).is_ok()
 }
 
+/// One authority for the `"latest"` ⇄ `None` sentinel and pin validation, so
+/// the config loader, the HTTP apply, and the TUI cycle cannot drift.
+pub fn parse_selection(version: &str) -> std::result::Result<Option<String>, String> {
+    if version == DEFAULT_VERSION {
+        return Ok(None);
+    }
+    if is_valid_explicit_version(version) {
+        return Ok(Some(version.to_string()));
+    }
+    Err(format!("invalid Bifrost version: {version}"))
+}
+
+/// The display form of a stored selection: the pin itself, or `latest`.
+pub fn selection_label(selection: Option<&str>) -> &str {
+    selection.unwrap_or(DEFAULT_VERSION)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +148,17 @@ mod tests {
     fn package_spec_leaves_latest_unpinned() {
         assert_eq!(package_spec(None), NPX_PACKAGE);
         assert_eq!(package_spec(Some("0.9.10")), "@brokkai/bifrost@0.9.10");
+    }
+
+    #[test]
+    fn selection_round_trips_the_latest_sentinel() {
+        assert_eq!(parse_selection("latest"), Ok(None));
+        assert_eq!(parse_selection("0.9.10"), Ok(Some("0.9.10".to_string())));
+        assert_eq!(
+            parse_selection("next"),
+            Err("invalid Bifrost version: next".to_string())
+        );
+        assert_eq!(selection_label(None), "latest");
+        assert_eq!(selection_label(Some("0.9.10")), "0.9.10");
     }
 }
