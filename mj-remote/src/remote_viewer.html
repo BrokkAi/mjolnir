@@ -3392,7 +3392,7 @@
             <div id="command-palette" class="command-palette" role="listbox" aria-label="Slash commands" hidden></div>
             <div class="console-strip">
               <div id="session-config" class="config-strip"></div>
-              <button id="attach-image" class="attach-button" type="button" hidden>Image</button>
+              <button id="attach-image" class="attach-button" type="button" aria-label="Attach one or more images" hidden>Images</button>
               <input id="image-picker" type="file" accept="image/*" multiple hidden>
               <span id="queue-status" class="queue-meta">Select a session.</span>
               <button id="exit-side" class="stop-turn" type="button" hidden>Exit side</button>
@@ -3682,7 +3682,7 @@
       // dies with the session) server-side.
       const CONFIG_APPLY_TIMEOUT_MS = 60000;
       const STOP_REQUEST_TIMEOUT_MS = 15000;
-      const MAX_QUEUE_REQUEST_BYTES = 8 * 1024 * 1024;
+      const MAX_QUEUE_REQUEST_BYTES = 32 * 1024 * 1024;
       /* How long a session launch may take before the viewer calls it failed.
          Generous on purpose: a host already running other agents can take a
          long time to spawn one, and declaring failure early is how a launch
@@ -8184,7 +8184,7 @@
           throw new Error(`${file.name || "That file"} is not an image`);
         }
         if (file.size >= MAX_QUEUE_REQUEST_BYTES) {
-          throw new Error(`${file.name || "That image"} is too large for the 8 MiB request limit`);
+          throw new Error(`${file.name || "That image"} is too large for the 32 MiB request limit`);
         }
         const [dataUrl, dimensions] = await Promise.all([
           readFileAsDataUrl(file),
@@ -9414,7 +9414,7 @@
           images,
         });
         if (new TextEncoder().encode(body).byteLength > MAX_QUEUE_REQUEST_BYTES) {
-          setQueueStatus("Prompt attachments exceed the 8 MiB request limit.", true);
+          setQueueStatus("Prompt attachments exceed the 32 MiB request limit.", true);
           return;
         }
         queueSubmitInFlight = true;

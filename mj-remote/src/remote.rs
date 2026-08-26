@@ -162,6 +162,10 @@ const VIEWER_CODE_LOCKOUT: Duration = Duration::from_secs(30);
 /// A `SessionRecord` can include the full transcript history; allow room for
 /// larger snapshots while still capping request bodies to something reasonable.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Image prompts need more room than ordinary remote-control requests. Browser
+/// uploads are base64-encoded, so two images can exceed the general 8 MiB limit
+/// even when each image fits it. Keep the larger bound scoped to the prompt route.
+const MAX_QUEUE_PROMPT_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// Keep structured diff payloads well below the remote-control request limit.
 /// The textual tool summary still carries every touched path when full file
 /// contents are too large to safely publish.
@@ -6305,7 +6309,9 @@ fn build_router_with_cookie_name(config: RouterConfig, cookie_name: &'static str
         )
         .route(
             "/api/queued-prompts",
-            get(list_queued_prompts).post(queue_prompt),
+            get(list_queued_prompts)
+                .post(queue_prompt)
+                .layer(DefaultBodyLimit::max(MAX_QUEUE_PROMPT_BODY_BYTES)),
         )
         .route(
             "/api/queued-prompts/{prompt_id}",
@@ -11822,12 +11828,14 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
     #[test]
     fn embedded_viewer_contains_gated_image_prompt_controls() {
         let viewer = include_str!("remote_viewer.html");
-        assert!(viewer.contains("id=\"image-picker\""));
+        assert!(viewer.contains("id=\"image-picker\" type=\"file\" accept=\"image/*\" multiple"));
+        assert!(viewer.contains("aria-label=\"Attach one or more images\""));
         assert!(viewer.contains("prompt_images_supported"));
         assert!(viewer.contains("function attachImageFiles"));
+        assert!(viewer.contains("current.concat(added)"));
         assert!(viewer.contains("queueInputEl.addEventListener(\"paste\""));
         assert!(viewer.contains("images,"));
-        assert!(viewer.contains("MAX_QUEUE_REQUEST_BYTES"));
+        assert!(viewer.contains("const MAX_QUEUE_REQUEST_BYTES = 32 * 1024 * 1024;"));
     }
 
     #[test]
@@ -15500,11 +15508,17 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
             session_manager: test_session_manager(),
             mjconfig: test_mjconfig_runtime(),
         });
-        let image = PromptImage {
+        let first_image = PromptImage {
             data_base64: "aW1hZ2U=".to_string(),
             mime_type: "image/png".to_string(),
             width: 32,
             height: 24,
+        };
+        let second_image = PromptImage {
+            data_base64: "c2Vjb25kLWltYWdl".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            width: 48,
+            height: 36,
         };
         let request = |session_id: &str| {
             axum::http::Request::builder()
@@ -15516,7 +15530,7 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
                     serde_json::to_vec(&QueuePromptRequest {
                         session_id: session_id.to_string(),
                         text: String::new(),
-                        images: vec![image.clone()],
+                        images: vec![first_image.clone(), second_image.clone()],
                     })
                     .expect("request json"),
                 ))
@@ -15537,7 +15551,62 @@ if (mjExtractUrl("Visit https://example.com/device).") !== "https://example.com/
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         let queued = load_queued_prompts(&db_path, "sess-supported").expect("load queue");
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].images, vec![image]);
+        assert_eq!(queued[0].images, vec![first_image, second_image]);
+    }
+
+    #[tokio::test]
+    async fn queued_prompt_endpoint_accepts_multiple_images_over_general_body_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        let now = now_rfc3339();
+        let mut session = session_named("sess-supported", &now);
+        session.prompt_images_supported = true;
+        upsert_session_record(&db_path, &session).expect("supported session");
+
+        let token = "integration-token".to_string();
+        let app = build_router(RouterConfig {
+            db_path: db_path.clone(),
+            token: token.clone(),
+            viewer_code: "123456".to_string(),
+            cookie_key: "test-cookie-key".to_string(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            workspace_roots: test_workspace_roots(dir.path()),
+            session_manager: test_session_manager(),
+            mjconfig: test_mjconfig_runtime(),
+        });
+        let data_base64 =
+            base64::engine::general_purpose::STANDARD.encode(vec![0_u8; MAX_BODY_BYTES / 2]);
+        let image = PromptImage {
+            data_base64,
+            mime_type: "image/png".to_string(),
+            width: 1920,
+            height: 1080,
+        };
+        let body = serde_json::to_vec(&QueuePromptRequest {
+            session_id: "sess-supported".to_string(),
+            text: String::new(),
+            images: vec![image.clone(), image],
+        })
+        .expect("request json");
+        assert!(body.len() > MAX_BODY_BYTES);
+        assert!(body.len() < MAX_QUEUE_PROMPT_BODY_BYTES);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/queued-prompts")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("queue multi-image prompt");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let queued = load_queued_prompts(&db_path, "sess-supported").expect("load queue");
+        assert_eq!(queued[0].images.len(), 2);
     }
 
     #[test]
