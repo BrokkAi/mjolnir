@@ -60,8 +60,9 @@ use mj_core::{
     roster::ResolvedAgent,
 };
 
-/// Wall-clock budget for Bifrost's one-shot semantic diff analysis.
-const ANALYZE_DIFF_TIMEOUT: Duration = Duration::from_secs(300);
+/// Wall-clock budget for Bifrost's one-shot semantic diff analysis. Large
+/// changesets can require several minutes before review fan-out can begin.
+const ANALYZE_DIFF_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Tool steps a lane may spend before it must report what it verified. Keeps
 /// a lane from burning its whole timeout on exploration.
@@ -2840,6 +2841,11 @@ mod tests {
             end_line: 20,
             change_reason: "body_changed".to_string(),
         }
+    }
+
+    #[test]
+    fn analyze_diff_budget_allows_large_changesets_ten_minutes() {
+        assert_eq!(ANALYZE_DIFF_TIMEOUT, Duration::from_secs(10 * 60));
     }
 
     #[test]
