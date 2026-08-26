@@ -1187,6 +1187,8 @@ pub enum ConnectionState {
     Cancelling,
     /// A `session/fork` request is in flight.
     Forking,
+    /// User-initiated quit in progress; the runtime is tearing down.
+    ShuttingDown,
     /// Runtime shut down cleanly (UI quit or agent EOF).
     Closed,
     /// Runtime ended with a fatal error.
@@ -3512,10 +3514,13 @@ impl AppState {
         self.config_picker = None;
         self.autocomplete = Autocomplete::default();
         self.clear_queued_prompts();
-        // Preserve Fatal: a fatal event always supersedes a clean close,
-        // since the channel-drop that triggers this method follows the
-        // Fatal event by design.
-        if self.connection_state != ConnectionState::Fatal {
+        // Preserve Fatal and ShuttingDown: a fatal event always supersedes
+        // a clean close, and ShuttingDown means the user already quit and
+        // the UI is waiting for teardown to finish.
+        if !matches!(
+            self.connection_state,
+            ConnectionState::Fatal | ConnectionState::ShuttingDown
+        ) {
             self.set_connection_state(ConnectionState::Closed);
         }
 
@@ -8930,6 +8935,18 @@ mod tests {
         let status = s.status_line.expect("status");
         assert_eq!(status.kind, StatusKind::Fatal);
         assert_eq!(status.text, "boom");
+    }
+
+    #[test]
+    fn runtime_close_preserves_shutting_down_state() {
+        let mut s = AppState::new();
+        s.set_connection_state(ConnectionState::ShuttingDown);
+        s.record_status_message(StatusKind::Info, "shutting down\u{2026}");
+
+        s.mark_runtime_closed();
+
+        assert!(s.runtime_closed);
+        assert_eq!(s.connection_state, ConnectionState::ShuttingDown);
     }
 
     #[test]

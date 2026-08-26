@@ -1952,11 +1952,14 @@ async fn ui_loop(
                         }
                     }
                     None => {
+                        let was_shutting_down =
+                            state.connection_state() == ConnectionState::ShuttingDown;
                         state.mark_runtime_closed();
-                        // Process-level PTY tests use a scripted agent that exits
-                        // after its assertions. Let the normal UI shutdown path
-                        // run without requiring a second synthetic keystroke.
-                        if std::env::var_os("MJ_E2E_EXIT_ON_RUNTIME_CLOSE").is_some() {
+                        // Complete the shutdown the user already initiated, or
+                        // auto-exit for process-level PTY tests.
+                        if was_shutting_down
+                            || std::env::var_os("MJ_E2E_EXIT_ON_RUNTIME_CLOSE").is_some()
+                        {
                             state.exit_reason = Some(UiExitReason::Quit);
                         }
                         pending_redraw.mark_interactive();
@@ -2089,6 +2092,25 @@ async fn ui_loop(
         }
 
         if let Some(reason) = state.exit_reason {
+            // In fullscreen mode, a Quit while the runtime is still alive
+            // enters ShuttingDown instead of returning immediately. The
+            // spinner keeps animating while main.rs tears down the ACP
+            // runtime; the event channel closing (mark_runtime_closed)
+            // will set exit_reason = Quit again and we return then.
+            if reason == UiExitReason::Quit
+                && mode == UiMode::FullscreenTui
+                && !state.runtime_closed
+                && state.connection_state() != ConnectionState::ShuttingDown
+            {
+                state.set_connection_state(ConnectionState::ShuttingDown);
+                state.record_status_message(StatusKind::Info, "shutting down\u{2026}");
+                let _ = cmd_tx.send(UiCommand::Shutdown);
+                cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
+                state.exit_reason = None;
+                pending_redraw.mark_interactive();
+                continue;
+            }
+
             if reason != UiExitReason::LoadSession {
                 let _ = cmd_tx.send(UiCommand::Shutdown);
             }
@@ -2429,6 +2451,7 @@ fn should_show_spinner(state: &AppState) -> bool {
             | ConnectionState::Streaming
             | ConnectionState::Cancelling
             | ConnectionState::Forking
+            | ConnectionState::ShuttingDown
     )
 }
 
@@ -9391,9 +9414,9 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
 
 fn turn_elapsed_value_label(state: &AppState) -> Option<String> {
     match state.connection_state() {
-        ConnectionState::Launching | ConnectionState::Initializing => {
-            Some(format_duration(state.connection_state_elapsed()))
-        }
+        ConnectionState::Launching
+        | ConnectionState::Initializing
+        | ConnectionState::ShuttingDown => Some(format_duration(state.connection_state_elapsed())),
         ConnectionState::Ready => state.last_turn_elapsed().map(format_duration),
         ConnectionState::Streaming | ConnectionState::Cancelling | ConnectionState::Forking => {
             state.active_turn_elapsed().map(format_duration)
@@ -13107,7 +13130,8 @@ fn busy_prompt_title(state: &AppState) -> Option<Line<'static>> {
         | ConnectionState::Initializing
         | ConnectionState::Ready
         | ConnectionState::Closed
-        | ConnectionState::Fatal => return None,
+        | ConnectionState::Fatal
+        | ConnectionState::ShuttingDown => return None,
     };
 
     Some(prompt_title_line(state, format!(" ({hint}) ")))
