@@ -1,4 +1,4 @@
-//! Startup self-update for `mj` and its bundled sidecar binaries.
+//! Install-aware startup update checks for `mj` and its bundled sidecars.
 
 use std::ffi::OsString;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
@@ -13,16 +13,84 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
+const NPM_LATEST_URL: &str = "https://registry.npmjs.org/@brokkai%2Fmjolnir/latest";
+const HOMEBREW_FORMULA_URL: &str =
+    "https://raw.githubusercontent.com/BrokkAi/homebrew-tap/main/Formula/mjolnir.rb";
+const CARGO_INDEX_URL: &str = "https://index.crates.io/br/ok/brokk-mjolnir";
 const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
 const VOICE_WORKER_NAME: &str = "mj-voice-worker";
 const WINDOWS_VOICE_WORKER_NAME: &str = "mj-voice-worker.exe";
+const NPM_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPM";
+const NPX_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPX";
+const HOMEBREW_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_HOMEBREW";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupUpdateResult {
     Skipped,
     UpToDate,
+    Notified,
     Declined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstallMethod {
+    Npm,
+    Npx,
+    Homebrew,
+    Cargo { voice_worker: bool },
+    Direct,
+}
+
+impl InstallMethod {
+    fn current() -> Self {
+        if std::env::var_os(NPX_MANAGED_ENV).is_some() {
+            return Self::Npx;
+        }
+        if std::env::var_os(NPM_MANAGED_ENV).is_some() {
+            return Self::Npm;
+        }
+        if std::env::var_os(HOMEBREW_MANAGED_ENV).is_some() {
+            return Self::Homebrew;
+        }
+
+        std::env::current_exe().ok().map_or(Self::Direct, |exe| {
+            install_method_from_exe(&exe, env!("CARGO_PKG_VERSION"))
+        })
+    }
+
+    fn update_command(&self) -> Option<String> {
+        match self {
+            Self::Npm => Some("npm install -g @brokkai/mjolnir@latest".to_string()),
+            Self::Npx => Some("npx -y @brokkai/mjolnir@latest".to_string()),
+            Self::Homebrew => Some("brew upgrade mjolnir".to_string()),
+            Self::Cargo { voice_worker: true } => {
+                Some("cargo install --locked brokk-mjolnir brokk-mj-voice-worker".to_string())
+            }
+            Self::Cargo {
+                voice_worker: false,
+            } => Some("cargo install --locked brokk-mjolnir".to_string()),
+            Self::Direct => None,
+        }
+    }
+
+    fn channel_name(&self) -> &'static str {
+        match self {
+            Self::Npm | Self::Npx => "npm",
+            Self::Homebrew => "Homebrew",
+            Self::Cargo { .. } => "crates.io",
+            Self::Direct => "GitHub Releases",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AvailableUpdate {
+    Managed {
+        version: Version,
+        method: InstallMethod,
+    },
+    Direct(UpdateInfo),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +114,18 @@ struct ReleaseAsset {
     browser_download_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct NpmLatest {
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoIndexEntry {
+    vers: String,
+    #[serde(default)]
+    yanked: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Platform {
     os_family: &'static str,
@@ -58,8 +138,14 @@ pub async fn check_prompt_and_restart_if_accepted() -> Result<StartupUpdateResul
         return Ok(StartupUpdateResult::Skipped);
     }
 
-    let Some(update) = latest_update().await? else {
+    let method = InstallMethod::current();
+    let Some(update) = latest_update(&method).await? else {
         return Ok(StartupUpdateResult::UpToDate);
+    };
+
+    let AvailableUpdate::Direct(update) = update else {
+        notify_managed_update(&update);
+        return Ok(StartupUpdateResult::Notified);
     };
 
     if !prompt_for_update(&update)? {
@@ -76,32 +162,120 @@ pub async fn check_prompt_and_restart_if_accepted() -> Result<StartupUpdateResul
     }
 }
 
-async fn latest_update() -> Result<Option<UpdateInfo>> {
+async fn latest_update(method: &InstallMethod) -> Result<Option<AvailableUpdate>> {
     let current = parse_version(env!("CARGO_PKG_VERSION"))
         .with_context(|| format!("parse current version {}", env!("CARGO_PKG_VERSION")))?;
-    let release = fetch_latest_release()
-        .await
-        .context("fetch latest mj release")?;
-    update_info_from_release(&release, &current, &current_platform()?)
+    if *method == InstallMethod::Direct {
+        let release = fetch_latest_release()
+            .await
+            .context("fetch latest mj release")?;
+        return update_info_from_release(&release, &current, &current_platform()?)
+            .map(|update| update.map(AvailableUpdate::Direct));
+    }
+
+    let latest = fetch_latest_managed_version(method).await?;
+    Ok((latest > current).then(|| AvailableUpdate::Managed {
+        version: latest,
+        method: method.clone(),
+    }))
 }
 
 async fn fetch_latest_release() -> Result<GitHubRelease> {
+    let body = fetch_text(LATEST_RELEASE_URL).await?;
+    serde_json::from_str(&body).context("parse release body")
+}
+
+async fn fetch_latest_managed_version(method: &InstallMethod) -> Result<Version> {
+    match method {
+        InstallMethod::Npm | InstallMethod::Npx => {
+            let body = fetch_text(NPM_LATEST_URL)
+                .await
+                .context("fetch latest npm package")?;
+            let latest: NpmLatest = serde_json::from_str(&body).context("parse npm metadata")?;
+            parse_version(&latest.version).context("parse latest npm version")
+        }
+        InstallMethod::Homebrew => {
+            let body = fetch_text(HOMEBREW_FORMULA_URL)
+                .await
+                .context("fetch Homebrew formula")?;
+            parse_homebrew_formula_version(&body)
+        }
+        InstallMethod::Cargo { .. } => {
+            let body = fetch_text(CARGO_INDEX_URL)
+                .await
+                .context("fetch crates.io index entry")?;
+            parse_cargo_index_version(&body)
+        }
+        InstallMethod::Direct => anyhow::bail!("direct installs use GitHub release metadata"),
+    }
+}
+
+async fn fetch_text(url: &str) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build http client")?;
     let resp = client
-        .get(LATEST_RELEASE_URL)
+        .get(url)
         .send()
         .await
-        .with_context(|| format!("GET {LATEST_RELEASE_URL}"))?;
+        .with_context(|| format!("GET {url}"))?;
     let status = resp.status();
     if !status.is_success() {
-        anyhow::bail!("GET {LATEST_RELEASE_URL}: HTTP {status}");
+        anyhow::bail!("GET {url}: HTTP {status}");
     }
-    let body = resp.text().await.context("read release body")?;
-    serde_json::from_str(&body).context("parse release body")
+    resp.text().await.with_context(|| format!("read {url}"))
+}
+
+fn parse_homebrew_formula_version(formula: &str) -> Result<Version> {
+    let raw = formula
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("version \"")?.strip_suffix('"'))
+        .ok_or_else(|| anyhow::anyhow!("Homebrew formula has no version"))?;
+    parse_version(raw).context("parse Homebrew formula version")
+}
+
+fn parse_cargo_index_version(index: &str) -> Result<Version> {
+    let mut latest: Option<Version> = None;
+    for line in index.lines().filter(|line| !line.trim().is_empty()) {
+        let entry: CargoIndexEntry =
+            serde_json::from_str(line).context("parse crates.io index entry")?;
+        if entry.yanked {
+            continue;
+        }
+        let version = parse_version(&entry.vers).context("parse crates.io package version")?;
+        if latest.as_ref().is_none_or(|current| version > *current) {
+            latest = Some(version);
+        }
+    }
+    latest.ok_or_else(|| anyhow::anyhow!("crates.io index has no published versions"))
+}
+
+fn notify_managed_update(update: &AvailableUpdate) {
+    let AvailableUpdate::Managed { version, method } = update else {
+        return;
+    };
+    println!(
+        "{}",
+        managed_update_notice(version, method, env!("CARGO_PKG_VERSION"))
+            .expect("managed installs have an update command")
+    );
+}
+
+fn managed_update_notice(
+    version: &Version,
+    method: &InstallMethod,
+    current_version: &str,
+) -> Option<String> {
+    Some(format!(
+        "mj {} is available through {}; current version is {}. Run: {}",
+        version,
+        method.channel_name(),
+        current_version,
+        method.update_command()?
+    ))
 }
 
 fn update_info_from_release(
@@ -518,6 +692,124 @@ fn restart_current_process(current_exe: &Path) -> Result<()> {
     }
 }
 
+fn install_method_from_exe(exe_path: &Path, current_version: &str) -> InstallMethod {
+    if is_homebrew_executable(exe_path) {
+        return InstallMethod::Homebrew;
+    }
+
+    let Some(install_root) = cargo_install_root(exe_path, current_version) else {
+        return InstallMethod::Direct;
+    };
+    InstallMethod::Cargo {
+        voice_worker: cargo_install_recorded(
+            &install_root,
+            "brokk-mj-voice-worker",
+            None,
+            VOICE_WORKER_NAME,
+        ),
+    }
+}
+
+fn is_homebrew_executable(exe_path: &Path) -> bool {
+    let components = exe_path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(2)
+        .any(|pair| pair == ["Cellar", "mjolnir"])
+}
+
+fn cargo_install_root(exe_path: &Path, current_version: &str) -> Option<PathBuf> {
+    let canonical_exe = exe_path.canonicalize().ok()?;
+    let bin_dir = canonical_exe.parent()?;
+    if bin_dir.file_name()? != "bin" {
+        return None;
+    }
+    let install_root = bin_dir.parent()?;
+    cargo_install_recorded(
+        install_root,
+        "brokk-mjolnir",
+        Some(current_version),
+        BIN_NAME,
+    )
+    .then(|| install_root.to_path_buf())
+}
+
+fn cargo_install_recorded(
+    install_root: &Path,
+    package: &str,
+    version: Option<&str>,
+    binary: &str,
+) -> bool {
+    cargo_json_install_recorded(install_root, package, version, binary)
+        || cargo_toml_install_recorded(install_root, package, version, binary)
+}
+
+fn cargo_json_install_recorded(
+    install_root: &Path,
+    package: &str,
+    version: Option<&str>,
+    binary: &str,
+) -> bool {
+    let Ok(raw) = std::fs::read_to_string(install_root.join(".crates2.json")) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    manifest
+        .get("installs")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|installs| {
+            installs.iter().any(|(source, record)| {
+                cargo_source_matches(source, package, version)
+                    && record
+                        .get("bins")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|bins| bins.iter().any(|name| name.as_str() == Some(binary)))
+            })
+        })
+}
+
+fn cargo_toml_install_recorded(
+    install_root: &Path,
+    package: &str,
+    version: Option<&str>,
+    binary: &str,
+) -> bool {
+    let Ok(raw) = std::fs::read_to_string(install_root.join(".crates.toml")) else {
+        return false;
+    };
+    let Ok(manifest) = raw.parse::<toml::Value>() else {
+        return false;
+    };
+    manifest
+        .get("v1")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|installs| {
+            installs.iter().any(|(source, bins)| {
+                cargo_source_matches(source, package, version)
+                    && bins
+                        .as_array()
+                        .is_some_and(|bins| bins.iter().any(|name| name.as_str() == Some(binary)))
+            })
+        })
+}
+
+fn cargo_source_matches(source: &str, package: &str, version: Option<&str>) -> bool {
+    let Some(rest) = source
+        .strip_prefix(package)
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        return false;
+    };
+    let Some(recorded_version) = rest.split_whitespace().next() else {
+        return false;
+    };
+    version.is_none_or(|expected| recorded_version == expected)
+}
+
 fn select_mj_asset(assets: &[ReleaseAsset], platform: &Platform) -> Result<ReleaseAsset> {
     let target_suffix = format!(
         "-{}{}",
@@ -660,6 +952,140 @@ mod tests {
             .expect("start file");
         writer.write_all(content).expect("zip write");
         writer.finish().expect("finish").into_inner()
+    }
+
+    #[test]
+    fn managed_install_methods_provide_their_own_update_commands() {
+        assert_eq!(
+            InstallMethod::Npm.update_command().as_deref(),
+            Some("npm install -g @brokkai/mjolnir@latest")
+        );
+        assert_eq!(
+            InstallMethod::Npx.update_command().as_deref(),
+            Some("npx -y @brokkai/mjolnir@latest")
+        );
+        assert_eq!(
+            InstallMethod::Homebrew.update_command().as_deref(),
+            Some("brew upgrade mjolnir")
+        );
+        assert_eq!(
+            InstallMethod::Cargo { voice_worker: true }
+                .update_command()
+                .as_deref(),
+            Some("cargo install --locked brokk-mjolnir brokk-mj-voice-worker")
+        );
+        assert_eq!(InstallMethod::Direct.update_command(), None);
+    }
+
+    #[test]
+    fn managed_update_notice_names_channel_version_and_command() {
+        assert_eq!(
+            managed_update_notice(
+                &Version::parse("1.15.0").expect("version"),
+                &InstallMethod::Homebrew,
+                "1.14.1"
+            )
+            .as_deref(),
+            Some(
+                "mj 1.15.0 is available through Homebrew; current version is 1.14.1. Run: brew upgrade mjolnir"
+            )
+        );
+    }
+
+    #[test]
+    fn parses_homebrew_formula_version() {
+        let formula = r#"
+class Mjolnir < Formula
+  version "1.15.2"
+end
+"#;
+        assert_eq!(
+            parse_homebrew_formula_version(formula).expect("version"),
+            Version::parse("1.15.2").expect("semver")
+        );
+    }
+
+    #[test]
+    fn cargo_index_uses_latest_non_yanked_version() {
+        let index = concat!(
+            r#"{"vers":"1.14.0","yanked":false}"#,
+            "\n",
+            r#"{"vers":"1.15.0","yanked":true}"#,
+            "\n",
+            r#"{"vers":"1.14.2","yanked":false}"#,
+            "\n",
+        );
+        assert_eq!(
+            parse_cargo_index_version(index).expect("version"),
+            Version::parse("1.14.2").expect("semver")
+        );
+    }
+
+    #[test]
+    fn detects_homebrew_cellar_on_macos_and_linux() {
+        assert_eq!(
+            install_method_from_exe(
+                Path::new("/opt/homebrew/Cellar/mjolnir/1.14.1/libexec/mj"),
+                "1.14.1"
+            ),
+            InstallMethod::Homebrew
+        );
+        assert_eq!(
+            install_method_from_exe(
+                Path::new("/home/linuxbrew/.linuxbrew/Cellar/mjolnir/1.14.1/libexec/mj"),
+                "1.14.1"
+            ),
+            InstallMethod::Homebrew
+        );
+    }
+
+    #[test]
+    fn detects_cargo_install_and_installed_voice_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bin_dir = root.path().join("bin");
+        std::fs::create_dir(&bin_dir).expect("bin dir");
+        let executable = bin_dir.join(if cfg!(windows) {
+            WINDOWS_BIN_NAME
+        } else {
+            BIN_NAME
+        });
+        std::fs::write(&executable, b"mj").expect("executable");
+        std::fs::write(
+            root.path().join(".crates.toml"),
+            r#"[v1]
+"brokk-mjolnir 1.14.1 (registry+https://github.com/rust-lang/crates.io-index)" = ["mj"]
+"brokk-mj-voice-worker 1.14.1 (registry+https://github.com/rust-lang/crates.io-index)" = ["mj-voice-worker"]
+"#,
+        )
+        .expect("manifest");
+
+        assert_eq!(
+            install_method_from_exe(&executable, "1.14.1"),
+            InstallMethod::Cargo { voice_worker: true }
+        );
+    }
+
+    #[test]
+    fn cargo_metadata_must_match_the_running_version() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bin_dir = root.path().join("bin");
+        std::fs::create_dir(&bin_dir).expect("bin dir");
+        let executable = bin_dir.join(if cfg!(windows) {
+            WINDOWS_BIN_NAME
+        } else {
+            BIN_NAME
+        });
+        std::fs::write(&executable, b"mj").expect("executable");
+        std::fs::write(
+            root.path().join(".crates2.json"),
+            r#"{"installs":{"brokk-mjolnir 1.14.0 (registry+https://github.com/rust-lang/crates.io-index)":{"bins":["mj"]}}}"#,
+        )
+        .expect("manifest");
+
+        assert_eq!(
+            install_method_from_exe(&executable, "1.14.1"),
+            InstallMethod::Direct
+        );
     }
 
     #[test]

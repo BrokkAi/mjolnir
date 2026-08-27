@@ -30,9 +30,10 @@ a worktree does not delete remote or provider session records.
 
 | Service | Why it is contacted |
 | --- | --- |
-| GitHub | Release installation and update checks |
+| GitHub | Release installation, direct-install update checks, and Homebrew tap version checks |
 | DeepSWE/DataCurve | Model ranking refresh |
-| npm registry | `npx`-launched ACP bridges and Bifrost discrete-review tooling |
+| npm registry | npm/npx Mjolnir update checks, `npx`-launched ACP bridges, and Bifrost discrete-review tooling |
+| crates.io sparse index | Cargo-install update checks |
 | Node.js / Astral | First-use installation of managed Node.js or uv runners |
 | Model providers | Active primary, subagent, and review sessions |
 | Voice model hosts | First-use speech model download |

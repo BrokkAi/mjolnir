@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import {
+  installMethodEnvironment,
   isMainModule,
   nativeBinaryPath,
   launch,
@@ -52,7 +53,7 @@ test("names the platform-native executable", () => {
   assert.equal(nativeBinaryPath("C:\\bundle", "win32"), "C:\\bundle/bin/mj.exe");
 });
 
-test("launches the native bundle with its siblings on PATH and updates disabled", () => {
+test("launches the native bundle with its siblings on PATH and npm ownership marked", () => {
   const child = new EventEmitter();
   child.kill = () => true;
   let invocation;
@@ -63,8 +64,18 @@ test("launches the native bundle with its siblings on PATH and updates disabled"
   assert.equal(invocation.binary, "/tmp/bundle/bin/mj");
   assert.deepEqual(invocation.args, ["--version"]);
   assert.equal(invocation.options.stdio, "inherit");
-  assert.equal(invocation.options.env.MJOLNIR_NO_UPDATE_CHECK, "true");
+  assert.equal(invocation.options.env.MJOLNIR_MANAGED_BY_NPM, "true");
+  assert.equal(invocation.options.env.MJOLNIR_MANAGED_BY_NPX, undefined);
   assert.ok(invocation.options.env.PATH.startsWith(`/tmp/bundle/bin${process.platform === "win32" ? ";" : ":"}`));
+});
+
+test("distinguishes one-shot npx runs from npm installs", () => {
+  assert.deepEqual(installMethodEnvironment({}), {
+    MJOLNIR_MANAGED_BY_NPM: "true",
+  });
+  assert.deepEqual(installMethodEnvironment({ npm_command: "exec" }), {
+    MJOLNIR_MANAGED_BY_NPX: "true",
+  });
 });
 
 test("returns the conventional exit status when the native process is signalled", () => {
