@@ -849,9 +849,12 @@ struct FeatureHint {
     requirement: FeatureHintRequirement,
 }
 
+// Feature hints are for capabilities that are not already advertised by the
+// persistent TUI or web composer chrome. Keep the TUI shortcut guard below in
+// sync with the prompt chrome when it changes.
 const FEATURE_HINTS: &[FeatureHint] = &[
     FeatureHint {
-        text: "Pick Codex, Claude, or a mixed coder/reviewer team before the first turn with Shift+Tab or the Team tab in /mjconfig.",
+        text: "Pick Codex, Claude, or a mixed coder/reviewer team before the first turn from the Team tab in /mjconfig.",
         requirement: FeatureHintRequirement::TeamChoice,
     },
     FeatureHint {
@@ -859,7 +862,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Press Ctrl+J for a new line, Up/Down for prompt history, F10 for help, and Ctrl+Y to copy the latest reply.",
+        text: "Use Up/Down for prompt history and Ctrl+Y to copy the latest reply.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -963,7 +966,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Isolate your changes — Start with mj --worktree to give the session its own linked Git worktree, keeping agent changes out of your main checkout.",
+        text: "Start with mj --worktree to isolate agent changes in the session's own linked Git worktree instead of your main checkout.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -11936,6 +11939,57 @@ mod tests {
                 "expected exactly one product hint containing {needle:?}"
             );
             assert_eq!(matches[0].requirement, requirement);
+        }
+    }
+
+    #[test]
+    fn feature_hints_avoid_persistent_prompt_shortcuts() {
+        fn words(text: &str) -> Vec<String> {
+            text.split(|character: char| !character.is_ascii_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect()
+        }
+
+        fn contains_words(haystack: &[String], needle: &[&str]) -> bool {
+            haystack.windows(needle.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(needle)
+                    .all(|(actual, expected)| actual == expected)
+            })
+        }
+
+        let persistent_shortcuts: &[(&str, &[&str])] = &[
+            ("Enter", &["enter"]),
+            ("Ctrl-J", &["ctrl", "j"]),
+            ("Shift-Enter", &["shift", "enter"]),
+            ("Alt-Enter", &["alt", "enter"]),
+            ("Shift-Tab", &["shift", "tab"]),
+            ("Ctrl-R", &["ctrl", "r"]),
+            ("F10", &["f10"]),
+            ("Ctrl-C", &["ctrl", "c"]),
+            ("Esc", &["esc"]),
+            ("F12", &["f12"]),
+        ];
+
+        for (label, shortcut) in persistent_shortcuts {
+            let prose_example = words(&format!("Press {label} for this feature"));
+            assert!(
+                contains_words(&prose_example, shortcut),
+                "guard must recognize prose containing {label:?}"
+            );
+        }
+
+        for hint in FEATURE_HINTS {
+            let hint_words = words(hint.text);
+            for (label, shortcut) in persistent_shortcuts {
+                assert!(
+                    !contains_words(&hint_words, shortcut),
+                    "feature hint {:?} repeats persistent shortcut {label:?}",
+                    hint.text
+                );
+            }
         }
     }
 
