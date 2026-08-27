@@ -149,6 +149,7 @@ mod tests {
     /// Real `npm cache npx ls` output, trimmed: the two bundled adapters as mj
     /// launches them, other tools' pinned specs for the same packages, a
     /// multi-package entry, and the two states that name no spec.
+    #[cfg(unix)]
     const LS_OUTPUT: &str = "\
 0e146165406b1119: @agentclientprotocol/claude-agent-acp@0.44.0
 0e9501d4069152f5: @hey-api/openapi-ts@0.99.0, typescript@6.0.3
