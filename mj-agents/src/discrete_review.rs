@@ -2989,13 +2989,16 @@ mod tests {
         .expect("write fake Bifrost wrapper");
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
             .expect("make fake Bifrost wrapper executable");
-        let bifrost = BifrostCommand::from_prepared(PreparedAgentCommand {
-            command: executable,
-            env: HashMap::from([(
-                "MJ_BIFROST_CHILD_PID".to_string(),
-                child_pid.to_string_lossy().into_owned(),
-            )]),
-        });
+        let bifrost = BifrostCommand::from_prepared(
+            PreparedAgentCommand {
+                command: executable,
+                env: HashMap::from([(
+                    "MJ_BIFROST_CHILD_PID".to_string(),
+                    child_pid.to_string_lossy().into_owned(),
+                )]),
+            },
+            None,
+        );
         (bifrost, child_pid)
     }
 
