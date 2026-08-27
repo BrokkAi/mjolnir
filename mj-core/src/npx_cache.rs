@@ -27,7 +27,7 @@ pub async fn run_retrying_once_after_clearing<A, F, N>(
     npx_command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
-    mut attempt: A,
+    attempt: A,
     notify: N,
 ) -> anyhow::Result<ExitStatus>
 where
@@ -35,9 +35,33 @@ where
     F: Future<Output = anyhow::Result<ExitStatus>>,
     N: FnOnce(),
 {
-    let status = attempt().await?;
-    if status.success() || !remove_entry(npx_command, args, env).await {
-        return Ok(status);
+    retry_once_after_clearing(
+        attempt,
+        ExitStatus::success,
+        || remove_entry(npx_command, args, env),
+        notify,
+    )
+    .await
+}
+
+/// The retry policy, over any outcome and any way of clearing.
+async fn retry_once_after_clearing<T, A, F, S, C, G, N>(
+    mut attempt: A,
+    succeeded: S,
+    clear: C,
+    notify: N,
+) -> anyhow::Result<T>
+where
+    A: FnMut() -> F,
+    F: Future<Output = anyhow::Result<T>>,
+    S: Fn(&T) -> bool,
+    C: FnOnce() -> G,
+    G: Future<Output = bool>,
+    N: FnOnce(),
+{
+    let outcome = attempt().await?;
+    if succeeded(&outcome) || !clear().await {
+        return Ok(outcome);
     }
     notify();
     attempt().await
@@ -205,6 +229,81 @@ d820eb7d96bc2600: @agentclientprotocol/claude-agent-acp
             "@agentclientprotocol/claude-agent-acp".to_string(),
         ];
         assert_eq!(matching_key(unreadable, &args), None);
+    }
+
+    /// An attempt that fails the first time and succeeds the second, counting
+    /// its runs. `true` stands for a successful launch.
+    fn counted_attempt(
+        runs: &std::cell::Cell<usize>,
+    ) -> impl FnMut() -> std::future::Ready<anyhow::Result<bool>> + '_ {
+        move || {
+            runs.set(runs.get() + 1);
+            std::future::ready(Ok(runs.get() > 1))
+        }
+    }
+
+    #[tokio::test]
+    async fn clearing_an_entry_buys_exactly_one_more_attempt() {
+        let runs = std::cell::Cell::new(0);
+        let notified = std::cell::Cell::new(0);
+
+        let succeeded = retry_once_after_clearing(
+            counted_attempt(&runs),
+            |ok: &bool| *ok,
+            || std::future::ready(true),
+            || notified.set(notified.get() + 1),
+        )
+        .await
+        .expect("attempt");
+
+        assert!(succeeded, "the retry's outcome is the one returned");
+        assert_eq!(runs.get(), 2, "one retry, not a loop");
+        assert_eq!(notified.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_when_there_was_nothing_to_clear() {
+        let runs = std::cell::Cell::new(0);
+        let notified = std::cell::Cell::new(0);
+
+        let succeeded = retry_once_after_clearing(
+            counted_attempt(&runs),
+            |ok: &bool| *ok,
+            || std::future::ready(false),
+            || notified.set(notified.get() + 1),
+        )
+        .await
+        .expect("attempt");
+
+        assert!(!succeeded, "the first failure is reported as it is");
+        assert_eq!(runs.get(), 1);
+        assert_eq!(notified.get(), 0);
+    }
+
+    /// A successful launch must not touch the cache at all.
+    #[tokio::test]
+    async fn does_not_clear_when_the_first_attempt_succeeds() {
+        let runs = std::cell::Cell::new(0);
+        let cleared = std::cell::Cell::new(false);
+
+        let succeeded = retry_once_after_clearing(
+            || {
+                runs.set(runs.get() + 1);
+                std::future::ready(Ok(true))
+            },
+            |ok: &bool| *ok,
+            || {
+                cleared.set(true);
+                std::future::ready(true)
+            },
+            || panic!("must not notify on success"),
+        )
+        .await
+        .expect("attempt");
+
+        assert!(succeeded);
+        assert_eq!(runs.get(), 1);
+        assert!(!cleared.get(), "the npx cache is left alone");
     }
 
     /// Records every npm invocation and answers `ls` with [`LISTING`].
