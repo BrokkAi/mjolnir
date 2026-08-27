@@ -71,7 +71,6 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
     append_login_args(&mut invocation, args);
     let _interrupt_guard = crate::termination::suppress_interrupts();
     let status = mj_core::npx_cache::run_retrying_once_after_clearing(
-        &invocation.command,
         &invocation.args,
         &invocation.env,
         || run_login_command(vendor, &invocation),

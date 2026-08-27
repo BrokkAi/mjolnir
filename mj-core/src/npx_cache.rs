@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -24,7 +24,6 @@ const NPM_TIMEOUT: Duration = Duration::from_secs(30);
 /// called before that second run. A second failure, or a failure with nothing
 /// to clear, is returned as it is.
 pub async fn run_retrying_once_after_clearing<A, F, N>(
-    npx_command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
     attempt: A,
@@ -38,7 +37,7 @@ where
     retry_once_after_clearing(
         attempt,
         ExitStatus::success,
-        || remove_entry(npx_command, args, env),
+        || remove_entry(args, env),
         notify,
     )
     .await
@@ -69,12 +68,8 @@ where
 
 /// Clear the npx cache entry this command runs from, so the next run
 /// reinstalls it. Returns whether an entry was removed.
-pub async fn remove_entry(
-    npx_command: &Path,
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> bool {
-    let Some(npm) = sibling_npm(npx_command) else {
+pub async fn remove_entry(args: &[String], env: &HashMap<String, String>) -> bool {
+    let Some(npm) = crate::acp::find_npm() else {
         return false;
     };
     remove_matching_entry(args, |npm_args| npm_output(&npm, npm_args, env)).await
@@ -150,18 +145,6 @@ async fn npm_output(
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// The `npm` shipped alongside an `npx`.
-fn sibling_npm(npx_command: &Path) -> Option<PathBuf> {
-    let npm_name = match npx_command.file_name()?.to_str()? {
-        "npx" => "npm",
-        "npx.cmd" => "npm.cmd",
-        "npx.exe" => "npm.exe",
-        _ => return None,
-    };
-    let npm = npx_command.parent()?.join(npm_name);
-    npm.is_file().then_some(npm)
 }
 
 #[cfg(test)]
@@ -361,16 +344,5 @@ d820eb7d96bc2600: @agentclientprotocol/claude-agent-acp
 
         assert!(!remove_matching_entry(&args, recording_npm(&calls, true)).await);
         assert_eq!(*calls.lock().expect("calls"), ["cache npx ls"]);
-    }
-
-    #[test]
-    fn finds_npm_only_beside_a_real_npx() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bin = temp.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("create bin");
-        assert_eq!(sibling_npm(&bin.join("npx")), None, "no npm on disk");
-        std::fs::write(bin.join("npm"), "").expect("write npm");
-        assert_eq!(sibling_npm(&bin.join("npx")), Some(bin.join("npm")));
-        assert_eq!(sibling_npm(&bin.join("node")), None, "not an npx");
     }
 }

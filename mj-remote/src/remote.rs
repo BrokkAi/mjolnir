@@ -6504,7 +6504,6 @@ async fn mjconfig_run_login(
     // Attempts share the pasted-code receiver so it survives a retry.
     let input = input.map(|receiver| Arc::new(tokio::sync::Mutex::new(receiver)));
     let status = mj_core::npx_cache::run_retrying_once_after_clearing(
-        &invocation.command,
         &invocation.args,
         &invocation.env,
         || mjconfig_login_attempt(vendor, &invocation, &output, input.clone()),
