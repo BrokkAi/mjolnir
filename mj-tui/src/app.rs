@@ -11852,6 +11852,22 @@ mod tests {
 
     #[test]
     fn less_visible_feature_hints_avoid_persistent_shortcut_copy() {
+        fn words(text: &str) -> Vec<String> {
+            text.split(|character: char| !character.is_ascii_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect()
+        }
+
+        fn contains_words(haystack: &[String], needle: &[&str]) -> bool {
+            haystack.windows(needle.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(needle)
+                    .all(|(actual, expected)| actual == expected)
+            })
+        }
+
         let expected = [
             "Type @ followed by a path",
             "/memory add <fact>",
@@ -11862,17 +11878,23 @@ mod tests {
             "mj models refresh",
             "Keep awake under Appearance",
         ];
-        let persistent_shortcut_copy = [
-            "Enter send",
-            "Shift/Alt+Enter",
-            "Shift-Tab team",
-            "Ctrl-R voice",
-            "F10 help",
-            "Ctrl-C quit",
-            "F12 select text",
-            "Enter queue next",
-            "Ctrl-C/Esc cancel current",
+        let persistent_shortcuts: &[(&str, &[&str])] = &[
+            ("Enter", &["enter"]),
+            ("Shift+Tab", &["shift", "tab"]),
+            ("Alt+Enter", &["alt", "enter"]),
+            ("Ctrl+R", &["ctrl", "r"]),
+            ("F10", &["f10"]),
+            ("Ctrl+C", &["ctrl", "c"]),
+            ("Esc", &["esc"]),
+            ("F12", &["f12"]),
         ];
+
+        let known_duplicate = words("Press Ctrl+R to dictate a prompt");
+        assert!(
+            persistent_shortcuts
+                .iter()
+                .any(|(_, shortcut)| contains_words(&known_duplicate, shortcut))
+        );
 
         for needle in expected {
             let matches: Vec<_> = FEATURE_HINTS
@@ -11885,10 +11907,11 @@ mod tests {
                 "expected exactly one less-visible hint containing {needle:?}"
             );
             assert_eq!(matches[0].requirement, FeatureHintRequirement::Always);
-            for visible in persistent_shortcut_copy {
+            let hint_words = words(matches[0].text);
+            for (label, shortcut) in persistent_shortcuts {
                 assert!(
-                    !matches[0].text.contains(visible),
-                    "hint containing {needle:?} repeats persistent shortcut copy {visible:?}"
+                    !contains_words(&hint_words, shortcut),
+                    "hint containing {needle:?} repeats persistent shortcut {label:?}"
                 );
             }
         }
