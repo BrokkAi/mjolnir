@@ -848,6 +848,9 @@ struct FeatureHint {
     requirement: FeatureHintRequirement,
 }
 
+// Feature hints are for capabilities that need discovery after the persistent
+// prompt and web composer chrome has done its job. Do not add another copy of
+// the shortcuts that those surfaces already keep in front of the user.
 const FEATURE_HINTS: &[FeatureHint] = &[
     FeatureHint {
         text: "Press Shift+Tab to switch coding teams, or open /mjconfig for models and session options.",
@@ -951,6 +954,38 @@ const FEATURE_HINTS: &[FeatureHint] = &[
     },
     FeatureHint {
         text: "The prompt honors readline keys: Ctrl+A/E jump to line start/end and Ctrl+K/U/W delete.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Type @ followed by a path to attach a workspace file as an ACP resource link, giving the agent the exact file reference.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use /memory add <fact> to save project knowledge for future sessions; add --global to use it across projects.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use /export full to include retained nested-agent transcripts with the primary transcript.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Start mj with --worktree to isolate changes in a linked Git worktree; Mjolnir prints a complete mj resume command when the session ends.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use mj --print for one non-interactive prompt, with --output-format json or stream-json for machine-readable output.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Repeat --additional-directory to grant Mjolnir-hosted tools access to another explicit workspace root.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Run mj models refresh to probe enabled adapters and report the models currently available to Mjolnir.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Keep awake under Appearance controls whether Mjolnir prevents system sleep while the server runs or a turn is in flight.",
         requirement: FeatureHintRequirement::Always,
     },
 ];
@@ -11813,6 +11848,50 @@ mod tests {
             spinner.text, ansi.text,
             "spinner and ANSI tips must remain separate"
         );
+    }
+
+    #[test]
+    fn less_visible_feature_hints_avoid_persistent_shortcut_copy() {
+        let expected = [
+            "Type @ followed by a path",
+            "/memory add <fact>",
+            "/export full",
+            "--worktree",
+            "mj --print",
+            "--additional-directory",
+            "mj models refresh",
+            "Keep awake under Appearance",
+        ];
+        let persistent_shortcut_copy = [
+            "Enter send",
+            "Shift/Alt+Enter",
+            "Shift-Tab team",
+            "Ctrl-R voice",
+            "F10 help",
+            "Ctrl-C quit",
+            "F12 select text",
+            "Enter queue next",
+            "Ctrl-C/Esc cancel current",
+        ];
+
+        for needle in expected {
+            let matches: Vec<_> = FEATURE_HINTS
+                .iter()
+                .filter(|hint| hint.text.contains(needle))
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "expected exactly one less-visible hint containing {needle:?}"
+            );
+            assert_eq!(matches[0].requirement, FeatureHintRequirement::Always);
+            for visible in persistent_shortcut_copy {
+                assert!(
+                    !matches[0].text.contains(visible),
+                    "hint containing {needle:?} repeats persistent shortcut copy {visible:?}"
+                );
+            }
+        }
     }
 
     #[test]
