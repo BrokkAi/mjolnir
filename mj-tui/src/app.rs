@@ -878,7 +878,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Mjolnir can queue another prompt while an agent is working; Ctrl+C cancels the active turn first.",
+        text: "Mjolnir can queue another prompt while an agent is working; Ctrl+C clears draft text before steering or stopping the active turn.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
@@ -11397,7 +11397,8 @@ mod tests {
         assert_eq!(s.connection_state, ConnectionState::Ready);
         assert!(!s.is_busy(), "Ready after fork must not count as busy");
 
-        // Streaming: input stays editable, popover remains available, Ctrl-C cancels.
+        // Streaming: input stays editable, popover remains available, and
+        // Ctrl-C clears composer text before cancelling.
         s.input.clear();
         s.record_user_prompt("hi".to_string());
         assert_eq!(s.connection_state, ConnectionState::Streaming);
