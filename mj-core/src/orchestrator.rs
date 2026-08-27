@@ -473,6 +473,10 @@ struct CleanReviewCheckpoint {
     target_tree: String,
 }
 
+struct CheckpointVerdictPending {
+    prompt: String,
+}
+
 struct CorrectionReviewBase {
     fingerprint: String,
     snapshot: Option<ReviewSnapshot>,
@@ -521,7 +525,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         let mut manual_review_in_flight: Option<ManualReviewInFlight> = None;
         let mut checkpoint_review_in_flight: Option<CheckpointReviewInFlight> = None;
         let mut clean_review_checkpoint: Option<CleanReviewCheckpoint> = None;
-        let mut checkpoint_prompt_queued = false;
+        let mut checkpoint_verdict_pending: Option<CheckpointVerdictPending> = None;
         let mut checkpoint_attempt = 0_u32;
         let mut checkpoint_epoch = None;
         let mut correction_review_base: Option<CorrectionReviewBase> = None;
@@ -708,7 +712,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             )
                             .await;
                             clean_review_checkpoint = None;
-                            checkpoint_prompt_queued = false;
+                            checkpoint_verdict_pending = None;
                             checkpoint_attempt = 0;
                             checkpoint_epoch = None;
                         }
@@ -717,21 +721,56 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         review_pass = 0;
                         correction_rounds = 0;
                     }
-                    // The primary runtime is idle while a review job is in
-                    // flight. A CancelPrompt can race the orchestrator-side
-                    // review cancellation and make that idle runtime emit a
-                    // PromptDone first. The automatic review already owns the
-                    // real primary completion, and a manual review has no
-                    // primary completion to publish, so this event is not a
-                    // second completed turn.
-                    if matches!(&event, UiEvent::PromptDone { .. }) && checkpoint_prompt_queued {
-                        // The verdict prompt was queued behind the still-active
-                        // primary. This completion belongs to that original
-                        // prompt; the queued continuation owns the real one.
-                        checkpoint_prompt_queued = false;
-                        continue;
+                    // A checkpoint verdict must never be queued behind an
+                    // active prompt: ACP would run that deferred prompt even
+                    // after cancellation. Inject a pending verdict only after
+                    // a normal completion, and discard it on cancellation or
+                    // failure. Likewise, a terminal primary event cancels an
+                    // in-flight checkpoint before it reaches the normal turn
+                    // cleanup below.
+                    if let UiEvent::PromptDone { stop_reason, .. } = &event
+                        && let Some(pending) = checkpoint_verdict_pending.take()
+                    {
+                        if matches!(stop_reason, StopReason::Cancelled) {
+                            clean_review_checkpoint = None;
+                        } else {
+                            emit_internal(
+                                &events_tx,
+                                "review",
+                                "primary",
+                                InternalMessageKind::DiscreteReview,
+                                &pending.prompt,
+                            );
+                            let _ = config.runtime_commands.send(UiCommand::SendPrompt {
+                                text: pending.prompt,
+                                images: Vec::new(),
+                                resources: Vec::new(),
+                            });
+                            trajectory.reset_attempt();
+                            idle_epoch = None;
+                            continue;
+                        }
                     }
-                    if let Some(review) = checkpoint_review_in_flight.as_mut()
+                    if matches!(&event, UiEvent::PromptFailed { .. })
+                        && checkpoint_verdict_pending.take().is_some()
+                    {
+                        clean_review_checkpoint = None;
+                    }
+                    if matches!(
+                        &event,
+                        UiEvent::PromptDone {
+                            stop_reason: StopReason::Cancelled,
+                            ..
+                        } | UiEvent::PromptFailed { .. }
+                    ) && checkpoint_review_in_flight.is_some()
+                    {
+                        cancel_checkpoint_review(
+                            &workflow,
+                            &mut checkpoint_review_in_flight,
+                        )
+                        .await;
+                        clean_review_checkpoint = None;
+                    } else if let Some(review) = checkpoint_review_in_flight.as_mut()
                         && matches!(&event, UiEvent::PromptDone { .. })
                     {
                         review.primary_completion = Some(event);
@@ -1078,24 +1117,28 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         } else {
                             UiEvent::Info(info)
                         });
-                        emit_internal(
-                            &events_tx,
-                            "review",
-                            "primary",
-                            InternalMessageKind::DiscreteReview,
-                            &prompt,
-                        );
-                        let _ = config.runtime_commands.send(UiCommand::SendPrompt {
-                            text: prompt,
-                            images: Vec::new(),
-                            resources: Vec::new(),
-                        });
-                        // If the original primary prompt is still active, ACP
-                        // queues this verdict prompt. Ignore exactly that
-                        // original completion, then process the continuation's.
-                        checkpoint_prompt_queued = primary_completion.is_none();
-                        trajectory.reset_attempt();
-                        idle_epoch = None;
+                        if primary_completion.is_some() {
+                            emit_internal(
+                                &events_tx,
+                                "review",
+                                "primary",
+                                InternalMessageKind::DiscreteReview,
+                                &prompt,
+                            );
+                            let _ = config.runtime_commands.send(UiCommand::SendPrompt {
+                                text: prompt,
+                                images: Vec::new(),
+                                resources: Vec::new(),
+                            });
+                            trajectory.reset_attempt();
+                            idle_epoch = None;
+                        } else {
+                            // Do not queue an internal verdict behind a live
+                            // primary turn. A normal completion injects it;
+                            // cancellation or failure discards it.
+                            checkpoint_verdict_pending =
+                                Some(CheckpointVerdictPending { prompt });
+                        }
                         continue;
                     }
                     if manual_review_in_flight
@@ -1600,7 +1643,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             idle_epoch = Some(active.epoch);
                         }
                         clean_review_checkpoint = None;
-                        checkpoint_prompt_queued = false;
+                        checkpoint_verdict_pending = None;
                         let _ = events_tx.send(UiEvent::Info(
                             "discrete review checkpoint · cancelled".to_string(),
                         ));
@@ -3699,6 +3742,73 @@ mod tests {
         }
     }
 
+    fn cancelled_completion() -> UiEvent {
+        UiEvent::PromptDone {
+            stop_reason: StopReason::Cancelled,
+            usage: None,
+        }
+    }
+
+    async fn wait_for_event(
+        events: &mut mpsc::UnboundedReceiver<UiEvent>,
+        matches: impl Fn(&UiEvent) -> bool,
+        description: &str,
+    ) {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for {description}"))
+                .expect("orchestrated event channel open");
+            if matches(&event) {
+                return;
+            }
+        }
+    }
+
+    struct CheckpointHarness {
+        _temp: tempfile::TempDir,
+        runtime_tx: mpsc::UnboundedSender<UiEvent>,
+        command_rx: mpsc::UnboundedReceiver<UiCommand>,
+        dispatch_rx: mpsc::UnboundedReceiver<(ReviewJob, mpsc::UnboundedSender<ReviewOutcome>)>,
+        checkpoint: ReviewCheckpointClient,
+        running: Running,
+    }
+
+    async fn checkpoint_harness() -> CheckpointHarness {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let turn_snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
+        let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
+            dispatch_tx
+                .send((job, outcomes))
+                .expect("record review job");
+        });
+        let (checkpoint, checkpoint_requests) = ReviewCheckpointClient::channel();
+        let mut config = fanout_config(command_tx, spawner);
+        config.review_root = temp.path().to_path_buf();
+        config.review_checkpoints = checkpoint_requests;
+        let running = spawn(runtime_rx, config);
+        running
+            .handle
+            .begin_turn(
+                1,
+                "implement the fix".to_string(),
+                Vec::new(),
+                turn_snapshot,
+            )
+            .await;
+        CheckpointHarness {
+            _temp: temp,
+            runtime_tx,
+            command_rx,
+            dispatch_rx,
+            checkpoint,
+            running,
+        }
+    }
+
     async fn next_prompt(commands: &mut mpsc::UnboundedReceiver<UiCommand>) -> String {
         let command = tokio::time::timeout(Duration::from_secs(5), commands.recv())
             .await
@@ -3791,6 +3901,145 @@ mod tests {
 
         drop(runtime_tx);
         running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_verdict_is_discarded_when_the_primary_is_cancelled() {
+        let mut harness = checkpoint_harness().await;
+        harness
+            .checkpoint
+            .request()
+            .await
+            .expect("checkpoint dispatch");
+        let (job, outcomes) = harness.dispatch_rx.recv().await.expect("review job");
+        outcomes
+            .send(ReviewOutcome {
+                epoch: job.epoch,
+                verdict: ReviewVerdict::Clean,
+            })
+            .expect("clean verdict");
+        wait_for_event(
+            &mut harness.running.events,
+            |event| {
+                matches!(event, UiEvent::Info(message) if message.contains("no material findings"))
+            },
+            "checkpoint verdict",
+        )
+        .await;
+        assert!(
+            harness.command_rx.try_recv().is_err(),
+            "the verdict must wait for the active prompt to finish"
+        );
+
+        harness
+            .runtime_tx
+            .send(cancelled_completion())
+            .expect("cancel primary prompt");
+        wait_for_event(
+            &mut harness.running.events,
+            |event| {
+                matches!(
+                    event,
+                    UiEvent::PromptDone {
+                        stop_reason: StopReason::Cancelled,
+                        ..
+                    }
+                )
+            },
+            "cancelled primary completion",
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), harness.command_rx.recv())
+                .await
+                .is_err(),
+            "a cancelled primary must not be resurrected by the checkpoint verdict"
+        );
+
+        drop(harness.runtime_tx);
+        harness.running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn primary_cancellation_cancels_an_in_flight_checkpoint() {
+        let mut harness = checkpoint_harness().await;
+        harness
+            .checkpoint
+            .request()
+            .await
+            .expect("checkpoint dispatch");
+        let (job, outcomes) = harness.dispatch_rx.recv().await.expect("review job");
+        harness
+            .runtime_tx
+            .send(cancelled_completion())
+            .expect("cancel primary prompt");
+        wait_for_event(
+            &mut harness.running.events,
+            |event| {
+                matches!(
+                    event,
+                    UiEvent::PromptDone {
+                        stop_reason: StopReason::Cancelled,
+                        ..
+                    }
+                )
+            },
+            "cancelled primary completion",
+        )
+        .await;
+        outcomes
+            .send(ReviewOutcome {
+                epoch: job.epoch,
+                verdict: ReviewVerdict::Clean,
+            })
+            .expect("stale checkpoint verdict");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), harness.command_rx.recv())
+                .await
+                .is_err(),
+            "a cancelled checkpoint must not dispatch its stale verdict"
+        );
+
+        drop(harness.runtime_tx);
+        harness.running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn primary_failure_cancels_an_in_flight_checkpoint() {
+        let mut harness = checkpoint_harness().await;
+        harness
+            .checkpoint
+            .request()
+            .await
+            .expect("checkpoint dispatch");
+        let (job, outcomes) = harness.dispatch_rx.recv().await.expect("review job");
+        harness
+            .runtime_tx
+            .send(UiEvent::PromptFailed {
+                message: "adapter failed".to_string(),
+            })
+            .expect("fail primary prompt");
+        wait_for_event(
+            &mut harness.running.events,
+            |event| matches!(event, UiEvent::PromptFailed { message } if message == "adapter failed"),
+            "failed primary completion",
+        )
+        .await;
+        outcomes
+            .send(ReviewOutcome {
+                epoch: job.epoch,
+                verdict: ReviewVerdict::Clean,
+            })
+            .expect("stale checkpoint verdict");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), harness.command_rx.recv())
+                .await
+                .is_err(),
+            "a failed primary must not be re-prompted by the checkpoint verdict"
+        );
+
+        drop(harness.runtime_tx);
+        harness.running.task.await.expect("orchestrator task");
     }
 
     #[tokio::test]
