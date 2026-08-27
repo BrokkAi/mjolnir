@@ -6188,13 +6188,8 @@ fn persist_mjconfig_selection(
         crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
     let team_changed = initial_config.team != config.team;
     let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
-    let primary_team_switch_pending =
-        team_changed && state.session_id.is_some() && !auxiliary_agents_update_live;
-    let live_session_updates = if primary_team_switch_pending {
-        Vec::new()
-    } else {
-        live_primary_session_config_updates(state, &config)
-    };
+    let primary_team_switch_pending = team_changed && !auxiliary_agents_update_live;
+    let live_session_updates = live_primary_session_config_updates(state, &config);
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
@@ -20651,6 +20646,92 @@ mod tests {
 
         assert!(state.team_picker.is_none());
         assert_eq!(state.exit_reason, Some(UiExitReason::TransferSession));
+    }
+
+    #[test]
+    fn saving_mjconfig_team_change_reconciles_active_session_if_switch_is_declined() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut initial_config);
+        let mut config = initial_config.clone();
+        config::TeamPreset::Claude.apply(&mut config);
+        config
+            .agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:service_tier".to_string(), "priority".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("codex-session".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("priority", "Priority"),
+            ],
+        )];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "service_tier".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "service_tier" && value.to_string() == "priority"
+        ));
+        assert_eq!(
+            state.team_picker.as_ref().map(|picker| picker.step),
+            Some(TeamPickerStep::SwitchPrimary)
+        );
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, None);
+        assert!(
+            state
+                .status_line
+                .as_ref()
+                .is_some_and(|status| status.text.contains("switch the primary when ready"))
+        );
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn saving_mjconfig_team_change_offers_to_start_primary_without_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut initial_config);
+        let mut config = initial_config.clone();
+        config::TeamPreset::Claude.apply(&mut config);
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        let picker = state.team_picker.as_ref().expect("primary switch prompt");
+        assert_eq!(picker.step, TeamPickerStep::SwitchPrimary);
+        assert!(picker.switch_primary_now);
+        assert!(cmd_rx.try_recv().is_err());
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
     }
 
     #[test]
