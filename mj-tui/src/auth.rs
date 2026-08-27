@@ -75,7 +75,9 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
     // every later run fails on. Clear it and try once more; a second failure
     // is reported as-is.
     if !status.success()
-        && let Some(dir) = mj_core::npx_cache::remove_entry(&invocation.args, &invocation.env).await
+        && let Some(dir) =
+            mj_core::npx_cache::remove_entry(&invocation.command, &invocation.args, &invocation.env)
+                .await
     {
         println!();
         println!("Sign-in failed. Removed {} and retrying.", dir.display());

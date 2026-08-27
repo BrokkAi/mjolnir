@@ -13,11 +13,19 @@
 //! Deleting an entry is cheap to undo: npm's package store (`_cacache`) is
 //! content-addressed and checksummed, so the reinstall re-extracts from local
 //! tarballs instead of re-downloading.
+//!
+//! Finding the entry means knowing where npm keeps its cache, which is
+//! configurable in every npmrc layer as well as the environment. npm is asked
+//! directly rather than guessing, so a custom cache location does not quietly
+//! turn recovery off.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use sha2::{Digest, Sha512};
+use tokio::process::Command;
 
 /// Extract the npm package specs from an npx argument list, mirroring how
 /// libnpmexec decides what to install: `--package`/`-p` values win, otherwise
@@ -68,11 +76,61 @@ pub fn entry_name(packages: &[String]) -> String {
         .collect()
 }
 
-/// npm's cache root as npx would resolve it: `npm_config_cache` from the spawn
-/// env or this process's env, else the platform default. A cache path set only
-/// in a user-level `.npmrc` is not consulted; there the computed entry simply
-/// will not exist and removal is a no-op.
-fn cache_root(env: &HashMap<String, String>) -> Option<PathBuf> {
+/// How long to wait for `npm config get cache`. Generous next to node's
+/// startup cost, and it only delays a launch that has already failed.
+const NPM_CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Ask npm where its cache lives.
+///
+/// `cache` is settable in every npmrc layer (project, user, global, builtin)
+/// as well as the environment, and an npmrc value wins whenever
+/// `npm_config_cache` is unset — so reading the environment alone would send
+/// removal to the wrong directory for anyone who configured a custom cache,
+/// silently turning the retry off. npm resolves that whole stack itself, so
+/// ask it rather than re-implementing the precedence.
+///
+/// Uses the npm beside the npx that ran, so an embedded Node install answers
+/// for its own cache, and inherits this process's working directory, so a
+/// project-level npmrc resolves the same way it did for the failed launch.
+async fn cache_root_from_npm(npx_command: &Path, env: &HashMap<String, String>) -> Option<PathBuf> {
+    let npm = sibling_npm(npx_command)?;
+    let mut command = Command::new(npm);
+    command
+        .args(["config", "get", "cache"])
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = tokio::time::timeout(NPM_CONFIG_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() || value == "undefined" || value == "null" {
+        return None;
+    }
+    Some(PathBuf::from(value))
+}
+
+/// The `npm` shipped alongside an `npx`, or `None` when it is not there.
+fn sibling_npm(npx_command: &Path) -> Option<PathBuf> {
+    let file_name = npx_command.file_name()?.to_str()?;
+    let npm_name = match file_name {
+        "npx" => "npm",
+        "npx.cmd" => "npm.cmd",
+        "npx.exe" => "npm.exe",
+        _ => return None,
+    };
+    let npm = npx_command.parent()?.join(npm_name);
+    npm.is_file().then_some(npm)
+}
+
+/// Fallback when npm cannot be asked: `npm_config_cache` from the spawn env or
+/// this process's env, else the platform default.
+fn cache_root_fallback(env: &HashMap<String, String>) -> Option<PathBuf> {
     for key in ["npm_config_cache", "NPM_CONFIG_CACHE"] {
         if let Some(value) = env.get(key).filter(|value| !value.trim().is_empty()) {
             return Some(PathBuf::from(value));
@@ -88,21 +146,33 @@ fn cache_root(env: &HashMap<String, String>) -> Option<PathBuf> {
     }
 }
 
-/// The `_npx` cache entry an npx invocation with these args and env installs
-/// into, or `None` when the args name no package.
-pub fn entry_dir(args: &[String], env: &HashMap<String, String>) -> Option<PathBuf> {
+/// The `_npx` cache entry an npx invocation installs into, or `None` when the
+/// args name no package or the cache root cannot be determined.
+pub async fn entry_dir(
+    npx_command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> Option<PathBuf> {
     let packages = packages_from_args(args);
     if packages.is_empty() {
         return None;
     }
-    Some(cache_root(env)?.join("_npx").join(entry_name(&packages)))
+    let root = match cache_root_from_npm(npx_command, env).await {
+        Some(root) => root,
+        None => cache_root_fallback(env)?,
+    };
+    Some(root.join("_npx").join(entry_name(&packages)))
 }
 
 /// Delete the npx cache entry this invocation runs from, so the next run
 /// reinstalls it. Returns the removed directory, or `None` when the args name
 /// no package, the entry does not exist, or the deletion failed.
-pub async fn remove_entry(args: &[String], env: &HashMap<String, String>) -> Option<PathBuf> {
-    let dir = entry_dir(args, env)?;
+pub async fn remove_entry(
+    npx_command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    let dir = entry_dir(npx_command, args, env).await?;
     // `remove_dir_all` on a computed path: refuse anything that is not shaped
     // like a cache entry, whatever the args or environment contained.
     if !is_entry_dir(&dir) || !dir.is_dir() {
@@ -140,6 +210,28 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A stand-in `npx` with an `npm` beside it that reports `cache_path`,
+    /// standing for any npm whose cache comes from an npmrc rather than the
+    /// environment. Returns the fake npx path.
+    #[cfg(unix)]
+    fn fake_npm_pair(dir: &Path, cache_path: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        let npx = bin.join("npx");
+        std::fs::write(&npx, "#!/bin/sh\nexit 1\n").expect("write npx");
+        let npm = bin.join("npm");
+        std::fs::write(
+            &npm,
+            format!("#!/bin/sh\necho '{}'\n", cache_path.display()),
+        )
+        .expect("write npm");
+        for path in [&npx, &npm] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        npx
     }
 
     #[test]
@@ -197,14 +289,73 @@ mod tests {
             .join(entry_name(&strings(&["removal-test-package"])));
         std::fs::create_dir_all(entry.join("node_modules")).expect("create entry");
 
+        let npx = PathBuf::from("npx");
         assert_eq!(
-            remove_entry(&args, &env).await.as_deref(),
+            remove_entry(&npx, &args, &env).await.as_deref(),
             Some(entry.as_path())
         );
         assert!(!entry.exists());
         // Nothing left to remove: the caller learns there was no repair to
         // make and does not retry.
-        assert_eq!(remove_entry(&args, &env).await, None);
+        assert_eq!(remove_entry(&npx, &args, &env).await, None);
+    }
+
+    /// npm's own answer wins over the environment, so a cache configured in an
+    /// npmrc is still found. Without this the entry would be looked for under
+    /// the env/default root, nothing would be removed, and the retry would
+    /// never happen.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uses_the_cache_root_npm_reports_over_the_environment() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let npmrc_cache = temp.path().join("npmrc-cache");
+        let npx = fake_npm_pair(temp.path(), &npmrc_cache);
+        let args = strings(&["-y", "npmrc-test-package"]);
+        // A different root in the environment, standing for the default npm
+        // would ignore in favour of its npmrc.
+        let env = HashMap::from([(
+            "npm_config_cache".to_string(),
+            temp.path().join("env-cache").to_string_lossy().into_owned(),
+        )]);
+
+        let entry = npmrc_cache
+            .join("_npx")
+            .join(entry_name(&strings(&["npmrc-test-package"])));
+        std::fs::create_dir_all(entry.join("node_modules")).expect("create entry");
+
+        assert_eq!(
+            entry_dir(&npx, &args, &env).await.as_deref(),
+            Some(entry.as_path())
+        );
+        assert_eq!(
+            remove_entry(&npx, &args, &env).await.as_deref(),
+            Some(entry.as_path())
+        );
+        assert!(!entry.exists());
+    }
+
+    /// With no npm beside npx to ask, the environment is still honoured.
+    #[tokio::test]
+    async fn falls_back_to_the_environment_when_npm_cannot_be_asked() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = HashMap::from([(
+            "npm_config_cache".to_string(),
+            temp.path().to_string_lossy().into_owned(),
+        )]);
+        let expected = temp
+            .path()
+            .join("_npx")
+            .join(entry_name(&strings(&["fallback-test-package"])));
+        assert_eq!(
+            entry_dir(
+                &temp.path().join("bin").join("npx"),
+                &strings(&["-y", "fallback-test-package"]),
+                &env
+            )
+            .await
+            .as_deref(),
+            Some(expected.as_path())
+        );
     }
 
     #[tokio::test]
@@ -214,7 +365,10 @@ mod tests {
             "npm_config_cache".to_string(),
             temp.path().to_string_lossy().into_owned(),
         )]);
-        assert_eq!(remove_entry(&strings(&["-y"]), &env).await, None);
+        assert_eq!(
+            remove_entry(&PathBuf::from("npx"), &strings(&["-y"]), &env).await,
+            None
+        );
     }
 
     #[test]
