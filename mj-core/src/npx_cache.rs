@@ -10,13 +10,38 @@
 //! not match.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use tokio::process::Command;
 
 const NPM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `attempt`; if it fails because this command's npx cache entry is a
+/// half-finished install, clear the entry and run it once more. `notify` is
+/// called before that second run. A second failure, or a failure with nothing
+/// to clear, is returned as it is.
+pub async fn run_retrying_once_after_clearing<A, F, N>(
+    npx_command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    mut attempt: A,
+    notify: N,
+) -> anyhow::Result<ExitStatus>
+where
+    A: FnMut() -> F,
+    F: Future<Output = anyhow::Result<ExitStatus>>,
+    N: FnOnce(),
+{
+    let status = attempt().await?;
+    if status.success() || !remove_entry(npx_command, args, env).await {
+        return Ok(status);
+    }
+    notify();
+    attempt().await
+}
 
 /// Clear the npx cache entry this command runs from, so the next run
 /// reinstalls it. Returns whether an entry was removed.
@@ -28,13 +53,22 @@ pub async fn remove_entry(
     let Some(npm) = sibling_npm(npx_command) else {
         return false;
     };
-    let Some(listing) = npm_output(&npm, &["cache", "npx", "ls"], env).await else {
+    remove_matching_entry(args, |npm_args| npm_output(&npm, npm_args, env)).await
+}
+
+/// The `ls`-then-`rm` exchange, over any way of running npm.
+async fn remove_matching_entry<R, F>(args: &[String], run_npm: R) -> bool
+where
+    R: Fn(Vec<String>) -> F,
+    F: Future<Output = Option<String>>,
+{
+    let Some(listing) = run_npm(npm_args(&["cache", "npx", "ls"])).await else {
         return false;
     };
     let Some(key) = matching_key(&listing, args) else {
         return false;
     };
-    let removed = npm_output(&npm, &["cache", "npx", "rm", key], env)
+    let removed = run_npm(npm_args(&["cache", "npx", "rm", key]))
         .await
         .is_some();
     tracing::warn!(key, removed, "clearing npx cache entry after failed launch");
@@ -64,9 +98,17 @@ fn passed(args: &[String], spec: &str) -> bool {
         .any(|arg| arg == spec || arg.strip_prefix("--package=") == Some(spec))
 }
 
+fn npm_args(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| arg.to_string()).collect()
+}
+
 /// Run npm and return its stdout, or `None` if it failed, timed out, or could
 /// not start.
-async fn npm_output(npm: &Path, args: &[&str], env: &HashMap<String, String>) -> Option<String> {
+async fn npm_output(
+    npm: &Path,
+    args: Vec<String>,
+    env: &HashMap<String, String>,
+) -> Option<String> {
     let output = tokio::time::timeout(
         NPM_TIMEOUT,
         Command::new(npm)
@@ -163,6 +205,63 @@ d820eb7d96bc2600: @agentclientprotocol/claude-agent-acp
             "@agentclientprotocol/claude-agent-acp".to_string(),
         ];
         assert_eq!(matching_key(unreadable, &args), None);
+    }
+
+    /// Records every npm invocation and answers `ls` with [`LISTING`].
+    fn recording_npm(
+        calls: &std::sync::Mutex<Vec<String>>,
+        rm_succeeds: bool,
+    ) -> impl Fn(Vec<String>) -> std::future::Ready<Option<String>> + '_ {
+        move |args: Vec<String>| {
+            let call = args.join(" ");
+            calls.lock().expect("calls").push(call.clone());
+            std::future::ready(match call.as_str() {
+                "cache npx ls" => Some(LISTING.to_string()),
+                _ if rm_succeeds => Some(String::new()),
+                _ => None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn removes_the_matched_key_and_reports_it() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let args: Vec<String> = ["-y", "@agentclientprotocol/claude-agent-acp", "--cli"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+
+        assert!(remove_matching_entry(&args, recording_npm(&calls, true)).await);
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            ["cache npx ls", "cache npx rm d820eb7d96bc2600"]
+        );
+    }
+
+    /// A failing `rm` must report no removal, or the caller retries a sign-in
+    /// against the same broken entry.
+    #[tokio::test]
+    async fn reports_no_removal_when_rm_fails() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let args: Vec<String> = ["-y", "@agentclientprotocol/claude-agent-acp"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+
+        assert!(!remove_matching_entry(&args, recording_npm(&calls, false)).await);
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            ["cache npx ls", "cache npx rm d820eb7d96bc2600"]
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_no_rm_when_nothing_matches() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let args = vec!["-y".to_string(), "some-other-package".to_string()];
+
+        assert!(!remove_matching_entry(&args, recording_npm(&calls, true)).await);
+        assert_eq!(*calls.lock().expect("calls"), ["cache npx ls"]);
     }
 
     #[test]

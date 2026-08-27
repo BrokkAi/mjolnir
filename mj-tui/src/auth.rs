@@ -70,19 +70,14 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
     let mut invocation = bundled_invocation(vendor).await?;
     append_login_args(&mut invocation, args);
     let _interrupt_guard = crate::termination::suppress_interrupts();
-    let mut status = run_login_command(vendor, &invocation).await?;
-    // An npx install interrupted partway through leaves a cache entry every
-    // later run fails on. Clear it and try once more; a second failure is
-    // reported as-is.
-    if !status.success()
-        && mj_core::npx_cache::remove_entry(&invocation.command, &invocation.args, &invocation.env)
-            .await
-    {
-        println!();
-        println!("Sign-in failed. Cleared the npx cache entry and retrying.");
-        println!();
-        status = run_login_command(vendor, &invocation).await?;
-    }
+    let status = mj_core::npx_cache::run_retrying_once_after_clearing(
+        &invocation.command,
+        &invocation.args,
+        &invocation.env,
+        || run_login_command(vendor, &invocation),
+        || println!("\nSign-in failed. Cleared the npx cache entry and retrying.\n"),
+    )
+    .await?;
     let success = status.success();
     let credentials_available = success && detect(vendor).available();
     login_outcome_from_status(vendor, success, &status.to_string(), credentials_available)

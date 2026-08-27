@@ -6503,19 +6503,18 @@ async fn mjconfig_run_login(
     let invocation = mj_core::auth::web_login_invocation(vendor, mode).await?;
     // Attempts share the pasted-code receiver so it survives a retry.
     let input = input.map(|receiver| Arc::new(tokio::sync::Mutex::new(receiver)));
-    let mut status = mjconfig_login_attempt(vendor, &invocation, &output, input.clone()).await?;
-    // An npx install interrupted partway through leaves a cache entry every
-    // later run fails on. Clear it and try once more; a second failure is
-    // reported as-is.
-    if !status.success()
-        && mj_core::npx_cache::remove_entry(&invocation.command, &invocation.args, &invocation.env)
-            .await
-    {
-        if let Ok(mut sink) = output.lock() {
-            sink.push(b"\nSign-in failed. Cleared the npx cache entry and retrying.\n");
-        }
-        status = mjconfig_login_attempt(vendor, &invocation, &output, input).await?;
-    }
+    let status = mj_core::npx_cache::run_retrying_once_after_clearing(
+        &invocation.command,
+        &invocation.args,
+        &invocation.env,
+        || mjconfig_login_attempt(vendor, &invocation, &output, input.clone()),
+        || {
+            if let Ok(mut sink) = output.lock() {
+                sink.push(b"\nSign-in failed. Cleared the npx cache entry and retrying.\n");
+            }
+        },
+    )
+    .await?;
     if !status.success() {
         anyhow::bail!("{} login exited with {status}", vendor.label());
     }
