@@ -3185,7 +3185,13 @@ fn handle_crossterm(
         && matches!(key.code, KeyCode::Char('c'))
         && state.is_streaming()
     {
-        cancel_current_turn(state, cmd_tx);
+        if !state.input.is_empty() {
+            clear_prompt_input(state);
+        } else if attachment_count(state) > 0 {
+            clear_prompt_attachments(state);
+        } else {
+            cancel_current_turn(state, cmd_tx);
+        }
         return TerminalRequest::None;
     }
 
@@ -3532,16 +3538,9 @@ fn handle_crossterm(
             } else if state.input.is_empty() && attachment_count(state) == 0 {
                 state.exit_reason = Some(UiExitReason::Quit);
             } else if !state.input.is_empty() {
-                state.input.clear();
-                state.input_cursor = 0;
-                state.reset_history_navigation();
-                state.scroll_input_to_bottom();
-                state.update_autocomplete();
+                clear_prompt_input(state);
             } else {
-                clear_attachments(state);
-                state.reset_history_navigation();
-                state.scroll_input_to_bottom();
-                state.update_autocomplete();
+                clear_prompt_attachments(state);
             }
         }
         (_, KeyCode::Esc) if state.is_streaming() => {
@@ -3711,6 +3710,21 @@ fn handle_crossterm(
         _ => {}
     }
     TerminalRequest::None
+}
+
+fn clear_prompt_input(state: &mut AppState) {
+    state.input.clear();
+    state.input_cursor = 0;
+    state.reset_history_navigation();
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
+}
+
+fn clear_prompt_attachments(state: &mut AppState) {
+    clear_attachments(state);
+    state.reset_history_navigation();
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
 }
 
 fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
@@ -13517,15 +13531,25 @@ fn busy_prompt_title(state: &AppState) -> Option<Line<'static>> {
     // and the missing-arm compile error is what forces that.
     let hint = match state.connection_state() {
         ConnectionState::Streaming | ConnectionState::Cancelling => {
-            let cancel_hint = if state.has_active_review_workflow() {
-                "Ctrl-X/Ctrl-C cancel review"
+            let interrupt_hint = if state.has_active_review_workflow() {
+                if !state.input.is_empty() {
+                    "Ctrl-C clear draft | Ctrl-X cancel review"
+                } else if attachment_count(state) > 0 {
+                    "Ctrl-C clear attachments | Ctrl-X cancel review"
+                } else {
+                    "Ctrl-X/Ctrl-C cancel review"
+                }
+            } else if !state.input.is_empty() {
+                "Ctrl-C clear draft | Esc cancel current"
+            } else if attachment_count(state) > 0 {
+                "Ctrl-C clear attachments | Esc cancel current"
             } else {
                 "Ctrl-C/Esc cancel current"
             };
             if queued > 0 {
-                format!("{queued} queued | Enter queue next | {cancel_hint}")
+                format!("{queued} queued | Enter queue next | {interrupt_hint}")
             } else {
-                format!("Enter queue next | {cancel_hint}")
+                format!("Enter queue next | {interrupt_hint}")
             }
         }
         ConnectionState::Forking => {
@@ -15376,7 +15400,7 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         ),
         help_binding_line(
             "Ctrl-C",
-            "cancel streaming; clear input/chips; quit when empty",
+            "clear input, then chips; cancel streaming; quit when empty",
             theme,
         ),
         help_binding_line("Ctrl-X", "cancel the active discrete review", theme),
@@ -25928,6 +25952,29 @@ mod tests {
         assert!(!cancelling.contains("streaming"), "{cancelling}");
         assert!(!cancelling.contains("prompt"), "{cancelling}");
 
+        state.input = "draft".to_string();
+        let drafting = line_text(&busy_prompt_title(&state).expect("drafting title"));
+        assert!(drafting.contains("Ctrl-C clear draft"), "{drafting}");
+        assert!(drafting.contains("Esc cancel current"), "{drafting}");
+        assert!(
+            !drafting.contains("Ctrl-C/Esc cancel current"),
+            "{drafting}"
+        );
+        state.input.clear();
+
+        state.attachments.push(PastedAttachment {
+            id: 1,
+            position: 0,
+            content: "attachment".to_string(),
+        });
+        let attaching = line_text(&busy_prompt_title(&state).expect("attaching title"));
+        assert!(
+            attaching.contains("Ctrl-C clear attachments"),
+            "{attaching}"
+        );
+        assert!(attaching.contains("Esc cancel current"), "{attaching}");
+        state.attachments.clear();
+
         state.push_queued_prompt(QueuedPrompt {
             text: "next".to_string(),
             images: Vec::new(),
@@ -25958,6 +26005,17 @@ mod tests {
         let review = line_text(&busy_prompt_title(&reviewing).expect("review title"));
         assert!(review.contains("Ctrl-X/Ctrl-C cancel review"), "{review}");
         assert!(!review.contains("cancel current"), "{review}");
+
+        reviewing.input = "draft".to_string();
+        let review_draft = line_text(&busy_prompt_title(&reviewing).expect("review draft title"));
+        assert!(
+            review_draft.contains("Ctrl-C clear draft"),
+            "{review_draft}"
+        );
+        assert!(
+            review_draft.contains("Ctrl-X cancel review"),
+            "{review_draft}"
+        );
     }
 
     #[test]
@@ -29844,6 +29902,56 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_clears_draft_layers_before_cancelling_streaming_turn() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("long-running task".to_string());
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "replace this draft");
+        state.attachments.push(PastedAttachment {
+            id: 1,
+            position: 0,
+            content: "attachment".to_string(),
+        });
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.input.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert_eq!(attachment_count(&state), 1);
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "clearing draft text must not interrupt the active turn"
+        );
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(attachment_count(&state), 0);
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "clearing draft attachments must not interrupt the active turn"
+        );
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelPrompt)));
+    }
+
+    #[test]
     fn ctrl_c_with_empty_side_composer_steers_queued_prompt_while_streaming() {
         let mut state = ready_state_with_session();
         state.is_side = true;
@@ -30540,6 +30648,41 @@ mod tests {
         );
 
         assert_eq!(state.queued_prompt_count(), 1, "review keeps the queue");
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelReview)));
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn review_ctrl_c_clears_draft_before_review_only_cancel() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        start_workflow(
+            &mut state,
+            WorkflowId::review(1),
+            WorkflowKind::Review,
+            WorkflowPhase::SpecialistReview,
+        );
+        state.input = "is /side in there?".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.input.is_empty());
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert!(cmd_rx.try_recv().is_err());
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
         assert_eq!(state.connection_state(), ConnectionState::Cancelling);
         assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelReview)));
         assert!(cmd_rx.try_recv().is_err());
