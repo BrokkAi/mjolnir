@@ -43,6 +43,13 @@ export function nativeBinaryPath(bundleRoot, platform = process.platform) {
   return path.join(bundleRoot, "bin", platform === "win32" ? "mj.exe" : "mj");
 }
 
+export function installMethodEnvironment(env = process.env) {
+  if (env.npm_command === "exec") {
+    return { MJOLNIR_MANAGED_BY_NPX: "true" };
+  }
+  return { MJOLNIR_MANAGED_BY_NPM: "true" };
+}
+
 const SIGNAL_EXIT_CODES = {
   SIGHUP: 129,
   SIGINT: 130,
@@ -57,15 +64,16 @@ export function launch(
   exitProcess = process.exit,
 ) {
   const bundleBin = path.join(bundleRoot, "bin");
+  const childEnv = {
+    ...process.env,
+    PATH: `${bundleBin}${path.delimiter}${process.env.PATH ?? ""}`,
+  };
+  delete childEnv.MJOLNIR_MANAGED_BY_NPM;
+  delete childEnv.MJOLNIR_MANAGED_BY_NPX;
+  Object.assign(childEnv, installMethodEnvironment(process.env));
   const child = spawnProcess(nativeBinaryPath(bundleRoot, platform), args, {
     stdio: "inherit",
-    env: {
-      ...process.env,
-      PATH: `${bundleBin}${path.delimiter}${process.env.PATH ?? ""}`,
-      // npm owns upgrades. Replacing files under node_modules would corrupt its
-      // package database and can leave sibling binaries at different versions.
-      MJOLNIR_NO_UPDATE_CHECK: "true",
-    },
+    env: childEnv,
   });
   const signalHandlers = new Map();
   for (const signal of Object.keys(SIGNAL_EXIT_CODES)) {

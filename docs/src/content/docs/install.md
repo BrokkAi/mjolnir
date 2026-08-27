@@ -254,9 +254,16 @@ launch or that delegation works end to end.
 
 ## Update and uninstall
 
-Interactive startup checks GitHub for a newer Mjolnir release unless
-`MJOLNIR_NO_UPDATE_CHECK=1` or `--no-update-check` is set. The in-app updater
-requires the matching checksum asset.
+Interactive startup checks the release channel that owns the current
+installation unless `MJOLNIR_NO_UPDATE_CHECK=true` or `--no-update-check` is
+set. npm and npx installations follow the npm registry, Homebrew installations
+follow the tap formula, and Cargo installations follow crates.io. When a newer
+version reaches that channel, Mjolnir prints the matching npm, npx, `brew`, or
+`cargo install` command.
+
+Release-installer and archive installations continue to follow GitHub Releases
+and can update in place after verifying the matching checksum asset. Builds
+that cannot be tied to a package manager use this direct-release behavior too.
 
 To uninstall a release-installer deployment, remove `mj` and
 `mj-voice-worker` from the selected install directory. Review [Storage and
