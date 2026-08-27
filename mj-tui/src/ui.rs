@@ -5550,13 +5550,19 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             state.record_status_message(StatusKind::Warning, "the ACP runtime is closed");
         } else if state.session_id.is_none() {
             state.announce_waiting_for_primary();
+        } else if state.has_active_review_workflow() {
+            // Review workers never receive UI commands. The primary ACP is
+            // idle while they run, so wake it with a normal prompt instead of
+            // an in-turn steer; the new primary turn supersedes the review.
+            state.record_user_prompt(RUNTIME_NUDGE.to_string());
+            let _ = cmd_tx.send(UiCommand::SendPrompt {
+                text: RUNTIME_NUDGE.to_string(),
+                images: Vec::new(),
+                resources: Vec::new(),
+            });
+            state.record_status_message(StatusKind::Info, "nudge sent to the main runtime");
         } else if !state.is_busy() {
             state.record_status_message(StatusKind::Info, "the runtime is idle");
-        } else if state.has_active_review_workflow() {
-            state.record_status_message(
-                StatusKind::Warning,
-                "the active review cannot be steered; use Ctrl-X to cancel it",
-            );
         } else if !state.can_steer() {
             state.record_status_message(
                 StatusKind::Warning,
@@ -9580,7 +9586,7 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
 
     if let Some(stall) = state.primary_runtime_stall_at(Instant::now()) {
         let action = if state.has_active_review_workflow() {
-            "Ctrl-X to cancel review"
+            "/nudge main or Ctrl-X to cancel review"
         } else if state.can_steer() {
             "/nudge or Ctrl-C"
         } else {
@@ -30717,7 +30723,7 @@ mod tests {
     }
 
     #[test]
-    fn nudge_during_review_is_not_sent_to_the_primary_runtime() {
+    fn nudge_during_review_starts_a_new_primary_turn() {
         let mut state = ready_state_with_session();
         state.steering_supported = true;
         state.record_user_prompt("first".to_string());
@@ -30732,13 +30738,23 @@ mod tests {
 
         submit_prompt(&mut state, &cmd_tx);
 
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, .. })
+                if text == "Please report your current status, then continue the active task."
+        ));
         assert!(cmd_rx.try_recv().is_err());
+        assert!(state.transcript.iter().any(|entry| matches!(
+            entry,
+            Entry::UserPrompt(text)
+                if text == "Please report your current status, then continue the active task."
+        )));
         assert_eq!(
             state
                 .status_line
                 .as_ref()
                 .map(|status| status.text.as_str()),
-            Some("the active review cannot be steered; use Ctrl-X to cancel it")
+            Some("nudge sent to the main runtime")
         );
     }
 
