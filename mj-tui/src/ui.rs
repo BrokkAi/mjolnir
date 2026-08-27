@@ -49,10 +49,10 @@ use crate::app::{
     AppState, AutocompleteKind, ConfigValueChoice, ConnectionState, CurrentBranchPullRequest,
     ElicitationFormFieldKind, ElicitationView, Entry, FileAttachment, PastedAttachment,
     PastedImageAttachment, PendingElicitation, PendingPermission, QUEUED_PROMPT_PREVIEW_WIDTH,
-    QueuedPrompt, StatusKind, StatusMessage, SubagentStatus, TeamPickerStep, ToolCallOutput,
-    TranscriptSearch, TranscriptSelection, UiExitReason, WorkspaceFile, classify_elicitation,
-    config_option_choices, config_option_current_value_label, file_mention_text,
-    workspace_file_candidates,
+    QueuedPrompt, StatusKind, StatusMessage, SubagentStatus, TeamPicker, TeamPickerStep,
+    ToolCallOutput, TranscriptSearch, TranscriptSelection, UiExitReason, WorkspaceFile,
+    classify_elicitation, config_option_choices, config_option_current_value_label,
+    file_mention_text, workspace_file_candidates,
 };
 use crate::clipboard::{
     ClipboardImage, copy_to_clipboard, load_image_path_as_png, read_clipboard_image_as_png,
@@ -6168,8 +6168,15 @@ fn persist_mjconfig_selection(
     // letting the next /new or restart fail to resolve.
     let reroute_notices =
         crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
-    let live_session_updates = live_primary_session_config_updates(state, &initial_config, &config);
+    let team_changed = initial_config.team != config.team;
     let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
+    let primary_team_switch_pending =
+        team_changed && state.session_id.is_some() && !auxiliary_agents_update_live;
+    let live_session_updates = if primary_team_switch_pending {
+        Vec::new()
+    } else {
+        live_primary_session_config_updates(state, &initial_config, &config)
+    };
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
@@ -6196,9 +6203,32 @@ fn persist_mjconfig_selection(
                 for (target, value) in live_session_updates {
                     let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
                 }
-                let mut message = format!(
-                    "config saved — theme {theme}, spinner {style}; changed session settings update the active primary when supported, while ACP routing changes apply on /new or /clear"
-                );
+                if primary_team_switch_pending {
+                    let selected = config
+                        .team
+                        .as_deref()
+                        .and_then(config::TeamPreset::from_id)
+                        .and_then(|selected| {
+                            config::TeamPreset::ALL
+                                .iter()
+                                .position(|preset| *preset == selected)
+                        })
+                        .unwrap_or(0);
+                    state.team_picker = Some(TeamPicker {
+                        selected,
+                        step: TeamPickerStep::SwitchPrimary,
+                        switch_primary_now: true,
+                    });
+                }
+                let mut message = if primary_team_switch_pending {
+                    "config saved; choose whether to switch the primary now".to_string()
+                } else if team_changed && auxiliary_agents_update_live {
+                    "config saved; reviewer and subagent configuration is updating now".to_string()
+                } else {
+                    format!(
+                        "config saved — theme {theme}, spinner {style}; changed session settings update the active primary when supported, while ACP routing changes apply on /new or /clear"
+                    )
+                };
                 for notice in &reroute_notices {
                     message.push_str("; ");
                     message.push_str(notice);
@@ -20464,6 +20494,68 @@ mod tests {
             .find(|server| server.id == server_id)
             .expect("same server");
         assert_eq!(server.session_config[0].id.to_string(), "service_tier");
+    }
+
+    #[test]
+    fn saving_mjconfig_team_change_uses_the_primary_handoff_prompt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut initial_config);
+        let mut config = initial_config.clone();
+        config::TeamPreset::Claude.apply(&mut config);
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.session_id = Some("codex-session".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        let picker = state.team_picker.as_ref().expect("primary switch prompt");
+        assert_eq!(picker.step, TeamPickerStep::SwitchPrimary);
+        assert_eq!(picker.selected, 1, "Claude is selected");
+        assert!(picker.switch_primary_now);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "the old primary is not reloaded"
+        );
+        let saved = config::Config::load(&path).expect("load saved config");
+        assert_eq!(
+            config::TeamPreset::from_config(&saved),
+            Some(config::TeamPreset::Claude)
+        );
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::TransferSession));
+    }
+
+    #[test]
+    fn saving_mjconfig_team_change_reloads_auxiliaries_for_the_same_primary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut initial_config);
+        let mut config = initial_config.clone();
+        config::TeamPreset::CodexWithClaudeReviewer.apply(&mut config);
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("codex-session".to_string());
+        state.active_models.primary = "gpt-5-6-sol".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.model_choices = vec![model_choice("gpt-5-6-sol", 0.70, "codex-acp")];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, None);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
     }
 
     #[test]
