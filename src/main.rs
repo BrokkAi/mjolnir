@@ -3149,6 +3149,10 @@ async fn run_session(
                 cmd_orchestrator.request_review(request);
                 continue;
             }
+            if matches!(command, UiCommand::CancelReview) {
+                cmd_orchestrator.cancel_review();
+                continue;
+            }
             if matches!(command, UiCommand::CompactPrimary) {
                 cmd_orchestrator.compact_manual().await;
                 continue;

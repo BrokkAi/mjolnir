@@ -677,6 +677,18 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         review_pass = 0;
                         correction_rounds = 0;
                     }
+                    // The primary runtime is idle while a review job is in
+                    // flight. A CancelPrompt can race the orchestrator-side
+                    // review cancellation and make that idle runtime emit a
+                    // PromptDone first. The automatic review already owns the
+                    // real primary completion, and a manual review has no
+                    // primary completion to publish, so this event is not a
+                    // second completed turn.
+                    if matches!(&event, UiEvent::PromptDone { .. })
+                        && (review_in_flight.is_some() || manual_review_in_flight.is_some())
+                    {
+                        continue;
+                    }
                     observe_delegation_event(
                         &workflow,
                         active.epoch,
@@ -4882,6 +4894,79 @@ mod tests {
         })
         .await
         .expect("Stop must release the held completion");
+        assert!(matches!(released, UiEvent::PromptDone { .. }));
+
+        drop(runtime_tx);
+        running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn runtime_completion_racing_review_stop_does_not_enter_the_recap_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (token_tx, mut token_rx) = mpsc::unbounded_channel();
+        let spawner = ReviewSpawner::stub_async(move |_job, _events, cancel, _outcomes| {
+            let _ = token_tx.send(cancel.clone());
+            async move {
+                cancel.cancelled().await;
+            }
+        });
+        let mut running = spawn(runtime_rx, fanout_config(command_tx, spawner));
+        running
+            .handle
+            .begin_turn(1, "add a retry".to_string(), Vec::new(), snapshot)
+            .await;
+        runtime_tx.send(completion()).expect("send completion");
+
+        let cancel = tokio::time::timeout(Duration::from_secs(5), token_rx.recv())
+            .await
+            .expect("the fan-out was dispatched")
+            .expect("token channel open");
+
+        // The command proxy forwards CancelPrompt to the primary runtime as
+        // well as notifying the orchestrator. If the idle runtime's terminal
+        // event wins that cross-channel race, it must not be mistaken for the
+        // completion of the still-running review.
+        runtime_tx
+            .send(completion())
+            .expect("send idle runtime completion");
+        runtime_tx
+            .send(UiEvent::Info(
+                "idle runtime completion observed".to_string(),
+            ))
+            .expect("send ordering marker");
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), running.events.recv())
+                .await
+                .expect("runtime event was consumed without a panic")
+                .expect("orchestrated event");
+            if matches!(event, UiEvent::Info(ref message) if message == "idle runtime completion observed")
+            {
+                break;
+            }
+            assert!(
+                !matches!(event, UiEvent::PromptDone { .. }),
+                "the idle runtime completion must remain internal"
+            );
+        }
+
+        running.handle.cancel_review();
+        tokio::time::timeout(Duration::from_secs(5), cancel.cancelled())
+            .await
+            .expect("Stop must still cancel the fan-out");
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(event) = running.events.recv().await
+                    && matches!(event, UiEvent::PromptDone { .. })
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("Stop must release the original completion");
         assert!(matches!(released, UiEvent::PromptDone { .. }));
 
         drop(runtime_tx);

@@ -1605,6 +1605,9 @@ pub struct AppState {
     /// Canonical runtime-owned workflow state. Transcript prose and display
     /// labels never mutate this store.
     pub workflows: crate::workflow::WorkflowStore,
+    /// Prevents repeated review-only cancellation commands while the workflow
+    /// is still publishing its terminal transition.
+    review_cancel_requested: bool,
     /// UI-side clocks for visible workflow progress rows. Lifecycle and counts
     /// remain reducer-owned; terminal rows keep their frozen clock until the
     /// next user turn starts.
@@ -2396,6 +2399,7 @@ impl AppState {
             subagents: BTreeMap::new(),
             nested_history_dir: None,
             workflows: crate::workflow::WorkflowStore::default(),
+            review_cancel_requested: false,
             workflow_clocks: BTreeMap::new(),
             agent_usage: crate::agent_usage::Snapshot::default(),
             status_line: None,
@@ -3413,10 +3417,13 @@ impl AppState {
 
     /// Whether Ctrl-C can steer the oldest queued prompt into the running
     /// turn: the agent supports `_session/steering` and a turn is actively
-    /// streaming. A turn being cancelled or a fork in flight has nothing left
-    /// to steer, so those states keep the normal cancellation path.
+    /// streaming. Reviews own the completed turn boundary and must not receive
+    /// primary-session steering. A turn being cancelled or a fork in flight
+    /// also has nothing left to steer.
     pub fn can_steer(&self) -> bool {
-        self.steering_supported && self.connection_state == ConnectionState::Streaming
+        self.steering_supported
+            && self.connection_state == ConnectionState::Streaming
+            && !self.has_active_review_workflow()
     }
 
     pub fn active_turn_elapsed(&self) -> Option<Duration> {
@@ -4894,7 +4901,10 @@ impl AppState {
         };
 
         match &event.transition {
-            WorkflowTransition::Started { .. } => {
+            WorkflowTransition::Started { kind, .. } => {
+                if *kind == crate::workflow::WorkflowKind::Review {
+                    self.review_cancel_requested = false;
+                }
                 self.workflow_clocks
                     .entry(event.workflow_id)
                     .or_insert_with(|| WorkflowClock {
@@ -4986,6 +4996,13 @@ impl AppState {
             WorkflowTransition::Terminal { outcome, .. } => {
                 if let Some(clock) = self.workflow_clocks.get_mut(&event.workflow_id) {
                     clock.finished_at = Some(Instant::now());
+                }
+                if self
+                    .workflows
+                    .get(event.workflow_id)
+                    .is_some_and(|state| state.kind == crate::workflow::WorkflowKind::Review)
+                {
+                    self.review_cancel_requested = false;
                 }
                 let Some(state) = self.workflows.get(event.workflow_id) else {
                     return;
@@ -5537,6 +5554,20 @@ impl AppState {
     pub fn has_active_workflows(&self) -> bool {
         self.visible_workflows()
             .any(|workflow| workflow.outcome.is_none())
+    }
+
+    pub fn has_active_review_workflow(&self) -> bool {
+        self.visible_workflows().any(|workflow| {
+            workflow.kind == crate::workflow::WorkflowKind::Review && workflow.outcome.is_none()
+        })
+    }
+
+    pub fn begin_review_cancel(&mut self) -> bool {
+        if self.review_cancel_requested || !self.has_active_review_workflow() {
+            return false;
+        }
+        self.review_cancel_requested = true;
+        true
     }
 
     pub fn workflow_elapsed_at(

@@ -2987,6 +2987,7 @@ async fn drive_session(
             UiCommand::SetReviewPolicy { .. }
             | UiCommand::ReloadAuxiliaryAgents
             | UiCommand::RunReview { .. }
+            | UiCommand::CancelReview
             | UiCommand::RefreshWorkspaceDiff => {}
             UiCommand::CompactPrimary => {
                 let _ = ui_tx.send(UiEvent::Warning(
@@ -3424,6 +3425,7 @@ async fn drive_fork_session(
                         UiCommand::SetReviewPolicy { .. }
                         | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
+                        | UiCommand::CancelReview
                         | UiCommand::RefreshWorkspaceDiff,
                     ) => {}
                     Some(UiCommand::CompactPrimary) => {}
@@ -5699,6 +5701,7 @@ async fn drive_config_update(
                         UiCommand::SetReviewPolicy { .. }
                         | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
+                        | UiCommand::CancelReview
                         | UiCommand::RefreshWorkspaceDiff,
                     ) => {}
                     Some(UiCommand::CompactPrimary) => {}
@@ -6224,6 +6227,7 @@ async fn drive_prompt_turn(
                         UiCommand::SetReviewPolicy { .. }
                         | UiCommand::ReloadAuxiliaryAgents
                         | UiCommand::RunReview { .. }
+                        | UiCommand::CancelReview
                         | UiCommand::RefreshWorkspaceDiff,
                     ) => {}
                     Some(UiCommand::CompactPrimary) => {}
