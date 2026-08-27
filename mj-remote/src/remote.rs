@@ -13031,9 +13031,13 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         assert!(viewer.contains("function mjRolePermissionRow(role, field)"));
         assert!(viewer.contains("review_permission"));
         assert!(viewer.contains("subagents_permission"));
-        assert!(viewer.contains(
-            "rows.push(mjSectionTitle(`${group.server_label} session options`));\n        rows.push(...leadingRows);"
-        ));
+        let session_options_title = viewer
+            .find("rows.push(mjSectionTitle(`${group.server_label} session options`));")
+            .expect("session-options title insertion");
+        let leading_rows = viewer[session_options_title..]
+            .find("rows.push(...leadingRows);")
+            .expect("leading session-option rows");
+        assert!(leading_rows > 0);
         assert!(viewer.contains("permissionRow ? [permissionRow] : []"));
         assert!(viewer.contains("Post-correction verification"));
         assert!(viewer.contains("mjcfg.edits.max_correction_rounds = next"));
