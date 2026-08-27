@@ -878,7 +878,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "Mjolnir can queue another prompt while an agent is working; Ctrl+C clears draft text before steering or stopping the active turn.",
+        text: "Mjolnir can queue another prompt while an agent is working; Ctrl+C clears draft text and attachment chips before steering or stopping the active turn.",
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
