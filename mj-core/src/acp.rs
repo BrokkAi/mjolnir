@@ -1353,6 +1353,20 @@ pub async fn run(
         let message = format!("acp agent teardown failed: {error:#}");
         emit_fatal(&ui_tx, &fatal_emitted, message);
     }
+    // One-shot recovery: a fatal from an npx-launched adapter whose stderr
+    // references the npx cache means an interrupted install poisoned the
+    // entry. Remove it so the next launch reinstalls cleanly instead of
+    // failing the same way forever.
+    if result.is_err()
+        && is_program_name(&cfg.command, "npx")
+        && let Some(tail) = stderr_tail.rendered_for_error().await
+        && let Some(dir) = crate::npx_repair::repair_after_failure(&cfg.args, &cfg.env, &tail).await
+    {
+        let _ = ui_tx.send(UiEvent::Info(format!(
+            "removed corrupted npx cache entry {}; the next launch reinstalls it",
+            dir.display()
+        )));
+    }
     let result = combine_runtime_and_teardown(result, teardown);
     if let Some(role) = cfg.role_config.as_ref()
         && let Some(session_tag) = role.session_tag.as_deref()

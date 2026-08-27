@@ -298,6 +298,10 @@ async fn probe(
         if is_authentication_error(&combined) {
             return Err(ClaudeUsageError::NotSignedIn);
         }
+        // One-shot recovery for a poisoned npx cache entry: remove it so the
+        // next poll (or seat launch) reinstalls cleanly.
+        let _ =
+            crate::npx_repair::repair_after_failure(&prepared.args, &prepared.env, &combined).await;
         let detail = combined
             .split_whitespace()
             .take(24)
@@ -339,6 +343,14 @@ async fn ensure_runtime_ready(
             if output.status.success() {
                 Ok(())
             } else {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let _ = crate::npx_repair::repair_after_failure(
+                    &prepared.args,
+                    &prepared.env,
+                    &format!("{stdout}\n{stderr}"),
+                )
+                .await;
                 let detail = output_detail(&output);
                 Err(ClaudeUsageError::Launch(format!(
                     "bundled Claude runtime preparation failed: {detail}"
