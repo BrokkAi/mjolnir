@@ -459,6 +459,9 @@ pub enum UiCommand {
     ReloadAuxiliaryAgents,
     /// Run one Mjolnir-owned discrete review while the primary is idle.
     RunReview { request: ReviewRequest },
+    /// Cancel only the active discrete review. The coordinator consumes this
+    /// command without forwarding a cancellation to the primary ACP runtime.
+    CancelReview,
     /// Recompute the worktree-versus-`HEAD` diff for the Ctrl-G reader. Sent
     /// on open and on explicit refresh; the reader pulls rather than replaying
     /// retained turn events, so what it shows is current as of the request.

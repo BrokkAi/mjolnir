@@ -956,6 +956,10 @@ fn start_server_agent_session(
                         primary_orchestrator.request_review(request);
                         continue;
                     }
+                    if matches!(command, UiCommand::CancelReview) {
+                        primary_orchestrator.cancel_review();
+                        continue;
+                    }
                     if matches!(command, UiCommand::CompactPrimary)
                         || matches!(&command, UiCommand::SendPrompt { text, images, resources } if text == "/compact" && images.is_empty() && resources.is_empty())
                     {

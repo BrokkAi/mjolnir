@@ -3185,7 +3185,21 @@ fn handle_crossterm(
         && matches!(key.code, KeyCode::Char('c'))
         && state.is_streaming()
     {
-        cancel_current_turn(state, cmd_tx);
+        if !state.input.is_empty() {
+            clear_prompt_input(state);
+        } else if attachment_count(state) > 0 {
+            clear_prompt_attachments(state);
+        } else {
+            cancel_current_turn(state, cmd_tx);
+        }
+        return TerminalRequest::None;
+    }
+
+    if key.modifiers == KeyModifiers::CONTROL
+        && matches!(key.code, KeyCode::Char('x'))
+        && state.has_active_review_workflow()
+    {
+        cancel_active_review(state, cmd_tx);
         return TerminalRequest::None;
     }
 
@@ -3524,16 +3538,9 @@ fn handle_crossterm(
             } else if state.input.is_empty() && attachment_count(state) == 0 {
                 state.exit_reason = Some(UiExitReason::Quit);
             } else if !state.input.is_empty() {
-                state.input.clear();
-                state.input_cursor = 0;
-                state.reset_history_navigation();
-                state.scroll_input_to_bottom();
-                state.update_autocomplete();
+                clear_prompt_input(state);
             } else {
-                clear_attachments(state);
-                state.reset_history_navigation();
-                state.scroll_input_to_bottom();
-                state.update_autocomplete();
+                clear_prompt_attachments(state);
             }
         }
         (_, KeyCode::Esc) if state.is_streaming() => {
@@ -3705,8 +3712,28 @@ fn handle_crossterm(
     TerminalRequest::None
 }
 
+fn clear_prompt_input(state: &mut AppState) {
+    state.input.clear();
+    state.input_cursor = 0;
+    state.reset_history_navigation();
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
+}
+
+fn clear_prompt_attachments(state: &mut AppState) {
+    clear_attachments(state);
+    state.reset_history_navigation();
+    state.scroll_input_to_bottom();
+    state.update_autocomplete();
+}
+
 fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
     if state.connection_state() != ConnectionState::Streaming {
+        return;
+    }
+
+    if state.has_active_review_workflow() {
+        cancel_active_review(state, cmd_tx);
         return;
     }
 
@@ -3744,6 +3771,22 @@ fn cancel_current_turn(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
         "cancelling current turn...".to_string()
     };
     state.status_line = Some(StatusMessage::info(msg));
+}
+
+fn cancel_active_review(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+    if !state.begin_review_cancel() {
+        return;
+    }
+
+    let _ = cmd_tx.send(UiCommand::CancelReview);
+    state.mark_cancelling();
+    let queued = state.queued_prompt_count();
+    let message = if queued > 0 {
+        format!("cancelling discrete review... ({queued} queued)")
+    } else {
+        "cancelling discrete review...".to_string()
+    };
+    state.status_line = Some(StatusMessage::info(message));
 }
 
 fn is_edit_latest_queued_prompt_key(modifiers: KeyModifiers, code: KeyCode) -> bool {
@@ -5507,6 +5550,17 @@ fn submit_prompt(state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>
             state.record_status_message(StatusKind::Warning, "the ACP runtime is closed");
         } else if state.session_id.is_none() {
             state.announce_waiting_for_primary();
+        } else if state.has_active_review_workflow() {
+            // Review workers never receive UI commands. The primary ACP is
+            // idle while they run, so wake it with a normal prompt instead of
+            // an in-turn steer; the new primary turn supersedes the review.
+            state.record_user_prompt(RUNTIME_NUDGE.to_string());
+            let _ = cmd_tx.send(UiCommand::SendPrompt {
+                text: RUNTIME_NUDGE.to_string(),
+                images: Vec::new(),
+                resources: Vec::new(),
+            });
+            state.record_status_message(StatusKind::Info, "nudge sent to the main runtime");
         } else if !state.is_busy() {
             state.record_status_message(StatusKind::Info, "the runtime is idle");
         } else if !state.can_steer() {
@@ -6174,13 +6228,8 @@ fn persist_mjconfig_selection(
         crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
     let team_changed = initial_config.team != config.team;
     let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
-    let primary_team_switch_pending =
-        team_changed && state.session_id.is_some() && !auxiliary_agents_update_live;
-    let live_session_updates = if primary_team_switch_pending {
-        Vec::new()
-    } else {
-        live_primary_session_config_updates(state, &config)
-    };
+    let primary_team_switch_pending = team_changed && !auxiliary_agents_update_live;
+    let live_session_updates = live_primary_session_config_updates(state, &config);
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
@@ -9531,7 +9580,9 @@ fn status_line(state: &AppState, width: usize) -> Line<'static> {
     }
 
     if let Some(stall) = state.primary_runtime_stall_at(Instant::now()) {
-        let action = if state.can_steer() {
+        let action = if state.has_active_review_workflow() {
+            "/nudge main or Ctrl-X to cancel review"
+        } else if state.can_steer() {
             "/nudge or Ctrl-C"
         } else {
             "Ctrl-C to cancel"
@@ -13481,10 +13532,25 @@ fn busy_prompt_title(state: &AppState) -> Option<Line<'static>> {
     // and the missing-arm compile error is what forces that.
     let hint = match state.connection_state() {
         ConnectionState::Streaming | ConnectionState::Cancelling => {
-            if queued > 0 {
-                format!("{queued} queued | Enter queue next | Ctrl-C/Esc cancel current")
+            let interrupt_hint = if state.has_active_review_workflow() {
+                if !state.input.is_empty() {
+                    "Ctrl-C clear draft | Ctrl-X cancel review"
+                } else if attachment_count(state) > 0 {
+                    "Ctrl-C clear attachments | Ctrl-X cancel review"
+                } else {
+                    "Ctrl-X/Ctrl-C cancel review"
+                }
+            } else if !state.input.is_empty() {
+                "Ctrl-C clear draft | Esc cancel current"
+            } else if attachment_count(state) > 0 {
+                "Ctrl-C clear attachments | Esc cancel current"
             } else {
-                "Enter queue next | Ctrl-C/Esc cancel current".to_string()
+                "Ctrl-C/Esc cancel current"
+            };
+            if queued > 0 {
+                format!("{queued} queued | Enter queue next | {interrupt_hint}")
+            } else {
+                format!("Enter queue next | {interrupt_hint}")
             }
         }
         ConnectionState::Forking => {
@@ -13803,10 +13869,15 @@ fn workflow_progress_line(
     let head_width = head.width();
     let mut details = vec![phase.to_string()];
     if let Some(stall) = runtime_stall.as_ref() {
+        let cancel_key = if workflow.kind == WorkflowKind::Review {
+            "Ctrl-X"
+        } else {
+            "Ctrl-C"
+        };
         details.insert(
             0,
             format!(
-                "no activity from {} for {} · Ctrl-C to cancel",
+                "no activity from {} for {} · {cancel_key} to cancel",
                 stall.label,
                 format_duration(stall.inactive_for)
             ),
@@ -15330,9 +15401,10 @@ fn general_help_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<
         ),
         help_binding_line(
             "Ctrl-C",
-            "cancel streaming; clear input/chips; quit when empty",
+            "clear input, then chips; cancel streaming; quit when empty",
             theme,
         ),
+        help_binding_line("Ctrl-X", "cancel the active discrete review", theme),
     ];
     if voice_input_supported {
         lines.push(help_binding_line(
@@ -18184,7 +18256,7 @@ mod tests {
             stalled.contains("no activity from claude-acp/opus for 5m01s"),
             "{stalled}"
         );
-        assert!(stalled.contains("Ctrl-C to cancel"), "{stalled}");
+        assert!(stalled.contains("Ctrl-X to cancel"), "{stalled}");
 
         apply_workflow(
             &mut state,
@@ -20630,6 +20702,92 @@ mod tests {
 
         assert!(state.team_picker.is_none());
         assert_eq!(state.exit_reason, Some(UiExitReason::TransferSession));
+    }
+
+    #[test]
+    fn saving_mjconfig_team_change_reconciles_active_session_if_switch_is_declined() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut initial_config);
+        let mut config = initial_config.clone();
+        config::TeamPreset::Claude.apply(&mut config);
+        config
+            .agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:service_tier".to_string(), "priority".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("codex-session".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("priority", "Priority"),
+            ],
+        )];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "service_tier".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "service_tier" && value.to_string() == "priority"
+        ));
+        assert_eq!(
+            state.team_picker.as_ref().map(|picker| picker.step),
+            Some(TeamPickerStep::SwitchPrimary)
+        );
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, None);
+        assert!(
+            state
+                .status_line
+                .as_ref()
+                .is_some_and(|status| status.text.contains("switch the primary when ready"))
+        );
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn saving_mjconfig_team_change_offers_to_start_primary_without_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut initial_config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut initial_config);
+        let mut config = initial_config.clone();
+        config::TeamPreset::Claude.apply(&mut config);
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+
+        let picker = state.team_picker.as_ref().expect("primary switch prompt");
+        assert_eq!(picker.step, TeamPickerStep::SwitchPrimary);
+        assert!(picker.switch_primary_now);
+        assert!(cmd_rx.try_recv().is_err());
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+
+        assert!(state.team_picker.is_none());
+        assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
     }
 
     #[test]
@@ -25881,6 +26039,29 @@ mod tests {
         assert!(!cancelling.contains("streaming"), "{cancelling}");
         assert!(!cancelling.contains("prompt"), "{cancelling}");
 
+        state.input = "draft".to_string();
+        let drafting = line_text(&busy_prompt_title(&state).expect("drafting title"));
+        assert!(drafting.contains("Ctrl-C clear draft"), "{drafting}");
+        assert!(drafting.contains("Esc cancel current"), "{drafting}");
+        assert!(
+            !drafting.contains("Ctrl-C/Esc cancel current"),
+            "{drafting}"
+        );
+        state.input.clear();
+
+        state.attachments.push(PastedAttachment {
+            id: 1,
+            position: 0,
+            content: "attachment".to_string(),
+        });
+        let attaching = line_text(&busy_prompt_title(&state).expect("attaching title"));
+        assert!(
+            attaching.contains("Ctrl-C clear attachments"),
+            "{attaching}"
+        );
+        assert!(attaching.contains("Esc cancel current"), "{attaching}");
+        state.attachments.clear();
+
         state.push_queued_prompt(QueuedPrompt {
             text: "next".to_string(),
             images: Vec::new(),
@@ -25899,6 +26080,29 @@ mod tests {
         assert!(!forking.contains("Ctrl-C/Esc cancel current"), "{forking}");
         assert!(!forking.contains("forking"), "{forking}");
         assert!(!forking.contains("prompt"), "{forking}");
+
+        let mut reviewing = AppState::new();
+        reviewing.set_connection_state(ConnectionState::Streaming);
+        start_workflow(
+            &mut reviewing,
+            WorkflowId::review(1),
+            WorkflowKind::Review,
+            WorkflowPhase::SpecialistReview,
+        );
+        let review = line_text(&busy_prompt_title(&reviewing).expect("review title"));
+        assert!(review.contains("Ctrl-X/Ctrl-C cancel review"), "{review}");
+        assert!(!review.contains("cancel current"), "{review}");
+
+        reviewing.input = "draft".to_string();
+        let review_draft = line_text(&busy_prompt_title(&reviewing).expect("review draft title"));
+        assert!(
+            review_draft.contains("Ctrl-C clear draft"),
+            "{review_draft}"
+        );
+        assert!(
+            review_draft.contains("Ctrl-X cancel review"),
+            "{review_draft}"
+        );
     }
 
     #[test]
@@ -29785,6 +29989,56 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_clears_draft_layers_before_cancelling_streaming_turn() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("long-running task".to_string());
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        type_string(&mut state, &cmd_tx, "replace this draft");
+        state.attachments.push(PastedAttachment {
+            id: 1,
+            position: 0,
+            content: "attachment".to_string(),
+        });
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.input.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert_eq!(attachment_count(&state), 1);
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "clearing draft text must not interrupt the active turn"
+        );
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(attachment_count(&state), 0);
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "clearing draft attachments must not interrupt the active turn"
+        );
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelPrompt)));
+    }
+
+    #[test]
     fn ctrl_c_with_empty_side_composer_steers_queued_prompt_while_streaming() {
         let mut state = ready_state_with_session();
         state.is_side = true;
@@ -30451,6 +30705,137 @@ mod tests {
                 .transcript
                 .iter()
                 .any(|entry| matches!(entry, Entry::UserPrompt(text) if text == "redirect here"))
+        );
+    }
+
+    #[test]
+    fn active_review_preserves_queued_prompt_and_uses_review_only_cancel() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        start_workflow(
+            &mut state,
+            WorkflowId::review(1),
+            WorkflowKind::Review,
+            WorkflowPhase::SpecialistReview,
+        );
+        state.push_queued_prompt(QueuedPrompt {
+            text: "is /side in there?".to_string(),
+            images: Vec::new(),
+            resources: Vec::new(),
+            display_text: "is /side in there?".to_string(),
+        });
+
+        assert!(!state.can_steer(), "a review must close primary steering");
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(state.queued_prompt_count(), 1, "review keeps the queue");
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelReview)));
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn review_ctrl_c_clears_draft_before_review_only_cancel() {
+        let mut state = ready_state_with_session();
+        state.record_user_prompt("first".to_string());
+        start_workflow(
+            &mut state,
+            WorkflowId::review(1),
+            WorkflowKind::Review,
+            WorkflowPhase::SpecialistReview,
+        );
+        state.input = "is /side in there?".to_string();
+        state.input_cursor = state.input.chars().count();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(state.input.is_empty());
+        assert_eq!(state.connection_state(), ConnectionState::Streaming);
+        assert!(cmd_rx.try_recv().is_err());
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(state.connection_state(), ConnectionState::Cancelling);
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelReview)));
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ctrl_x_cancels_manual_review_without_touching_primary() {
+        let mut state = ready_state_with_session();
+        start_workflow(
+            &mut state,
+            WorkflowId::review(1),
+            WorkflowKind::Review,
+            WorkflowPhase::SpecialistReview,
+        );
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(state.connection_state(), ConnectionState::Ready);
+        assert!(matches!(cmd_rx.try_recv(), Ok(UiCommand::CancelReview)));
+
+        handle_crossterm(
+            &mut state,
+            &cmd_tx,
+            key_with_modifiers(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        );
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn nudge_during_review_starts_a_new_primary_turn() {
+        let mut state = ready_state_with_session();
+        state.steering_supported = true;
+        state.record_user_prompt("first".to_string());
+        start_workflow(
+            &mut state,
+            WorkflowId::review(1),
+            WorkflowKind::Review,
+            WorkflowPhase::SpecialistReview,
+        );
+        state.input = "/nudge".to_string();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        submit_prompt(&mut state, &cmd_tx);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SendPrompt { text, .. })
+                if text == "Please report your current status, then continue the active task."
+        ));
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(state.transcript.iter().any(|entry| matches!(
+            entry,
+            Entry::UserPrompt(text)
+                if text == "Please report your current status, then continue the active task."
+        )));
+        assert_eq!(
+            state
+                .status_line
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("nudge sent to the main runtime")
         );
     }
 
