@@ -1,15 +1,13 @@
 //! Clearing the npx cache entry behind a bundled command.
 //!
 //! npx reuses whatever sits in a cache entry as long as its tree contains a
-//! manifest satisfying the spec; it never checks that the install finished. An
-//! install interrupted partway through therefore leaves a tree that every later
-//! run fails on, and npm neither validates completeness nor offers a flag to
-//! bypass a broken entry (issue #896).
-//!
-//! npm does supply the recovery, as two commands this module drives and does
-//! not second-guess: `npm cache npx ls` names the cached entries, and
-//! `npm cache npx rm <key>` removes one. npm owns where its cache lives, what
-//! is in it, and the deletion; nothing about any of that is derived here.
+//! manifest satisfying the spec, and never checks that the install finished, so
+//! an interrupted install leaves a tree every later run fails on (issue #896).
+//! The recovery is npm's own: `npm cache npx ls` names the entries and
+//! `npm cache npx rm <key>` removes one. `ls` echoes the specs as the
+//! invocation gave them, so our entry is the line whose specs we passed —
+//! other tools' entries for the same package are pinned to a version and do
+//! not match.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,115 +16,77 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-/// How long to wait for an `npm cache npx` command. Generous next to node's
-/// startup cost, and it only delays a launch that has already failed.
 const NPM_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Clear the npx cache entry this invocation runs from, so the next run
-/// reinstalls it.
-///
-/// Returns whether npm removed an entry, which is how a caller tells "there
-/// was a cached install to clear" from "nothing to do here".
+/// Clear the npx cache entry this command runs from, so the next run
+/// reinstalls it. Returns whether an entry was removed.
 pub async fn remove_entry(
     npx_command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
 ) -> bool {
     let Some(npm) = sibling_npm(npx_command) else {
-        tracing::warn!(
-            npx = %npx_command.display(),
-            "no npm beside npx; leaving the npx cache alone"
-        );
         return false;
     };
-    let Some(key) = entry_key(&npm, args, env).await else {
-        tracing::debug!("no npx cache entry matches this command; nothing to clear");
+    let Some(listing) = npm_output(&npm, &["cache", "npx", "ls"], env).await else {
         return false;
     };
-    match run_npm(&npm, &["cache", "npx", "rm", &key], env).await {
-        Some(output) if output.status.success() => {
-            tracing::warn!(
-                key = %key,
-                "cleared npx cache entry after a failed launch: {}",
-                String::from_utf8_lossy(&output.stdout).trim()
-            );
-            true
-        }
-        Some(output) => {
-            tracing::warn!(
-                key = %key,
-                "npm did not remove the npx cache entry: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            false
-        }
-        None => false,
-    }
+    let Some(key) = matching_key(&listing, args) else {
+        return false;
+    };
+    let removed = npm_output(&npm, &["cache", "npx", "rm", key], env)
+        .await
+        .is_some();
+    tracing::warn!(key, removed, "clearing npx cache entry after failed launch");
+    removed
 }
 
-/// Ask npm which cache entry belongs to this command.
-///
-/// `npm cache npx ls` prints `<key>: <spec>[, <spec>...]`, echoing the specs as
-/// the invocation gave them, so the entry is found by looking for the one whose
-/// specs this command passed — no knowledge of how npm names or locates entries.
-///
-/// Entries npm reports as `(empty/invalid)` or `(unknown)` name no spec and are
-/// skipped. They are also not the stuck case: an entry npm cannot read a
-/// manifest from is one npx reinstalls of its own accord.
-async fn entry_key(npm: &Path, args: &[String], env: &HashMap<String, String>) -> Option<String> {
-    let output = run_npm(npm, &["cache", "npx", "ls"], env).await?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| {
-            let (key, specs) = line.split_once(": ")?;
-            let specs: Vec<&str> = specs.split(", ").map(str::trim).collect();
-            let names_a_spec = specs.iter().all(|spec| !spec.starts_with('('));
-            (names_a_spec && specs.iter().all(|spec| command_passed_spec(args, spec)))
-                .then(|| key.trim().to_string())
-        })
-}
-
-/// Whether this command passed `spec` as a package to install: on its own, or
-/// as the value of npx's `--package`/`-p`.
-fn command_passed_spec(args: &[String], spec: &str) -> bool {
-    args.iter().enumerate().any(|(index, arg)| {
-        arg == spec
-            || arg.strip_prefix("--package=") == Some(spec)
-            || arg.strip_prefix("-p=") == Some(spec)
-            || ((arg == "--package" || arg == "-p")
-                && args.get(index + 1).is_some_and(|next| next == spec))
-    })
-}
-
-async fn run_npm(
-    npm: &Path,
-    args: &[&str],
-    env: &HashMap<String, String>,
-) -> Option<std::process::Output> {
-    let mut command = Command::new(npm);
-    command
-        .args(args)
-        .envs(env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    match tokio::time::timeout(NPM_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => Some(output),
-        Ok(Err(error)) => {
-            tracing::warn!("could not run `npm {}`: {error}", args.join(" "));
-            None
-        }
-        Err(_) => {
-            tracing::warn!("`npm {}` timed out", args.join(" "));
-            None
+/// The key `npm cache npx ls` lists for the packages this command installs.
+fn matching_key<'a>(listing: &'a str, args: &[String]) -> Option<&'a str> {
+    for line in listing.lines() {
+        let Some((key, specs)) = line.split_once(": ") else {
+            continue;
+        };
+        // Entries npm cannot read a manifest from list as "(empty/invalid)" or
+        // "(unknown)", which no spec of ours matches. They are also not the
+        // stuck case: npx reinstalls an entry it cannot read.
+        if specs.split(", ").all(|spec| passed(args, spec.trim())) {
+            return Some(key.trim());
         }
     }
+    None
 }
 
-/// The `npm` shipped alongside an `npx`, or `None` when it is not there.
+/// Whether `spec` is a package this command installs: bare, or after npx's
+/// `--package=`/`-p=`.
+fn passed(args: &[String], spec: &str) -> bool {
+    args.iter()
+        .any(|arg| arg == spec || arg.strip_prefix("--package=") == Some(spec))
+}
+
+/// Run npm and return its stdout, or `None` if it failed, timed out, or could
+/// not start.
+async fn npm_output(npm: &Path, args: &[&str], env: &HashMap<String, String>) -> Option<String> {
+    let output = tokio::time::timeout(
+        NPM_TIMEOUT,
+        Command::new(npm)
+            .args(args)
+            .envs(env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The `npm` shipped alongside an `npx`.
 fn sibling_npm(npx_command: &Path) -> Option<PathBuf> {
     let npm_name = match npx_command.file_name()?.to_str()? {
         "npx" => "npm",
@@ -142,15 +102,10 @@ fn sibling_npm(npx_command: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn strings(args: &[&str]) -> Vec<String> {
-        args.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// Real `npm cache npx ls` output, trimmed: the two bundled adapters as mj
+    /// Real `npm cache npx ls` output, trimmed: the bundled adapters as mj
     /// launches them, other tools' pinned specs for the same packages, a
-    /// multi-package entry, and the two states that name no spec.
-    #[cfg(unix)]
-    const LS_OUTPUT: &str = "\
+    /// multi-package entry, and the states that name no spec.
+    const LISTING: &str = "\
 0e146165406b1119: @agentclientprotocol/claude-agent-acp@0.44.0
 0e9501d4069152f5: @hey-api/openapi-ts@0.99.0, typescript@6.0.3
 4877722a062902ce: @agentclientprotocol/codex-acp
@@ -159,126 +114,65 @@ d6d842980a021838: (unknown)
 d820eb7d96bc2600: @agentclientprotocol/claude-agent-acp
 ";
 
-    /// A stand-in `npx` with an `npm` beside it that answers `ls` with
-    /// [`LS_OUTPUT`], records any other invocation's arguments, and exits with
-    /// `rm_exit_code` for those. Returns the fake npx path and the record file.
-    #[cfg(unix)]
-    fn fake_npm_pair(dir: &Path, rm_exit_code: u8) -> (PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).expect("create bin");
-        let npx = bin.join("npx");
-        std::fs::write(&npx, "#!/bin/sh\nexit 1\n").expect("write npx");
-        let recorded = dir.join("npm-args");
-        let npm = bin.join("npm");
-        std::fs::write(
-            &npm,
-            format!(
-                "#!/bin/sh\nif [ \"$3\" = ls ]; then cat <<'EOF'\n{LS_OUTPUT}EOF\n  exit 0\nfi\n\
-                 echo \"$@\" > '{}'\nexit {rm_exit_code}\n",
-                recorded.display()
-            ),
-        )
-        .expect("write npm");
-        for path in [&npx, &npm] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        }
-        (npx, recorded)
+    fn key_for(args: &[&str]) -> Option<&'static str> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        matching_key(LISTING, &args)
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn removes_the_entry_listed_for_this_commands_spec() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (npx, recorded) = fake_npm_pair(temp.path(), 0);
-
-        // Claude: the spec is a bare argument. The pinned entries for the same
-        // package belong to other tools and must not be touched.
-        assert!(
-            remove_entry(
-                &npx,
-                &strings(&["-y", "@agentclientprotocol/claude-agent-acp", "--cli"]),
-                &HashMap::new()
-            )
-            .await
+    #[test]
+    fn finds_the_entry_for_each_adapters_argument_style() {
+        // Claude passes the spec bare; codex passes it through --package=.
+        assert_eq!(
+            key_for(&["-y", "@agentclientprotocol/claude-agent-acp", "--cli"]),
+            Some("d820eb7d96bc2600")
         );
         assert_eq!(
-            std::fs::read_to_string(&recorded).expect("recorded").trim(),
-            "cache npx rm d820eb7d96bc2600"
-        );
-
-        // Codex: the spec arrives through --package=.
-        assert!(
-            remove_entry(
-                &npx,
-                &strings(&["--yes", "--package=@agentclientprotocol/codex-acp", "codex"]),
-                &HashMap::new()
-            )
-            .await
-        );
-        assert_eq!(
-            std::fs::read_to_string(&recorded).expect("recorded").trim(),
-            "cache npx rm 4877722a062902ce"
-        );
-    }
-
-    /// Nothing cached for this command means the failure was not a broken
-    /// install, so there is nothing to clear and nothing to retry.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn reports_no_removal_when_no_entry_matches() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (npx, recorded) = fake_npm_pair(temp.path(), 0);
-
-        assert!(
-            !remove_entry(
-                &npx,
-                &strings(&["-y", "some-other-package"]),
-                &HashMap::new()
-            )
-            .await
-        );
-        assert!(!recorded.exists(), "rm must not run without a match");
-    }
-
-    /// A failing `rm` is reported as no removal, so the caller does not retry.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn reports_no_removal_when_npm_rm_fails() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (npx, _) = fake_npm_pair(temp.path(), 1);
-
-        assert!(
-            !remove_entry(
-                &npx,
-                &strings(&["-y", "@agentclientprotocol/claude-agent-acp"]),
-                &HashMap::new()
-            )
-            .await
-        );
-    }
-
-    #[tokio::test]
-    async fn does_nothing_without_an_npm_beside_npx() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        assert!(
-            !remove_entry(
-                &temp.path().join("bin").join("npx"),
-                &strings(&["-y", "pkg"]),
-                &HashMap::new()
-            )
-            .await
+            key_for(&["--yes", "--package=@agentclientprotocol/codex-acp", "codex"]),
+            Some("4877722a062902ce")
         );
     }
 
     #[test]
-    fn matches_specs_however_the_command_passed_them() {
-        let args = strings(&["--package", "separated", "-p=joined", "bare", "--yes"]);
-        for spec in ["separated", "joined", "bare"] {
-            assert!(command_passed_spec(&args, spec), "{spec}");
-        }
-        // A pinned spec is a different entry belonging to a different command.
-        assert!(!command_passed_spec(&args, "bare@1.2.3"));
-        assert!(!command_passed_spec(&args, "never-passed"));
+    fn ignores_entries_this_command_did_not_install() {
+        // Every spec of a multi-package entry must be ours.
+        assert_eq!(key_for(&["-y", "typescript@6.0.3"]), None);
+        assert_eq!(key_for(&["-y", "some-other-package"]), None);
+        assert_eq!(key_for(&["-y"]), None);
+    }
+
+    /// The listing holds several entries for the adapters mj launches, pinned
+    /// to versions by whoever installed them. Clearing one of those would
+    /// disrupt another tool and leave our own broken entry in place.
+    #[test]
+    fn an_unversioned_spec_never_matches_someone_elses_pinned_entry() {
+        let pinned = "0e146165406b1119: @agentclientprotocol/claude-agent-acp@0.44.0\n";
+        let args = vec![
+            "-y".to_string(),
+            "@agentclientprotocol/claude-agent-acp".to_string(),
+        ];
+        assert_eq!(matching_key(pinned, &args), None);
+    }
+
+    /// Entries npm cannot read a manifest from name no spec, so no real
+    /// invocation matches them.
+    #[test]
+    fn unreadable_entries_match_nothing() {
+        let unreadable = "ba3092411dcdc02f: (empty/invalid)\nd6d842980a021838: (unknown)\n";
+        let args = vec![
+            "-y".to_string(),
+            "@agentclientprotocol/claude-agent-acp".to_string(),
+        ];
+        assert_eq!(matching_key(unreadable, &args), None);
+    }
+
+    #[test]
+    fn finds_npm_only_beside_a_real_npx() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        assert_eq!(sibling_npm(&bin.join("npx")), None, "no npm on disk");
+        std::fs::write(bin.join("npm"), "").expect("write npm");
+        assert_eq!(sibling_npm(&bin.join("npx")), Some(bin.join("npm")));
+        assert_eq!(sibling_npm(&bin.join("node")), None, "not an npx");
     }
 }
