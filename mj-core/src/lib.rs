@@ -18,6 +18,7 @@ pub mod labels;
 pub mod mcp_bridge;
 pub mod memory;
 pub mod model_resolve;
+pub mod npx_cache;
 pub mod orchestrator;
 mod orchestrator_contract;
 pub mod paths;

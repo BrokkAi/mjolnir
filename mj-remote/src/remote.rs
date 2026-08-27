@@ -6536,10 +6536,44 @@ async fn mjconfig_run_login(
     vendor: mj_core::auth::AuthVendor,
     mode: mj_core::auth::WebLoginMode,
     output: Arc<Mutex<mj_core::terminal_output::TerminalText>>,
-    mut input: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    input: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Result<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let invocation = mj_core::auth::web_login_invocation(vendor, mode).await?;
+    // Attempts share the pasted-code receiver so it survives a retry.
+    let input = input.map(|receiver| Arc::new(tokio::sync::Mutex::new(receiver)));
+    let status = mj_core::npx_cache::run_retrying_once_after_clearing(
+        &invocation.args,
+        &invocation.env,
+        || mjconfig_login_attempt(vendor, &invocation, &output, input.clone()),
+        || {
+            if let Ok(mut sink) = output.lock() {
+                sink.push(b"\nSign-in failed. Cleared the npx cache entry and retrying.\n");
+            }
+        },
+    )
+    .await?;
+    if !status.success() {
+        anyhow::bail!("{} login exited with {status}", vendor.label());
+    }
+    if !mj_core::auth::detect(vendor).available() {
+        anyhow::bail!(
+            "{} login finished but no supported credential was found",
+            vendor.label()
+        );
+    }
+    Ok(format!(
+        "Signed in to {}; refreshing models for new sessions",
+        vendor.label()
+    ))
+}
+
+async fn mjconfig_login_attempt(
+    vendor: mj_core::auth::AuthVendor,
+    invocation: &mj_core::auth::LoginInvocation,
+    output: &Arc<Mutex<mj_core::terminal_output::TerminalText>>,
+    input: Option<Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>>,
+) -> Result<std::process::ExitStatus> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut child = tokio::process::Command::new(&invocation.command)
         .args(&invocation.args)
         .envs(&invocation.env)
@@ -6553,9 +6587,10 @@ async fn mjconfig_run_login(
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("run {} login", vendor.label()))?;
-    let input_task = input.take().map(|mut input| {
+    let input_task = input.map(|input| {
         let mut stdin = child.stdin.take().expect("piped stdin");
         tokio::spawn(async move {
+            let mut input = input.lock().await;
             while let Some(line) = input.recv().await {
                 stdin.write_all(line.as_bytes()).await?;
                 stdin.write_all(b"\n").await?;
@@ -6566,7 +6601,7 @@ async fn mjconfig_run_login(
     });
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
-    let stdout_sink = Arc::clone(&output);
+    let stdout_sink = Arc::clone(output);
     let stdout_task = tokio::spawn(async move {
         let mut buffer = [0u8; 4096];
         while let Ok(read) = stdout.read(&mut buffer).await {
@@ -6578,7 +6613,7 @@ async fn mjconfig_run_login(
             }
         }
     });
-    let stderr_sink = Arc::clone(&output);
+    let stderr_sink = Arc::clone(output);
     let stderr_task = tokio::spawn(async move {
         let mut buffer = [0u8; 4096];
         while let Ok(read) = stderr.read(&mut buffer).await {
@@ -6599,19 +6634,7 @@ async fn mjconfig_run_login(
     if let Ok(mut sink) = output.lock() {
         sink.finish();
     }
-    if !status.success() {
-        anyhow::bail!("{} login exited with {status}", vendor.label());
-    }
-    if !mj_core::auth::detect(vendor).available() {
-        anyhow::bail!(
-            "{} login finished but no supported credential was found",
-            vendor.label()
-        );
-    }
-    Ok(format!(
-        "Signed in to {}; refreshing models for new sessions",
-        vendor.label()
-    ))
+    Ok(status)
 }
 
 async fn mjconfig_login_input(

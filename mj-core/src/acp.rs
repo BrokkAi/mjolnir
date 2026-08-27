@@ -1814,16 +1814,30 @@ fn embedded_npx_path() -> Option<PathBuf> {
 }
 
 fn embedded_npx_path_in_dir(dir: &Path) -> Option<PathBuf> {
+    embedded_node_program_in_dir(dir, "npx")
+}
+
+/// A program from an extracted Node install, where Node puts it: `<dir>/bin/`
+/// on unix, `<dir>/<name>.cmd` on Windows.
+fn embedded_node_program_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let path = dir.join("npx.cmd");
+        let path = dir.join(format!("{name}.cmd"));
         is_executable_file(&path).then_some(path)
     }
     #[cfg(not(windows))]
     {
-        let path = dir.join("bin").join("npx");
+        let path = dir.join("bin").join(name);
         is_executable_file(&path).then_some(path)
     }
+}
+
+/// Resolve `npm` the way [`prepare_npx_command`] resolves `npx`: the first one
+/// on `PATH`, else the embedded Node install. Never installs anything — a
+/// caller that has already launched `npx` has one or the other.
+pub fn find_npm() -> Option<PathBuf> {
+    find_on_path(Path::new("npm"))
+        .or_else(|| embedded_node_dir().and_then(|dir| embedded_node_program_in_dir(&dir, "npm")))
 }
 
 fn embedded_node_env() -> HashMap<String, String> {

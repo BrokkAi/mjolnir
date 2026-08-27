@@ -70,13 +70,28 @@ pub async fn run_login(vendor: AuthVendor) -> Result<LoginOutcome> {
     let mut invocation = bundled_invocation(vendor).await?;
     append_login_args(&mut invocation, args);
     let _interrupt_guard = crate::termination::suppress_interrupts();
-    let status = tokio::process::Command::new(&invocation.command)
+    let status = mj_core::npx_cache::run_retrying_once_after_clearing(
+        &invocation.args,
+        &invocation.env,
+        || run_login_command(vendor, &invocation),
+        || println!("\nSign-in failed. Cleared the npx cache entry and retrying.\n"),
+    )
+    .await?;
+    let success = status.success();
+    let credentials_available = success && detect(vendor).available();
+    login_outcome_from_status(vendor, success, &status.to_string(), credentials_available)
+}
+
+/// Run the vendor login CLI with the terminal handed to it, as the flows are
+/// interactive.
+async fn run_login_command(
+    vendor: AuthVendor,
+    invocation: &LoginInvocation,
+) -> Result<std::process::ExitStatus> {
+    tokio::process::Command::new(&invocation.command)
         .args(&invocation.args)
         .envs(&invocation.env)
         .status()
         .await
-        .with_context(|| format!("run {} login", vendor.label()))?;
-    let success = status.success();
-    let credentials_available = success && detect(vendor).available();
-    login_outcome_from_status(vendor, success, &status.to_string(), credentials_available)
+        .with_context(|| format!("run {} login", vendor.label()))
 }
