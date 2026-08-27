@@ -1038,8 +1038,9 @@ pub struct ReviewConfig {
     /// Adapter-owned session defaults selected for future review sessions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
-    /// Exact Bifrost npm version used by discrete review. `None` follows the
-    /// package's moving `latest` tag, preserving the default launch behavior.
+    /// Bifrost npm version selection used by discrete review. `None` launches
+    /// [`crate::bifrost::DEFAULT_PINNED_VERSION`]; `"latest"` is the explicit
+    /// opt-in that follows the package's moving `latest` tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bifrost_version: Option<String>,
 }
