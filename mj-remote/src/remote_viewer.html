@@ -4964,24 +4964,28 @@
           }
           mjcfg.snapshot = await response.json();
           applyServerSnapshot(mjcfg.snapshot, true);
-          // Parity with the TUI: saved primary session-option defaults also
-          // update the selected live session where it exposes the same option.
+          // Parity with the TUI: the saved primary session options reconcile
+          // the selected live session wherever it exposes the same option.
+          // The post-save snapshot is the source, not this save's edits, so
+          // drift from an earlier failed or missed update heals on any save.
           const session = sessions.find((s) => s.session_id === selectedSessionId) || null;
-          if (session && edits.primary_session_defaults) {
+          if (session) {
             const liveOptions = sessionConfigOptions(session);
             const activeSource = session.status?.model_source;
-            const activeDefaults = activeSource
-              ? edits.primary_session_defaults[activeSource]
+            const savedGroup = activeSource
+              ? (mjcfg.snapshot?.session_options?.primary || []).find(
+                  (group) => group.server_id === activeSource,
+                )
               : null;
-            if (activeDefaults) {
-              const options = activeDefaults;
-              for (const [key, value] of Object.entries(options)) {
-                const live = liveOptions.find(
-                  (option) => option.config_id && `config:${option.config_id}` === key,
-                );
-                if (live && live.current_value !== value) {
-                  void submitConfigChange(session.session_id, live, value);
-                }
+            for (const option of savedGroup?.options || []) {
+              const live = liveOptions.find(
+                (candidate) =>
+                  candidate.config_id && `config:${candidate.config_id}` === option.key,
+              );
+              const accepted =
+                live && (live.choices || []).some((choice) => choice.value === option.value);
+              if (accepted && live.current_value !== option.value) {
+                void submitConfigChange(session.session_id, live, option.value);
               }
             }
           }

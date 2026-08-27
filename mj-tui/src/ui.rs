@@ -6148,6 +6148,10 @@ fn handle_mjconfig_menu_key(
 }
 
 /// Persist the shared settings selection and apply review switches immediately.
+/// `initial_config` is the config as loaded when the menu opened; it gates
+/// only save-scoped transitions (a team change prompting a primary switch).
+/// Live session options never diff against it — they reconcile with the
+/// saved config in [`live_primary_session_config_updates`].
 fn persist_mjconfig_selection(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
@@ -6175,7 +6179,7 @@ fn persist_mjconfig_selection(
     let live_session_updates = if primary_team_switch_pending {
         Vec::new()
     } else {
-        live_primary_session_config_updates(state, &initial_config, &config)
+        live_primary_session_config_updates(state, &config)
     };
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
@@ -6226,7 +6230,7 @@ fn persist_mjconfig_selection(
                     "config saved; reviewer and subagent configuration is updating now".to_string()
                 } else {
                     format!(
-                        "config saved — theme {theme}, spinner {style}; changed session settings update the active primary when supported, while ACP routing changes apply on /new or /clear"
+                        "config saved — theme {theme}, spinner {style}; saved session settings apply to the active primary when supported, while ACP routing changes apply on /new or /clear"
                     )
                 };
                 for notice in &reroute_notices {
@@ -6257,7 +6261,18 @@ fn primary_route_stays_active(state: &AppState, config: &config::Config) -> bool
 }
 
 fn primary_config_matches_active_route(state: &AppState, config: &config::Config) -> bool {
-    let Some(source) = config.agent.acp_source.as_deref() else {
+    // Same resolution as the panel: the raw `acp_source` hint is
+    // `#[serde(skip)]`, so a config loaded when the menu opened carries no
+    // route hint even though a route is clearly selected.
+    let selected_source = mj_core::settings::selected_seat_session_source(
+        config,
+        crate::settings::SessionDefaultsSeat::Primary,
+        Some(&state.active_models),
+        &state.model_choices,
+        &state.acp_inventory,
+    )
+    .or_else(|| config.agent.acp_source.clone());
+    let Some(source) = selected_source.as_deref() else {
         return false;
     };
     let selected_model = if config.agent.model == "auto" {
@@ -6271,9 +6286,15 @@ fn primary_config_matches_active_route(state: &AppState, config: &config::Config
         && state.primary_route_reasoning_effort == config.agent.reasoning_effort
 }
 
+/// Session config updates that reconcile the live primary session with the
+/// values just saved in `/mjconfig`. ACP session options are live-mutable by
+/// definition, so the saved value the panel displays is pushed whenever the
+/// active session disagrees with it — not only when this particular save
+/// changed it. Diffing against the pre-save config left any earlier drift (a
+/// resumed session, a save made while no session was up, an update the
+/// adapter rejected) permanently unrepairable from the panel.
 fn live_primary_session_config_updates(
     state: &AppState,
-    initial_config: &config::Config,
     config: &config::Config,
 ) -> Vec<(SessionConfigTarget, SessionConfigValueId)> {
     if state.session_id.is_none() {
@@ -6283,7 +6304,22 @@ fn live_primary_session_config_updates(
         return Vec::new();
     };
     let defaults = config.agent.session_defaults.get(source_id);
-    let source_stays_active = config.agent.acp_source.as_deref() == Some(source_id);
+    let saved_defaults = config
+        .session_config
+        .get(source_id)
+        .map(|saved| &saved.defaults);
+    // Resolve the selected route exactly as the panel displays it. The raw
+    // `acp_source` hint is `#[serde(skip)]` and therefore absent on the
+    // loaded config whenever the user did not touch a model in this menu.
+    let selected_source = mj_core::settings::selected_seat_session_source(
+        config,
+        crate::settings::SessionDefaultsSeat::Primary,
+        Some(&state.active_models),
+        &state.model_choices,
+        &state.acp_inventory,
+    )
+    .or_else(|| config.agent.acp_source.clone());
+    let source_stays_active = selected_source.as_deref() == Some(source_id);
     let selected_model = if config.agent.model == "auto" {
         crate::roster::auto_primary_model_for_source(&state.model_choices, source_id)
     } else {
@@ -6295,33 +6331,32 @@ fn live_primary_session_config_updates(
         .iter()
         .zip(state.session_config_targets.iter())
         .filter_map(|(option, target)| {
+            // The saved value for this option, resolved through the same
+            // layers the panel reads: seat defaults, then the source-level
+            // saved defaults.
+            let saved_value = || {
+                let key = crate::acp::session_config_option_key(&option.id);
+                defaults
+                    .and_then(|defaults| defaults.get(&key))
+                    .or_else(|| saved_defaults.and_then(|defaults| defaults.get(&key)))
+                    .cloned()
+            };
             let desired = if crate::settings::session_option_controls_reasoning_effort(option) {
-                if !source_stays_active
-                    || initial_config.agent.reasoning_effort == config.agent.reasoning_effort
-                {
+                if !source_stays_active {
                     return None;
                 }
-                SessionConfigValueId::from(config.agent.reasoning_effort.clone()?)
+                SessionConfigValueId::from(
+                    config.agent.reasoning_effort.clone().or_else(saved_value)?,
+                )
             } else if matches!(option.category, Some(SessionConfigOptionCategory::Model)) {
                 if !source_stays_active
-                    || initial_config.agent.model == config.agent.model
                     || !matches!(target, SessionConfigTarget::ConfigOption { .. })
                 {
                     return None;
                 }
                 crate::acp::session_config_model_value(option, source_id, selected_model?, None)?
             } else {
-                let key = crate::acp::session_config_option_key(&option.id);
-                let desired = defaults?.get(&key)?;
-                let initial = initial_config
-                    .agent
-                    .session_defaults
-                    .get(source_id)
-                    .and_then(|defaults| defaults.get(&key));
-                if initial == Some(desired) {
-                    return None;
-                }
-                SessionConfigValueId::from(desired.clone())
+                SessionConfigValueId::from(saved_value()?)
             };
             let current = crate::app::config_option_current_value_id(option)?;
             if !crate::acp::session_config_option_contains_value(option, &desired) {
@@ -20562,8 +20597,7 @@ mod tests {
     fn saving_mjconfig_updates_the_live_primary_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        let initial_config = config::Config::default();
-        let mut config = initial_config.clone();
+        let mut config = config::Config::default();
         config
             .agent
             .session_defaults
@@ -20588,7 +20622,7 @@ mod tests {
         }];
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -20600,10 +20634,48 @@ mod tests {
     }
 
     #[test]
-    fn saving_mjconfig_does_not_reset_live_reasoning_effort() {
+    fn saving_mjconfig_leaves_an_already_matching_session_option_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut config = config::Config::default();
+        config
+            .agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:service_tier".to_string(), "default".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![SessionConfigOption::select(
+            "service_tier",
+            "Service tier",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("priority", "Priority"),
+            ],
+        )];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "service_tier".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "a saved value that matches the active session must not be re-sent"
+        );
+    }
+
+    #[test]
+    fn saving_mjconfig_reconciles_drifted_live_reasoning_effort() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.agent.acp_source = Some("codex-acp".to_string());
         config
             .agent
             .session_defaults
@@ -20632,8 +20704,48 @@ mod tests {
         persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
         assert!(
+            matches!(
+                cmd_rx.try_recv(),
+                Ok(UiCommand::SetSessionConfigOption {
+                    target: SessionConfigTarget::LegacyMode,
+                    value,
+                }) if value.to_string() == "medium"
+            ),
+            "the saved effort default must win over a drifted live session"
+        );
+    }
+
+    #[test]
+    fn saving_mjconfig_leaves_effort_alone_when_another_source_is_selected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.agent.acp_source = Some("claude-acp".to_string());
+        config.agent.reasoning_effort = Some("medium".to_string());
+        let mut state = AppState::new();
+        state.config_path = Some(path);
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "thinking",
+                "Thinking",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("medium", "Thinking: medium"),
+                    SessionConfigSelectOption::new("high", "Thinking: high"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::LegacyMode];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(
             cmd_rx.try_recv().is_err(),
-            "saving a default must not overwrite the active session's effort"
+            "the selected seat effort belongs to another provider's route"
         );
     }
 
@@ -20641,10 +20753,8 @@ mod tests {
     fn saving_mjconfig_updates_changed_live_reasoning_effort() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        let mut initial_config = config::Config::default();
-        initial_config.agent.acp_source = Some("codex-acp".to_string());
-        initial_config.agent.reasoning_effort = Some("medium".to_string());
-        let mut config = initial_config.clone();
+        let mut config = config::Config::default();
+        config.agent.acp_source = Some("codex-acp".to_string());
         config.agent.reasoning_effort = Some("high".to_string());
         let mut state = AppState::new();
         state.config_path = Some(path);
@@ -20665,7 +20775,7 @@ mod tests {
         state.session_config_targets = vec![SessionConfigTarget::LegacyMode];
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -20680,10 +20790,8 @@ mod tests {
     fn saving_mjconfig_updates_changed_primary_model_with_the_adapter_value() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        let mut initial_config = config::Config::default();
-        initial_config.agent.acp_source = Some("claude-acp".to_string());
-        initial_config.agent.model = "claude-sonnet-4-6".to_string();
-        let mut config = initial_config.clone();
+        let mut config = config::Config::default();
+        config.agent.acp_source = Some("claude-acp".to_string());
         config.agent.model = "claude-opus-4-8".to_string();
         let mut state = AppState::new();
         state.config_path = Some(path);
@@ -20707,7 +20815,7 @@ mod tests {
         }];
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-        persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
+        persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
         assert!(matches!(
             cmd_rx.try_recv(),

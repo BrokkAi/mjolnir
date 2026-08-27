@@ -12864,7 +12864,11 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         assert!(viewer.contains("is unavailable on ${group.server_id}"));
         assert!(!viewer.contains("saved default ·"));
         assert!(!viewer.contains("already-running subagents are unchanged"));
-        assert!(viewer.contains("edits.primary_session_defaults[activeSource]"));
+        // The post-save reconcile reads the snapshot's saved values, not this
+        // save's edits, so drifted live options heal on any save.
+        assert!(viewer.contains("mjcfg.snapshot?.session_options?.primary || []"));
+        assert!(viewer.contains("live.current_value !== option.value"));
+        assert!(!viewer.contains("edits.primary_session_defaults[activeSource]"));
         assert!(!viewer.contains("Object.values(edits.primary_session_defaults)"));
         assert!(viewer.contains("snapshot.probing"));
         assert!(viewer.contains("previous.discovery_revision"));
