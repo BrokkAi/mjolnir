@@ -988,6 +988,46 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         text: "Keep awake under Appearance controls whether Mjolnir prevents system sleep while the server runs or a turn is in flight.",
         requirement: FeatureHintRequirement::Always,
     },
+    FeatureHint {
+        text: "Headless runs default to --permission-mode manual, rejecting permission prompts instead of hanging; auto accepts file edits but rejects shell execution.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "For one --print run, --model, --review-model, and --subagent-model accept explicit IDs with optional +effort; --subagent-model disabled turns workers off.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Use mj resume --list --cwd <path> --format json to inventory saved sessions without opening the picker.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Saved provenance routes mj resume to the original ACP adapter and model when still launchable; pass --worktree <name> separately to reuse its linked checkout.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "A headless run waits for subagents and their injected reports before exiting, so its final result reflects drained delegated work.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Set Voice auto-send under Input in /mjconfig to submit after 2, 4, 6, or 8 seconds of silence; it defaults to off.",
+        requirement: FeatureHintRequirement::Voice,
+    },
+    FeatureHint {
+        text: "Pasting four or more text lines creates an attachment chip at the cursor, keeping the composer compact until the prompt is submitted.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "Paste an image file path or file:// URL to attach the decoded image when the agent advertises image prompts.",
+        requirement: FeatureHintRequirement::Images,
+    },
+    FeatureHint {
+        text: "Use mj server --logout-all to invalidate viewer cookies; --history-days and --session-ttl-days control disconnected-session and sign-in retention.",
+        requirement: FeatureHintRequirement::Always,
+    },
+    FeatureHint {
+        text: "On a tailnet machine, mj server can use detected Tailscale automatically; --no-tailscale-detect keeps the listener loopback-only.",
+        requirement: FeatureHintRequirement::Always,
+    },
 ];
 
 /// One displayed value for a select-style session config option.
@@ -11756,9 +11796,11 @@ mod tests {
                 FeatureHintRequirement::Subagents,
             ),
             ("dictate", FeatureHintRequirement::Voice),
+            ("Voice auto-send under Input", FeatureHintRequirement::Voice),
             ("/fork", FeatureHintRequirement::Fork),
             ("/side", FeatureHintRequirement::Side),
-            ("Paste an image", FeatureHintRequirement::Images),
+            ("clipboard with Ctrl+V", FeatureHintRequirement::Images),
+            ("Paste an image file path", FeatureHintRequirement::Images),
             (
                 "With an empty prompt, Ctrl+F",
                 FeatureHintRequirement::Fullscreen,
@@ -11869,14 +11911,30 @@ mod tests {
         }
 
         let expected = [
-            "Type @ followed by a path",
-            "/memory add <fact>",
-            "/export full",
-            "--worktree",
-            "mj --print",
-            "--additional-directory",
-            "mj models refresh",
-            "Keep awake under Appearance",
+            ("Type @ followed by a path", FeatureHintRequirement::Always),
+            ("/memory add <fact>", FeatureHintRequirement::Always),
+            ("/export full", FeatureHintRequirement::Always),
+            ("Start mj with --worktree", FeatureHintRequirement::Always),
+            ("Use mj --print", FeatureHintRequirement::Always),
+            ("--additional-directory", FeatureHintRequirement::Always),
+            ("mj models refresh", FeatureHintRequirement::Always),
+            (
+                "Keep awake under Appearance",
+                FeatureHintRequirement::Always,
+            ),
+            ("--permission-mode manual", FeatureHintRequirement::Always),
+            ("For one --print run", FeatureHintRequirement::Always),
+            ("mj resume --list", FeatureHintRequirement::Always),
+            ("Saved provenance", FeatureHintRequirement::Always),
+            (
+                "headless run waits for subagents",
+                FeatureHintRequirement::Always,
+            ),
+            ("Voice auto-send under Input", FeatureHintRequirement::Voice),
+            ("Pasting four or more", FeatureHintRequirement::Always),
+            ("Paste an image file path", FeatureHintRequirement::Images),
+            ("mj server --logout-all", FeatureHintRequirement::Always),
+            ("--no-tailscale-detect", FeatureHintRequirement::Always),
         ];
         let persistent_shortcuts: &[(&str, &[&str])] = &[
             ("Enter", &["enter"]),
@@ -11896,7 +11954,7 @@ mod tests {
                 .any(|(_, shortcut)| contains_words(&known_duplicate, shortcut))
         );
 
-        for needle in expected {
+        for (needle, requirement) in expected {
             let matches: Vec<_> = FEATURE_HINTS
                 .iter()
                 .filter(|hint| hint.text.contains(needle))
@@ -11906,7 +11964,7 @@ mod tests {
                 1,
                 "expected exactly one less-visible hint containing {needle:?}"
             );
-            assert_eq!(matches[0].requirement, FeatureHintRequirement::Always);
+            assert_eq!(matches[0].requirement, requirement);
             let hint_words = words(matches[0].text);
             for (label, shortcut) in persistent_shortcuts {
                 assert!(
