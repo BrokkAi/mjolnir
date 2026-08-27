@@ -242,7 +242,7 @@ pub const REVIEW_LANES: [ReviewLane; 6] = [
 /// [`REVIEW_LANES`]: the supervisor may never dispatch it, and it owns every
 /// specialist's ground at once rather than staying inside one lane.
 pub const QUICK_LANE: ReviewLane = ReviewLane {
-    id: "general",
+    id: mj_core::workflow::QUICK_REVIEWER_LANE_ID,
     label: "General",
     focus: "Everything this turn got wrong or left out: broken or unintended behavior, unmet stated requirements, mishandled failures, tests that cannot fail for the reason they claim, reuse the repository already offered, and prose the changes invalidated.",
     // Navigation only. See `QUICK_BIFROST_TOOLSET`.
@@ -253,6 +253,8 @@ pub const QUICK_LANE: ReviewLane = ReviewLane {
         "Prefer few verified findings to many plausible ones: everything you report is re-verified by a validator, and an unverifiable finding creates a false tracked issue that can start a correction round for nothing.",
     ],
 };
+
+const QUICK_REVIEW_STARTED_NOTICE: &str = "Quick review started. One general reviewer inspects the completed turn; anything it reports is validated against source before it can require a correction.";
 
 /// Everything the fan-out needs that does not change between turns. Built
 /// once where the roster is resolved and shared by every dispatch.
@@ -1434,14 +1436,7 @@ async fn run_quick(review: QuickReview<'_>) -> ReviewVerdict {
             return ReviewVerdict::Failed { reason };
         }
     };
-    emit_internal(
-        events,
-        "primary",
-        "review validator",
-        InternalMessageKind::ReviewProgress,
-        "Quick review started. One general reviewer inspects the completed turn; anything it reports is validated against source before it can require a correction.",
-        Some(started.subagent_id),
-    );
+    emit_quick_review_started(events, started.subagent_id);
 
     let report = match receive_report(
         &mut reviewer_reports,
@@ -2710,6 +2705,17 @@ fn emit_internal(
         text: text.to_string(),
         owner_subagent_id,
     }));
+}
+
+fn emit_quick_review_started(events: &UnboundedSender<UiEvent>, reviewer_id: u64) {
+    emit_internal(
+        events,
+        "primary",
+        "review validator",
+        InternalMessageKind::ReviewProgress,
+        QUICK_REVIEW_STARTED_NOTICE,
+        Some(reviewer_id),
+    );
 }
 
 /// Classify the supervisor's reply. Some models explain their clean verdict
@@ -4857,6 +4863,24 @@ mod tests {
         // is exactly the cost this tier declines to pay.
         assert!(QUICK_LANE.bifrost_tools.is_empty());
         assert_eq!(QUICK_BIFROST_TOOLSET, "core");
+    }
+
+    #[test]
+    fn quick_review_start_notice_is_primary_and_retained_by_the_reviewer() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+
+        emit_quick_review_started(&events, 7);
+
+        assert!(matches!(
+            received.try_recv(),
+            Ok(UiEvent::InternalMessage(InternalMessage {
+                kind: InternalMessageKind::ReviewProgress,
+                text,
+                owner_subagent_id: Some(7),
+                ..
+            })) if text == QUICK_REVIEW_STARTED_NOTICE
+        ));
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

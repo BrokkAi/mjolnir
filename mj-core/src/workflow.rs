@@ -16,6 +16,9 @@ use crate::event::{SubagentOutcome, UiEvent};
 
 const MAX_RETAINED_WORKFLOWS: usize = 128;
 
+/// Stable lane identity for the quick tier's single general reviewer.
+pub const QUICK_REVIEWER_LANE_ID: &str = "general";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkflowId {
     pub turn_id: u64,
@@ -149,6 +152,15 @@ impl WorkflowActorRole {
     /// presented or counted as such.
     pub const fn is_internal_review_session(&self) -> bool {
         matches!(self, Self::IntentAnalyst | Self::ReviewSupervisor)
+    }
+
+    /// The quick tier has one review-level start notice, so its reviewer does
+    /// not also need a prompt-derived lifecycle line in the primary transcript.
+    pub fn is_quick_reviewer(&self) -> bool {
+        matches!(
+            self,
+            Self::SpecialistReviewer { lane } if lane == QUICK_REVIEWER_LANE_ID
+        )
     }
 
     pub const fn display_label(&self) -> &'static str {

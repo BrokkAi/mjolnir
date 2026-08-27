@@ -2396,7 +2396,11 @@ impl TrackerState {
                     );
                     self.prune_finished_subagents();
                 }
-                if !resumed {
+                if !resumed
+                    && !role
+                        .as_ref()
+                        .is_some_and(mj_core::workflow::WorkflowActorRole::is_quick_reviewer)
+                {
                     let actor = remote_nested_actor(*subagent_id, role.as_ref());
                     let display = role
                         .as_ref()
@@ -14882,6 +14886,57 @@ for (const [field, seat] of [
             Some(&WorkflowActorRole::ReviewSupervisor)
         );
         assert!(state.snapshot().expect("snapshot").transcript.is_empty());
+    }
+
+    #[test]
+    fn tracker_uses_the_full_quick_review_notice_instead_of_a_reviewer_start_record() {
+        use mj_core::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowEvent, WorkflowId, WorkflowKind,
+            WorkflowPhase, WorkflowStage, WorkflowTransition,
+        };
+
+        const NOTICE: &str = "Quick review started. One general reviewer inspects the completed turn; anything it reports is validated against source before it can require a correction.";
+
+        let mut state = started_session_tracker();
+        let workflow_id = WorkflowId::review(4);
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+        )));
+        state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: WorkflowActorId::Subagent(7),
+                role: WorkflowActorRole::SpecialistReviewer {
+                    lane: mj_core::workflow::QUICK_REVIEWER_LANE_ID.to_string(),
+                },
+            },
+        )));
+        state.observe_event(&UiEvent::InternalMessage(mj_core::event::InternalMessage {
+            source: "primary".to_string(),
+            target: "review validator".to_string(),
+            kind: mj_core::event::InternalMessageKind::ReviewProgress,
+            text: NOTICE.to_string(),
+            owner_subagent_id: Some(7),
+        }));
+        state.observe_event(&started_subagent(7, "review · general", "review · general"));
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            transcript_texts(&snapshot)
+                .iter()
+                .filter(|text| **text == NOTICE)
+                .count(),
+            1
+        );
+        assert!(
+            !snapshot.transcript.iter().any(|entry| {
+                entry.text.contains("reviewer #7") && entry.text.contains("started")
+            })
+        );
     }
 
     #[test]
