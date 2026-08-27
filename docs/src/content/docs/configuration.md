@@ -65,7 +65,10 @@ be disabled. `[review]` configures the discrete-review model; review
 is still enabled or disabled with `agent.discrete_review`, its depth is
 chosen with `agent.review_tier`, and its optional Bifrost preprocessing is
 controlled by `agent.bifrost_analysis`. `agent.correction_threshold` controls
-which validated priorities receive automatic correction. `[subagents]`
+which validated priorities receive automatic correction. The separate
+`agent.mcp_discrete_review` opt-in adds a primary-session MCP tool and prompt
+that require a review checkpoint before publishing code; it is off by default
+and does not change the end-of-turn review. `[subagents]`
 configures the default backing for `create_subagent`; set `model = "disabled"`
 (or `"none"`) to turn subagents off entirely.
 
@@ -76,6 +79,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `agent.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `agent.session_defaults` | Per-ACP saved session-option defaults for new primary sessions |
 | `agent.discrete_review` | Run the end-of-turn discrete review |
+| `agent.mcp_discrete_review` | Expose `request_discrete_review` to the primary and instruct it to review changed code before commit, push, PR, merge, tag, publication, or release. Default `false` |
 | `agent.bifrost_analysis` | Precompute semantic diff context with Bifrost before review (default `true`). Set to `false` to use the bounded raw Git patch while keeping Bifrost navigation tools available. |
 | `agent.review_tier` | Review depth: `quick` (default) sends one general reviewer and validates its findings; `extended` runs the adversarial supervisor with on-demand specialist lanes and spends far more tokens |
 | `agent.correction_threshold` | Automatically correct validated findings through `p0`, `p1`, `p2`, or `p3` (default). Findings below the selected threshold remain tracked as deferred, and the Review Board records that policy reason. |

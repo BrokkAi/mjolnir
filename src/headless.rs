@@ -155,7 +155,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     .with_subagent_handoff_counter(subagent_handoffs.clone())
                     .with_id_allocator(subagent_ids.clone())
                     .with_active_implementation_workers(active_implementation_workers.clone())
-                    .with_review_checkpoint(review_checkpoint.clone())
+                    .with_review_checkpoint(
+                        review_checkpoint.clone(),
+                        app_config.agent.mcp_discrete_review,
+                    )
                     .with_max_parallel(app_config.subagents.max_parallel)
                     .with_debrief(app_config.subagents.debrief)
                     .with_permission_mode(subagent_permission)
@@ -267,7 +270,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         workers.is_some(),
                         supervisor.is_some(),
                         &app_config.subagents.model,
-                        app_config.agent.discrete_review,
+                        app_config.agent.needs_review_route(),
                         &resolved.warnings,
                     ))
                 }

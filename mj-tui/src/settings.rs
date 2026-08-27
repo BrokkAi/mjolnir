@@ -54,6 +54,7 @@ enum SettingsRow {
         option_index: usize,
     },
     DiscreteReview,
+    McpDiscreteReview,
     BifrostAnalysis,
     BifrostVersion,
     ReviewTier,
@@ -263,6 +264,7 @@ impl SettingsEditor {
                 SettingsRow::MaxCorrectionRounds => self.cycle_max_correction_rounds(delta),
                 SettingsRow::BifrostVersion => self.cycle_bifrost_version(delta),
                 SettingsRow::DiscreteReview
+                | SettingsRow::McpDiscreteReview
                 | SettingsRow::BifrostAnalysis
                 | SettingsRow::AutomaticQuotaFailover => {
                     return SettingsAction::None;
@@ -366,6 +368,9 @@ impl SettingsEditor {
                 SettingsRow::DiscreteReview => {
                     self.config.agent.discrete_review = !self.config.agent.discrete_review;
                 }
+                SettingsRow::McpDiscreteReview => {
+                    self.config.agent.mcp_discrete_review = !self.config.agent.mcp_discrete_review;
+                }
                 SettingsRow::BifrostAnalysis => {
                     self.config.agent.bifrost_analysis = !self.config.agent.bifrost_analysis;
                 }
@@ -439,6 +444,7 @@ impl SettingsEditor {
                         }),
                 );
                 rows.push(SettingsRow::DiscreteReview);
+                rows.push(SettingsRow::McpDiscreteReview);
                 rows.push(SettingsRow::BifrostAnalysis);
                 rows.push(SettingsRow::BifrostVersion);
                 rows.push(SettingsRow::ReviewTier);
@@ -1199,6 +1205,7 @@ fn draw_agents(
             | SettingsRow::SubagentModel
             | SettingsRow::SubagentPermissions
             | SettingsRow::DiscreteReview
+            | SettingsRow::McpDiscreteReview
             | SettingsRow::BifrostAnalysis
             | SettingsRow::BifrostVersion
             | SettingsRow::ReviewTier
@@ -1287,6 +1294,20 @@ fn draw_reviewer(
                 ),
                 theme,
             )),
+            SettingsRow::McpDiscreteReview => {
+                lines.push(selected_line(
+                    selected,
+                    format!(
+                        "MCP discrete review [{}]",
+                        on_off(editor.config.agent.mcp_discrete_review)
+                    ),
+                    theme,
+                ));
+                lines.push(Line::styled(
+                    "  ask the primary to review changed code before publishing",
+                    Style::default().ink(theme.muted),
+                ));
+            }
             SettingsRow::BifrostAnalysis => {
                 lines.push(selected_line(
                     selected,
@@ -1517,6 +1538,7 @@ fn draw_subagents(
             | SettingsRow::ReviewModel
             | SettingsRow::ReviewPermissions
             | SettingsRow::DiscreteReview
+            | SettingsRow::McpDiscreteReview
             | SettingsRow::BifrostAnalysis
             | SettingsRow::BifrostVersion
             | SettingsRow::ReviewTier
@@ -2688,7 +2710,27 @@ mod tests {
     }
 
     #[test]
-    fn review_controls_include_the_bifrost_analysis_toggle() {
+    fn mcp_discrete_review_is_a_separate_opt_in_toggle() {
+        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = editor
+            .settings_rows(SettingsTab::Reviewer)
+            .iter()
+            .position(|row| *row == SettingsRow::McpDiscreteReview)
+            .expect("MCP discrete review row");
+
+        assert!(editor.config.agent.discrete_review);
+        assert!(!editor.config.agent.mcp_discrete_review);
+        assert_eq!(
+            editor.handle_key(KeyCode::Char(' ')),
+            SettingsAction::Changed
+        );
+        assert!(editor.config.agent.discrete_review);
+        assert!(editor.config.agent.mcp_discrete_review);
+    }
+
+    #[test]
+    fn review_controls_include_both_review_entrypoints_and_bifrost_analysis() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Reviewer;
         let rows = editor.settings_rows(SettingsTab::Reviewer);
@@ -2696,6 +2738,10 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::DiscreteReview)
             .expect("discrete review row");
+        let mcp_review = rows
+            .iter()
+            .position(|row| *row == SettingsRow::McpDiscreteReview)
+            .expect("MCP discrete review row");
         let analysis = rows
             .iter()
             .position(|row| *row == SettingsRow::BifrostAnalysis)
@@ -2716,7 +2762,8 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::MaxCorrectionRounds)
             .expect("correction rounds row");
-        assert_eq!(analysis, review + 1, "analysis belongs beside review");
+        assert_eq!(mcp_review, review + 1, "MCP review belongs beside review");
+        assert_eq!(analysis, mcp_review + 1, "analysis follows review toggles");
         assert_eq!(bifrost, analysis + 1, "the Bifrost pin follows analysis");
         assert_eq!(tier, bifrost + 1, "the tier follows the Bifrost pin");
         assert_eq!(
@@ -3197,6 +3244,10 @@ mod tests {
         assert!(reviewer.contains("Review model"), "rendered:\n{reviewer}");
         assert!(
             reviewer.contains("Discrete review"),
+            "rendered:\n{reviewer}"
+        );
+        assert!(
+            reviewer.contains("MCP discrete review [off]"),
             "rendered:\n{reviewer}"
         );
         assert!(reviewer.contains("Review depth"), "rendered:\n{reviewer}");

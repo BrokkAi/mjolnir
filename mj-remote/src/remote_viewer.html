@@ -4451,6 +4451,18 @@
         );
         mjconfigBodyEl.appendChild(reviewRow);
 
+        const mcpReviewRow = mjRow("MCP discrete review");
+        mcpReviewRow.appendChild(
+          mjToggle(mjEditedValue("mcp_discrete_review", panel.mcp_discrete_review), (next) => {
+            mjcfg.edits.mcp_discrete_review = next;
+            renderMjConfig();
+          }),
+        );
+        mcpReviewRow.appendChild(
+          mjDetail("ask the primary to review changed code before publishing"),
+        );
+        mjconfigBodyEl.appendChild(mcpReviewRow);
+
         const analysisRow = mjRow("Bifrost diff analysis");
         const analysisEnabled = mjEditedValue(
           "bifrost_analysis",

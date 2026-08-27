@@ -592,6 +592,7 @@ fn start_server_agent_session(
             pool,
             &live_subagent_options,
             &app_config.subagents,
+            app_config.agent.mcp_discrete_review,
         )),
         None => subagent::LiveRuntimeService::unconfigured(),
     };
@@ -700,7 +701,7 @@ fn start_server_agent_session(
                                 workers.is_some(),
                                 supervisor.is_some(),
                                 &app_config.subagents.model,
-                                app_config.agent.discrete_review,
+                                app_config.agent.needs_review_route(),
                                 &resolved.warnings,
                             )
                         },
@@ -893,6 +894,7 @@ fn start_server_agent_session(
                                     pool.clone(),
                                     &command_live_subagent_options,
                                     &updated_config.subagents,
+                                    updated_config.agent.mcp_discrete_review,
                                 ))
                                 .await;
                         } else {
@@ -937,7 +939,7 @@ fn start_server_agent_session(
                                         workers.is_some(),
                                         supervisor.is_some(),
                                         &updated_config.subagents.model,
-                                        updated_config.agent.discrete_review,
+                                        updated_config.agent.needs_review_route(),
                                         &updated_roster.warnings,
                                     ),
                                 )

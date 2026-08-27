@@ -988,6 +988,11 @@ pub struct AgentConfig {
     pub session_defaults: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default = "default_true")]
     pub discrete_review: bool,
+    /// Expose the primary-session MCP checkpoint that asks the agent to run
+    /// discrete review before publishing changes. This is opt-in and does not
+    /// affect the automatic end-of-turn review controlled above.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mcp_discrete_review: bool,
     /// Precompute semantic diff context with Bifrost before dispatching a
     /// review. When disabled, reviewers receive the bounded raw Git patch and
     /// keep Bifrost's interactive navigation tools.
@@ -1030,6 +1035,7 @@ impl Default for AgentConfig {
             reasoning_effort: None,
             session_defaults: BTreeMap::new(),
             discrete_review: true,
+            mcp_discrete_review: false,
             bifrost_analysis: true,
             review_tier: ReviewTier::default(),
             review_tier_from_team_default: false,
@@ -1049,6 +1055,11 @@ fn is_default_runtime_stall_minutes(value: &u64) -> bool {
 }
 
 impl AgentConfig {
+    /// Whether either review entrypoint needs a launchable reviewer route.
+    pub const fn needs_review_route(&self) -> bool {
+        self.discrete_review || self.mcp_discrete_review
+    }
+
     pub fn set_review_tier(&mut self, tier: ReviewTier) {
         self.review_tier = tier;
         self.review_tier_from_team_default = false;
@@ -1985,6 +1996,7 @@ mod tests {
         assert_eq!(cfg.theme, TerminalThemeKind::Adaptive);
         assert_eq!(cfg.model_names(), ModelsConfig::default());
         assert!(cfg.agent.discrete_review);
+        assert!(!cfg.agent.mcp_discrete_review);
         assert!(cfg.agent.bifrost_analysis);
         assert_eq!(cfg.agent.max_correction_rounds, None);
         assert_eq!(cfg.agent.review_tier.default_correction_rounds(), 1);
@@ -2011,6 +2023,7 @@ mod tests {
         .expect("write");
         let cfg = Config::load(&path).expect("load");
         assert!(cfg.agent.discrete_review);
+        assert!(!cfg.agent.mcp_discrete_review);
         assert_eq!(cfg.agent.review_tier, ReviewTier::Quick);
         assert_eq!(cfg.agent.max_correction_rounds, None);
 
@@ -2697,6 +2710,7 @@ kimi = "disabled"
                 reasoning_effort: None,
                 session_defaults: BTreeMap::new(),
                 discrete_review: false,
+                mcp_discrete_review: true,
                 bifrost_analysis: false,
                 review_tier: ReviewTier::Extended,
                 review_tier_from_team_default: false,
@@ -2715,6 +2729,7 @@ kimi = "disabled"
         assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert_eq!(loaded.agent.model, "gpt-5-6-sol");
         assert!(!loaded.agent.discrete_review);
+        assert!(loaded.agent.mcp_discrete_review);
         assert!(!loaded.agent.bifrost_analysis);
         assert_eq!(loaded.agent.review_tier, ReviewTier::Extended);
         assert_eq!(

@@ -51,6 +51,8 @@ all three seats to the Codex adapter. Then confirm:
    lets Mjolnir choose among currently launchable ranked Codex models.
 4. **Discrete review** is on if you want workspace-changing turns reviewed
    before they are released.
+5. **MCP discrete review** is off by default. Turn it on to require Codex to
+   request a review checkpoint after validation and before publishing changes.
 
 Press **Shift+Tab** during a session to switch among all four teams, or return to
 the same choice on the **Team** tab in `/mjconfig`. Start a new session after

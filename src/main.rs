@@ -1558,6 +1558,7 @@ pub(crate) fn configured_subagent_service(
     pool: quota::RolePool,
     options: &LiveSubagentOptions,
     config: &config::SubagentsConfig,
+    mcp_discrete_review: bool,
 ) -> subagent::Config {
     let mut service = subagent::Config::new(pool, options.agent_stderr.clone());
     if let Some(role) = service.role_config.as_mut() {
@@ -1567,7 +1568,7 @@ pub(crate) fn configured_subagent_service(
         .with_subagent_handoff_counter(options.handoff_counter.clone())
         .with_id_allocator(options.id_allocator.clone())
         .with_active_implementation_workers(options.active_workers.clone())
-        .with_review_checkpoint(options.review_checkpoint.clone())
+        .with_review_checkpoint(options.review_checkpoint.clone(), mcp_discrete_review)
         .with_max_parallel(config.max_parallel)
         .with_debrief(config.debrief)
         .with_permission_mode(config.permission)
@@ -1589,7 +1590,7 @@ pub(crate) fn review_fanout_error(
     workers_available: bool,
     supervisor_available: bool,
     subagents_model: &str,
-    discrete_review: bool,
+    review_route_enabled: bool,
     roster_warnings: &[String],
 ) -> String {
     let mut causes = Vec::new();
@@ -1604,9 +1605,10 @@ pub(crate) fn review_fanout_error(
         }
     }
     if !supervisor_available {
-        if !discrete_review {
+        if !review_route_enabled {
             causes.push(
-                "`agent.discrete_review` is disabled in the active configuration".to_string(),
+                "both `agent.discrete_review` and `agent.mcp_discrete_review` are disabled in the active configuration"
+                    .to_string(),
             );
         } else if let Some(warning) = roster_warnings
             .iter()
@@ -2713,6 +2715,7 @@ async fn run_session(
             pool,
             &live_subagent_options,
             &subagents_config,
+            agent_config.mcp_discrete_review,
         )),
         None => subagent::LiveRuntimeService::unconfigured(),
     };
@@ -2851,7 +2854,7 @@ async fn run_session(
                         workers.is_some(),
                         supervisor.is_some(),
                         &subagents_config.model,
-                        agent_config.discrete_review,
+                        agent_config.needs_review_route(),
                         &roster.warnings,
                     ))
                 }
@@ -3087,6 +3090,7 @@ async fn run_session(
                             pool.clone(),
                             &command_live_subagent_options,
                             &updated_config.subagents,
+                            updated_config.agent.mcp_discrete_review,
                         ))
                         .await;
                 } else {
@@ -3123,7 +3127,7 @@ async fn run_session(
                             workers.is_some(),
                             supervisor.is_some(),
                             &updated_config.subagents.model,
-                            updated_config.agent.discrete_review,
+                            updated_config.agent.needs_review_route(),
                             &updated_roster.warnings,
                         ))
                     }

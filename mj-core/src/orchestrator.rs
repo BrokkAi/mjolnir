@@ -1777,9 +1777,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 checkpoint_request = config.review_checkpoints.recv() => {
                     let Some(checkpoint_request) = checkpoint_request else { continue; };
                     let active = turn.lock().await.clone();
-                    let rejection = if !review_enabled.load(Ordering::Acquire) {
-                        Some("automatic discrete review is disabled for this session".to_string())
-                    } else if active.epoch == 0 || idle_epoch == Some(active.epoch) {
+                    let rejection = if active.epoch == 0 || idle_epoch == Some(active.epoch) {
                         Some("request_discrete_review must be called during an active primary turn".to_string())
                     } else if checkpoint_review_in_flight.is_some() {
                         Some("a discrete review checkpoint is already active".to_string())
@@ -3860,6 +3858,9 @@ mod tests {
         });
         let (checkpoint, checkpoint_requests) = ReviewCheckpointClient::channel();
         let mut config = fanout_config(command_tx, spawner);
+        // The MCP checkpoint is independent from the automatic end-of-turn
+        // gate. These harness cases must keep working with that gate off.
+        config.discrete_review = false;
         config.review_root = temp.path().to_path_buf();
         config.review_checkpoints = checkpoint_requests;
         let running = spawn(runtime_rx, config);

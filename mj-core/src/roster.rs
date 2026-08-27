@@ -87,7 +87,7 @@ pub fn subagent_failover_roles(roster: &Roster) -> Vec<ResolvedAgent> {
 }
 
 pub fn rebind_auto_review_for_primary(roster: &mut Roster, config: &Config) {
-    if !config.agent.discrete_review {
+    if !config.agent.needs_review_route() {
         roster.review_supervisor = None;
         return;
     }
@@ -775,7 +775,9 @@ fn resolve_review_supervisor(
         return Ok(None);
     }
     if matches!(selector, crate::config::DISABLED_MODEL | "none") {
-        bail!("Review model cannot be disabled; use agent.discrete_review = false");
+        bail!(
+            "Review model cannot be disabled while discrete review or the MCP review checkpoint is enabled"
+        );
     }
     Ok(if selector == "auto" {
         choose_review_auto(primary, rows, available, acp_priority)
@@ -1081,7 +1083,7 @@ fn assemble_roster(
         rows,
         &review_available,
         &config.review.acp_priority,
-        config.agent.discrete_review,
+        config.agent.needs_review_route(),
     )?;
     let subagent_available = candidates_for_selector(
         &available,
@@ -1132,11 +1134,11 @@ fn assemble_roster(
                 .to_string(),
         );
     }
-    if config.agent.discrete_review && review_supervisor.is_none() {
+    if config.agent.needs_review_route() && review_supervisor.is_none() {
         warnings.push(
             "agentic review supervisor is disabled: no distinct launchable review model is available. \
              Install or authenticate another supported ACP adapter, select an explicit review model, \
-             or turn off discrete review."
+             or turn off both discrete-review entrypoints."
                 .to_string(),
         );
     }

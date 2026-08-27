@@ -194,6 +194,13 @@ workflow progress and nested transcript machinery as ordinary subagents but do
 not receive implementation write access or recursive delegation tools. See
 [Delegation and review](/delegation-review/).
 
+The separate **MCP discrete review** setting is off by default. When enabled,
+the primary receives `request_discrete_review` plus instructions to call it
+after validation and before committing, pushing, opening or merging a pull
+request, tagging, publishing, or releasing. Turning this MCP setting off hides
+the tool and omits those instructions; the automatic end-of-turn review above
+is unchanged.
+
 ## Turning subagents off
 
 Set `model = "disabled"` under `[subagents]`. The primary keeps working; the

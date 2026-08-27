@@ -104,14 +104,14 @@ Several subagents run concurrently and every one of them has full write access t
 
 A report is the subagent's own account of its work; its claims, including any test results it states, are claims and not verified facts. Spot-check only what gates your next decision when a report arrives; run full verification exactly once, at the end of the turn, when you validate the whole workspace before finishing. Fix what you find yourself, or launch a follow-up. One counter-indication: work that is a single deep continuous thread through one large context — rather than partitionable pieces — is usually faster and better done yourself than fragmented across subagents.
 
-When automatic discrete review is enabled and this task changes code, call request_discrete_review immediately after implementation and local validation are complete, before any commit, push, pull request, merge, tag, publication, or release action. The call starts the configured review asynchronously and returns after dispatch, not after the verdict. While it runs, you may do read-only work, but do not change the workspace or perform any commit, push, pull-request, merge, tag, publication, or release action. If there is no useful read-only work, end your turn; the verdict will be injected when ready. A clean checkpoint authorizes those actions only while the reviewed code remains unchanged. If findings arrive, verify and fix every material issue, validate the result, and call request_discrete_review again before publishing anything. A failed or incomplete review is not a clean review and must block publication.
-
 resume continues a finished subagent's retained session with a new prompt, preserving its context; use it for targeted follow-up on work that subagent already did. subagent_cancel stops a running subagent or releases a finished one and returns its full report either way; use it to abandon or conclude work, not to collect results. It never reverts edits.
 
 Subagents use the model and ACP routing configured by Mjolnir.
 
 Prefer your own tools for small local edits, known-path lookups, and quick single-step questions; delegation is worth it when the work is clearly larger than writing the brief and reviewing the result. Prefer delegating investigation AND implementation as one task; do not read deeply yourself just to write a brief. When the affected files are genuinely unknown, delegate the discovery too — a read-focused subagent can map the ground and report the targets. Apply this policy while handling each user request; do not acknowledge or summarize it.
 </mj-subagent-policy>"#;
+
+const MCP_DISCRETE_REVIEW_DIRECTIVE: &str = "<mj-review-checkpoint>\nWhen this task changes code, call request_discrete_review immediately after implementation and local validation are complete, before any commit, push, pull request, merge, tag, publication, or release action. The call starts the configured review asynchronously and returns after dispatch, not after the verdict. While it runs, you may do read-only work, but do not change the workspace or perform any commit, push, pull-request, merge, tag, publication, or release action. If there is no useful read-only work, end your turn; the verdict will be injected when ready. A clean checkpoint authorizes those actions only while the reviewed code remains unchanged. If findings arrive, verify and fix every material issue, validate the result, and call request_discrete_review again before publishing anything. A failed or incomplete review is not a clean review and must block publication.\n</mj-review-checkpoint>";
 
 const SUBAGENT_PREAMBLE: &str = "You are a subagent working for a primary agent. This is a fresh ACP process and session: you have no memory of the user conversation or of any earlier subagent, including one that ran a moment ago. Treat the standalone brief below and the current workspace as your only task context.\n\nThe brief is a colleague's account, not ground truth. Verify its claims against the repository and any primary sources it quotes; where the code or the stated requirements contradict the brief, follow reality and flag the divergence. Exercise what you build with targeted checks — the specific tests, commands, or repro scripts that cover your changes, including the public surface exactly as the requirements name it (import paths, exported names, signatures). Do NOT run project-wide test suites, formatters, or linters: the primary runs full validation exactly once at the end, and mid-flight suite runs block on other agents' concurrent edits.\n\nOther subagents may be working in this same workspace at the same time. Stay inside the scope you were given and do not clean up or refactor unrelated code.\n\nYour final message is the report your parent reads: state what you did, what you verified and how, any deviation from the brief, and anything you could not verify. Do not write a report file.\n\n";
 
@@ -166,6 +166,7 @@ pub struct Config {
     pub subagent_handoff_counter: Option<Arc<AtomicUsize>>,
     pub active_implementation_workers: ActiveSubagentWorkers,
     pub review_checkpoint: Option<ReviewCheckpointClient>,
+    pub review_checkpoint_enabled: bool,
     pub max_parallel: usize,
     pub snapshot_exclusions: Vec<PathBuf>,
     /// Id source installed on the controller when the MCP server starts, so
@@ -349,6 +350,7 @@ impl Config {
             subagent_handoff_counter: None,
             active_implementation_workers: ActiveSubagentWorkers::default(),
             review_checkpoint: None,
+            review_checkpoint_enabled: false,
             max_parallel: DEFAULT_MAX_PARALLEL,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
@@ -389,8 +391,13 @@ impl Config {
         self
     }
 
-    pub fn with_review_checkpoint(mut self, checkpoint: ReviewCheckpointClient) -> Self {
+    pub fn with_review_checkpoint(
+        mut self,
+        checkpoint: ReviewCheckpointClient,
+        enabled: bool,
+    ) -> Self {
         self.review_checkpoint = Some(checkpoint);
+        self.review_checkpoint_enabled = enabled;
         self
     }
 
@@ -813,9 +820,13 @@ impl McpHandler {
         &self,
         Parameters(_args): Parameters<RequestDiscreteReviewArgs>,
     ) -> std::result::Result<CallToolResult, McpError> {
-        let Some(checkpoint) = self.config().and_then(|config| config.review_checkpoint) else {
+        let Some(checkpoint) = self
+            .config()
+            .filter(|config| config.review_checkpoint_enabled)
+            .and_then(|config| config.review_checkpoint)
+        else {
             return Ok(CallToolResult::error(vec![Content::text(
-                "the configured discrete-review checkpoint is unavailable for this session",
+                "the MCP discrete-review checkpoint is disabled for this session",
             )]));
         };
         match checkpoint.request().await {
@@ -1148,9 +1159,26 @@ fn discard_saved_permission_mode(
 const HEADLESS_AUTONOMY_DIRECTIVE: &str = "<mj-noninteractive>\nThis is a non-interactive run: no human can respond until it ends, and anything you ask will go unanswered. Never stop to request permission, approval, or clarification. Where repository policy requires sign-offs you cannot obtain here (maintainer agreement, DCO attestation, issue references), do the work anyway and record the unmet requirement prominently in your final answer. State your assumptions instead of blocking on them. Ending your turn with no workspace changes delivers nothing: there is no user here to continue the conversation, and a plan or design stated in your final message is not a deliverable. End your turn only after the work is implemented and validated, or after recording a genuine blocker — never to 'continue next turn'; with no subagents running there is no next turn.\n</mj-noninteractive>";
 
 impl McpHandler {
+    fn review_checkpoint_enabled(&self) -> bool {
+        self.config()
+            .is_some_and(|config| config.review_checkpoint_enabled)
+    }
+
+    fn advertised_tools(&self) -> Vec<Tool> {
+        let mut tools = self.tool_router.list_all();
+        if !self.review_checkpoint_enabled() {
+            tools.retain(|tool| tool.name != "request_discrete_review");
+        }
+        tools
+    }
+
     fn server_info(&self) -> ServerInfo {
         let mut instructions =
             format!("{SERVER_DELEGATION_GUIDANCE}\n\n{PRIMARY_SESSION_DIRECTIVE}");
+        if self.review_checkpoint_enabled() {
+            instructions.push_str("\n\n");
+            instructions.push_str(MCP_DISCRETE_REVIEW_DIRECTIVE);
+        }
         if self.config().is_some_and(|config| config.is_headless) {
             instructions.push_str("\n\n");
             instructions.push_str(HEADLESS_AUTONOMY_DIRECTIVE);
@@ -1174,9 +1202,7 @@ impl ServerHandler for McpHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = std::result::Result<ListToolsResult, McpError>> + Send + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(
-            self.tool_router.list_all(),
-        )))
+        std::future::ready(Ok(ListToolsResult::with_all_items(self.advertised_tools())))
     }
 
     fn call_tool(
@@ -1189,6 +1215,9 @@ impl ServerHandler for McpHandler {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
+        if name == "request_discrete_review" && !self.review_checkpoint_enabled() {
+            return None;
+        }
         self.tool_router.get(name).cloned()
     }
 }
@@ -3883,6 +3912,7 @@ mod tests {
             subagent_handoff_counter: None,
             active_implementation_workers: ActiveSubagentWorkers::default(),
             review_checkpoint: None,
+            review_checkpoint_enabled: false,
             max_parallel: 2,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
@@ -4266,8 +4296,9 @@ mod tests {
         assert!(instructions.contains(SERVER_DELEGATION_GUIDANCE));
         assert!(instructions.contains(PRIMARY_SESSION_DIRECTIVE));
         assert!(!instructions.contains("Available agents and models:"));
+        assert!(!instructions.contains("call request_discrete_review immediately"));
 
-        let tools = handler.tool_router.list_all();
+        let tools = handler.advertised_tools();
         let create = tools
             .iter()
             .find(|tool| tool.name == "create_subagent")
@@ -4276,7 +4307,29 @@ mod tests {
         assert!(description.contains("RETURNS IMMEDIATELY"));
         assert!(description.contains("configured subagent model"));
         assert!(!description.contains("Available agents and models:"));
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.name != "request_discrete_review")
+        );
+        assert!(handler.get_tool("request_discrete_review").is_none());
+    }
 
+    #[test]
+    fn enabled_review_checkpoint_adds_its_tool_and_primary_directive() {
+        let (checkpoint, _requests) = ReviewCheckpointClient::channel();
+        let config = test_config().with_review_checkpoint(checkpoint, true);
+        let handler = McpHandler::new(
+            config,
+            test_context(),
+            mpsc::unbounded_channel().0,
+            Controller::default(),
+        );
+        let instructions = handler
+            .server_info()
+            .instructions
+            .expect("server instructions");
+        let tools = handler.advertised_tools();
         let checkpoint = tools
             .iter()
             .find(|tool| tool.name == "request_discrete_review")
@@ -4286,12 +4339,25 @@ mod tests {
         assert!(description.contains("before any commit"));
         assert!(instructions.contains("call request_discrete_review immediately"));
         assert!(instructions.contains("A failed or incomplete review is not a clean review"));
+        assert!(handler.get_tool("request_discrete_review").is_some());
+    }
+
+    #[tokio::test]
+    async fn disabled_review_checkpoint_rejects_direct_tool_calls() {
+        let handler = test_mcp_handler(Controller::default());
+
+        let result = handler
+            .request_discrete_review(Parameters(RequestDiscreteReviewArgs::default()))
+            .await
+            .expect("disabled tool returns an MCP tool result");
+
+        assert_eq!(result.is_error, Some(true));
     }
 
     #[tokio::test]
     async fn discrete_review_tool_returns_after_orchestrator_dispatch() {
         let (checkpoint, mut requests) = ReviewCheckpointClient::channel();
-        let mut config = test_config().with_review_checkpoint(checkpoint);
+        let mut config = test_config().with_review_checkpoint(checkpoint, true);
         config.is_enabled = true;
         let handler = McpHandler::new(
             config,
