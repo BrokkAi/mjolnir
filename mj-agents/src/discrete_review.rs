@@ -4586,7 +4586,7 @@ mod tests {
         assert!(format_changed_functions(&output).contains("introduced: src/work.rs:1-3"));
         let args = std::fs::read_to_string(invocation).expect("read invocation");
         assert!(args.contains("managed=enabled"));
-        assert!(args.contains(&format!("-y {}", mj_core::bifrost::NPX_PACKAGE)));
+        assert!(args.contains(&format!("-y {}", mj_core::bifrost::package_spec(None))));
         assert!(args.contains("--tool analyze_diff"));
         assert!(args.contains("--root"));
         assert!(args.contains("--args"));

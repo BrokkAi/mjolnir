@@ -1530,15 +1530,17 @@ impl Config {
             self.subagents.max_parallel <= 16,
             "subagents.max_parallel must be between 0 and 16"
         );
-        // A pin this build cannot parse falls back to `latest` the way an
-        // unmappable team id falls back above: the field is hand-editable
+        // A pin this build cannot parse falls back to the default pin the way
+        // an unmappable team id falls back above: the field is hand-editable
         // and a newer build may accept formats this one does not, so it must
         // never cost the rest of the config.
         if let Some(version) = self.review.bifrost_version.take() {
             match crate::bifrost::parse_selection(&version) {
                 Ok(selection) => self.review.bifrost_version = selection,
                 Err(error) => {
-                    tracing::warn!("ignoring review.bifrost_version and tracking latest: {error}");
+                    tracing::warn!(
+                        "ignoring review.bifrost_version and using the default pin: {error}"
+                    );
                 }
             }
         }
@@ -2407,7 +2409,7 @@ kimi = "disabled"
     }
 
     #[test]
-    fn v6_migration_keeps_latest_as_the_bifrost_default() {
+    fn v6_migration_keeps_the_default_bifrost_pin() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, format!("version = {V6_CONFIG_VERSION}\n")).expect("write v6 config");
@@ -2419,7 +2421,7 @@ kimi = "disabled"
     }
 
     #[test]
-    fn bifrost_version_defaults_to_latest_and_persists_only_an_explicit_pin() {
+    fn bifrost_version_defaults_to_the_pin_and_persists_an_explicit_selection() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         Config::default().save(&path).expect("save default");
@@ -2440,6 +2442,8 @@ kimi = "disabled"
             Some("0.9.10")
         );
 
+        // `latest` is an explicit opt-in that must survive the load; the
+        // default pin canonicalizes back to the absent-field sentinel.
         std::fs::write(
             &path,
             format!("version = {CONFIG_VERSION}\n[review]\nbifrost_version = \"latest\"\n"),
@@ -2449,13 +2453,30 @@ kimi = "disabled"
             Config::load(&path)
                 .expect("normalize latest")
                 .review
+                .bifrost_version
+                .as_deref(),
+            Some("latest")
+        );
+
+        std::fs::write(
+            &path,
+            format!(
+                "version = {CONFIG_VERSION}\n[review]\nbifrost_version = \"{}\"\n",
+                crate::bifrost::DEFAULT_PINNED_VERSION
+            ),
+        )
+        .expect("write default pin");
+        assert_eq!(
+            Config::load(&path)
+                .expect("normalize default pin")
+                .review
                 .bifrost_version,
             None
         );
     }
 
     #[test]
-    fn invalid_bifrost_version_falls_back_to_latest_without_failing_the_load() {
+    fn invalid_bifrost_version_falls_back_to_the_default_pin_without_failing_the_load() {
         // The pin is hand-editable and a newer build may accept formats this
         // one does not; a load failure here would abort startup on the CLI
         // paths and stage a default config on the unwrap_or_default paths,

@@ -8,7 +8,14 @@ use semver::Version;
 use serde::Deserialize;
 
 pub const NPX_PACKAGE: &str = "@brokkai/bifrost";
-pub const DEFAULT_VERSION: &str = "latest";
+/// The known-good pin every launch uses unless the config selects otherwise.
+/// Tracking npm's `latest` tag by default shipped 0.10.6's performance
+/// regression to every review the moment it was published; a moving default
+/// can do that again, so the default must be an explicit version that only
+/// changes with an mj release. Bump this when validating a new Bifrost.
+pub const DEFAULT_PINNED_VERSION: &str = "0.10.5";
+/// Explicit opt-in that keeps the old moving-tag behavior.
+pub const LATEST_VERSION: &str = "latest";
 pub const RECENT_VERSION_LIMIT: usize = 5;
 
 const REGISTRY_URL: &str = "https://registry.npmjs.org/%40brokkai%2Fbifrost";
@@ -61,13 +68,15 @@ fn parse_recent_versions(body: &str) -> Result<Vec<String>> {
     Ok(versions.into_iter().map(|(_, raw)| raw).collect())
 }
 
-/// Choices shown by `/mjconfig`: moving `latest`, the saved pin when it is
-/// older than the recent window, then the newest explicit stable versions.
+/// Choices shown by `/mjconfig`: the default pin, moving `latest`, the saved
+/// pin when it is older than the recent window, then the newest explicit
+/// stable versions.
 pub fn version_choices(selected: Option<&str>, recent: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut choices = Vec::with_capacity(recent.len() + 2);
+    let mut choices = Vec::with_capacity(recent.len() + 3);
     let old_pin = selected.filter(|selected| !recent.iter().any(|recent| recent == *selected));
-    for version in std::iter::once(DEFAULT_VERSION)
+    for version in [DEFAULT_PINNED_VERSION, LATEST_VERSION]
+        .into_iter()
         .chain(old_pin)
         .chain(recent.iter().map(String::as_str))
     {
@@ -78,33 +87,35 @@ pub fn version_choices(selected: Option<&str>, recent: &[String]) -> Vec<String>
     choices
 }
 
-/// npm package argument used by both Bifrost CLI and MCP launches.
+/// npm package argument used by both Bifrost CLI and MCP launches. `None`
+/// (no selection) resolves to the default pin, never to a moving tag.
 pub fn package_spec(version: Option<&str>) -> String {
-    version.map_or_else(
-        || NPX_PACKAGE.to_string(),
-        |version| format!("{NPX_PACKAGE}@{version}"),
-    )
+    let version = version.unwrap_or(DEFAULT_PINNED_VERSION);
+    format!("{NPX_PACKAGE}@{version}")
 }
 
 pub fn is_valid_explicit_version(version: &str) -> bool {
     Version::parse(version).is_ok()
 }
 
-/// One authority for the `"latest"` ⇄ `None` sentinel and pin validation, so
+/// One authority for the default-pin ⇄ `None` sentinel and pin validation, so
 /// the config loader, the HTTP apply, and the TUI cycle cannot drift.
+/// Selecting the default pin canonicalizes to `None` so the default is one
+/// state with one label; `"latest"` persists as an explicit opt-in.
 pub fn parse_selection(version: &str) -> std::result::Result<Option<String>, String> {
-    if version == DEFAULT_VERSION {
+    if version == DEFAULT_PINNED_VERSION {
         return Ok(None);
     }
-    if is_valid_explicit_version(version) {
+    if version == LATEST_VERSION || is_valid_explicit_version(version) {
         return Ok(Some(version.to_string()));
     }
     Err(format!("invalid Bifrost version: {version}"))
 }
 
-/// The display form of a stored selection: the pin itself, or `latest`.
+/// The display form of a stored selection: the pin itself (`latest` included),
+/// or the default pin.
 pub fn selection_label(selection: Option<&str>) -> &str {
-    selection.unwrap_or(DEFAULT_VERSION)
+    selection.unwrap_or(DEFAULT_PINNED_VERSION)
 }
 
 #[cfg(test)]
@@ -132,33 +143,39 @@ mod tests {
     }
 
     #[test]
-    fn choices_preserve_an_old_saved_pin_after_latest() {
+    fn choices_preserve_an_old_saved_pin_after_the_default_and_latest() {
         let recent = vec!["1.0.0".to_string(), "0.9.10".to_string()];
         assert_eq!(
             version_choices(Some("0.8.7"), &recent),
-            ["latest", "0.8.7", "1.0.0", "0.9.10"]
+            [DEFAULT_PINNED_VERSION, "latest", "0.8.7", "1.0.0", "0.9.10"]
         );
         assert_eq!(
             version_choices(Some("1.0.0"), &recent),
-            ["latest", "1.0.0", "0.9.10"]
+            [DEFAULT_PINNED_VERSION, "latest", "1.0.0", "0.9.10"]
         );
     }
 
     #[test]
-    fn package_spec_leaves_latest_unpinned() {
-        assert_eq!(package_spec(None), NPX_PACKAGE);
+    fn package_spec_pins_the_default_and_honors_an_explicit_latest() {
+        assert_eq!(
+            package_spec(None),
+            format!("{NPX_PACKAGE}@{DEFAULT_PINNED_VERSION}")
+        );
         assert_eq!(package_spec(Some("0.9.10")), "@brokkai/bifrost@0.9.10");
+        assert_eq!(package_spec(Some("latest")), "@brokkai/bifrost@latest");
     }
 
     #[test]
-    fn selection_round_trips_the_latest_sentinel() {
-        assert_eq!(parse_selection("latest"), Ok(None));
+    fn selection_round_trips_the_default_pin_sentinel() {
+        assert_eq!(parse_selection(DEFAULT_PINNED_VERSION), Ok(None));
+        assert_eq!(parse_selection("latest"), Ok(Some("latest".to_string())));
         assert_eq!(parse_selection("0.9.10"), Ok(Some("0.9.10".to_string())));
         assert_eq!(
             parse_selection("next"),
             Err("invalid Bifrost version: next".to_string())
         );
-        assert_eq!(selection_label(None), "latest");
+        assert_eq!(selection_label(None), DEFAULT_PINNED_VERSION);
+        assert_eq!(selection_label(Some("latest")), "latest");
         assert_eq!(selection_label(Some("0.9.10")), "0.9.10");
     }
 }

@@ -5311,6 +5311,7 @@ struct MjAgentsPanel {
     correction_threshold: String,
     correction_thresholds: Vec<MjCorrectionThresholdEntry>,
     bifrost_version: String,
+    bifrost_default_version: String,
     bifrost_versions: Vec<String>,
     bifrost_versions_error: Option<String>,
     max_parallel: usize,
@@ -5991,6 +5992,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
                 config.review.bifrost_version.as_deref(),
             )
             .to_string(),
+            bifrost_default_version: mj_core::bifrost::DEFAULT_PINNED_VERSION.to_string(),
             bifrost_versions: mj_core::bifrost::version_choices(
                 config.review.bifrost_version.as_deref(),
                 &bifrost_versions,
@@ -11935,7 +11937,11 @@ mod tests {
         assert_eq!(snapshot["agents"]["review_tiers"][0]["tier"], "quick");
         assert_eq!(snapshot["agents"]["correction_threshold"], "p1");
         assert_eq!(snapshot["agents"]["bifrost_version"], "0.9.9");
-        assert_eq!(snapshot["agents"]["bifrost_versions"][0], "latest");
+        assert_eq!(
+            snapshot["agents"]["bifrost_versions"][0],
+            mj_core::bifrost::DEFAULT_PINNED_VERSION
+        );
+        assert_eq!(snapshot["agents"]["bifrost_versions"][1], "latest");
         assert_eq!(
             snapshot["agents"]["correction_thresholds"][3]["threshold"],
             "p3"

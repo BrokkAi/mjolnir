@@ -1302,10 +1302,13 @@ fn draw_reviewer(
                     "loading recent versions…".to_string()
                 } else if let Some(error) = &editor.bifrost_versions_error {
                     format!("couldn't load recent versions: {error}")
-                } else if editor.config.review.bifrost_version.is_some() {
-                    "uses this exact npm version".to_string()
                 } else {
-                    "tracks npm's latest tag".to_string()
+                    match editor.config.review.bifrost_version.as_deref() {
+                        Some(mj_core::bifrost::LATEST_VERSION) => "tracks npm's latest tag",
+                        Some(_) => "uses this exact npm version",
+                        None => "mj's default known-good pin",
+                    }
+                    .to_string()
                 };
                 lines.push(Line::styled(
                     format!("  {detail}"),
@@ -2704,7 +2707,7 @@ mod tests {
     }
 
     #[test]
-    fn bifrost_version_defaults_to_latest_and_cycles_through_recent_versions() {
+    fn bifrost_version_defaults_to_the_pin_and_cycles_through_latest_and_recent_versions() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor
             .finish_bifrost_version_discovery(Ok(vec!["0.9.10".to_string(), "0.9.9".to_string()]));
@@ -2716,6 +2719,11 @@ mod tests {
             .expect("Bifrost version row");
 
         assert_eq!(editor.config.review.bifrost_version, None);
+        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
+        assert_eq!(
+            editor.config.review.bifrost_version.as_deref(),
+            Some("latest")
+        );
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(
             editor.config.review.bifrost_version.as_deref(),

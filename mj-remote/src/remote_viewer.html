@@ -4477,9 +4477,15 @@
           mjCombo(
             panel.bifrost_versions.map((version) => ({
               value: version,
-              label: version === "latest" ? "Latest" : version,
+              label: version === "latest"
+                ? "Latest"
+                : version === panel.bifrost_default_version
+                ? `${version} (default)`
+                : version,
               description: version === "latest"
                 ? "Tracks npm's latest tag"
+                : version === panel.bifrost_default_version
+                ? "mj's default known-good pin"
                 : "Uses this exact npm version",
             })),
             bifrostVersion,
@@ -4496,6 +4502,8 @@
             ? `Couldn't load recent versions: ${panel.bifrost_versions_error}`
             : bifrostVersion === "latest"
             ? "Tracks npm's latest tag."
+            : bifrostVersion === panel.bifrost_default_version
+            ? "mj's default known-good pin; every Bifrost CLI and MCP launch uses it."
             : "Pins every Bifrost CLI and MCP launch to this version.",
         ));
         mjconfigBodyEl.appendChild(bifrostRow);
