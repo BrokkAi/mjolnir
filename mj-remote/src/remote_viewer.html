@@ -4354,9 +4354,12 @@
 
       // Session options for one seat's bound ACP source, staged into that
       // role's session_defaults map.
-      function mjSeatOptionRows(group, editsField, seat) {
+      function mjSeatOptionRows(group, editsField, seat, leadingRows = []) {
         const rows = [];
         if (!group) {
+          if (leadingRows.length > 0) {
+            rows.push(mjSectionTitle("Session options"), ...leadingRows);
+          }
           if (mjcfg.snapshot?.probing) {
             const label = seat === "primary" ? "agent" : (seat === "review" ? "reviewer" : "subagent");
             rows.push(mjNote(`Discovering ACP session options for the ${label} route…`));
@@ -4364,6 +4367,7 @@
           return rows;
         }
         rows.push(mjSectionTitle(`${group.server_label} session options`));
+        rows.push(...leadingRows);
         const staged = mjcfg.edits[editsField] || {};
         const stagedGroup = staged[group.server_id] || {};
         for (const option of group.options) {
@@ -4430,16 +4434,18 @@
         const role = panel.roles[1];
         mjconfigBodyEl.appendChild(mjRoleModelRow(role, "review_model", "review"));
         const permissionRow = mjRolePermissionRow(role, "review_permission");
-        if (permissionRow) {
-          mjconfigBodyEl.appendChild(permissionRow);
-        }
         const options = mjSeatOptionGroup(
           role,
           "review_model",
           "review",
           mjcfg.snapshot.review_options,
         );
-        for (const row of mjSeatOptionRows(options, "review_session_defaults", "review")) {
+        for (const row of mjSeatOptionRows(
+          options,
+          "review_session_defaults",
+          "review",
+          permissionRow ? [permissionRow] : [],
+        )) {
           mjconfigBodyEl.appendChild(row);
         }
         const reviewRow = mjRow("Discrete review");
@@ -4583,16 +4589,18 @@
         const role = panel.roles[2];
         mjconfigBodyEl.appendChild(mjRoleModelRow(role, "subagents_model", "subagents"));
         const permissionRow = mjRolePermissionRow(role, "subagents_permission");
-        if (permissionRow) {
-          mjconfigBodyEl.appendChild(permissionRow);
-        }
         const options = mjSeatOptionGroup(
           role,
           "subagents_model",
           "subagents",
           mjcfg.snapshot.subagent_options,
         );
-        for (const row of mjSeatOptionRows(options, "subagent_session_defaults", "subagents")) {
+        for (const row of mjSeatOptionRows(
+          options,
+          "subagent_session_defaults",
+          "subagents",
+          permissionRow ? [permissionRow] : [],
+        )) {
           mjconfigBodyEl.appendChild(row);
         }
 

@@ -13031,6 +13031,10 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         assert!(viewer.contains("function mjRolePermissionRow(role, field)"));
         assert!(viewer.contains("review_permission"));
         assert!(viewer.contains("subagents_permission"));
+        assert!(viewer.contains(
+            "rows.push(mjSectionTitle(`${group.server_label} session options`));\n        rows.push(...leadingRows);"
+        ));
+        assert!(viewer.contains("permissionRow ? [permissionRow] : []"));
         assert!(viewer.contains("Post-correction verification"));
         assert!(viewer.contains("mjcfg.edits.max_correction_rounds = next"));
         assert!(viewer.contains("voice_auto_send"));

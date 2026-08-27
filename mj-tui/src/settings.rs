@@ -1219,14 +1219,21 @@ fn draw_reviewer(
 ) {
     let rows = editor.settings_rows(SettingsTab::Reviewer);
     let source = editor.selected_session_source(SessionDefaultsSeat::Review);
-    let has_options = rows
-        .iter()
-        .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
+    let has_options = rows.iter().any(|row| {
+        matches!(
+            row,
+            SettingsRow::ReviewPermissions | SettingsRow::SessionOption { .. }
+        )
+    });
     let mut lines = Vec::new();
     let mut selected_line_index = 0;
     let mut session_options_heading_drawn = false;
     for (row_index, row) in rows.into_iter().enumerate() {
-        if matches!(row, SettingsRow::SessionOption { .. }) && !session_options_heading_drawn {
+        if matches!(
+            row,
+            SettingsRow::ReviewPermissions | SettingsRow::SessionOption { .. }
+        ) && !session_options_heading_drawn
+        {
             lines.push(Line::raw(""));
             lines.push(session_options_heading(editor, source.as_deref(), theme));
             session_options_heading_drawn = true;
@@ -1437,14 +1444,21 @@ fn draw_subagents(
 ) {
     let rows = editor.settings_rows(SettingsTab::Subagents);
     let source = editor.selected_session_source(SessionDefaultsSeat::Subagents);
-    let has_options = rows
-        .iter()
-        .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
+    let has_options = rows.iter().any(|row| {
+        matches!(
+            row,
+            SettingsRow::SubagentPermissions | SettingsRow::SessionOption { .. }
+        )
+    });
     let mut lines = Vec::new();
     let mut selected_line_index = 0;
     let mut session_options_heading_drawn = false;
     for (row_index, row) in rows.into_iter().enumerate() {
-        if matches!(row, SettingsRow::SessionOption { .. }) && !session_options_heading_drawn {
+        if matches!(
+            row,
+            SettingsRow::SubagentPermissions | SettingsRow::SessionOption { .. }
+        ) && !session_options_heading_drawn
+        {
             lines.push(Line::raw(""));
             lines.push(session_options_heading(editor, source.as_deref(), theme));
             session_options_heading_drawn = true;
@@ -3195,6 +3209,16 @@ mod tests {
         editor.tab = SettingsTab::Reviewer;
         let reviewer = render(&editor, 100, 30);
         assert!(reviewer.contains("Review model"), "rendered:\n{reviewer}");
+        let reviewer_session_options = reviewer
+            .find("Session options ·")
+            .expect("reviewer session-options heading");
+        let reviewer_permissions = reviewer
+            .find("Permissions < Auto >")
+            .expect("reviewer permissions");
+        assert!(
+            reviewer_session_options < reviewer_permissions,
+            "rendered:\n{reviewer}"
+        );
         assert!(
             reviewer.contains("Discrete review"),
             "rendered:\n{reviewer}"
@@ -3214,6 +3238,16 @@ mod tests {
         let subagents = render(&editor, 100, 30);
         assert!(
             subagents.contains("Subagent model"),
+            "rendered:\n{subagents}"
+        );
+        let subagent_session_options = subagents
+            .find("Session options ·")
+            .expect("subagent session-options heading");
+        let subagent_permissions = subagents
+            .find("Permissions < Auto >")
+            .expect("subagent permissions");
+        assert!(
+            subagent_session_options < subagent_permissions,
             "rendered:\n{subagents}"
         );
         assert!(
@@ -3313,6 +3347,15 @@ mod tests {
         );
         assert!(
             reviewer.contains("Reasoning effort < High >"),
+            "rendered:\n{reviewer}"
+        );
+        let heading = reviewer.find("Session options ·").expect("heading");
+        let permissions = reviewer.find("Permissions < Auto >").expect("permissions");
+        let reasoning = reviewer
+            .find("Reasoning effort < High >")
+            .expect("reasoning effort");
+        assert!(
+            heading < permissions && permissions < reasoning,
             "rendered:\n{reviewer}"
         );
         assert!(
