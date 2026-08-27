@@ -507,6 +507,10 @@ fn start_server_agent_session(
         TrackerStatusSeed {
             model_source,
             reasoning_effort,
+            model_choices: roster
+                .as_ref()
+                .map(|resolved| resolved.choices.clone())
+                .unwrap_or_default(),
             cwd: Some(cwd.clone()),
             runtime_stall_minutes: app_config.agent.runtime_stall_minutes,
         },

@@ -213,6 +213,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         remote::TrackerStatusSeed {
             model_source: Some(primary.launch.source_id.clone()),
             reasoning_effort: primary.reasoning_effort.clone(),
+            model_choices: resolved.choices.clone(),
             cwd: Some(cfg.cwd.clone()),
             runtime_stall_minutes: app_config.agent.runtime_stall_minutes,
         },

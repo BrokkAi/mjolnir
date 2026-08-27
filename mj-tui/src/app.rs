@@ -1688,6 +1688,11 @@ pub struct AppState {
     /// resolutions used by the current session are deliberately shown separately.
     pub configured_models: crate::config::ModelsConfig,
     pub active_models: crate::config::ModelsConfig,
+    /// The model selection last advertised by the live session's config
+    /// options. The connect-time snapshot is the baseline (session setup
+    /// already selected the configured model, however the adapter spells it);
+    /// display follows only when a later snapshot moves the value.
+    pub live_primary_model_value: Option<SessionConfigValueId>,
     pub review_enabled: bool,
     pub review_tier: crate::config::ReviewTier,
     pub correction_threshold: crate::config::ReviewCorrectionThreshold,
@@ -2432,6 +2437,7 @@ impl AppState {
             model_choices: Vec::new(),
             configured_models: crate::config::ModelsConfig::default(),
             active_models: crate::config::ModelsConfig::default(),
+            live_primary_model_value: None,
             review_enabled: true,
             review_tier: crate::config::ReviewTier::default(),
             correction_threshold: crate::config::ReviewCorrectionThreshold::default(),
@@ -4610,6 +4616,10 @@ impl AppState {
                 }
                 if self.session_id.as_deref() != Some(&session_id) {
                     self.cleanup_nested_history();
+                    // A fresh session re-baselines the live model selection:
+                    // its first config snapshot describes the launch route,
+                    // not a user-driven `/model` move.
+                    self.live_primary_model_value = None;
                     self.workspace_head_diff = None;
                     self.pending_workspace_diff_total = None;
                     self.close_workspace_diff_viewer();
@@ -6074,6 +6084,30 @@ impl AppState {
         self.session_config_options = options;
         self.primary_reasoning_effort =
             mj_core::settings::session_reasoning_effort(&self.session_config_options);
+        // Keep the displayed primary model in sync with live `/model` and
+        // `/mjconfig` changes. Only a selection that moved between snapshots
+        // re-derives the display: the baseline snapshot may spell the launch
+        // model as an adapter alias that resolution cannot map back, and the
+        // configured id must survive that.
+        let model_value = mj_core::settings::session_model_value(&self.session_config_options);
+        if let (Some(previous), Some(_)) = (self.live_primary_model_value.as_ref(), &model_value)
+            && Some(previous) != model_value.as_ref()
+        {
+            let source_id = self
+                .active_models
+                .primary_source
+                .clone()
+                .unwrap_or_else(|| self.agent_source_id.clone());
+            if let Some(model) = mj_core::settings::live_session_model(
+                &self.session_config_options,
+                &source_id,
+                &self.active_models.primary,
+                &self.model_choices,
+            ) {
+                self.active_models.primary = model;
+            }
+        }
+        self.live_primary_model_value = model_value;
         self.refresh_config_picker();
 
         if let Some(mode_option) = self.session_config_options.iter().find(|option| {

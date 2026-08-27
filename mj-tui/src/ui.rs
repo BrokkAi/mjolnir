@@ -17046,6 +17046,71 @@ mod tests {
     }
 
     #[test]
+    fn status_line_uses_the_effective_live_session_model() {
+        let mut state = AppState::new();
+        state.active_models.primary = "gpt-5-6-sol".to_string();
+        state.active_models.primary_source = Some("codex-acp".to_string());
+        state.model_choices = vec![
+            crate::roster::ModelChoice {
+                model: "gpt-5-6-sol".to_string(),
+                pass_at_1: 0.7,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            },
+            crate::roster::ModelChoice {
+                model: "gpt-5-6-terra".to_string(),
+                pass_at_1: 0.6,
+                mean_cost_usd: 1.0,
+                available: true,
+                disabled_reason: None,
+                adapter: Some("codex-acp".to_string()),
+                ranked: true,
+            },
+        ];
+        let model_select = |current: &str| {
+            vec![
+                SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    current.to_string(),
+                    vec![
+                        SessionConfigSelectOption::new("gpt-5-6-sol", "gpt-5-6-sol"),
+                        SessionConfigSelectOption::new("gpt-5-6-terra", "gpt-5-6-terra"),
+                    ],
+                )
+                .category(SessionConfigOptionCategory::Model),
+            ]
+        };
+        let targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "model".into(),
+        }];
+
+        // The connect-time snapshot matches the launch route and must not
+        // disturb the canonical configured id.
+        state.apply_event(UiEvent::SessionConfigOptions {
+            options: model_select("gpt-5-6-sol"),
+            targets: targets.clone(),
+            hidden_config_ids: Vec::new(),
+        });
+        assert_eq!(state.active_models.primary, "gpt-5-6-sol");
+
+        // A live `/model` (or saved `/mjconfig`) change lands as a refreshed
+        // snapshot and must show up without restarting the session.
+        state.apply_event(UiEvent::SessionConfigOptions {
+            options: model_select("gpt-5-6-terra"),
+            targets,
+            hidden_config_ids: Vec::new(),
+        });
+
+        let rendered = line_text(&status_line(&state, 120));
+        assert!(rendered.contains("gpt-5-6-terra"), "{rendered}");
+        assert!(!rendered.contains("gpt-5-6-sol"), "{rendered}");
+    }
+
+    #[test]
     fn narrow_status_line_keeps_the_pr_number_visible() {
         let mut state = AppState::new();
         state.active_models.primary = "gpt-5-6-terra".to_string();

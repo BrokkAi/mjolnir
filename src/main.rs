@@ -2797,6 +2797,7 @@ async fn run_session(
         remote::TrackerStatusSeed {
             model_source: Some(roster.primary.launch.source_id.clone()),
             reasoning_effort: roster.primary.reasoning_effort.clone(),
+            model_choices: roster.choices.clone(),
             cwd: Some(cwd.clone()),
             runtime_stall_minutes: agent_config.runtime_stall_minutes,
         },

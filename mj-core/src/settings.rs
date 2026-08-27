@@ -6,6 +6,7 @@
 
 use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionConfigValueId,
 };
 
 use crate::roster::{AcpInventory, AdapterKind, ModelChoice};
@@ -261,6 +262,82 @@ pub fn session_reasoning_effort(options: &[SessionConfigOption]) -> Option<Strin
         })
 }
 
+/// The live ACP session option that selects the primary model. Adapters may
+/// tag their reasoning-effort selector with the same `Model` category, so
+/// that option is explicitly excluded.
+pub fn session_model_option(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+    options.iter().find(|option| {
+        matches!(option.category, Some(SessionConfigOptionCategory::Model))
+            && !session_option_controls_reasoning_effort(option)
+    })
+}
+
+/// Wire value currently selected by the live session's model option. Callers
+/// compare this across config snapshots to tell a moved selection apart from
+/// an alias respelling of the model already shown.
+pub fn session_model_value(options: &[SessionConfigOption]) -> Option<SessionConfigValueId> {
+    session_model_option(options).and_then(|option| match &option.kind {
+        SessionConfigKind::Select(select) => Some(select.current_value.clone()),
+        _ => None,
+    })
+}
+
+/// The model a live ACP session currently runs, as a seat display name.
+///
+/// `None` when the session exposes no model selector or when the advertised
+/// selection still corresponds to `active_model`: the canonical configured id
+/// is better display than the adapter-native alias for the same model. A
+/// selection that moved is reverse-resolved through the roster back to a
+/// canonical model id, falling back to the advertised choice label for models
+/// the roster doesn't carry.
+pub fn live_session_model(
+    options: &[SessionConfigOption],
+    source_id: &str,
+    active_model: &str,
+    choices: &[ModelChoice],
+) -> Option<String> {
+    let option = session_model_option(options)?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let current = select.current_value.clone();
+    if crate::acp::session_config_model_value(option, source_id, active_model, None).as_ref()
+        == Some(&current)
+    {
+        return None;
+    }
+    choices
+        .iter()
+        .filter(|choice| choice.adapter.as_deref() == Some(source_id))
+        .find(|choice| {
+            crate::acp::session_config_model_value(option, source_id, &choice.model, None).as_ref()
+                == Some(&current)
+        })
+        .map(|choice| choice.model.clone())
+        .or_else(|| Some(select_value_label(&select.options, &current)))
+}
+
+/// Display label for one advertised select value, preferring the choice name
+/// over the wire id.
+fn select_value_label(
+    options: &SessionConfigSelectOptions,
+    value: &SessionConfigValueId,
+) -> String {
+    let choices: Box<dyn Iterator<Item = _>> = match options {
+        SessionConfigSelectOptions::Ungrouped(options) => Box::new(options.iter()),
+        SessionConfigSelectOptions::Grouped(groups) => {
+            Box::new(groups.iter().flat_map(|group| group.options.iter()))
+        }
+        _ => Box::new(std::iter::empty()),
+    };
+    choices
+        .into_iter()
+        .find(|choice| choice.value == *value)
+        .map(|choice| choice.name.trim())
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| value.to_string(), str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +390,94 @@ mod tests {
                 &effort
             ));
         }
+    }
+
+    fn roster_choice(model: &str, adapter: &str) -> ModelChoice {
+        ModelChoice {
+            model: model.to_string(),
+            pass_at_1: 0.5,
+            mean_cost_usd: 1.0,
+            available: true,
+            disabled_reason: None,
+            adapter: Some(adapter.to_string()),
+            ranked: true,
+        }
+    }
+
+    fn model_select(current: &str) -> SessionConfigOption {
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            current.to_string(),
+            vec![
+                SessionConfigSelectOption::new("gpt-5-6-sol", "gpt-5-6-sol"),
+                SessionConfigSelectOption::new("gpt-5-6-terra", "gpt-5-6-terra"),
+                SessionConfigSelectOption::new("experimental", "Experimental preview"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)
+    }
+
+    #[test]
+    fn live_session_model_ignores_the_model_tagged_effort_selector() {
+        let effort = SessionConfigOption::select(
+            crate::acp::REASONING_EFFORT_CONFIG_ID,
+            "Reasoning effort",
+            "xhigh",
+            vec![SessionConfigSelectOption::new("xhigh", "Xhigh")],
+        )
+        .category(SessionConfigOptionCategory::Model);
+        assert!(session_model_option(std::slice::from_ref(&effort)).is_none());
+        assert_eq!(
+            session_model_option(&[effort, model_select("gpt-5-6-sol")])
+                .map(|option| option.id.to_string()),
+            Some("model".to_string())
+        );
+    }
+
+    #[test]
+    fn live_session_model_keeps_the_canonical_id_while_the_selection_matches() {
+        let choices = vec![roster_choice("gpt-5-6-sol", "codex-acp")];
+        assert_eq!(
+            live_session_model(
+                &[model_select("gpt-5-6-sol")],
+                "codex-acp",
+                "gpt-5-6-sol",
+                &choices,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn live_session_model_follows_a_moved_selection_to_the_roster_id() {
+        let choices = vec![
+            roster_choice("gpt-5-6-sol", "codex-acp"),
+            roster_choice("gpt-5-6-terra", "codex-acp"),
+        ];
+        assert_eq!(
+            live_session_model(
+                &[model_select("gpt-5-6-terra")],
+                "codex-acp",
+                "gpt-5-6-sol",
+                &choices,
+            ),
+            Some("gpt-5-6-terra".to_string())
+        );
+    }
+
+    #[test]
+    fn live_session_model_falls_back_to_the_choice_label_outside_the_roster() {
+        let choices = vec![roster_choice("gpt-5-6-sol", "codex-acp")];
+        assert_eq!(
+            live_session_model(
+                &[model_select("experimental")],
+                "codex-acp",
+                "gpt-5-6-sol",
+                &choices,
+            ),
+            Some("Experimental preview".to_string())
+        );
     }
 
     #[test]

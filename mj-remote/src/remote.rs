@@ -378,6 +378,10 @@ pub struct PullRequestRecord {
 pub struct TrackerStatusSeed {
     pub model_source: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Roster snapshot for resolving live model selections back to canonical
+    /// model ids. Empty disables resolution; moved selections then publish
+    /// the adapter's advertised choice label.
+    pub model_choices: Vec<roster::ModelChoice>,
     /// Working directory published as session provenance and probed for the
     /// current branch's open pull request. `None` disables both.
     pub cwd: Option<PathBuf>,
@@ -1547,6 +1551,14 @@ struct TrackerState {
     /// status-line field.
     model_source: Option<String>,
     reasoning_effort: Option<String>,
+    /// Roster snapshot for resolving live model selections back to canonical
+    /// model ids, mirroring the TUI status line.
+    model_choices: Vec<roster::ModelChoice>,
+    /// The model selection last advertised by the live session's config
+    /// options. The connect-time snapshot is the baseline (session setup
+    /// already selected the configured model, however the adapter spells it);
+    /// the published model follows only when a later snapshot moves the value.
+    live_model_value: Option<SessionConfigValueId>,
     /// Per-seat token/cost accounting, folded from the same `AgentUsage`
     /// records the TUI status line reads.
     agent_usage: mj_core::agent_usage::Snapshot,
@@ -1777,6 +1789,8 @@ impl TrackerState {
             agent,
             model_source: None,
             reasoning_effort: None,
+            model_choices: Vec::new(),
+            live_model_value: None,
             agent_usage: mj_core::agent_usage::Snapshot::default(),
             codex_quota: None,
             claude_quota: None,
@@ -1896,6 +1910,9 @@ impl TrackerState {
         self.workspace_head_diff = None;
         self.pending_permissions.clear();
         self.session_config.clear();
+        // A fresh session re-baselines the live model selection: its first
+        // config snapshot describes the launch route, not a `/model` move.
+        self.live_model_value = None;
         self.native_mode = None;
         self.main_available_commands = available_command_records(
             &[],
@@ -2004,6 +2021,24 @@ impl TrackerState {
                 hidden_config_ids,
             } => {
                 self.reasoning_effort = mj_core::settings::session_reasoning_effort(options);
+                // Follow live `/model` and `/mjconfig` changes like the TUI
+                // status line: only a selection that moved between snapshots
+                // re-derives the published model, so a baseline snapshot that
+                // spells the launch model as an unmappable adapter alias
+                // cannot clobber the canonical id.
+                let model_value = mj_core::settings::session_model_value(options);
+                if let (Some(previous), Some(_)) = (self.live_model_value.as_ref(), &model_value)
+                    && Some(previous) != model_value.as_ref()
+                    && let Some(model) = mj_core::settings::live_session_model(
+                        options,
+                        self.model_source.as_deref().unwrap_or_default(),
+                        &self.agent,
+                        &self.model_choices,
+                    )
+                {
+                    self.agent = model;
+                }
+                self.live_model_value = model_value;
                 self.native_mode = native_mode_record(options);
                 self.session_config = config_option_records(options, targets)
                     .into_iter()
@@ -3149,6 +3184,7 @@ impl RemoteSessionTracker {
         state.worktree = worktree;
         state.model_source = status.model_source;
         state.reasoning_effort = status.reasoning_effort;
+        state.model_choices = status.model_choices;
         state.runtime_stall_seconds = status.runtime_stall_minutes.saturating_mul(60);
         state.cwd = status.cwd.clone();
         let tracker = Self {
@@ -17690,6 +17726,78 @@ for (const [field, seat] of [
             .snapshot()
             .expect("snapshot");
         assert!(snapshot.session_config.is_empty());
+    }
+
+    #[test]
+    fn tracker_status_model_follows_live_selection_moves() {
+        let tracker =
+            RemoteSessionTracker::new_disconnected("proj".to_string(), "gpt-5-6-sol".to_string());
+        {
+            let mut state = tracker.state.lock().expect("state");
+            state.model_source = Some("codex-acp".to_string());
+            state.model_choices = vec![
+                roster::ModelChoice {
+                    model: "gpt-5-6-sol".to_string(),
+                    pass_at_1: 0.7,
+                    mean_cost_usd: 1.0,
+                    available: true,
+                    disabled_reason: None,
+                    adapter: Some("codex-acp".to_string()),
+                    ranked: true,
+                },
+                roster::ModelChoice {
+                    model: "gpt-5-6-terra".to_string(),
+                    pass_at_1: 0.6,
+                    mean_cost_usd: 1.0,
+                    available: true,
+                    disabled_reason: None,
+                    adapter: Some("codex-acp".to_string()),
+                    ranked: true,
+                },
+            ];
+        }
+        tracker.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+        let model_snapshot = |current: &str| UiEvent::SessionConfigOptions {
+            options: vec![
+                SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    current.to_string(),
+                    vec![
+                        SessionConfigSelectOption::new("gpt-5-6-sol", "gpt-5-6-sol"),
+                        SessionConfigSelectOption::new("gpt-5-6-terra", "gpt-5-6-terra"),
+                    ],
+                )
+                .category(SessionConfigOptionCategory::Model),
+            ],
+            targets: vec![SessionConfigTarget::ConfigOption {
+                config_id: SessionConfigId::from("model".to_string()),
+            }],
+            hidden_config_ids: Vec::new(),
+        };
+        let published_model = |tracker: &RemoteSessionTracker| {
+            tracker
+                .state
+                .lock()
+                .expect("state")
+                .snapshot()
+                .expect("snapshot")
+                .status
+                .map(|status| status.model)
+        };
+
+        // The connect-time snapshot matches the launch route and must not
+        // disturb the canonical configured id.
+        tracker.observe_event(&model_snapshot("gpt-5-6-sol"));
+        assert_eq!(published_model(&tracker).as_deref(), Some("gpt-5-6-sol"));
+
+        // A live `/model` (or saved `/mjconfig`) change lands as a refreshed
+        // snapshot and must publish without restarting the session.
+        tracker.observe_event(&model_snapshot("gpt-5-6-terra"));
+        assert_eq!(published_model(&tracker).as_deref(), Some("gpt-5-6-terra"));
     }
 
     #[test]
