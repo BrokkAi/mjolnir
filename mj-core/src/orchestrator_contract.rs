@@ -6,9 +6,63 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::event::SubagentOutcome;
+
+/// Primary-agent entrypoint for a mid-turn discrete-review checkpoint.
+///
+/// The reply confirms only that the orchestrator captured and dispatched the
+/// immutable review target. The verdict is delivered back into the primary
+/// session later, so MCP callers never block on the reviewer itself.
+#[derive(Clone, Debug)]
+pub struct ReviewCheckpointClient {
+    tx: mpsc::UnboundedSender<ReviewCheckpointRequest>,
+}
+
+#[derive(Debug)]
+pub struct ReviewCheckpointReceiver {
+    rx: mpsc::UnboundedReceiver<ReviewCheckpointRequest>,
+}
+
+#[derive(Debug)]
+pub struct ReviewCheckpointRequest {
+    reply: oneshot::Sender<Result<ReviewCheckpointStarted, String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCheckpointStarted {
+    pub target_tree: String,
+}
+
+impl ReviewCheckpointClient {
+    pub fn channel() -> (Self, ReviewCheckpointReceiver) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx }, ReviewCheckpointReceiver { rx })
+    }
+
+    pub async fn request(&self) -> Result<ReviewCheckpointStarted, String> {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(ReviewCheckpointRequest { reply })
+            .map_err(|_| "the discrete-review orchestrator is unavailable".to_string())?;
+        response
+            .await
+            .map_err(|_| "the discrete-review orchestrator stopped before dispatch".to_string())?
+    }
+}
+
+impl ReviewCheckpointReceiver {
+    pub async fn recv(&mut self) -> Option<ReviewCheckpointRequest> {
+        self.rx.recv().await
+    }
+}
+
+impl ReviewCheckpointRequest {
+    pub fn respond(self, result: Result<ReviewCheckpointStarted, String>) {
+        let _ = self.reply.send(result);
+    }
+}
 
 pub const PROGRESS_WAKE_INSTRUCTION: &str = "No subagent has finished yet. Decide: keep waiting (end your turn again), redirect or take over the work yourself, or cancel a subagent.";
 

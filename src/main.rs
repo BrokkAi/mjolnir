@@ -1549,6 +1549,7 @@ pub(crate) struct LiveSubagentOptions {
     pub(crate) handoff_counter: Arc<AtomicUsize>,
     pub(crate) id_allocator: subagent::SubagentIdAllocator,
     pub(crate) active_workers: subagent::ActiveSubagentWorkers,
+    pub(crate) review_checkpoint: subagent::ReviewCheckpointClient,
     pub(crate) reports: subagent::SubagentReportBus,
     pub(crate) runs: subagent::SubagentRegistry,
 }
@@ -1566,6 +1567,7 @@ pub(crate) fn configured_subagent_service(
         .with_subagent_handoff_counter(options.handoff_counter.clone())
         .with_id_allocator(options.id_allocator.clone())
         .with_active_implementation_workers(options.active_workers.clone())
+        .with_review_checkpoint(options.review_checkpoint.clone())
         .with_max_parallel(config.max_parallel)
         .with_debrief(config.debrief)
         .with_permission_mode(config.permission)
@@ -2506,6 +2508,7 @@ async fn run_session(
     // rows in the same status area.
     let subagent_ids = subagent::SubagentIdAllocator::default();
     let active_implementation_workers = subagent::ActiveSubagentWorkers::default();
+    let (review_checkpoint, review_checkpoints) = subagent::ReviewCheckpointClient::channel();
     let (subagent_reports, subagent_report_rx) = subagent::SubagentReportBus::channel();
     // Shared with the orchestrator so every wake can ask the still-running
     // subagents for progress.
@@ -2520,6 +2523,7 @@ async fn run_session(
         handoff_counter: subagent_handoffs_this_turn.clone(),
         id_allocator: subagent_ids.clone(),
         active_workers: active_implementation_workers.clone(),
+        review_checkpoint,
         reports: subagent_reports.clone(),
         runs: subagent_runs.clone(),
     };
@@ -2822,6 +2826,7 @@ async fn run_session(
             max_correction_rounds: agent_config.max_correction_rounds,
             primary_model: Some(roster.primary.model.model.clone()),
             review_root: cwd.clone(),
+            review_checkpoints,
             review_fanout: match (review_workers, roster.review_supervisor.clone()) {
                 (Some(workers), Some(supervisor)) => {
                     mj_core::orchestrator::ReviewFanout::available(discrete_review::live_spawner(

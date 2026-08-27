@@ -116,6 +116,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     // Shared with the review fan-out so lane ids never collide with pool ids.
     let subagent_ids = subagent::SubagentIdAllocator::default();
     let active_implementation_workers = subagent::ActiveSubagentWorkers::default();
+    let (review_checkpoint, review_checkpoints) = subagent::ReviewCheckpointClient::channel();
     let (subagent_reports, subagent_report_rx) = subagent::SubagentReportBus::channel();
     // Shared with the orchestrator so every wake can ask the still-running
     // subagents for progress.
@@ -154,6 +155,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     .with_subagent_handoff_counter(subagent_handoffs.clone())
                     .with_id_allocator(subagent_ids.clone())
                     .with_active_implementation_workers(active_implementation_workers.clone())
+                    .with_review_checkpoint(review_checkpoint.clone())
                     .with_max_parallel(app_config.subagents.max_parallel)
                     .with_debrief(app_config.subagents.debrief)
                     .with_permission_mode(subagent_permission)
@@ -238,6 +240,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             max_correction_rounds: app_config.agent.max_correction_rounds,
             primary_model: Some(primary.model.model.clone()),
             review_root: cfg.cwd.clone(),
+            review_checkpoints,
             review_fanout: match (review_workers, review_supervisor) {
                 (Some(workers), Some(supervisor)) => {
                     mj_core::orchestrator::ReviewFanout::available(

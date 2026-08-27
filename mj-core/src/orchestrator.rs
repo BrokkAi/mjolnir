@@ -404,6 +404,8 @@ pub struct Config {
     /// per-model usage breakdown can attribute them.
     pub primary_model: Option<String>,
     pub review_root: PathBuf,
+    /// Mid-turn review requests made by the primary through Mjolnir's MCP.
+    pub review_checkpoints: ReviewCheckpointReceiver,
     /// Multi-specialist review plan. An unavailable plan carries the source
     /// error that must be shown if the primary fallback is used.
     pub review_fanout: ReviewFanout,
@@ -454,6 +456,23 @@ struct ManualReviewInFlight {
     review_task: tokio::task::JoinHandle<()>,
 }
 
+/// A primary-requested checkpoint audits an immutable uncommitted-work tree
+/// while the primary turn is still open. The primary may keep doing read-only
+/// work; its next mutating or publishing step waits for the injected verdict.
+struct CheckpointReviewInFlight {
+    epoch: u64,
+    workflow_id: WorkflowId,
+    target_tree: String,
+    primary_completion: Option<UiEvent>,
+    cancel: CancellationToken,
+    review_task: tokio::task::JoinHandle<()>,
+}
+
+struct CleanReviewCheckpoint {
+    epoch: u64,
+    target_tree: String,
+}
+
 struct CorrectionReviewBase {
     fingerprint: String,
     snapshot: Option<ReviewSnapshot>,
@@ -500,6 +519,11 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         let mut discrete_review_started = false;
         let mut review_in_flight: Option<ReviewInFlight> = None;
         let mut manual_review_in_flight: Option<ManualReviewInFlight> = None;
+        let mut checkpoint_review_in_flight: Option<CheckpointReviewInFlight> = None;
+        let mut clean_review_checkpoint: Option<CleanReviewCheckpoint> = None;
+        let mut checkpoint_prompt_queued = false;
+        let mut checkpoint_attempt = 0_u32;
+        let mut checkpoint_epoch = None;
         let mut correction_review_base: Option<CorrectionReviewBase> = None;
         // Corrective re-review passes dispatched for the current turn. Capped
         // by the configured or tier-default round budget so a correction that
@@ -672,6 +696,22 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                         // subprocesses instead of letting them run detached.
                         cancel_review(&workflow, &mut review_in_flight).await;
                         cancel_manual_review(&workflow, &mut manual_review_in_flight).await;
+                        // `begin_turn` updates the shared epoch before the ACP
+                        // emits its first runtime event. A checkpoint tool can
+                        // therefore dispatch for that new epoch before this
+                        // boundary observation arrives; preserve state that is
+                        // already explicitly bound to the active turn.
+                        if checkpoint_epoch != Some(active.epoch) {
+                            cancel_checkpoint_review(
+                                &workflow,
+                                &mut checkpoint_review_in_flight,
+                            )
+                            .await;
+                            clean_review_checkpoint = None;
+                            checkpoint_prompt_queued = false;
+                            checkpoint_attempt = 0;
+                            checkpoint_epoch = None;
+                        }
                         trajectory = BoundaryTracker::default();
                         manual_review_active = false;
                         review_pass = 0;
@@ -684,6 +724,19 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     // real primary completion, and a manual review has no
                     // primary completion to publish, so this event is not a
                     // second completed turn.
+                    if matches!(&event, UiEvent::PromptDone { .. }) && checkpoint_prompt_queued {
+                        // The verdict prompt was queued behind the still-active
+                        // primary. This completion belongs to that original
+                        // prompt; the queued continuation owns the real one.
+                        checkpoint_prompt_queued = false;
+                        continue;
+                    }
+                    if let Some(review) = checkpoint_review_in_flight.as_mut()
+                        && matches!(&event, UiEvent::PromptDone { .. })
+                    {
+                        review.primary_completion = Some(event);
+                        continue;
+                    }
                     if matches!(&event, UiEvent::PromptDone { .. })
                         && (review_in_flight.is_some() || manual_review_in_flight.is_some())
                     {
@@ -926,6 +979,125 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 // and the fan-out for the live turn (if any) keeps running.
                 outcome = review_outcome_rx.recv() => {
                     let Some(outcome) = outcome else { continue; };
+                    if checkpoint_review_in_flight
+                        .as_ref()
+                        .map(|review| review.epoch)
+                        == Some(outcome.epoch)
+                    {
+                        let CheckpointReviewInFlight {
+                            epoch,
+                            workflow_id,
+                            target_tree,
+                            primary_completion,
+                            cancel: _,
+                            review_task,
+                        } = checkpoint_review_in_flight
+                            .take()
+                            .expect("checkpoint review matched by epoch");
+                        await_review_task(review_task).await;
+                        let coverage = workflow_coverage(&workflow, workflow_id);
+                        let (workflow_outcome, prompt, info) = match outcome.verdict {
+                            ReviewVerdict::Clean if coverage == WorkflowCoverage::Complete => {
+                                clean_review_checkpoint = Some(CleanReviewCheckpoint {
+                                    epoch,
+                                    target_tree,
+                                });
+                                (
+                                    WorkflowOutcome::Clean,
+                                    checkpoint_review_clean_prompt(),
+                                    "discrete review checkpoint · no material findings".to_string(),
+                                )
+                            }
+                            ReviewVerdict::Clean => {
+                                clean_review_checkpoint = None;
+                                (
+                                    WorkflowOutcome::Degraded,
+                                    checkpoint_review_incomplete_prompt(
+                                        &workflow_coverage_error(&workflow, workflow_id),
+                                    ),
+                                    format!(
+                                        "discrete review checkpoint · incomplete verification: {}",
+                                        workflow_coverage_error(&workflow, workflow_id)
+                                    ),
+                                )
+                            }
+                            ReviewVerdict::Findings { synthesis, .. } => {
+                                clean_review_checkpoint = None;
+                                emit_workflow(
+                                    &workflow,
+                                    WorkflowEvent::new(
+                                        workflow_id,
+                                        WorkflowTransition::IssuesValidated {
+                                            pass: 0,
+                                            summaries: review_issue_summaries(&synthesis),
+                                        },
+                                    ),
+                                );
+                                (
+                                    if coverage == WorkflowCoverage::Complete {
+                                        WorkflowOutcome::Completed
+                                    } else {
+                                        WorkflowOutcome::Degraded
+                                    },
+                                    checkpoint_review_findings_prompt(&synthesis),
+                                    "discrete review checkpoint · findings validated".to_string(),
+                                )
+                            }
+                            ReviewVerdict::Failed { reason } => {
+                                clean_review_checkpoint = None;
+                                emit_workflow(
+                                    &workflow,
+                                    WorkflowEvent::new(
+                                        workflow_id,
+                                        WorkflowTransition::CoverageChanged {
+                                            coverage: WorkflowCoverage::Degraded,
+                                            error: Some(reason.clone()),
+                                        },
+                                    ),
+                                );
+                                (
+                                    WorkflowOutcome::Failed,
+                                    checkpoint_review_failed_prompt(&reason),
+                                    format!("discrete review checkpoint · failed: {reason}"),
+                                )
+                            }
+                        };
+                        let terminal_coverage = workflow_coverage(&workflow, workflow_id);
+                        emit_workflow(
+                            &workflow,
+                            WorkflowEvent::new(
+                                workflow_id,
+                                WorkflowTransition::Terminal {
+                                    outcome: workflow_outcome,
+                                    coverage: terminal_coverage,
+                                },
+                            ),
+                        );
+                        let _ = events_tx.send(if workflow_outcome == WorkflowOutcome::Failed {
+                            UiEvent::Warning(info)
+                        } else {
+                            UiEvent::Info(info)
+                        });
+                        emit_internal(
+                            &events_tx,
+                            "review",
+                            "primary",
+                            InternalMessageKind::DiscreteReview,
+                            &prompt,
+                        );
+                        let _ = config.runtime_commands.send(UiCommand::SendPrompt {
+                            text: prompt,
+                            images: Vec::new(),
+                            resources: Vec::new(),
+                        });
+                        // If the original primary prompt is still active, ACP
+                        // queues this verdict prompt. Ignore exactly that
+                        // original completion, then process the continuation's.
+                        checkpoint_prompt_queued = primary_completion.is_none();
+                        trajectory.reset_attempt();
+                        idle_epoch = None;
+                        continue;
+                    }
                     if manual_review_in_flight
                         .as_ref()
                         .map(|review| review.epoch)
@@ -1418,7 +1590,21 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 cancel = review_cancel_rx.recv() => {
                     let Some(()) = cancel else { break; };
                     let active = turn.lock().await.clone();
-                    if let Some(review) = manual_review_in_flight.take() {
+                    if let Some(review) = checkpoint_review_in_flight.take() {
+                        let workflow_id = review.workflow_id;
+                        review.cancel.cancel();
+                        await_review_task(review.review_task).await;
+                        terminal_cancelled_workflow(&workflow, workflow_id);
+                        if let Some(completion) = review.primary_completion {
+                            let _ = events_tx.send(completion);
+                            idle_epoch = Some(active.epoch);
+                        }
+                        clean_review_checkpoint = None;
+                        checkpoint_prompt_queued = false;
+                        let _ = events_tx.send(UiEvent::Info(
+                            "discrete review checkpoint · cancelled".to_string(),
+                        ));
+                    } else if let Some(review) = manual_review_in_flight.take() {
                         let workflow_id = review.workflow_id;
                         review.cancel.cancel();
                         await_review_task(review.review_task).await;
@@ -1489,6 +1675,129 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                             "discrete review · cancellation pending turn completion".to_string(),
                         ));
                     }
+                }
+                checkpoint_request = config.review_checkpoints.recv() => {
+                    let Some(checkpoint_request) = checkpoint_request else { continue; };
+                    let active = turn.lock().await.clone();
+                    let rejection = if !review_enabled.load(Ordering::Acquire) {
+                        Some("automatic discrete review is disabled for this session".to_string())
+                    } else if active.epoch == 0 || idle_epoch == Some(active.epoch) {
+                        Some("request_discrete_review must be called during an active primary turn".to_string())
+                    } else if checkpoint_review_in_flight.is_some() {
+                        Some("a discrete review checkpoint is already active".to_string())
+                    } else if manual_review_in_flight.is_some() || manual_review_active {
+                        Some("an on-demand discrete review is already active".to_string())
+                    } else if review_in_flight.is_some() || primary_review_prompt_active {
+                        Some("an automatic discrete review or correction is already active".to_string())
+                    } else if held_completion.is_some() {
+                        Some("the primary turn is already completing".to_string())
+                    } else if *active_worker_updates.borrow() > 0 {
+                        Some("wait for all implementation subagents to finish before requesting discrete review".to_string())
+                    } else {
+                        None
+                    };
+                    if let Some(error) = rejection {
+                        checkpoint_request.respond(Err(error));
+                        continue;
+                    }
+                    let review_plan = {
+                        review_fanout
+                            .read()
+                            .expect("review fanout lock poisoned")
+                            .clone()
+                    };
+                    let spawner = match review_plan {
+                        ReviewFanout::Available(spawner) => spawner,
+                        ReviewFanout::Unavailable(error) => {
+                            checkpoint_request.respond(Err(error));
+                            continue;
+                        }
+                    };
+                    let snapshot = match repository_review_snapshot(
+                        &config.review_root,
+                        RepositoryReviewTarget::Uncommitted,
+                    ).await {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            checkpoint_request.respond(Err(format!(
+                                "could not prepare review checkpoint: {error}"
+                            )));
+                            continue;
+                        }
+                    };
+                    let diff = match snapshot.full_patch().await {
+                        Ok(diff) if !diff.trim().is_empty() => diff,
+                        Ok(_) => {
+                            checkpoint_request.respond(Err(
+                                "there are no uncommitted changes to review; call this before committing"
+                                    .to_string(),
+                            ));
+                            continue;
+                        }
+                        Err(error) => {
+                            checkpoint_request.respond(Err(format!(
+                                "could not prepare review checkpoint: {error}"
+                            )));
+                            continue;
+                        }
+                    };
+                    clean_review_checkpoint = None;
+                    let target_tree = snapshot.target_tree().to_string();
+                    let workflow_id = WorkflowId::checkpoint_review(active.epoch, checkpoint_attempt);
+                    checkpoint_attempt = checkpoint_attempt.saturating_add(1);
+                    emit_workflow(
+                        &workflow,
+                        WorkflowEvent::new(
+                            workflow_id,
+                            WorkflowTransition::Started {
+                                kind: WorkflowKind::Review,
+                                stage: WorkflowStage::new(0, WorkflowPhase::IntentAnalysis),
+                            },
+                        ),
+                    );
+                    let tier = ReviewTier::from_index(review_tier.load(Ordering::Acquire));
+                    let _ = events_tx.send(UiEvent::Info(match tier {
+                        ReviewTier::Quick => {
+                            "reviewing the implementation checkpoint · quick review…".to_string()
+                        }
+                        ReviewTier::Extended => {
+                            "reviewing the implementation checkpoint · dispatching specialist lanes…"
+                                .to_string()
+                        }
+                    }));
+                    let job = ReviewJob {
+                        epoch: active.epoch,
+                        workflow_id,
+                        review_pass: 0,
+                        tier,
+                        workflow: workflow.clone(),
+                        task: active.task.clone(),
+                        images: active.images.as_ref().clone(),
+                        user_messages: user_messages.lock().await.snapshot(),
+                        initial_result: trajectory.final_message(),
+                        trajectory: trajectory.review_trajectory(),
+                        diff,
+                        snapshot: Some(snapshot),
+                        focus_snapshot: None,
+                        prior_review: None,
+                    };
+                    let cancel = CancellationToken::new();
+                    let review_task = spawner.spawn(
+                        job,
+                        events_tx.clone(),
+                        cancel.clone(),
+                        review_outcome_tx.clone(),
+                    );
+                    checkpoint_review_in_flight = Some(CheckpointReviewInFlight {
+                        epoch: active.epoch,
+                        workflow_id,
+                        target_tree: target_tree.clone(),
+                        primary_completion: None,
+                        cancel,
+                        review_task,
+                    });
+                    checkpoint_epoch = Some(active.epoch);
+                    checkpoint_request.respond(Ok(ReviewCheckpointStarted { target_tree }));
                 }
                 review_request = review_request_rx.recv() => {
                     let Some(review_request) = review_request else { continue; };
@@ -1824,10 +2133,21 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     workflow_coverage_error(&workflow, WorkflowId::review(active.epoch))
                 )));
             }
+            let checkpoint_covers_workspace =
+                clean_review_checkpoint.as_ref().is_some_and(|checkpoint| {
+                    checkpoint.epoch == active.epoch
+                        && delta
+                            .as_ref()
+                            .and_then(WorkspaceDelta::review_snapshot)
+                            .map(ReviewSnapshot::target_tree)
+                            == Some(checkpoint.target_tree.as_str())
+                });
             if should_start_discrete_review(
                 review,
                 discrete_review_started && !correction_rearm,
-                delta.as_ref().is_some_and(WorkspaceDelta::changed) || correction_rearm,
+                (delta.as_ref().is_some_and(WorkspaceDelta::changed)
+                    && !checkpoint_covers_workspace)
+                    || correction_rearm,
                 *active_worker_updates.borrow(),
             ) {
                 let workflow_id = WorkflowId::review(active.epoch);
@@ -2118,6 +2438,7 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
         // The session is going away; lane subprocesses must not outlive it.
         cancel_review(&workflow, &mut review_in_flight).await;
         cancel_manual_review(&workflow, &mut manual_review_in_flight).await;
+        cancel_checkpoint_review(&workflow, &mut checkpoint_review_in_flight).await;
         cancel_primary_review_actor(&workflow, observed_epoch, &mut active_primary_review_actor);
         terminate_delegation_at_boundary(&workflow, WorkflowId::delegation(observed_epoch));
     });
@@ -2543,6 +2864,18 @@ async fn cancel_manual_review(
     }
 }
 
+async fn cancel_checkpoint_review(
+    workflow: &WorkflowEmitter,
+    review_in_flight: &mut Option<CheckpointReviewInFlight>,
+) {
+    if let Some(review) = review_in_flight.take() {
+        let workflow_id = review.workflow_id;
+        review.cancel.cancel();
+        await_review_task(review.review_task).await;
+        terminal_cancelled_workflow(workflow, workflow_id);
+    }
+}
+
 async fn await_review_task(task: tokio::task::JoinHandle<()>) {
     if let Err(error) = task.await {
         tracing::error!(
@@ -2676,6 +3009,28 @@ fn on_demand_discrete_review_report_prompt(
         tier.as_str(),
         review_target_label(target),
         report
+    )
+}
+
+fn checkpoint_review_clean_prompt() -> String {
+    "The configured discrete review of the current implementation checkpoint completed with full coverage and found no material issues. You may continue the user's task, including the previously blocked commit, push, pull-request, merge, tag, publication, or release steps. This clean checkpoint applies only to the exact reviewed code. If you change code again, validate it and call request_discrete_review again before any publishing action. Do not run another review while the code remains unchanged.".to_string()
+}
+
+fn checkpoint_review_findings_prompt(report: &str) -> String {
+    format!(
+        "The configured discrete review of the current implementation checkpoint found material issues. Treat these as review leads: verify each against the current source, fix every valid material issue, run appropriate local validation, and call request_discrete_review again. Until a complete clean checkpoint arrives, do not commit, push, open or merge a pull request, tag, publish, or release.\n\n<discrete_review_findings>\n{report}\n</discrete_review_findings>"
+    )
+}
+
+fn checkpoint_review_incomplete_prompt(reason: &str) -> String {
+    format!(
+        "The configured discrete review of the current implementation checkpoint did not complete with full coverage: {reason}. This is not a clean review. Resolve the review availability problem and call request_discrete_review again. Until a complete clean checkpoint arrives, do not commit, push, open or merge a pull request, tag, publish, or release."
+    )
+}
+
+fn checkpoint_review_failed_prompt(reason: &str) -> String {
+    format!(
+        "The configured discrete review of the current implementation checkpoint failed: {reason}. This is not a clean review. Resolve the failure and call request_discrete_review again. Until a complete clean checkpoint arrives, do not commit, push, open or merge a pull request, tag, publish, or release."
     )
 }
 
@@ -3218,6 +3573,10 @@ mod tests {
         snapshot
     }
 
+    fn unused_review_checkpoints() -> ReviewCheckpointReceiver {
+        ReviewCheckpointClient::channel().1
+    }
+
     fn fanout_config(
         command_tx: mpsc::UnboundedSender<UiCommand>,
         spawner: ReviewSpawner,
@@ -3236,6 +3595,7 @@ mod tests {
             max_correction_rounds: None,
             primary_model: None,
             review_root: PathBuf::from("."),
+            review_checkpoints: unused_review_checkpoints(),
             review_fanout: ReviewFanout::available(spawner),
         }
     }
@@ -3258,6 +3618,7 @@ mod tests {
             max_correction_rounds: None,
             primary_model: None,
             review_root: PathBuf::from("."),
+            review_checkpoints: unused_review_checkpoints(),
             review_fanout: ReviewFanout::unavailable(error),
         }
     }
@@ -3347,6 +3708,210 @@ mod tests {
             UiCommand::SendPrompt { text, .. } => text,
             other => panic!("expected a prompt, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn clean_mid_turn_checkpoint_releases_publishing_and_skips_duplicate_review() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let turn_snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+        let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
+            dispatch_tx
+                .send((job, outcomes))
+                .expect("record review job");
+        });
+        let (checkpoint, checkpoint_requests) = ReviewCheckpointClient::channel();
+        let mut config = fanout_config(command_tx, spawner);
+        config.review_root = temp.path().to_path_buf();
+        config.review_checkpoints = checkpoint_requests;
+        let mut running = spawn(runtime_rx, config);
+        running
+            .handle
+            .begin_turn(
+                1,
+                "implement and publish the fix".to_string(),
+                Vec::new(),
+                turn_snapshot,
+            )
+            .await;
+
+        let started = checkpoint.request().await.expect("checkpoint dispatch");
+        let (job, outcomes) = dispatch_rx.recv().await.expect("review job");
+        assert_eq!(job.task, "implement and publish the fix");
+        assert_eq!(
+            job.snapshot.as_ref().unwrap().target_tree(),
+            started.target_tree
+        );
+        assert!(job.diff.contains("reviewed change"));
+
+        // Exercise the race this feature exists for: the primary can finish
+        // its prompt while the asynchronous review is still running.
+        runtime_tx.send(completion()).expect("original completion");
+        outcomes
+            .send(ReviewOutcome {
+                epoch: job.epoch,
+                verdict: ReviewVerdict::Clean,
+            })
+            .expect("clean verdict");
+        let prompt = next_prompt(&mut command_rx).await;
+        assert!(
+            prompt.contains("previously blocked commit, push, pull-request, merge"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("exact reviewed code"));
+
+        // Completing the injected continuation with unchanged code must use
+        // the clean checkpoint instead of starting the ordinary end-turn
+        // review over the same tree.
+        runtime_tx
+            .send(completion())
+            .expect("continuation completion");
+        let mut seen = Vec::new();
+        loop {
+            let event = match tokio::time::timeout(Duration::from_secs(5), running.events.recv())
+                .await
+            {
+                Ok(Some(event)) => event,
+                other => panic!(
+                    "completion not released; events={seen:?}, recv={other:?}, extra_review={:?}",
+                    dispatch_rx.try_recv().map(|(job, _)| job.diff)
+                ),
+            };
+            seen.push(format!("{event:?}"));
+            if matches!(event, UiEvent::PromptDone { .. }) {
+                break;
+            }
+        }
+        assert!(
+            dispatch_rx.try_recv().is_err(),
+            "unchanged code was reviewed twice"
+        );
+
+        drop(runtime_tx);
+        running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn code_change_after_clean_checkpoint_rearms_review() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let turn_snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+        let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
+            dispatch_tx
+                .send((job, outcomes))
+                .expect("record review job");
+        });
+        let (checkpoint, checkpoint_requests) = ReviewCheckpointClient::channel();
+        let mut config = fanout_config(command_tx, spawner);
+        config.review_root = temp.path().to_path_buf();
+        config.review_checkpoints = checkpoint_requests;
+        let running = spawn(runtime_rx, config);
+        running
+            .handle
+            .begin_turn(
+                1,
+                "implement and publish the fix".to_string(),
+                Vec::new(),
+                turn_snapshot,
+            )
+            .await;
+
+        checkpoint.request().await.expect("checkpoint dispatch");
+        let (job, outcomes) = dispatch_rx.recv().await.expect("checkpoint job");
+        runtime_tx.send(completion()).expect("original completion");
+        outcomes
+            .send(ReviewOutcome {
+                epoch: job.epoch,
+                verdict: ReviewVerdict::Clean,
+            })
+            .expect("clean verdict");
+        let _ = next_prompt(&mut command_rx).await;
+
+        std::fs::write(temp.path().join("tracked.txt"), "changed after review\n")
+            .expect("change reviewed code");
+        runtime_tx
+            .send(completion())
+            .expect("continuation completion");
+        let (second_job, _outcomes) =
+            tokio::time::timeout(Duration::from_secs(5), dispatch_rx.recv())
+                .await
+                .expect("changed code starts another review")
+                .expect("automatic review job");
+        assert!(second_job.diff.contains("changed after review"));
+
+        drop(runtime_tx);
+        running.task.await.expect("orchestrator task");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_findings_require_a_corrected_checkpoint_before_publishing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let turn_snapshot = changed_workspace(temp.path()).await;
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let (dispatch_tx, mut dispatch_rx) = mpsc::unbounded_channel();
+        let spawner = ReviewSpawner::stub(move |job, _events, _cancel, outcomes| {
+            dispatch_tx
+                .send((job, outcomes))
+                .expect("record review job");
+        });
+        let (checkpoint, checkpoint_requests) = ReviewCheckpointClient::channel();
+        let mut config = fanout_config(command_tx, spawner);
+        config.review_root = temp.path().to_path_buf();
+        config.review_checkpoints = checkpoint_requests;
+        let running = spawn(runtime_rx, config);
+        running
+            .handle
+            .begin_turn(
+                1,
+                "implement and publish the fix".to_string(),
+                Vec::new(),
+                turn_snapshot,
+            )
+            .await;
+
+        checkpoint
+            .request()
+            .await
+            .expect("first checkpoint dispatch");
+        let (first_job, first_outcomes) = dispatch_rx.recv().await.expect("first review job");
+        runtime_tx.send(completion()).expect("original completion");
+        first_outcomes
+            .send(ReviewOutcome {
+                epoch: first_job.epoch,
+                verdict: ReviewVerdict::Findings {
+                    synthesis: "[P1] tracked.txt:1 -- invalid behavior".to_string(),
+                    evidence: ReviewPassEvidence::default(),
+                },
+            })
+            .expect("findings verdict");
+        let prompt = next_prompt(&mut command_rx).await;
+        assert!(
+            prompt.contains("call request_discrete_review again"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("do not commit, push"));
+        assert!(prompt.contains("[P1] tracked.txt:1"));
+
+        std::fs::write(temp.path().join("tracked.txt"), "corrected change\n")
+            .expect("correct finding");
+        let second = checkpoint
+            .request()
+            .await
+            .expect("corrected checkpoint dispatch");
+        let (second_job, _second_outcomes) = dispatch_rx.recv().await.expect("second review job");
+        assert_eq!(
+            second_job.snapshot.unwrap().target_tree(),
+            second.target_tree
+        );
+        assert_ne!(first_job.workflow_id, second_job.workflow_id);
+
+        drop(runtime_tx);
+        running.task.await.expect("orchestrator task");
     }
 
     #[tokio::test]
@@ -5043,6 +5608,7 @@ mod tests {
                 max_correction_rounds: Some(1),
                 primary_model: None,
                 review_root: PathBuf::from("."),
+                review_checkpoints: unused_review_checkpoints(),
                 review_fanout: ReviewFanout::unavailable("review disabled in test"),
             },
         );
@@ -5105,6 +5671,7 @@ mod tests {
             max_correction_rounds: Some(1),
             primary_model: None,
             review_root: PathBuf::from("."),
+            review_checkpoints: unused_review_checkpoints(),
             review_fanout: ReviewFanout::unavailable("review disabled in test"),
         }
     }

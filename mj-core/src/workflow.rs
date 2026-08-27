@@ -39,6 +39,15 @@ impl WorkflowId {
         }
     }
 
+    /// A primary-requested checkpoint may run more than once in one turn as
+    /// findings are corrected, so every attempt needs its own terminal state.
+    pub const fn checkpoint_review(turn_id: u64, attempt: u32) -> Self {
+        Self {
+            turn_id,
+            operation: 3 + attempt,
+        }
+    }
+
     pub const fn delegation(turn_id: u64) -> Self {
         Self {
             turn_id,

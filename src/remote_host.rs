@@ -562,6 +562,7 @@ fn start_server_agent_session(
     // Shared with the review fan-out so lane ids never collide with pool ids.
     let subagent_ids = subagent::SubagentIdAllocator::default();
     let active_implementation_workers = subagent::ActiveSubagentWorkers::default();
+    let (review_checkpoint, review_checkpoints) = subagent::ReviewCheckpointClient::channel();
     let (subagent_reports, subagent_report_rx) = subagent::SubagentReportBus::channel();
     // Shared with the orchestrator so every wake can ask the still-running
     // subagents for progress.
@@ -582,6 +583,7 @@ fn start_server_agent_session(
         handoff_counter: subagent_handoffs.clone(),
         id_allocator: subagent_ids.clone(),
         active_workers: active_implementation_workers.clone(),
+        review_checkpoint,
         reports: subagent_reports.clone(),
         runs: subagent_runs.clone(),
     };
@@ -659,6 +661,7 @@ fn start_server_agent_session(
                 .as_ref()
                 .map(|resolved| resolved.primary.model.model.clone()),
             review_root: provenance_cwd.clone(),
+            review_checkpoints,
             review_fanout: match (
                 review_workers,
                 roster

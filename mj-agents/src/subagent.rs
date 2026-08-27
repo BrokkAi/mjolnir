@@ -104,6 +104,8 @@ Several subagents run concurrently and every one of them has full write access t
 
 A report is the subagent's own account of its work; its claims, including any test results it states, are claims and not verified facts. Spot-check only what gates your next decision when a report arrives; run full verification exactly once, at the end of the turn, when you validate the whole workspace before finishing. Fix what you find yourself, or launch a follow-up. One counter-indication: work that is a single deep continuous thread through one large context — rather than partitionable pieces — is usually faster and better done yourself than fragmented across subagents.
 
+When automatic discrete review is enabled and this task changes code, call request_discrete_review immediately after implementation and local validation are complete, before any commit, push, pull request, merge, tag, publication, or release action. The call starts the configured review asynchronously and returns after dispatch, not after the verdict. While it runs, you may do read-only work, but do not change the workspace or perform any commit, push, pull-request, merge, tag, publication, or release action. If there is no useful read-only work, end your turn; the verdict will be injected when ready. A clean checkpoint authorizes those actions only while the reviewed code remains unchanged. If findings arrive, verify and fix every material issue, validate the result, and call request_discrete_review again before publishing anything. A failed or incomplete review is not a clean review and must block publication.
+
 resume continues a finished subagent's retained session with a new prompt, preserving its context; use it for targeted follow-up on work that subagent already did. subagent_cancel stops a running subagent or releases a finished one and returns its full report either way; use it to abandon or conclude work, not to collect results. It never reverts edits.
 
 Subagents use the model and ACP routing configured by Mjolnir.
@@ -163,6 +165,7 @@ pub struct Config {
     pub role_config: Option<acp::RuntimeRoleConfig>,
     pub subagent_handoff_counter: Option<Arc<AtomicUsize>>,
     pub active_implementation_workers: ActiveSubagentWorkers,
+    pub review_checkpoint: Option<ReviewCheckpointClient>,
     pub max_parallel: usize,
     pub snapshot_exclusions: Vec<PathBuf>,
     /// Id source installed on the controller when the MCP server starts, so
@@ -345,6 +348,7 @@ impl Config {
             }),
             subagent_handoff_counter: None,
             active_implementation_workers: ActiveSubagentWorkers::default(),
+            review_checkpoint: None,
             max_parallel: DEFAULT_MAX_PARALLEL,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
@@ -382,6 +386,11 @@ impl Config {
 
     pub fn with_active_implementation_workers(mut self, workers: ActiveSubagentWorkers) -> Self {
         self.active_implementation_workers = workers;
+        self
+    }
+
+    pub fn with_review_checkpoint(mut self, checkpoint: ReviewCheckpointClient) -> Self {
+        self.review_checkpoint = Some(checkpoint);
         self
     }
 
@@ -572,8 +581,8 @@ struct SessionSpec {
 use futures::future::BoxFuture;
 
 pub use mj_core::orchestrator::{
-    ActiveSubagentWorkers, SubagentProgressSource, SubagentReport, SubagentReportBus,
-    format_report_block, format_report_elapsed, format_report_injection,
+    ActiveSubagentWorkers, ReviewCheckpointClient, SubagentProgressSource, SubagentReport,
+    SubagentReportBus, format_report_block, format_report_elapsed, format_report_injection,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,6 +683,10 @@ pub struct SubagentCancelArgs {
     /// Subagent id returned by create_subagent.
     pub subagent_id: u64,
 }
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestDiscreteReviewArgs {}
 
 #[derive(Clone)]
 struct McpHandler {
@@ -790,6 +803,34 @@ impl McpHandler {
             &spec.agent,
             &spec.model,
         ))
+    }
+
+    #[tool(
+        name = "request_discrete_review",
+        description = "START THE CONFIGURED DISCRETE REVIEW NOW. Call this immediately after code changes and local validation are complete, before any commit, push, pull request, merge, tag, publication, or release action. It captures the current uncommitted changes as an immutable Git snapshot, starts Mjolnir's configured review asynchronously, and RETURNS IMMEDIATELY after dispatch; the verdict is injected into the primary session later. While review runs, do only read-only work or end your turn. Do not mutate or publish until a complete clean verdict arrives. A clean verdict remains valid only while the reviewed code is unchanged; after material fixes or any later code change, validate and call this tool again. Takes no arguments."
+    )]
+    async fn request_discrete_review(
+        &self,
+        Parameters(_args): Parameters<RequestDiscreteReviewArgs>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let Some(checkpoint) = self.config().and_then(|config| config.review_checkpoint) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "the configured discrete-review checkpoint is unavailable for this session",
+            )]));
+        };
+        match checkpoint.request().await {
+            Ok(started) => {
+                let mut result = CallToolResult::success(vec![Content::text(
+                    "discrete review started in the background. This call carries no verdict. Do only read-only work or end your turn until the result is injected; do not commit, push, open or merge a pull request, tag, publish, or release.",
+                )]);
+                result.structured_content = Some(serde_json::json!({
+                    "status": "started",
+                    "targetTree": started.target_tree,
+                }));
+                Ok(result)
+            }
+            Err(error) => Ok(CallToolResult::error(vec![Content::text(error)])),
+        }
     }
 
     async fn resume_subagent(
@@ -3841,6 +3882,7 @@ mod tests {
             }),
             subagent_handoff_counter: None,
             active_implementation_workers: ActiveSubagentWorkers::default(),
+            review_checkpoint: None,
             max_parallel: 2,
             snapshot_exclusions: Vec::new(),
             id_allocator: SubagentIdAllocator::default(),
@@ -4200,12 +4242,17 @@ mod tests {
                 .is_err()
         );
         assert!(serde_json::from_str::<SubagentCancelArgs>("{}").is_err());
+
+        serde_json::from_str::<RequestDiscreteReviewArgs>("{}")
+            .expect("the review checkpoint takes an empty object");
+        assert!(serde_json::from_str::<RequestDiscreteReviewArgs>(r#"{"extra":true}"#).is_err());
     }
 
     #[test]
-    fn only_the_two_subagent_tools_are_registered() {
+    fn only_the_three_primary_mcp_tools_are_registered() {
         let router = McpHandler::tool_router();
         assert!(router.get("create_subagent").is_some());
+        assert!(router.get("request_discrete_review").is_some());
         assert!(router.get("subagent_cancel").is_some());
         assert!(router.get("code_agent").is_none());
         assert!(router.get("explore_agent").is_none());
@@ -4229,6 +4276,53 @@ mod tests {
         assert!(description.contains("RETURNS IMMEDIATELY"));
         assert!(description.contains("configured subagent model"));
         assert!(!description.contains("Available agents and models:"));
+
+        let checkpoint = tools
+            .iter()
+            .find(|tool| tool.name == "request_discrete_review")
+            .expect("request_discrete_review is advertised");
+        let description = checkpoint.description.as_deref().expect("description");
+        assert!(description.contains("RETURNS IMMEDIATELY"));
+        assert!(description.contains("before any commit"));
+        assert!(instructions.contains("call request_discrete_review immediately"));
+        assert!(instructions.contains("A failed or incomplete review is not a clean review"));
+    }
+
+    #[tokio::test]
+    async fn discrete_review_tool_returns_after_orchestrator_dispatch() {
+        let (checkpoint, mut requests) = ReviewCheckpointClient::channel();
+        let mut config = test_config().with_review_checkpoint(checkpoint);
+        config.is_enabled = true;
+        let handler = McpHandler::new(
+            config,
+            test_context(),
+            mpsc::unbounded_channel().0,
+            Controller::default(),
+        );
+        let responder = tokio::spawn(async move {
+            requests
+                .recv()
+                .await
+                .expect("checkpoint request")
+                .respond(Ok(mj_core::orchestrator::ReviewCheckpointStarted {
+                    target_tree: "reviewed-tree".to_string(),
+                }));
+        });
+
+        let result = handler
+            .request_discrete_review(Parameters(RequestDiscreteReviewArgs::default()))
+            .await
+            .expect("tool call");
+        responder.await.expect("checkpoint responder");
+
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({
+                "status": "started",
+                "targetTree": "reviewed-tree",
+            }))
+        );
     }
 
     #[tokio::test]
