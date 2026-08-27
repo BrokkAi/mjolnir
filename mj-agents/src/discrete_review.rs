@@ -254,8 +254,6 @@ pub const QUICK_LANE: ReviewLane = ReviewLane {
     ],
 };
 
-const QUICK_REVIEW_STARTED_NOTICE: &str = "Quick review started. One general reviewer inspects the completed turn; anything it reports is validated against source before it can require a correction.";
-
 /// Everything the fan-out needs that does not change between turns. Built
 /// once where the roster is resolved and shared by every dispatch.
 pub struct FanoutConfig {
@@ -2708,14 +2706,9 @@ fn emit_internal(
 }
 
 fn emit_quick_review_started(events: &UnboundedSender<UiEvent>, reviewer_id: u64) {
-    emit_internal(
-        events,
-        "primary",
-        "review validator",
-        InternalMessageKind::ReviewProgress,
-        QUICK_REVIEW_STARTED_NOTICE,
-        Some(reviewer_id),
-    );
+    let _ = events.send(UiEvent::InternalMessage(
+        InternalMessage::quick_review_started(reviewer_id),
+    ));
 }
 
 /// Classify the supervisor's reply. Some models explain their clean verdict
@@ -4878,7 +4871,7 @@ mod tests {
                 text,
                 owner_subagent_id: Some(7),
                 ..
-            })) if text == QUICK_REVIEW_STARTED_NOTICE
+            })) if text == mj_core::event::QUICK_REVIEW_STARTED_NOTICE
         ));
         assert!(received.try_recv().is_err());
     }

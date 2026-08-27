@@ -14895,8 +14895,6 @@ for (const [field, seat] of [
             WorkflowPhase, WorkflowStage, WorkflowTransition,
         };
 
-        const NOTICE: &str = "Quick review started. One general reviewer inspects the completed turn; anything it reports is validated against source before it can require a correction.";
-
         let mut state = started_session_tracker();
         let workflow_id = WorkflowId::review(4);
         state.observe_event(&UiEvent::Workflow(WorkflowEvent::new(
@@ -14915,20 +14913,16 @@ for (const [field, seat] of [
                 },
             },
         )));
-        state.observe_event(&UiEvent::InternalMessage(mj_core::event::InternalMessage {
-            source: "primary".to_string(),
-            target: "review validator".to_string(),
-            kind: mj_core::event::InternalMessageKind::ReviewProgress,
-            text: NOTICE.to_string(),
-            owner_subagent_id: Some(7),
-        }));
+        state.observe_event(&UiEvent::InternalMessage(
+            mj_core::event::InternalMessage::quick_review_started(7),
+        ));
         state.observe_event(&started_subagent(7, "review · general", "review · general"));
 
         let snapshot = state.snapshot().expect("snapshot");
         assert_eq!(
             transcript_texts(&snapshot)
                 .iter()
-                .filter(|text| **text == NOTICE)
+                .filter(|text| **text == mj_core::event::QUICK_REVIEW_STARTED_NOTICE)
                 .count(),
             1
         );

@@ -4709,10 +4709,8 @@ impl AppState {
             }
             UiEvent::InternalMessage(message) => {
                 let now = Instant::now();
-                let primary_review_notice = (message.owner_subagent_id.is_some()
-                    && message.kind == crate::event::InternalMessageKind::ReviewProgress
-                    && message.source == "primary"
-                    && message.target == "review validator")
+                let primary_review_notice = message
+                    .is_quick_review_started()
                     .then(|| message.text.clone());
                 // An internal message starts a fresh orchestrator-initiated
                 // exchange. The previous turn's completion may have been
@@ -8394,7 +8392,6 @@ mod tests {
             WorkflowPhase, WorkflowStage, WorkflowTransition,
         };
 
-        const NOTICE: &str = "Quick review started. One general reviewer inspects the completed turn; anything it reports is validated against source before it can require a correction.";
         const BRIEF: &str = "You are the sole reviewer for one completed user turn, in a fresh read-only session: `general` (General). A validator reads your findings afterwards and verifies each against source; findings you cannot support are dropped there.";
 
         let mut state = AppState::new();
@@ -8415,13 +8412,9 @@ mod tests {
                 },
             },
         )));
-        state.apply_event(UiEvent::InternalMessage(InternalMessage {
-            source: "primary".to_string(),
-            target: "review validator".to_string(),
-            kind: crate::event::InternalMessageKind::ReviewProgress,
-            text: NOTICE.to_string(),
-            owner_subagent_id: Some(7),
-        }));
+        state.apply_event(UiEvent::InternalMessage(
+            InternalMessage::quick_review_started(7),
+        ));
         state.apply_event(UiEvent::InternalMessage(InternalMessage {
             source: "primary".to_string(),
             target: "reviewer general".to_string(),
@@ -8435,7 +8428,7 @@ mod tests {
             state
                 .transcript
                 .iter()
-                .any(|entry| matches!(entry, Entry::System(text) if text == NOTICE))
+                .any(|entry| matches!(entry, Entry::System(text) if text == crate::event::QUICK_REVIEW_STARTED_NOTICE))
         );
         assert!(!state.transcript.iter().any(|entry| matches!(
             entry,

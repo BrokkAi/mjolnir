@@ -92,6 +92,30 @@ pub struct InternalMessage {
     pub owner_subagent_id: Option<u64>,
 }
 
+const QUICK_REVIEW_NOTICE_SOURCE: &str = "primary";
+const QUICK_REVIEW_NOTICE_TARGET: &str = "review validator";
+pub const QUICK_REVIEW_STARTED_NOTICE: &str = "Quick review started. One general reviewer inspects the completed turn; anything it reports is validated against source before it can require a correction.";
+
+impl InternalMessage {
+    pub fn quick_review_started(reviewer_id: u64) -> Self {
+        Self {
+            source: QUICK_REVIEW_NOTICE_SOURCE.to_string(),
+            target: QUICK_REVIEW_NOTICE_TARGET.to_string(),
+            kind: InternalMessageKind::ReviewProgress,
+            text: QUICK_REVIEW_STARTED_NOTICE.to_string(),
+            owner_subagent_id: Some(reviewer_id),
+        }
+    }
+
+    pub fn is_quick_review_started(&self) -> bool {
+        self.source == QUICK_REVIEW_NOTICE_SOURCE
+            && self.target == QUICK_REVIEW_NOTICE_TARGET
+            && self.kind == InternalMessageKind::ReviewProgress
+            && self.text == QUICK_REVIEW_STARTED_NOTICE
+            && self.owner_subagent_id.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InternalMessageKind {
     Delegation,
@@ -546,6 +570,15 @@ mod tests {
     #[test]
     fn manual_compact_trigger_has_a_stable_label() {
         assert_eq!(CompactTrigger::Manual.label(), "manual");
+    }
+
+    #[test]
+    fn quick_review_start_message_owns_its_shared_recognition_contract() {
+        let message = InternalMessage::quick_review_started(7);
+
+        assert!(message.is_quick_review_started());
+        assert_eq!(message.text, QUICK_REVIEW_STARTED_NOTICE);
+        assert_eq!(message.owner_subagent_id, Some(7));
     }
 
     #[test]
