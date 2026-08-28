@@ -118,6 +118,7 @@ jobs:
     # dependency on the terminal frontend. `cargo tree` resolves without
     # building, so this holds on any runner.
     - name: Verify the desktop shell does not depend on the TUI
+      shell: bash
       run: |
         if cargo tree -p brokk-mj-app --edges normal | grep -q brokk-mj-tui; then
           echo "brokk-mj-app must not depend on brokk-mj-tui" >&2
@@ -140,6 +141,7 @@ jobs:
     # platform webview, or it cannot start on a headless machine.
     - name: Verify mj does not link the webview
       if: runner.os == 'Linux'
+      shell: bash
       run: |
         if readelf -d target/release/mj | grep -Ei 'webkit|javascriptcore'; then
           echo "mj links the webview; headless installs will fail to start" >&2

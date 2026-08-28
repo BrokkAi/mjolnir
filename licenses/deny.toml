@@ -42,6 +42,7 @@ exceptions = [
     { crate = "brokk-mj-agents", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-anvil", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-desktop", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-app", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-remote", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-tui", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-voice-worker", allow = ["GPL-3.0-only"] },

@@ -41,10 +41,6 @@
       "minimum": 59.5,
       "reason": "Remaining branches depend on live provider-specific quota responses."
     },
-    "src/remote_host.rs": {
-      "minimum": 0.0,
-      "reason": "This host adapter launches real ACP, subagent, review, side-session, and worktree runtimes; its behavior is covered through remote API tests while a hermetic multi-runtime harness remains future work."
-    },
     "src/remote.rs": {
       "minimum": 0.0,
       "reason": "The root remote adapter delegates to the extracted remote crate and is exercised through server integration tests."
@@ -64,6 +60,14 @@
     "src/worktree.rs": {
       "minimum": 0.0,
       "reason": "The root worktree adapter delegates to extracted workflow code and its behavior is covered by repository integration tests."
+    },
+    "mj-remote/src/remote_host.rs": {
+      "minimum": 32.0,
+      "reason": "This host adapter launches real ACP, subagent, review, side-session, and worktree runtimes; its behavior is covered through remote API tests in the crate that now owns it while a hermetic multi-runtime harness remains future work."
+    },
+    "mj-agents/src/live.rs": {
+      "minimum": 58.0,
+      "reason": "Live subagent wiring extracted from the CLI entry point: the remaining branches build isolated Codex homes and subagent services that need live ACP adapters."
     }
   }
 }
