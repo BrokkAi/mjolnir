@@ -4326,9 +4326,18 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     let _keep_awake = mj_core::keep_awake::KeepAwake::hold(cfg.keep_awake);
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
-    let tailscale_tls = should_detect_tailscale(tailscale_detect, requested_hostname.as_deref())
-        .then(|| detect_tailscale_tls(&remote_control_dir()))
-        .flatten();
+    // `Err` here means tailscale is present but its certificate could not be
+    // minted. The server still starts on loopback, so hold the reason and
+    // report it below rather than aborting a startup that can still serve
+    // local clients.
+    let (tailscale_tls, tailscale_error) =
+        match should_detect_tailscale(tailscale_detect, requested_hostname.as_deref())
+            .then(|| detect_tailscale_tls(&remote_control_dir()))
+            .transpose()
+        {
+            Ok(tls) => (tls.flatten(), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
     let listen = match &tailscale_tls {
         Some(ts) => tailscale_listen_config(&ts.tailscale.cert_domain, port),
         None => server_listen_config(requested_hostname.as_deref(), port)?,
@@ -4430,13 +4439,13 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
             "tls: detected tailscale; serving a trusted certificate for {} (auto-renews daily)",
             ts.tailscale.cert_domain
         );
+    } else if let Some(error) = &tailscale_error {
+        println!("tls: falling back to localhost, {error}");
     }
     if should_render_login_qr(&listen.viewer_host) {
         println!("{}", crate::render_qr(&viewer_url)?);
     } else {
-        println!(
-            "QR code hidden because localhost is only reachable from this machine; connect this machine to a tailnet or pass --hostname for a device-login QR."
-        );
+        println!("{}", qr_hidden_message(tailscale_error.is_some()));
     }
     println!("viewer code: {viewer_code}");
     if logout_all {
@@ -4840,6 +4849,18 @@ struct TailscaleTls {
     key_path: PathBuf,
 }
 
+/// Why the login QR is missing. Telling someone whose machine is already on a
+/// tailnet to "connect this machine to a tailnet" sends them to re-check
+/// something that is working; when the certificate is what failed, point at
+/// the error just printed instead.
+fn qr_hidden_message(tailscale_failed: bool) -> &'static str {
+    if tailscale_failed {
+        "QR code hidden because the server fell back to localhost; resolve the tailscale error above, or pass --hostname for a device-login QR."
+    } else {
+        "QR code hidden because localhost is only reachable from this machine; connect this machine to a tailnet or pass --hostname for a device-login QR."
+    }
+}
+
 /// Whether to probe this machine for a tailscale node. An explicit
 /// `--hostname` names the host the login QR must point at, so detection stays
 /// out of its way; `--no-tailscale-detect` turns detection off outright.
@@ -4848,18 +4869,36 @@ fn should_detect_tailscale(detect: bool, requested_hostname: Option<&str>) -> bo
 }
 
 /// Serve this machine's tailscale certificate when it has a usable tailnet
-/// node. Anything short of that — no tailscale, daemon down, HTTPS
-/// Certificates off, `tailscale cert` failing — falls back to the loopback
-/// default instead of failing the server start.
-fn detect_tailscale_tls(root: &Path) -> Option<TailscaleTls> {
-    match crate::Tailscale::discover().and_then(|tailscale| prepare_tailscale_tls(root, tailscale))
-    {
-        Ok(tls) => Some(tls),
-        Err(error) => {
-            debug!("no tailscale certificate for this server: {error:#}");
-            None
-        }
-    }
+/// node. Neither outcome short of that fails the server start — it falls back
+/// to the loopback default — but they are not equally silent.
+///
+/// `Ok(None)` is reserved for the single unremarkable case: this machine has
+/// no tailscale CLI, so there was never a tailnet to serve from and the
+/// fallback needs no explanation.
+///
+/// Every other failure is an `Err` the caller must surface, because each one
+/// means the user has tailscale and it is not doing what they expect: the
+/// daemon is stopped, the node is not logged in, the tailnet has HTTPS
+/// Certificates switched off, or minting the certificate was denied. Each
+/// carries its own remedy, and each otherwise leaves them staring at a hidden
+/// QR code with no reason for it.
+fn detect_tailscale_tls(root: &Path) -> Result<Option<TailscaleTls>> {
+    tailscale_tls_from_discovery(root, crate::Tailscale::discover()?)
+}
+
+/// Split from [`detect_tailscale_tls`] so tests can supply a discovery
+/// outcome directly. Locating the CLI on `PATH` is not the part that needs
+/// covering — deciding which outcomes stay quiet and which must be reported
+/// is, and that decision lives here.
+fn tailscale_tls_from_discovery(
+    root: &Path,
+    discovered: Option<crate::Tailscale>,
+) -> Result<Option<TailscaleTls>> {
+    let Some(tailscale) = discovered else {
+        debug!("no tailscale CLI on this machine; serving on localhost");
+        return Ok(None);
+    };
+    prepare_tailscale_tls(root, tailscale).map(Some)
 }
 
 fn prepare_tailscale_tls(root: &Path, tailscale: crate::Tailscale) -> Result<TailscaleTls> {
@@ -19785,6 +19824,56 @@ for (const [field, seat] of [
     fn an_explicit_hostname_suppresses_detection() {
         assert!(!should_detect_tailscale(true, Some("example.com")));
         assert!(!should_detect_tailscale(false, Some("example.com")));
+    }
+
+    /// The failure this whole path exists for: discovery succeeds, the user is
+    /// told a certificate is coming, and minting then fails. That error has to
+    /// leave `detect_tailscale_tls` — returning `Ok(None)` here would hide the
+    /// reason behind a localhost fallback, which is the bug being fixed.
+    #[cfg(unix)]
+    #[test]
+    fn a_certificate_that_fails_to_mint_reports_why() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("tailscale");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' 'Access denied: cert access denied' >&2\nexit 1\n",
+        )
+        .expect("write fake tailscale");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("make executable");
+
+        let tailscale = crate::Tailscale::for_test(binary, "mybox.tail1234.ts.net");
+        let error =
+            tailscale_tls_from_discovery(&dir.path().join("remote-control"), Some(tailscale))
+                .expect_err("mint failure must surface");
+        let message = format!("{error:#}");
+        assert!(message.contains("--operator=$USER"), "{message}");
+        assert!(message.contains("mybox.tail1234.ts.net"), "{message}");
+    }
+
+    /// The one outcome that stays quiet, asserted against the same function
+    /// so the contrast with the mint failure above is exact.
+    #[test]
+    fn a_machine_with_no_tailscale_cli_falls_back_without_comment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let detected = tailscale_tls_from_discovery(&dir.path().join("remote-control"), None);
+        assert!(matches!(detected, Ok(None)), "{detected:?}");
+    }
+
+    /// Once the user has been told a certificate is coming, a minting failure
+    /// has to reach them — swallowing it leaves a hidden QR with no reason.
+    #[test]
+    fn qr_hidden_message_points_at_the_tailscale_error_when_minting_failed() {
+        assert!(qr_hidden_message(true).contains("tailscale error above"));
+        assert!(!qr_hidden_message(true).contains("connect this machine to a tailnet"));
+    }
+
+    #[test]
+    fn qr_hidden_message_suggests_a_tailnet_when_there_is_no_tailscale() {
+        assert!(qr_hidden_message(false).contains("connect this machine to a tailnet"));
     }
 
     #[test]
