@@ -540,6 +540,7 @@ dependencies = [
  "clap",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
 ]
 
 [[package]]

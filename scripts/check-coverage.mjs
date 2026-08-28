@@ -22,6 +22,7 @@ function projectPath(filename) {
   for (const crate of [
     "mj-agents",
     "mj-anvil",
+    "mj-app",
     "mj-core",
     "mj-remote",
     "mj-tui",
@@ -46,7 +47,7 @@ const moduleLines = new Map(
     .map((file) => [projectPath(file.filename), file.summary?.lines?.percent])
     .filter(
       ([path, percent]) =>
-        /^(src|(?:mj-agents|mj-anvil|mj-core|mj-remote|mj-tui|voice-worker)\/src)\/.*\.rs$/.test(path) &&
+        /^(src|(?:mj-agents|mj-anvil|mj-app|mj-core|mj-remote|mj-tui|voice-worker)\/src)\/.*\.rs$/.test(path) &&
         Number.isFinite(percent),
     ),
 );

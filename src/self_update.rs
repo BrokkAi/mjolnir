@@ -40,7 +40,10 @@ enum InstallMethod {
     Npm,
     Npx,
     Homebrew,
-    Cargo { voice_worker: bool },
+    Cargo {
+        voice_worker: bool,
+        desktop_app: bool,
+    },
     Direct,
 }
 
@@ -66,12 +69,21 @@ impl InstallMethod {
             Self::Npm => Some("npm install -g @brokkai/mjolnir@latest".to_string()),
             Self::Npx => Some("npx -y @brokkai/mjolnir@latest".to_string()),
             Self::Homebrew => Some("brew upgrade mjolnir".to_string()),
-            Self::Cargo { voice_worker: true } => {
-                Some("cargo install --locked brokk-mjolnir brokk-mj-voice-worker".to_string())
-            }
             Self::Cargo {
-                voice_worker: false,
-            } => Some("cargo install --locked brokk-mjolnir".to_string()),
+                voice_worker,
+                desktop_app,
+            } => {
+                // Reinstall every sidecar crate cargo recorded, so `mj app`
+                // and the voice worker stay in lockstep with `mj`.
+                let mut command = String::from("cargo install --locked brokk-mjolnir");
+                if *desktop_app {
+                    command.push_str(" brokk-mj-app");
+                }
+                if *voice_worker {
+                    command.push_str(" brokk-mj-voice-worker");
+                }
+                Some(command)
+            }
             Self::Direct => None,
         }
     }
@@ -746,6 +758,7 @@ fn install_method_from_exe(exe_path: &Path, current_version: &str) -> InstallMet
             None,
             VOICE_WORKER_NAME,
         ),
+        desktop_app: cargo_install_recorded(&install_root, "brokk-mj-app", None, DESKTOP_APP_NAME),
     }
 }
 
@@ -1008,10 +1021,40 @@ mod tests {
             Some("brew upgrade mjolnir")
         );
         assert_eq!(
-            InstallMethod::Cargo { voice_worker: true }
-                .update_command()
-                .as_deref(),
+            InstallMethod::Cargo {
+                voice_worker: true,
+                desktop_app: false
+            }
+            .update_command()
+            .as_deref(),
             Some("cargo install --locked brokk-mjolnir brokk-mj-voice-worker")
+        );
+        assert_eq!(
+            InstallMethod::Cargo {
+                voice_worker: false,
+                desktop_app: true
+            }
+            .update_command()
+            .as_deref(),
+            Some("cargo install --locked brokk-mjolnir brokk-mj-app")
+        );
+        assert_eq!(
+            InstallMethod::Cargo {
+                voice_worker: true,
+                desktop_app: true
+            }
+            .update_command()
+            .as_deref(),
+            Some("cargo install --locked brokk-mjolnir brokk-mj-app brokk-mj-voice-worker")
+        );
+        assert_eq!(
+            InstallMethod::Cargo {
+                voice_worker: false,
+                desktop_app: false
+            }
+            .update_command()
+            .as_deref(),
+            Some("cargo install --locked brokk-mjolnir")
         );
         assert_eq!(InstallMethod::Direct.update_command(), None);
     }
@@ -1094,13 +1137,45 @@ end
             r#"[v1]
 "brokk-mjolnir 1.14.1 (registry+https://github.com/rust-lang/crates.io-index)" = ["mj"]
 "brokk-mj-voice-worker 1.14.1 (registry+https://github.com/rust-lang/crates.io-index)" = ["mj-voice-worker"]
+"brokk-mj-app 1.14.1 (registry+https://github.com/rust-lang/crates.io-index)" = ["mj-app"]
 "#,
         )
         .expect("manifest");
 
         assert_eq!(
             install_method_from_exe(&executable, "1.14.1"),
-            InstallMethod::Cargo { voice_worker: true }
+            InstallMethod::Cargo {
+                voice_worker: true,
+                desktop_app: true
+            }
+        );
+    }
+
+    #[test]
+    fn cargo_sidecars_are_omitted_when_not_recorded() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bin_dir = root.path().join("bin");
+        std::fs::create_dir(&bin_dir).expect("bin dir");
+        let executable = bin_dir.join(if cfg!(windows) {
+            WINDOWS_BIN_NAME
+        } else {
+            BIN_NAME
+        });
+        std::fs::write(&executable, b"mj").expect("executable");
+        std::fs::write(
+            root.path().join(".crates.toml"),
+            r#"[v1]
+"brokk-mjolnir 1.14.1 (registry+https://github.com/rust-lang/crates.io-index)" = ["mj"]
+"#,
+        )
+        .expect("manifest");
+
+        assert_eq!(
+            install_method_from_exe(&executable, "1.14.1"),
+            InstallMethod::Cargo {
+                voice_worker: false,
+                desktop_app: false
+            }
         );
     }
 

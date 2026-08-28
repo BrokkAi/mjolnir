@@ -660,6 +660,7 @@ async fn main() -> Result<()> {
                 &top_level_additional_directories,
                 &snapshot_exclusions,
                 fs_max_text_bytes,
+                debug_file.as_deref(),
             ),
             // Dispatched before the termination coordinator installs; kept
             // here only for match exhaustiveness.
@@ -1028,6 +1029,7 @@ fn launch_desktop_app(
     additional_directories: &[PathBuf],
     snapshot_exclusions: &[PathBuf],
     fs_max_text_bytes: u64,
+    debug_file: Option<&Path>,
 ) -> Result<()> {
     // Validate before spawning so a bad workspace root fails here, with the
     // same message it produced when the shell ran in-process.
@@ -1047,6 +1049,11 @@ fn launch_desktop_app(
     }
     for exclusion in snapshot_exclusions {
         command.arg("--snapshot-exclusion").arg(exclusion);
+    }
+    // The shell ran in-process before it split out, so `--debug-file` captured
+    // its diagnostics; keep that by handing the same file to the child.
+    if let Some(debug_file) = debug_file {
+        command.arg("--debug-file").arg(debug_file);
     }
 
     let status = command
@@ -4831,6 +4838,7 @@ mod tests {
             &[PathBuf::from("relative")],
             &[],
             acp::DEFAULT_FS_TEXT_BYTES,
+            None,
         )
         .expect_err("relative workspace roots must be rejected");
 

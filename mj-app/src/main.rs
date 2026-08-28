@@ -4,7 +4,9 @@
 //! native WebView. This lives in its own binary so the WebKitGTK/WebView2
 //! dependency never reaches `mj`, which has to start on headless machines.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -38,10 +40,17 @@ struct Cli {
     /// forever.
     #[arg(long, default_value_t = 30)]
     history_days: u32,
+
+    /// Path to a log file. When unset, logging is disabled. `mj app` forwards
+    /// its own `--debug-file` here so desktop-server diagnostics keep reaching
+    /// the file they reached when the shell ran inside `mj`.
+    #[arg(long = "debug-file", visible_alias = "log-file", env = "BROKK_TUI_LOG")]
+    debug_file: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    init_logging(cli.debug_file.as_deref())?;
     let cwd = match cli.cwd {
         Some(path) => path,
         None => std::env::current_dir().context("current dir")?,
@@ -164,6 +173,80 @@ async fn run(
         (Ok(_), Ok(())) => Ok(()),
         (Err(shell_error), _) => Err(shell_error),
         (Ok(_), Err(serve_error)) => Err(serve_error),
+    }
+}
+
+// Mirrors the `mj` binary's initializer: `mj` and this shell may append to the
+// same log file, so each JSON event must land in a single write.
+fn init_logging(path: Option<&Path>) -> Result<()> {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent).with_context(|| format!("create log dir {parent:?}"))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open log {path:?}"))?;
+    let filter =
+        EnvFilter::try_from_env("BROKK_TUI_LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .with_writer(SynchronizedFileWriter::new(file))
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .json()
+        .flatten_event(true)
+        .with_current_span(false)
+        .with_span_list(false)
+        .init();
+    Ok(())
+}
+
+/// `tracing_subscriber` may write a single JSON event in multiple calls, so
+/// locking individual writes would still allow records from concurrent tasks
+/// to interleave.
+#[derive(Clone)]
+struct SynchronizedFileWriter {
+    file: Arc<Mutex<std::fs::File>>,
+}
+
+impl SynchronizedFileWriter {
+    fn new(file: std::fs::File) -> Self {
+        Self {
+            file: Arc::new(Mutex::new(file)),
+        }
+    }
+}
+
+struct LockedFileWriter<'a> {
+    file: MutexGuard<'a, std::fs::File>,
+}
+
+impl Write for LockedFileWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SynchronizedFileWriter {
+    type Writer = LockedFileWriter<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LockedFileWriter {
+            file: self
+                .file
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        }
     }
 }
 
