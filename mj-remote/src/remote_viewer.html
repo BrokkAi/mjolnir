@@ -1378,6 +1378,10 @@
         box-shadow: 0 0 0 1px var(--line-row);
       }
 
+      .session-version {
+        color: var(--dim);
+      }
+
       .session-foot {
         display: flex;
         justify-content: space-between;
@@ -3582,6 +3586,7 @@
             <span class="session-project"></span>
             <span class="session-worktree" hidden></span>
             <span class="session-agent"></span>
+            <span class="session-version" hidden></span>
           </div>
           <div class="session-foot">
             <span class="session-counts"></span>
@@ -5988,6 +5993,15 @@
         return session.name || session.session_id;
       }
 
+      /* The Mjolnir build of the client publishing the session, which is not
+         necessarily this server's: a session started by an older `mj` keeps
+         reporting that build until it is restarted. Clients that predate the
+         field report nothing, so the label stays empty rather than guessing. */
+      function sessionVersionLabel(session) {
+        const version = session?.mjolnir_version;
+        return version ? `mj v${version}` : "";
+      }
+
       function sessionPendingPermissions(session) {
         return session && Array.isArray(session.pending_permissions) ? session.pending_permissions : [];
       }
@@ -6200,6 +6214,7 @@
           project: root.querySelector(".session-project"),
           worktree: root.querySelector(".session-worktree"),
           agent: root.querySelector(".session-agent"),
+          version: root.querySelector(".session-version"),
           counts: root.querySelector(".session-counts"),
           updated: root.querySelector(".session-updated"),
         };
@@ -6214,6 +6229,10 @@
         card.worktree.textContent = session.worktree || "";
         card.worktree.hidden = !session.worktree;
         card.agent.textContent = session.agent || "-";
+        const version = sessionVersionLabel(session);
+        card.version.textContent = version;
+        card.version.hidden = !version;
+        card.version.title = version ? `Running ${version}` : "";
         const queued = archived ? 0 : session.queued_prompt_count ?? 0;
         card.counts.textContent = `${session.total_messages ?? 0} messages${queued ? ` · ${queued} queued` : ""}`;
         // Prefer prompt recency, but fall back to the heartbeat timestamp so
@@ -8206,7 +8225,8 @@
         const archiveMeta = archived
           ? `Archived ${formatRelative(session.last_update || session.start_time) || "session"} · `
           : "";
-        transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
+        const versionMeta = sessionVersionLabel(session);
+        transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"}${versionMeta ? ` · ${versionMeta}` : ""} · ${transcript.length} entries`;
         workingBadgeEl.hidden = archived || !sessionIsWorking(session);
         syncWorkingSpinner();
         syncFeatureTip();

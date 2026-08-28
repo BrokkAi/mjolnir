@@ -61,6 +61,9 @@ use mj_core::event::{
 use mj_core::roster;
 use mj_core::session_state::{StatusKind, status_transcript_text};
 
+/// Build of Mjolnir publishing a session. `mj-remote` inherits the workspace
+/// version, so this is the same string `mj --version` reports.
+const MJOLNIR_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REMOTE_CONTROL_LOCAL_HOST: &str = "127.0.0.1";
 const REMOTE_CONTROL_LOCAL_HOST_V6: &str = "[::1]";
 const REMOTE_CONTROL_PUBLIC_HOST: &str = "0.0.0.0";
@@ -215,6 +218,10 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     pub agent: String,
+    /// Mjolnir build running this session. Clients older than this field omit
+    /// it, so a session shows a version only once its publisher reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mjolnir_version: Option<String>,
     #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
     /// Structured review workflows, including every issue's finding,
@@ -2969,6 +2976,7 @@ impl TrackerState {
             project: self.project.clone(),
             worktree: self.worktree.clone(),
             agent: self.agent.clone(),
+            mjolnir_version: Some(MJOLNIR_VERSION.to_string()),
             transcript: self.published_transcript(),
             review_workflows: self.review_workflows(),
             queued_prompt_count: 0,
@@ -8800,6 +8808,7 @@ fn init_db(db_path: &Path) -> Result<()> {
     ensure_sessions_column(&conn, "workspace_diff_json", "text")?;
     ensure_sessions_column(&conn, "review_workflows_json", "text not null default '[]'")?;
     ensure_sessions_column(&conn, "runtime_activity_json", "text not null default '{}'")?;
+    ensure_sessions_column(&conn, "mjolnir_version", "text")?;
     ensure_table_column(
         &conn,
         "queued_prompts",
@@ -9071,8 +9080,9 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             review_workflows_json,
             runtime_activity_json,
             lease_id,
+            mjolnir_version,
             connected
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 1)
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, 1)
         on conflict(session_id) do update set
             name = excluded.name,
             start_time = sessions.start_time,
@@ -9100,6 +9110,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             review_workflows_json = excluded.review_workflows_json,
             runtime_activity_json = excluded.runtime_activity_json,
             lease_id = excluded.lease_id,
+            mjolnir_version = excluded.mjolnir_version,
             connected = 1
         where excluded.last_update >= sessions.last_update
             and (
@@ -9136,6 +9147,7 @@ fn upsert_session_record_in(conn: &Connection, session: &SessionRecord) -> Resul
             review_workflows_json,
             runtime_activity_json,
             session.lease_id,
+            session.mjolnir_version,
         ],
     )
     .context("upsert remote-control session")?;
@@ -9374,7 +9386,8 @@ const SESSION_RECORD_SELECT: &str = "select
     status_json,
     workspace_diff_json,
     review_workflows_json,
-    runtime_activity_json
+    runtime_activity_json,
+    mjolnir_version
 from sessions";
 
 fn load_session_records(db_path: &Path) -> Result<Vec<SessionRecord>> {
@@ -9528,7 +9541,8 @@ fn load_connected_session_records(db_path: &Path, cutoff: &str) -> Result<Vec<Se
                 status_json,
                 workspace_diff_json,
                 review_workflows_json,
-                runtime_activity_json
+                runtime_activity_json,
+                mjolnir_version
             from sessions
             where connected = 1 and last_update >= ?1
             order by session_id asc",
@@ -9584,6 +9598,7 @@ fn session_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionR
         project: row.get(6)?,
         worktree: row.get::<_, Option<String>>(16)?,
         agent: row.get(7)?,
+        mjolnir_version: row.get::<_, Option<String>>(22)?,
         transcript,
         review_workflows,
         queued_prompt_count: u64::try_from(queued_prompt_count).unwrap_or(0),
@@ -12545,6 +12560,36 @@ mod tests {
         let viewer = include_str!("remote_viewer.html");
 
         assert!(viewer.contains("No live sessions. Use New to start one."));
+    }
+
+    #[test]
+    fn embedded_viewer_shows_each_session_its_publishing_mjolnir_build() {
+        let viewer = include_str!("remote_viewer.html");
+        // Pin both ends of every binding the version chip depends on, so
+        // renaming one side without the other fails here rather than
+        // silently rendering a blank chip.
+        assert!(viewer.contains("class=\"session-version\""));
+        assert!(viewer.contains("version: root.querySelector(\".session-version\"),"));
+        assert!(viewer.contains("function sessionVersionLabel(session)"));
+        assert!(viewer.contains("`mj v${version}`"));
+        assert!(viewer.contains("card.version.textContent = version;"));
+        assert!(viewer.contains("card.version.hidden = !version;"));
+        assert!(viewer.contains("const versionMeta = sessionVersionLabel(session);"));
+    }
+
+    /// The viewer reads the published field by name, so a rename on either
+    /// side would blank the chip without any type error to catch it.
+    #[test]
+    fn published_session_json_carries_the_version_field_the_viewer_reads() {
+        let session = SessionRecord {
+            mjolnir_version: Some("9.9.9".to_string()),
+            ..session_named("sess-1", "2026-06-10T10:00:00Z")
+        };
+        let json = serde_json::to_value(&session).expect("serialize");
+        assert_eq!(json["mjolnir_version"], serde_json::json!("9.9.9"));
+
+        let viewer = include_str!("remote_viewer.html");
+        assert!(viewer.contains("session?.mjolnir_version"));
     }
 
     #[test]
@@ -15675,6 +15720,7 @@ for (const [field, seat] of [
             project: "mjolnir".to_string(),
             worktree: Some("bold-fox".to_string()),
             agent: "opencode".to_string(),
+            mjolnir_version: Some("9.9.9".to_string()),
             transcript: vec![
                 TranscriptEntry {
                     kind: "user".to_string(),
@@ -15846,6 +15892,48 @@ for (const [field, seat] of [
         assert_eq!(sessions[0].worktree.as_deref(), Some("bold-fox"));
         assert_eq!(sessions[0].subagents, session.subagents);
         assert_eq!(sessions[0].status, session.status);
+        assert_eq!(sessions[0].mjolnir_version.as_deref(), Some("9.9.9"));
+    }
+
+    /// A database written before sessions carried a build reports no version
+    /// rather than failing to load, and adopts one on the next snapshot.
+    #[test]
+    fn sqlite_adds_the_version_column_to_an_existing_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        init_db(&db_path).expect("init");
+        open_db(&db_path)
+            .expect("open")
+            .execute_batch("alter table sessions drop column mjolnir_version")
+            .expect("drop version column");
+        let session = session_named("sess-1", "2026-06-10T10:00:00Z");
+        upsert_session_record(&db_path, &session).expect("insert without version");
+        assert_eq!(
+            load_session_record(&db_path, "sess-1")
+                .expect("load")
+                .expect("session")
+                .mjolnir_version,
+            None
+        );
+
+        upsert_session_record(
+            &db_path,
+            &SessionRecord {
+                last_update: "2026-06-10T10:00:10Z".to_string(),
+                mjolnir_version: Some("9.9.9".to_string()),
+                ..session
+            },
+        )
+        .expect("insert with version");
+
+        assert_eq!(
+            load_session_record(&db_path, "sess-1")
+                .expect("load")
+                .expect("session")
+                .mjolnir_version
+                .as_deref(),
+            Some("9.9.9")
+        );
     }
 
     #[test]
@@ -15862,6 +15950,23 @@ for (const [field, seat] of [
         let record: SessionRecord = serde_json::from_str(json).expect("deserialize");
         assert_eq!(record.worktree, None);
         assert!(!record.steering_supported);
+        assert_eq!(record.mjolnir_version, None);
+    }
+
+    #[test]
+    fn published_snapshots_report_the_running_mjolnir_build() {
+        let mut state = TrackerState::new("proj".to_string(), "agent".to_string());
+        state.observe_event(&UiEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            resumed: false,
+        });
+
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.mjolnir_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "each session must report the build that publishes it"
+        );
     }
 
     fn init_committed_git_repo(path: &Path) {
@@ -16331,6 +16436,7 @@ for (const [field, seat] of [
             project: "mjolnir".to_string(),
             worktree: None,
             agent: "agent".to_string(),
+            mjolnir_version: None,
             transcript: Vec::new(),
             review_workflows: Vec::new(),
             queued_prompt_count: 0,
@@ -17451,6 +17557,7 @@ for (const [field, seat] of [
             project: "proj".to_string(),
             worktree: None,
             agent: "agent".to_string(),
+            mjolnir_version: None,
             transcript: Vec::new(),
             review_workflows: Vec::new(),
             queued_prompt_count: 0,
@@ -18652,6 +18759,7 @@ for (const [field, seat] of [
             project: "mjolnir".to_string(),
             worktree: None,
             agent: "opencode".to_string(),
+            mjolnir_version: None,
             transcript: Vec::new(),
             review_workflows: Vec::new(),
             queued_prompt_count: 0,
@@ -20165,6 +20273,7 @@ for (const [field, seat] of [
             project: "proj".to_string(),
             worktree: None,
             agent: "agent".to_string(),
+            mjolnir_version: None,
             transcript: Vec::new(),
             review_workflows: Vec::new(),
             queued_prompt_count: 0,
