@@ -14,9 +14,9 @@ using a private repository.
 
 | Method | Platforms | Installs |
 | --- | --- | --- |
-| npm / npx | macOS universal; Linux x86-64 or ARM64 glibc with WebKitGTK 4.1; Windows x86-64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker`; no first-run Mjolnir download |
+| npm / npx | macOS universal; Linux x86-64 or ARM64 glibc; Windows x86-64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker` and `mj-app`; no first-run Mjolnir download |
 | Homebrew | macOS on Apple Silicon or Intel; Linux on x86-64 or ARM64 glibc | `mj` on `PATH`, with `mj-voice-worker` in the formula's `libexec` |
-| Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker` |
+| Release installer | macOS/Linux on x86-64 or ARM64; Android ARM64 | `mj` and, on desktop, `mj-voice-worker` and `mj-app` |
 | crates.io | Platforms supported by the Rust crates | `mj` and whichever crates you name |
 | Release archive | Linux, macOS, Windows, Android release targets | The binaries and legal files packaged for that target |
 | Build from source | Rust-supported development hosts | The workspace members you build |
@@ -155,8 +155,15 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-The default desktop build includes the native WebView shell. On macOS, install
-Apple's Command Line Tools. The shell uses the WebKit
+That build needs no desktop or audio system libraries, and produces `mj` alone.
+The native WebView shell that `mj app` launches is a separate binary, excluded
+from the default workspace members, so build it explicitly:
+
+```bash
+cargo build --release -p brokk-mj-app
+```
+
+On macOS, install Apple's Command Line Tools first. The shell uses the WebKit
 framework included in the macOS SDK:
 
 ```bash
@@ -175,11 +182,13 @@ sudo dnf install webkit2gtk4.1-devel
 ```
 
 Fedora's `webkit2gtk4.1-devel` package provides the GTK 3 and libsoup 3 API
-expected by Wry; `webkitgtk6.0-devel` is the incompatible GTK 4 API. Build the
-feature with:
+expected by Wry; `webkitgtk6.0-devel` is the incompatible GTK 4 API.
+
+Put the shell beside `mj` so `mj app` finds it:
 
 ```bash
-cargo build --release
+cargo build --release -p brokk-mj-app
+# target/release/mj-app now sits next to target/release/mj
 ```
 
 On Linux, the desktop shell needs WebKitGTK and the voice worker needs ALSA

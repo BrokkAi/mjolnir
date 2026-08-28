@@ -431,12 +431,31 @@ find_extracted_binary() {
   printf '%s\n' "$found"
 }
 
+# Sidecars are optional: an archive that predates one (or omits it for a
+# platform) must still install `mj` cleanly rather than abort.
+install_companions() {
+  local extract_dir="$1"
+  local names="$2"
+  local name
+  local src
+
+  for name in $names; do
+    src="$(find "$extract_dir" -type f -name "$name" -print -quit)"
+    if [[ -z "$src" ]]; then
+      log "archive has no ${name}; skipping"
+      continue
+    fi
+    install_binary "$src" "$name"
+  done
+}
+
 install_from_asset() {
   local label="$1"
   local repo="$2"
   local bin_name="$3"
   local version="$4"
-  local companion_name="$5"
+  # Space-separated sidecar binaries packaged beside the main one.
+  local companion_names="$5"
   shift 5
   local release_file="${TMP_DIR}/${repo}-release.json"
   local tag
@@ -458,7 +477,12 @@ install_from_asset() {
 
   # Skip download when the stored archive checksum matches the remote one
   expected="$(fetch_checksum "$release_file" "$asset_name" || true)"
-  if [[ -n "$expected" && -f "$dest" && ( -z "$companion_name" || -f "${INSTALL_DIR}/${companion_name}" ) ]]; then
+  local companions_present=1
+  local companion
+  for companion in $companion_names; do
+    [[ -f "${INSTALL_DIR}/${companion}" ]] || companions_present=0
+  done
+  if [[ -n "$expected" && -f "$dest" && "$companions_present" -eq 1 ]]; then
     local stored_checksum_file
     stored_checksum_file="$(stored_checksum_path "$bin_name")"
     if [[ -f "$stored_checksum_file" ]]; then
@@ -492,10 +516,7 @@ install_from_asset() {
       strip_quarantine "$extract_dir"
       src="$(find_extracted_binary "$extract_dir" "$bin_name")"
       install_binary "$src" "$bin_name"
-      if [[ -n "$companion_name" ]]; then
-        src="$(find_extracted_binary "$extract_dir" "$companion_name")"
-        install_binary "$src" "$companion_name"
-      fi
+      install_companions "$extract_dir" "$companion_names"
       ;;
     *.zip)
       require_command unzip
@@ -504,10 +525,7 @@ install_from_asset() {
       strip_quarantine "$extract_dir"
       src="$(find_extracted_binary "$extract_dir" "$bin_name")"
       install_binary "$src" "$bin_name"
-      if [[ -n "$companion_name" ]]; then
-        src="$(find_extracted_binary "$extract_dir" "$companion_name")"
-        install_binary "$src" "$companion_name"
-      fi
+      install_companions "$extract_dir" "$companion_names"
       ;;
     *)
       install_binary "$asset_file" "$bin_name"
@@ -523,11 +541,13 @@ install_mjolnir() {
   fi
   patterns+=("^brokk-mjolnir-.*-${RUST_TARGET}[.]tar[.]gz$")
 
-  local companion="mj-voice-worker"
+  # `mj` links no desktop or audio libraries; both sidecars do, which is why
+  # they are separate binaries installed beside it.
+  local companions="mj-voice-worker mj-app"
   if [[ "$OS_FAMILY" == "android" ]]; then
-    companion=""
+    companions=""
   fi
-  install_from_asset "mjolnir" "mjolnir" "mj" "${MJOLNIR_VERSION:-}" "$companion" "${patterns[@]}"
+  install_from_asset "mjolnir" "mjolnir" "mj" "${MJOLNIR_VERSION:-}" "$companions" "${patterns[@]}"
 }
 
 main() {

@@ -4749,13 +4749,48 @@ mod tests {
             desktop_app_binary_from(Some(Path::new("/nonexistent/bin/mj")))
                 .expect_err("no sibling shell")
         );
+        // Literal, not `DESKTOP_APP_BIN`: this name is a packaging contract
+        // with the release archives and the npm bundle, so asserting it
+        // against the constant would let a rename pass while making the
+        // shipped binary undiscoverable.
+        let packaged_name = if cfg!(target_os = "windows") {
+            "mj-app.exe"
+        } else {
+            "mj-app"
+        };
+        assert_eq!(DESKTOP_APP_BIN, packaged_name);
         assert!(
-            message.contains(DESKTOP_APP_BIN),
+            message.contains(packaged_name),
             "names the binary: {message}"
         );
         assert!(
             message.contains("libwebkit2gtk-4.1-0"),
             "points Linux users at the runtime package: {message}"
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_shell_resolves_to_the_sibling_beside_mj() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shell = dir.path().join(DESKTOP_APP_BIN);
+        std::fs::write(&shell, b"shell").expect("write shell");
+
+        let resolved = desktop_app_binary_from(Some(&dir.path().join("mj")))
+            .expect("sibling shell beside mj resolves");
+
+        assert_eq!(resolved, shell);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_shell_lookup_ignores_a_directory_named_like_the_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(DESKTOP_APP_BIN)).expect("create decoy directory");
+
+        assert!(
+            desktop_app_binary_from(Some(&dir.path().join("mj"))).is_err(),
+            "a directory must not satisfy the shell lookup"
         );
     }
 

@@ -89,8 +89,21 @@ jobs:
           npm install --prefix npm-smoke --ignore-scripts \
             "npm/dist/brokkai-mjolnir-$version.tgz" \
             "npm/dist/brokkai-mjolnir-linux-x64-gnu-$version.tgz"
-          test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj
-          test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-voice-worker
+          bundle=npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin
+          # Both sidecars must ship: `mj app` and Ctrl-R dictation are broken
+          # without them, and nothing else in this job would notice.
+          for binary in mj mj-voice-worker mj-app; do
+            test -x "$bundle/$binary" || {
+              echo "npm bundle is missing $binary" >&2
+              exit 1
+            }
+          done
+          # The CLI must start with no desktop libraries installed; this runner
+          # has them, so assert the link is absent rather than trusting a run.
+          if readelf -d "$bundle/mj" | grep -Ei 'webkit|javascriptcore'; then
+            echo "published mj links the webview; headless installs will fail" >&2
+            exit 1
+          fi
           npm-smoke/node_modules/.bin/mj --version
 
       - uses: actions/upload-artifact@v7

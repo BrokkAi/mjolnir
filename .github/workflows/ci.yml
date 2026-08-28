@@ -114,6 +114,16 @@ jobs:
     - name: Lint desktop shell binary
       run: cargo clippy -p brokk-mj-app --all-targets -- -D warnings
 
+    # The desktop shell serves the viewer on its own; it must never grow a
+    # dependency on the terminal frontend. `cargo tree` resolves without
+    # building, so this holds on any runner.
+    - name: Verify the desktop shell does not depend on the TUI
+      run: |
+        if cargo tree -p brokk-mj-app --edges normal | grep -q brokk-mj-tui; then
+          echo "brokk-mj-app must not depend on brokk-mj-tui" >&2
+          exit 1
+        fi
+
     - name: Build mjolnir
       run: cargo build --release
 
