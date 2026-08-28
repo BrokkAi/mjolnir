@@ -2034,12 +2034,12 @@ async fn ui_loop(
         }
 
         // A save from this session already reconciled everything it needed to,
-        // so the watcher accepts that write silently. Anything else — a
+        // so the watcher takes that write as read. Anything else — a
         // cancelled menu, a failed save — leaves the watcher untouched, so a
         // save another session made while the menu was open is still adopted on
         // the next tick.
-        if std::mem::take(&mut state.config_written_here) {
-            config_watch.resync();
+        if let Some(written) = state.config_written_here.take() {
+            config_watch.accept_own_write(written);
         }
 
         // A freshly opened `/mjconfig` menu gets the cached version list, or
@@ -6257,9 +6257,10 @@ fn persist_mjconfig_selection(
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
-                // Tell the config watcher this write was ours; the state below
-                // already reflects it.
-                state.config_written_here = true;
+                // Tell the config watcher exactly what this session wrote; the
+                // state below already reflects it. `config` matches the file:
+                // the save merged the session routes it preserved back into it.
+                state.config_written_here = Some(config.clone());
                 adopt_live_config(state, cmd_tx, &config, live_session_updates, review_changed);
                 if auxiliary_agents_update_live {
                     let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
@@ -6428,20 +6429,20 @@ impl ConfigWatch {
         adopted
     }
 
-    /// Accept the file as this session's own work, without adopting it.
+    /// Record the config this session just wrote, so its own save does not come
+    /// back through [`Self::poll`] as if another session had made it. A
+    /// cancelled menu deliberately does not call this, so a save another
+    /// session made while it was open is still picked up.
     ///
-    /// Called after a `/mjconfig` save here: that write already reconciled this
-    /// session and must not come back through [`Self::poll`] as if another
-    /// session had made it. A cancelled menu deliberately does not resync, so a
-    /// save another session made while it was open is still picked up.
-    fn resync(&mut self) {
-        let Some(path) = self.path.as_deref() else {
-            return;
-        };
-        self.stamp = config_file_stamp(path);
-        if let Ok(config) = config::Config::load(path) {
-            self.last_seen = Some(config);
-        }
+    /// The stamp is cleared rather than advanced to whatever the file now
+    /// holds: another session can land a save between this session's write and
+    /// this call, and stamping past it would mark that change seen without ever
+    /// applying it. Clearing costs one extra read on the next poll, which then
+    /// adopts only what differs from what was written here — nothing at all in
+    /// the common case.
+    fn accept_own_write(&mut self, written: config::Config) {
+        self.stamp = None;
+        self.last_seen = Some(written);
     }
 }
 
@@ -21084,6 +21085,13 @@ mod tests {
         state
     }
 
+    /// The handoff the ui loop performs after every iteration.
+    fn take_own_write(state: &mut AppState, watch: &mut ConfigWatch) {
+        if let Some(written) = state.config_written_here.take() {
+            watch.accept_own_write(written);
+        }
+    }
+
     fn save_permission_mode(config: &mut config::Config, path: &Path, mode: &str) {
         config
             .agent
@@ -21174,8 +21182,8 @@ mod tests {
         save_permission_mode(&mut config, &path, "auto");
         state.mjconfig_menu_cancel();
 
-        // Nothing was written here, so the watcher was never resynced.
-        assert!(!state.config_written_here);
+        // Nothing was written here, so the watcher was never told otherwise.
+        assert!(state.config_written_here.is_none());
         assert!(watch.should_poll(&state, false));
         assert!(watch.poll(&mut state, &cmd_tx));
         assert!(matches!(
@@ -21198,16 +21206,49 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         save_permission_mode(&mut config, &path, "auto");
-        state.config_written_here = true;
-        if std::mem::take(&mut state.config_written_here) {
-            watch.resync();
-        }
+        state.config_written_here = Some(config.clone());
+        take_own_write(&mut state, &mut watch);
 
         assert!(
             !watch.poll(&mut state, &cmd_tx),
             "this session already matches the file it just wrote"
         );
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    /// Another session can land a save in the window between this session's
+    /// write and the watcher being told about it. Marking that write seen
+    /// without applying it would strand this session on the old mode, since no
+    /// later save re-sends a value the watcher already believes it has.
+    #[test]
+    fn a_save_racing_this_sessions_own_write_is_still_adopted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut ours = config::Config::default();
+        ours.save(&path).expect("seed config");
+        let mut state = watching_session(&path, "default");
+        let mut watch = ConfigWatch::new(Some(path.clone()));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        // This session saves an unrelated setting...
+        ours.feature_hints = !ours.feature_hints;
+        ours.save(&path).expect("save from this session");
+        state.config_written_here = Some(ours.clone());
+        // ...and another session sets the permission mode before this one gets
+        // to record its own write.
+        let mut theirs = ours.clone();
+        save_permission_mode(&mut theirs, &path, "auto");
+        take_own_write(&mut state, &mut watch);
+
+        assert!(
+            watch.poll(&mut state, &cmd_tx),
+            "the racing save must still reach this session"
+        );
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption { value, .. })
+                if value.to_string() == "auto"
+        ));
     }
 
     /// A file caught mid-write must be retried, not stamped past: skipping it
