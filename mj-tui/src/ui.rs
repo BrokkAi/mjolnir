@@ -751,7 +751,6 @@ fn transcript_entry_matches(state: &AppState, entry: &Entry, query: &str) -> boo
         | Entry::SubagentMessage(text)
         | Entry::System(text)
         | Entry::CommandOutput(text)
-        | Entry::FeatureHint(text)
         | Entry::SessionBoundary(text) => search_text_contains(text, query),
         Entry::AgentThought(thought) | Entry::SubagentThought(thought) => {
             search_text_contains(&thought.text, query)
@@ -1149,7 +1148,6 @@ fn transcript_entry_settles_naturally(state: &AppState, idx: usize, entry: &Entr
         Entry::UserPrompt(_)
         | Entry::System(_)
         | Entry::CommandOutput(_)
-        | Entry::FeatureHint(_)
         | Entry::ReviewLedger(_)
         | Entry::SessionBoundary(_)
         | Entry::Plan(_)
@@ -1918,24 +1916,8 @@ async fn ui_loop(
                             && state.session_id.is_none()
                             && matches!(&ev, UiEvent::Fatal(_));
                         let flushed_prose = stream_reveal.flush_for_event(&mut state, &ev);
-                        let completed_turn = matches!(
-                            &ev,
-                            UiEvent::PromptDone { stop_reason, .. }
-                                if *stop_reason != StopReason::Cancelled
-                        );
                         mark_session_import_complete(&mut state, import_resumed_session, &ev);
                         state.apply_event(ev);
-                        if completed_turn {
-                            state.maybe_record_feature_hint(crate::app::FeatureHintCapabilities {
-                                subagents: state.active_models.subagent
-                                    != crate::config::DISABLED_MODEL,
-                                voice: voice_input_supported(),
-                                fork: state.session_fork_supported,
-                                side: state.side_session_supported,
-                                images: state.prompt_images_supported,
-                                fullscreen: mode == UiMode::FullscreenTui,
-                            });
-                        }
                         let visibility_changed = stream_reveal.observe(&mut state);
                         finalize_startup_prompt(&mut state);
                         if failed_side_start {
@@ -3108,12 +3090,14 @@ fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
     } else if state.config_picker.is_some() {
         inline_config_view_line_count(state, width)
     } else {
-        // Queued prompts render above the input; request extra rows so
-        // the input box keeps its full height while the queue is visible.
+        // Queued prompts and the spinner-anchored tip render above the
+        // input; request extra rows so the input box keeps its full height
+        // while they are visible.
         usize::from(INLINE_CHAT_HEIGHT)
             + usize::from(queued_prompt_row_count(state))
             + usize::from(workflow_progress_row_count(state))
             + usize::from(review_board_row_count(state))
+            + usize::from(should_show_spinner(state) && state.feature_tips_active())
             + usage_quota_row_count(state, width)
     };
 
@@ -6892,7 +6876,6 @@ fn push_transcript_entries(
                     .join("\n");
                 push_export_text(out, "Review", &text, mode);
             }
-            Entry::FeatureHint(_) => {}
             Entry::SessionBoundary(text) => push_export_text(out, "Session", text, mode),
             Entry::Plan(entries) | Entry::SubagentPlan(entries) => {
                 let heading = if matches!(entry, Entry::SubagentPlan(_)) {
@@ -8063,6 +8046,7 @@ fn draw(
     let queued_row = queued_prompt_row_count(state);
     let workflow_rows = workflow_progress_row_count(state);
     let terminal_rows = running_terminals_row_count(state);
+    let feature_tip = current_feature_tip(state, mode);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -8071,6 +8055,7 @@ fn draw(
             Constraint::Length(workflow_rows),
             Constraint::Length(terminal_rows),
             Constraint::Length(queued_row),
+            Constraint::Length(u16::from(feature_tip.is_some())),
             Constraint::Length(input_height),
             Constraint::Length(1),
             Constraint::Length(usage_quota_rows),
@@ -8110,9 +8095,10 @@ fn draw(
     draw_workflow_progress_rows(f, chunks[2], state);
     draw_running_terminals_row(f, chunks[3], state);
     draw_queued_prompt_row(f, chunks[4], state);
-    draw_input(f, chunks[5], state, mode);
-    draw_status_line(f, chunks[6], state);
-    draw_usage_quota_row(f, chunks[7], state);
+    draw_feature_tip_row(f, chunks[5], feature_tip, state.theme);
+    draw_input(f, chunks[6], state, mode);
+    draw_status_line(f, chunks[7], state);
+    draw_usage_quota_row(f, chunks[8], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -8218,7 +8204,7 @@ fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
         .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS as u16)
 }
 
-fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 9] {
+fn inline_chat_layout(state: &AppState, area: Rect, tip_rows: u16) -> [Rect; 10] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -8228,12 +8214,52 @@ fn inline_chat_layout(state: &AppState, area: Rect) -> [Rect; 9] {
             Constraint::Length(review_board_row_count(state)),
             Constraint::Length(running_terminals_row_count(state)),
             Constraint::Length(queued_prompt_row_count(state)),
+            Constraint::Length(tip_rows),
             Constraint::Min(MIN_INPUT_HEIGHT),
             Constraint::Length(1),
             Constraint::Length(usage_quota_row_count(state, area.width) as u16),
         ])
         .split(area);
     std::array::from_fn(|index| chunks[index])
+}
+
+/// The rotating tip anchored to the activity spinner, modeled on Claude
+/// Code's under-spinner tips: present only while a turn is in flight, one
+/// dim line, advancing on a fixed cadence. `None` hides the row entirely.
+fn current_feature_tip(state: &mut AppState, mode: UiMode) -> Option<&'static str> {
+    if !should_show_spinner(state) {
+        return None;
+    }
+    let capabilities = crate::app::FeatureHintCapabilities {
+        subagents: state.active_models.subagent != crate::config::DISABLED_MODEL,
+        voice: voice_input_supported(),
+        fork: state.session_fork_supported,
+        side: state.side_session_supported,
+        images: state.prompt_images_supported,
+        fullscreen: mode == UiMode::FullscreenTui,
+    };
+    state.feature_tip(capabilities, Instant::now())
+}
+
+/// One dim line directly above the prompt block, whose border carries the
+/// activity spinner.
+fn draw_feature_tip_row(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    tip: Option<&str>,
+    theme: TerminalTheme,
+) {
+    let Some(tip) = tip else { return };
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let line = Line::from(Span::styled(
+        fit_width(format!(" ※ Tip: {tip}"), usize::from(area.width)),
+        Style::default()
+            .ink(theme.tip)
+            .add_modifier(Modifier::ITALIC),
+    ));
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_inline_chat(
@@ -8312,7 +8338,8 @@ fn draw_inline_chat(
         return;
     }
 
-    let chunks = inline_chat_layout(state, f.area());
+    let feature_tip = current_feature_tip(state, UiMode::InlineChat);
+    let chunks = inline_chat_layout(state, f.area(), u16::from(feature_tip.is_some()));
 
     draw_inline_transcript_tail(f, chunks[0], state);
     draw_header(f, chunks[1], state);
@@ -8320,9 +8347,10 @@ fn draw_inline_chat(
     draw_review_board(f, chunks[3], state);
     draw_running_terminals_row(f, chunks[4], state);
     draw_queued_prompt_row(f, chunks[5], state);
-    draw_input(f, chunks[6], state, UiMode::InlineChat);
-    draw_status_line(f, chunks[7], state);
-    draw_usage_quota_row(f, chunks[8], state);
+    draw_feature_tip_row(f, chunks[6], feature_tip, state.theme);
+    draw_input(f, chunks[7], state, UiMode::InlineChat);
+    draw_status_line(f, chunks[8], state);
+    draw_usage_quota_row(f, chunks[9], state);
 
     if state.autocomplete.visible
         && !state.has_pending_permission()
@@ -9181,9 +9209,6 @@ fn render_nested_agent_lines(
             }
             Entry::ReviewLedger(lines) => {
                 push_review_ledger_record(&mut out, lines, state.theme);
-            }
-            Entry::FeatureHint(text) => {
-                push_feature_hint(&mut out, text, state.theme);
             }
             Entry::SessionBoundary(text) => {
                 out.push(Line::from(""));
@@ -11030,9 +11055,6 @@ fn render_transcript_entry_range_with_turns(
             Entry::ReviewLedger(lines) => {
                 push_review_ledger_record(&mut out, lines, theme);
             }
-            Entry::FeatureHint(text) => {
-                push_feature_hint(&mut out, text, theme);
-            }
             Entry::SessionBoundary(text) => {
                 if !text.starts_with("subagent ·") {
                     out.push(Line::from(""));
@@ -11364,16 +11386,6 @@ fn push_styled_message(
     }
     if collapsed {
         push_message_collapse_hint(out, theme);
-    }
-    out.push(Line::from(""));
-}
-
-fn push_feature_hint(out: &mut Vec<Line<'static>>, text: &str, theme: TerminalTheme) {
-    let style = Style::default()
-        .ink(theme.tip)
-        .add_modifier(Modifier::ITALIC);
-    for raw in format!("Mjolnir tip · {text}").split('\n') {
-        out.push(Line::from(Span::styled(raw.to_string(), style)));
     }
     out.push(Line::from(""));
 }
@@ -16321,7 +16333,7 @@ mod tests {
             "header plus one row per issue"
         );
         let area = Rect::new(0, 0, 120, 30);
-        let chunks = inline_chat_layout(&state, area);
+        let chunks = inline_chat_layout(&state, area, 0);
         assert_eq!(
             chunks[3].height, 3,
             "the inline viewport reserves the board block"
@@ -16393,7 +16405,7 @@ mod tests {
             0,
             "a finished review leaves the board to the verdict banner"
         );
-        assert_eq!(inline_chat_layout(&state, area)[3].height, 0);
+        assert_eq!(inline_chat_layout(&state, area, 0)[3].height, 0);
     }
 
     #[test]
@@ -16468,6 +16480,8 @@ mod tests {
     #[test]
     fn session_header_is_explicit_below_a_live_review_board() {
         let mut state = AppState::new();
+        // Row geometry below pins the review board; keep the spinner tip out.
+        state.feature_hints_enabled = false;
         state.session_title = Some("Correct review permissions".to_string());
         let workflow_id = WorkflowId::review(4);
         start_workflow(
@@ -22622,7 +22636,9 @@ mod tests {
 
     #[test]
     fn compact_inline_height_change_keeps_clear_scoped_to_viewport() {
-        let state = AppState::new();
+        let mut state = AppState::new();
+        // Height arithmetic below is exact; keep the spinner tip row out.
+        state.feature_hints_enabled = false;
         let plan = inline_viewport_resize_plan(
             &state,
             Rect::new(0, 17, 80, 7),
@@ -23564,6 +23580,8 @@ mod tests {
     #[test]
     fn inline_chat_streams_primary_and_subagent_through_one_transcript_tail() {
         let mut state = AppState::new();
+        // The buffer scan below counts exact rows; keep the spinner tip out.
+        state.feature_hints_enabled = false;
         state.agent_label = "gpt-primary".to_string();
         state.record_user_prompt("delegate this".to_string());
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
@@ -23652,7 +23670,7 @@ mod tests {
         let baseline = desired_inline_height(&state, terminal_size);
         let area = Rect::new(0, 0, terminal_size.width, baseline);
         let baseline_tail_height = inline_transcript_tail_height(&state, area);
-        let baseline_input_area = inline_chat_layout(&state, area)[6];
+        let baseline_input_area = inline_chat_layout(&state, area, 0)[7];
         let mut terminal =
             Terminal::new(TestBackend::new(terminal_size.width, baseline)).expect("terminal");
         terminal
@@ -23698,7 +23716,7 @@ mod tests {
             streamed_header_row, baseline_header_row,
             "streaming must not move the header inside the fixed viewport"
         );
-        let streamed_input_area = inline_chat_layout(&state, area)[6];
+        let streamed_input_area = inline_chat_layout(&state, area, 0)[7];
         assert_eq!(
             streamed_input_area, baseline_input_area,
             "the input panel rendered by the inline layout must not move or resize"
@@ -30888,6 +30906,9 @@ mod tests {
         // while they wait, and must NOT be recorded into the transcript;
         // they have not been sent yet.
         let mut state = ready_state_with_session();
+        // The queued-chip row assertions below are exact; keep the spinner
+        // tip row out.
+        state.feature_hints_enabled = false;
         state.record_user_prompt("first".to_string());
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -31691,33 +31712,41 @@ mod tests {
     }
 
     #[test]
-    fn feature_hint_is_distinct_wraps_narrowly_and_is_not_exported() {
+    fn feature_tip_row_is_dim_and_anchored_to_the_working_spinner() {
         let mut state = AppState::new();
-        state.transcript.push(Entry::FeatureHint(
-            "Open /mjconfig to choose agents and session options.".to_string(),
-        ));
+        state.set_connection_state(ConnectionState::Ready);
+        assert!(
+            current_feature_tip(&mut state, UiMode::FullscreenTui).is_none(),
+            "no tip while idle: the row exists only beside the spinner"
+        );
 
-        let rendered = render_transcript_lines(&state, 24);
-        let text = rendered
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("Mjolnir tip"));
-        assert!(text.contains("/mjconfig"));
-        assert!(rendered.len() > 1, "narrow hint should wrap: {text:?}");
+        state.set_connection_state(ConnectionState::Streaming);
+        let tip =
+            current_feature_tip(&mut state, UiMode::FullscreenTui).expect("tip while working");
+
+        let backend = TestBackend::new(160, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_feature_tip_row(frame, frame.area(), Some(tip), state.theme))
+            .expect("draw tip");
+        let text = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(text.contains("※ Tip:"), "{text}");
         assert_ne!(state.theme.tip.color(), state.theme.muted.color());
-        for span in rendered
-            .iter()
-            .flat_map(|line| &line.spans)
-            .filter(|span| !span.content.is_empty())
-        {
-            assert_eq!(span.style.fg, Some(state.theme.tip.color()));
-            assert!(span.style.add_modifier.contains(Modifier::ITALIC));
-        }
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((1, 0))
+            .expect("ornament cell");
+        assert_eq!(cell.style().fg, Some(state.theme.tip.color()));
+        assert!(cell.style().add_modifier.contains(Modifier::ITALIC));
+    }
 
-        let mut exported = String::new();
-        push_export_entries(&mut exported, &state.transcript, &state);
-        assert!(exported.is_empty(), "ephemeral hint leaked into export");
+    #[test]
+    fn disabled_feature_tips_never_reach_the_working_chrome() {
+        let mut state = AppState::new();
+        state.feature_hints_enabled = false;
+        state.set_connection_state(ConnectionState::Streaming);
+        assert!(current_feature_tip(&mut state, UiMode::FullscreenTui).is_none());
+        assert!(current_feature_tip(&mut state, UiMode::InlineChat).is_none());
     }
 }

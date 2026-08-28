@@ -5532,10 +5532,29 @@ struct MjAppearancePanel {
     thought_output: String,
     thought_outputs: Vec<String>,
     feature_hints: bool,
+    /// Rotating feature-discovery tips the viewer pins beside the working
+    /// spinner while a turn is in flight. Gated client-side by
+    /// `feature_hints` so the toggle applies without a reload.
+    tips: Vec<String>,
     keep_awake: bool,
     interface: String,
     interfaces: Vec<MjInterfaceEntry>,
 }
+
+/// Feature-discovery tips for the web viewer, phrased for browser and phone
+/// use: no terminal keybindings. The TUI keeps its own list in `mj-tui`.
+const WEB_FEATURE_TIPS: &[&str] = &[
+    "Pick Codex, Claude, or a mixed coder/reviewer team from the Team tab in settings.",
+    "Queue another instruction while the agent is working; Mjolnir sends it when the turn allows and can steer supported agents mid-turn.",
+    "Permission requests show the exact command or diff behind the action, so approvals are evidence-backed rather than blind.",
+    "The primary agent can launch specialist subagents in parallel; their live activity appears above the composer.",
+    "Mjolnir can automatically review changed turns, track validated findings in the Review Board, and correct them according to your policy.",
+    "The ± button shows the session's uncommitted workspace changes.",
+    "Attach images to your next prompt with the Images button when the agent supports them.",
+    "Install this page as an app on your phone: prompts, approvals, and reviews work anywhere the server is reachable.",
+    "Sessions started in the terminal appear here live, and sessions started here are ordinary mj sessions.",
+    "Mjolnir synchronizes verified project knowledge locally across Codex and Claude, so switching providers does not erase repository context.",
+];
 
 #[derive(Debug, Serialize)]
 struct MjInterfaceEntry {
@@ -6012,6 +6031,7 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             .map(|output| output.to_string())
             .collect(),
         feature_hints: config.feature_hints,
+        tips: WEB_FEATURE_TIPS.iter().map(|tip| tip.to_string()).collect(),
         keep_awake: config.keep_awake,
         interface: config.interface.to_string(),
         interfaces: config::InterfaceMode::ALL
@@ -11331,6 +11351,16 @@ mod tests {
                 .len(),
             config::ThoughtOutput::ALL.len()
         );
+        let tips = snapshot["appearance"]["tips"].as_array().expect("tips");
+        assert!(
+            !tips.is_empty(),
+            "the viewer's working-spinner tip rotation needs content"
+        );
+        assert!(
+            tips.iter()
+                .all(|tip| tip.as_str().is_some_and(|tip| !tip.is_empty())),
+            "every tip is a non-empty string"
+        );
         assert_eq!(snapshot["input"]["voice_auto_send"], "off");
         assert_eq!(
             snapshot["input"]["voice_auto_sends"]
@@ -12912,6 +12942,7 @@ const permissionsEl = makeEl("div");
 const approvalBadgeEl = { hidden: true };
 const workingBadgeEl = { hidden: true };
 function syncWorkingSpinner() {}
+function syncFeatureTip() {}
 function setTimestamp() {}
 const sentDecisions = new Set();
 function decisionKey(sessionId, requestId) {
@@ -13257,6 +13288,31 @@ for (const [field, seat] of [
         assert!(viewer.contains("mjcfg.edits.spinner = next"));
         assert!(viewer.contains("matches the terminal prompt-working spinner"));
         assert!(!viewer.contains("cursor-blink"));
+    }
+
+    /// The rotating feature tip is anchored to the working spinner: hidden
+    /// with the badge, sourced from the appearance snapshot, and gated by the
+    /// shared feature_hints toggle.
+    #[test]
+    fn embedded_viewer_rotates_feature_tips_beside_the_working_spinner() {
+        let viewer = include_str!("remote_viewer.html");
+
+        assert!(viewer.contains("id=\"feature-tip\""));
+        assert!(viewer.contains("function syncFeatureTip"));
+        assert!(viewer.contains("function renderFeatureTip"));
+        assert!(viewer.contains("FEATURE_TIP_ROTATION_MS"));
+        assert!(viewer.contains("snapshot?.appearance?.tips"));
+        assert!(viewer.contains("snapshot?.appearance?.feature_hints !== false"));
+        assert!(viewer.contains("!workingBadgeEl.hidden && featureTipsEnabled"));
+        // Every badge toggle re-syncs the tip so it can never outlive the
+        // spinner it annotates.
+        let badge_toggles = viewer.matches("workingBadgeEl.hidden = ").count();
+        let tip_syncs = viewer.matches("syncFeatureTip();").count();
+        assert!(
+            tip_syncs > badge_toggles,
+            "each working-badge toggle plus the appearance snapshot must re-sync the tip \
+             ({tip_syncs} syncs vs {badge_toggles} toggles)"
+        );
     }
 
     #[test]

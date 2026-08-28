@@ -1448,6 +1448,17 @@
         }
       }
 
+      /* Rotating feature tip pinned directly above the console, whose top
+         border carries the working spinner badge. Working-state only. */
+      .feature-tip {
+        margin-bottom: -4px;
+        color: var(--dim);
+        font: italic 400 11px/1.4 var(--font-mono);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .working-badge {
         position: absolute;
         top: 0;
@@ -3413,6 +3424,9 @@
           <div id="subagents" class="subagent-list" role="status" aria-label="Subagent status"></div>
           <div id="permissions" class="permission-list"></div>
           <div id="queue-list" class="queue-list"></div>
+          <div id="feature-tip" class="feature-tip" role="status" aria-live="off" hidden>
+            <span aria-hidden="true">※</span> <span id="feature-tip-text"></span>
+          </div>
           <div class="console">
             <span class="console-frame" aria-hidden="true"></span>
             <span id="working-badge" class="working-badge" role="status" aria-label="Working" hidden>
@@ -3672,6 +3686,8 @@
       const statusQuotasEl = $("status-quotas");
       const workingBadgeEl = $("working-badge");
       const workingSpinnerEl = $("working-spinner");
+      const featureTipEl = $("feature-tip");
+      const featureTipTextEl = $("feature-tip-text");
       const approvalBadgeEl = $("approval-badge");
       const connectionBadgeEl = $("connection-badge");
       const archiveBadgeEl = $("archive-badge");
@@ -3907,11 +3923,56 @@
         syncWorkingSpinner();
       }
 
+      /* Rotating feature tip pinned above the working spinner, modeled on
+         Claude Code's under-spinner tips. The index persists across turns so
+         the rotation keeps advancing instead of restarting. */
+      const FEATURE_TIP_ROTATION_MS = 15000;
+      let featureTips = [];
+      let featureTipsEnabled = true;
+      let featureTipIndex = 0;
+      let featureTipTimer = null;
+
+      function renderFeatureTip() {
+        if (!featureTips.length) {
+          featureTipTextEl.textContent = "";
+          return;
+        }
+        featureTipTextEl.textContent = `Tip: ${featureTips[featureTipIndex % featureTips.length]}`;
+      }
+
+      function syncFeatureTip() {
+        const show = !workingBadgeEl.hidden && featureTipsEnabled && featureTips.length > 0;
+        if (!show) {
+          if (featureTipTimer) {
+            clearInterval(featureTipTimer);
+            featureTipTimer = null;
+          }
+          featureTipEl.hidden = true;
+          return;
+        }
+        featureTipEl.hidden = false;
+        renderFeatureTip();
+        // Snapshot polling re-syncs every couple of seconds; keep the running
+        // timer so re-syncs cannot indefinitely postpone the next rotation.
+        if (!featureTipTimer) {
+          featureTipTimer = setInterval(() => {
+            featureTipIndex = (featureTipIndex + 1) % featureTips.length;
+            renderFeatureTip();
+          }, FEATURE_TIP_ROTATION_MS);
+        }
+      }
+
       function applyAppearanceSnapshot(snapshot, render = false) {
         const next = snapshot?.appearance?.thought_output === "full" ? "full" : "default";
         const changed = thoughtOutput !== next;
         thoughtOutput = next;
         setActiveSpinner(spinnerEntry(snapshot));
+        const tips = snapshot?.appearance?.tips;
+        if (Array.isArray(tips)) {
+          featureTips = tips.filter((tip) => typeof tip === "string" && tip);
+        }
+        featureTipsEnabled = snapshot?.appearance?.feature_hints !== false;
+        syncFeatureTip();
         if (render && changed) {
           renderChat();
         }
@@ -8126,6 +8187,7 @@
           transcriptMetaEl.textContent = "Select a session to inspect its history.";
           workingBadgeEl.hidden = true;
           syncWorkingSpinner();
+          syncFeatureTip();
           renderWorkspaceDiff(null);
           stopTurnEl.hidden = true;
           stopTurnEl.disabled = true;
@@ -8147,6 +8209,7 @@
         transcriptMetaEl.textContent = `${archiveMeta}${session.project || "-"}${session.worktree ? ` · ${session.worktree}` : ""} · ${session.agent || "-"} · ${transcript.length} entries`;
         workingBadgeEl.hidden = archived || !sessionIsWorking(session);
         syncWorkingSpinner();
+        syncFeatureTip();
         renderWorkspaceDiff(session.workspace_diff);
         renderWorkspaceHeadDiff(session.workspace_head_diff);
         const activeTurn = !archived && sessionHasActiveTurn(session);
@@ -8877,6 +8940,7 @@
         if (pending.length) {
           workingBadgeEl.hidden = true;
           syncWorkingSpinner();
+          syncFeatureTip();
         }
         const live = new Set();
         const cards = [];

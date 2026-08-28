@@ -547,8 +547,6 @@ pub enum Entry {
     /// Styled like `System`, but the user explicitly asked for this output,
     /// so it is as durable as their prompt and never collapses.
     CommandOutput(String),
-    /// Local Mjolnir feature-discovery hint. Never sent to the agent.
-    FeatureHint(String),
     /// Settled review-issue record: validated findings, pass verdicts, and
     /// the final tally banner. Unlike `System`, each span carries a tone so
     /// fixed/invalidated stay color-coded in scrollback.
@@ -814,7 +812,9 @@ pub struct TranscriptSearch {
     pub(crate) matches_revision: Option<u64>,
 }
 
-const FEATURE_HINT_INTERVAL_TURNS: usize = 5;
+/// How long one tip stays beside the activity spinner before the rotation
+/// advances to the next eligible tip.
+pub const FEATURE_TIP_ROTATION: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureHintCapabilities {
@@ -1513,8 +1513,11 @@ pub struct AppState {
     /// switch is on). Driven from `set_connection_state` so it cannot drift
     /// from the lifecycle enum.
     pub keep_awake: crate::keep_awake::KeepAwake,
-    completed_turns_since_hint: usize,
     feature_hint_cursor: usize,
+    /// Tip currently pinned beside the activity spinner, plus when it was
+    /// selected. Chrome-only UI state: it never enters the transcript.
+    active_feature_tip: Option<&'static str>,
+    feature_tip_rotated_at: Option<Instant>,
     /// Latest on-demand worktree-versus-`HEAD` diff backing the Ctrl-G reader.
     /// One `Option` rather than a history: the workspace has a single current
     /// state, and every refresh supersedes the last.
@@ -2383,8 +2386,9 @@ impl AppState {
             }),
             feature_hints_enabled: true,
             keep_awake: crate::keep_awake::KeepAwake::new(),
-            completed_turns_since_hint: 0,
             feature_hint_cursor: 0,
+            active_feature_tip: None,
+            feature_tip_rotated_at: None,
             workspace_head_diff: None,
             workspace_diff_loading: false,
             stream_visible_bytes: HashMap::new(),
@@ -3418,7 +3422,6 @@ impl AppState {
             | Entry::InternalMessage(_)
             | Entry::System(_)
             | Entry::CommandOutput(_)
-            | Entry::FeatureHint(_)
             | Entry::ReviewLedger(_)
             | Entry::SessionBoundary(_) => None,
         })
@@ -3647,17 +3650,44 @@ impl AppState {
         self.push_command_output(text);
     }
 
-    /// Record the next eligible local feature hint after a quiet run of turns.
-    /// The hint is transcript-only UI state and never becomes ACP history.
-    pub fn maybe_record_feature_hint(&mut self, capabilities: FeatureHintCapabilities) -> bool {
-        if !self.feature_hints_enabled || self.is_side {
-            return false;
-        }
-        self.completed_turns_since_hint += 1;
-        if self.completed_turns_since_hint < FEATURE_HINT_INTERVAL_TURNS {
-            return false;
-        }
+    /// Whether the spinner-anchored tip line may appear for this session.
+    /// Layout code reserves the row from this cheap predicate; the actual
+    /// text comes from [`feature_tip`](Self::feature_tip).
+    pub fn feature_tips_active(&self) -> bool {
+        self.feature_hints_enabled && !self.is_side
+    }
 
+    /// The tip pinned beside the activity spinner while a turn is in flight,
+    /// advancing to the next eligible tip once [`FEATURE_TIP_ROTATION`] has
+    /// elapsed. Chrome-only UI state that never becomes ACP history; callers
+    /// gate on the spinner being visible so rotation only ticks while the
+    /// tip is actually on screen.
+    pub fn feature_tip(
+        &mut self,
+        capabilities: FeatureHintCapabilities,
+        now: Instant,
+    ) -> Option<&'static str> {
+        if !self.feature_hints_enabled || self.is_side {
+            return None;
+        }
+        let rotation_due = self
+            .feature_tip_rotated_at
+            .is_none_or(|at| now.duration_since(at) >= FEATURE_TIP_ROTATION);
+        if rotation_due {
+            self.active_feature_tip = self.next_eligible_feature_tip(capabilities);
+            if self.active_feature_tip.is_some() {
+                self.feature_tip_rotated_at = Some(now);
+            }
+        }
+        self.active_feature_tip
+    }
+
+    /// Advance the persistent cursor to the next hint whose requirement the
+    /// current capabilities satisfy.
+    fn next_eligible_feature_tip(
+        &mut self,
+        capabilities: FeatureHintCapabilities,
+    ) -> Option<&'static str> {
         for offset in 0..FEATURE_HINTS.len() {
             let index = (self.feature_hint_cursor + offset) % FEATURE_HINTS.len();
             let hint = FEATURE_HINTS[index];
@@ -3674,15 +3704,11 @@ impl AppState {
                 FeatureHintRequirement::Inline => !capabilities.fullscreen,
             };
             if eligible {
-                self.transcript
-                    .push(Entry::FeatureHint(hint.text.to_string()));
                 self.feature_hint_cursor = (index + 1) % FEATURE_HINTS.len();
-                self.completed_turns_since_hint = 0;
-                self.bump_transcript_revision();
-                return true;
+                return Some(hint.text);
             }
         }
-        false
+        None
     }
 
     /// Mark the runtime as closed and switch the UI into read-only mode.
@@ -11802,7 +11828,8 @@ mod tests {
     }
 
     #[test]
-    fn every_gated_feature_hint_follows_its_own_capability() {
+    fn every_gated_feature_tip_follows_its_own_capability() {
+        let now = Instant::now();
         for (index, hint) in FEATURE_HINTS.iter().enumerate() {
             // Desktop depends on the compile target. TeamChoice reads the
             // process-global external adapter, which a test cannot register
@@ -11819,28 +11846,22 @@ mod tests {
 
             let mut state = AppState::new();
             state.feature_hint_cursor = index;
-            state.completed_turns_since_hint = FEATURE_HINT_INTERVAL_TURNS - 1;
-            assert!(state.maybe_record_feature_hint(capabilities_for(hint.requirement, true)));
-            let Some(Entry::FeatureHint(text)) = state.transcript.last() else {
-                panic!("expected feature hint at index {index}");
-            };
+            let text = state
+                .feature_tip(capabilities_for(hint.requirement, true), now)
+                .unwrap_or_else(|| panic!("expected feature tip at index {index}"));
             assert_eq!(
-                text.as_str(),
-                hint.text,
-                "cursor at index {index} should select its own hint when supported"
+                text, hint.text,
+                "cursor at index {index} should select its own tip when supported"
             );
 
             let mut state = AppState::new();
             state.feature_hint_cursor = index;
-            state.completed_turns_since_hint = FEATURE_HINT_INTERVAL_TURNS - 1;
-            assert!(state.maybe_record_feature_hint(capabilities_for(hint.requirement, false)));
-            let Some(Entry::FeatureHint(text)) = state.transcript.last() else {
-                panic!("expected fallback feature hint at index {index}");
-            };
+            let text = state
+                .feature_tip(capabilities_for(hint.requirement, false), now)
+                .unwrap_or_else(|| panic!("expected fallback feature tip at index {index}"));
             assert_ne!(
-                text.as_str(),
-                hint.text,
-                "hint at index {index} must be skipped when unsupported"
+                text, hint.text,
+                "tip at index {index} must be skipped when unsupported"
             );
         }
     }
@@ -11901,26 +11922,23 @@ mod tests {
     }
 
     #[test]
-    fn feature_hints_are_infrequent_and_rotate() {
+    fn feature_tip_holds_until_cadence_then_rotates() {
         let mut state = AppState::new();
-        for _ in 0..FEATURE_HINT_INTERVAL_TURNS - 1 {
-            assert!(!state.maybe_record_feature_hint(feature_capabilities()));
-        }
-        assert!(state.maybe_record_feature_hint(feature_capabilities()));
-        let first = match state.transcript.last() {
-            Some(Entry::FeatureHint(text)) => text.clone(),
-            other => panic!("expected feature hint, got {other:?}"),
-        };
+        let start = Instant::now();
+        let first = state
+            .feature_tip(feature_capabilities(), start)
+            .expect("tip while working");
 
-        for _ in 0..FEATURE_HINT_INTERVAL_TURNS - 1 {
-            assert!(!state.maybe_record_feature_hint(feature_capabilities()));
-        }
-        assert!(state.maybe_record_feature_hint(feature_capabilities()));
-        let second = match state.transcript.last() {
-            Some(Entry::FeatureHint(text)) => text,
-            other => panic!("expected feature hint, got {other:?}"),
-        };
-        assert_ne!(&first, second);
+        // Redraws before the cadence elapses keep the same tip pinned.
+        let held = state
+            .feature_tip(feature_capabilities(), start + FEATURE_TIP_ROTATION / 2)
+            .expect("tip stays pinned");
+        assert_eq!(first, held);
+
+        let second = state
+            .feature_tip(feature_capabilities(), start + FEATURE_TIP_ROTATION)
+            .expect("rotated tip");
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -12072,49 +12090,50 @@ mod tests {
     }
 
     #[test]
-    fn feature_hints_skip_unsupported_capabilities() {
+    fn feature_tips_skip_unsupported_capabilities() {
         let mut state = AppState::new();
         state.feature_hint_cursor = FEATURE_HINTS
             .iter()
             .position(|hint| hint.requirement == FeatureHintRequirement::Subagents)
             .expect("subagent hint");
-        state.completed_turns_since_hint = FEATURE_HINT_INTERVAL_TURNS - 1;
 
-        assert!(state.maybe_record_feature_hint(FeatureHintCapabilities {
-            subagents: false,
-            voice: false,
-            fork: false,
-            side: false,
-            images: false,
-            fullscreen: false,
-        }));
-        let Some(Entry::FeatureHint(text)) = state.transcript.last() else {
-            panic!("expected feature hint");
-        };
+        let text = state
+            .feature_tip(
+                FeatureHintCapabilities {
+                    subagents: false,
+                    voice: false,
+                    fork: false,
+                    side: false,
+                    images: false,
+                    fullscreen: false,
+                },
+                Instant::now(),
+            )
+            .expect("fallback tip");
         let selected = FEATURE_HINTS
             .iter()
             .find(|hint| hint.text == text)
-            .expect("selected hint remains in the rotation");
+            .expect("selected tip remains in the rotation");
         assert_eq!(selected.requirement, FeatureHintRequirement::Always);
     }
 
     #[test]
-    fn feature_hints_can_be_disabled_and_never_enter_prompt_history() {
+    fn feature_tips_can_be_disabled_and_stay_out_of_side_sessions() {
         let mut state = AppState::new();
+        let now = Instant::now();
         state.feature_hints_enabled = false;
-        for _ in 0..FEATURE_HINT_INTERVAL_TURNS * 2 {
-            assert!(!state.maybe_record_feature_hint(feature_capabilities()));
-        }
-        assert!(state.transcript.is_empty());
+        assert!(state.feature_tip(feature_capabilities(), now).is_none());
 
         state.feature_hints_enabled = true;
-        for _ in 0..FEATURE_HINT_INTERVAL_TURNS {
-            state.maybe_record_feature_hint(feature_capabilities());
-        }
-        assert!(matches!(
-            state.transcript.last(),
-            Some(Entry::FeatureHint(_))
-        ));
+        state.is_side = true;
+        assert!(state.feature_tip(feature_capabilities(), now).is_none());
+
+        state.is_side = false;
+        assert!(state.feature_tip(feature_capabilities(), now).is_some());
+        assert!(
+            state.transcript.is_empty(),
+            "tips are chrome-only and must never enter the transcript"
+        );
         assert!(state.prompt_history().is_empty());
     }
 
