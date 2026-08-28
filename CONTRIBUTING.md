@@ -33,9 +33,11 @@ cargo build --release
 ./target/release/mj --cwd .
 ```
 
-The default desktop build includes the native WebView shell. On macOS, install
-Apple's Command Line Tools; the shell uses the WebKit framework from
-the macOS SDK:
+That build produces `mj` alone and needs no desktop libraries. The native
+WebView shell that `mj app` launches is the separate `brokk-mj-app` member,
+excluded from the default set; building it needs the platform WebView
+development files below. On macOS, install Apple's Command Line Tools; the
+shell uses the WebKit framework from the macOS SDK:
 
 ```bash
 xcode-select --install
@@ -53,10 +55,11 @@ sudo dnf install webkit2gtk4.1-devel
 ```
 
 Use `webkit2gtk4.1-devel` on Fedora: the shell targets WebKitGTK's GTK 3 and
-libsoup 3 API, not the GTK 4 `webkitgtk6.0-devel` package. Then build it with:
+libsoup 3 API, not the GTK 4 `webkitgtk6.0-devel` package. Then build the shell
+beside `mj`, where `mj app` looks for it:
 
 ```bash
-cargo build --release
+cargo build --release -p brokk-mj-app
 ```
 
 The `brokk-mj-voice-worker` workspace member provides local Ctrl-R dictation.
@@ -145,6 +148,23 @@ cargo test
 The separate LLVM coverage job, local collection commands, 70% production
 module target, and reviewed integration-boundary exceptions are documented in
 [COVERAGE.md](COVERAGE.md).
+
+When changing the desktop shell, also run -- neither crate is a default
+workspace member, so the checks above do not cover them:
+
+```bash
+cargo clippy -p brokk-mj-desktop --all-targets -- -D warnings
+cargo test -p brokk-mj-desktop
+cargo clippy -p brokk-mj-app --all-targets -- -D warnings
+cargo build --release -p brokk-mj-app
+```
+
+`mj` must never link the platform WebView; that is what lets it start on a
+headless machine. CI asserts it, and you can check a local build the same way:
+
+```bash
+readelf -d target/release/mj | grep -Ei 'webkit|javascriptcore'   # must not match
+```
 
 When changing the voice worker, also run:
 

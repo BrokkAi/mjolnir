@@ -123,9 +123,9 @@ archive or Cargo.
 
 ### crates.io
 
-On Linux, Cargo installations need WebKitGTK 4.1 development files for the
-default `mj app` desktop shell. Installing the voice worker also needs ALSA
-development files:
+`brokk-mjolnir` alone needs no system libraries. On Linux, the optional
+`brokk-mj-app` desktop shell needs WebKitGTK 4.1 development files, and the
+optional voice worker needs ALSA development files:
 
 ```bash
 # Ubuntu or Debian
@@ -157,13 +157,10 @@ cargo build --release
 
 That build needs no desktop or audio system libraries, and produces `mj` alone.
 The native WebView shell that `mj app` launches is a separate binary, excluded
-from the default workspace members, so build it explicitly:
+from the default workspace members. Building it needs the platform WebView
+development files below, so install those first.
 
-```bash
-cargo build --release -p brokk-mj-app
-```
-
-On macOS, install Apple's Command Line Tools first. The shell uses the WebKit
+On macOS, install Apple's Command Line Tools. The shell uses the WebKit
 framework included in the macOS SDK:
 
 ```bash
