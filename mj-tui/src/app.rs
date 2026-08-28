@@ -28,6 +28,8 @@ use crate::event::{
     PromptImage, PromptResource, ReviewRequest, ReviewTarget, SessionConfigTarget, SubagentEvent,
     SubagentOutcome, SubagentStatusKind, TerminalOutputSnapshot, UiEvent, content_block_text,
 };
+use mj_core::builtin_commands;
+
 use crate::palette::TerminalTheme;
 use crate::palette::TerminalThemeKindExt;
 use crate::session_state::SessionState;
@@ -262,154 +264,31 @@ pub struct RuntimeStall {
     pub inactive_for: Duration,
 }
 
-const BUILTIN_NEW_COMMAND: &str = "new";
-const BUILTIN_CLEAR_COMMAND: &str = "clear";
-const BUILTIN_COMPACT_COMMAND: &str = "compact";
-const BUILTIN_NUDGE_COMMAND: &str = "nudge";
-const BUILTIN_LOAD_COMMAND: &str = "load";
-const BUILTIN_FORK_COMMAND: &str = "fork";
-const BUILTIN_SIDE_COMMAND: &str = "side";
-const BUILTIN_EXPORT_COMMAND: &str = "export";
-const BUILTIN_DIFF_COMMAND: &str = "diff";
-const BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
-const BUILTIN_MODEL_COMMAND: &str = "model";
-const BUILTIN_EFFORT_COMMAND: &str = "effort";
-const BUILTIN_AGENTS_COMMAND: &str = "agents";
-const BUILTIN_SUBAGENTS_COMMAND: &str = "subagents";
-const RETIRED_REVIEW_COMMAND: &str = "review";
-const BUILTIN_DISCRETE_REVIEW_COMMAND: &str = "discrete-review";
-const BUILTIN_ADVERSARIAL_REVIEW_COMMAND: &str = "adversarial-review";
-const BUILTIN_TERMINALS_COMMAND: &str = "terminals";
-const BUILTIN_MEMORY_COMMAND: &str = "memory";
-const BUILTIN_EXIT_COMMAND: &str = "exit";
+// Builtin command names and descriptions live in `mj_core::builtin_commands`,
+// shared with the web viewer.
 const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
 
-fn builtin_new_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_NEW_COMMAND, "start a new session")
+fn tui_shared_command(spec: &builtin_commands::SharedCommand) -> AvailableCommand {
+    AvailableCommand::new(spec.name, spec.tui_description)
 }
 
-fn builtin_clear_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_CLEAR_COMMAND,
-        "start a fresh session with the current agent",
-    )
+fn tui_only_command(spec: &builtin_commands::SurfaceCommand) -> AvailableCommand {
+    AvailableCommand::new(spec.name, spec.description)
 }
 
-fn builtin_compact_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_COMPACT_COMMAND,
-        "compact the primary agent's session where supported",
-    )
-}
-
-fn builtin_nudge_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_NUDGE_COMMAND,
-        "ask a quiet active runtime to report status and continue",
-    )
-}
-
-fn builtin_load_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_LOAD_COMMAND,
-        "load a previous session into the current primary",
-    )
-}
-
-fn builtin_fork_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_FORK_COMMAND,
-        "fork the current session (unstable ACP extension)",
-    )
-}
-
-fn builtin_side_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_SIDE_COMMAND,
-        "open an isolated ephemeral conversation",
-    )
-}
-
-fn builtin_export_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_EXPORT_COMMAND,
-        "export primary transcript; add full for nested agents",
-    )
-}
-
-fn builtin_mjconfig_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_MJCONFIG_COMMAND,
-        "configure the team, agents, ACP servers, and appearance",
-    )
-}
-
-fn builtin_model_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_MODEL_COMMAND,
-        "change the active session model without starting a new session",
-    )
-}
-
-fn builtin_effort_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_EFFORT_COMMAND,
-        "change the active session reasoning effort without starting a new session",
-    )
-}
-
-fn builtin_diff_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_DIFF_COMMAND, "show workspace changes against HEAD")
-}
-
-fn builtin_agents_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_AGENTS_COMMAND,
-        "show active model selections and usage",
-    )
-}
-
-fn builtin_subagents_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_SUBAGENTS_COMMAND,
-        "inspect implementation and review agent transcripts",
-    )
-}
-
-fn builtin_discrete_review_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_DISCRETE_REVIEW_COMMAND,
-        "run the configured discrete review; add quick or extended to override its tier",
-    )
-}
-
-fn builtin_adversarial_review_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
-        "alias for discrete-review",
-    )
-}
-
-fn builtin_terminals_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_TERMINALS_COMMAND,
-        "view terminals the agent started, including ones still running",
-    )
-}
-
-fn builtin_memory_command() -> AvailableCommand {
-    AvailableCommand::new(
-        BUILTIN_MEMORY_COMMAND,
-        "list and manage persistent memories (usage: /memory [add|forget|on|off|use|generate|clear])",
-    )
-}
-
-fn builtin_exit_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_EXIT_COMMAND, "quit Mjolnir")
+/// Look up a builtin the TUI advertises by name.
+fn tui_builtin(name: &str) -> AvailableCommand {
+    builtin_commands::shared_command(name)
+        .map(tui_shared_command)
+        .or_else(|| builtin_commands::tui_only_command(name).map(tui_only_command))
+        .expect("name is a TUI builtin")
 }
 
 fn builtin_exit_side_command() -> AvailableCommand {
-    AvailableCommand::new(BUILTIN_EXIT_COMMAND, "return to the primary conversation")
+    AvailableCommand::new(
+        builtin_commands::EXIT_COMMAND,
+        "return to the primary conversation",
+    )
 }
 
 fn install_builtin_commands(
@@ -417,84 +296,44 @@ fn install_builtin_commands(
     include_fork: bool,
     include_side: bool,
 ) {
-    commands.retain(|command| {
-        command.name != BUILTIN_NEW_COMMAND
-            && command.name != BUILTIN_CLEAR_COMMAND
-            && command.name != BUILTIN_COMPACT_COMMAND
-            && command.name != BUILTIN_NUDGE_COMMAND
-            && command.name != BUILTIN_LOAD_COMMAND
-            && command.name != BUILTIN_FORK_COMMAND
-            && command.name != BUILTIN_SIDE_COMMAND
-            && command.name != BUILTIN_EXPORT_COMMAND
-            && command.name != BUILTIN_DIFF_COMMAND
-            && command.name != BUILTIN_MJCONFIG_COMMAND
-            && command.name != BUILTIN_MODEL_COMMAND
-            && command.name != BUILTIN_EFFORT_COMMAND
-            && command.name != BUILTIN_AGENTS_COMMAND
-            && command.name != BUILTIN_SUBAGENTS_COMMAND
-            && command.name != RETIRED_REVIEW_COMMAND
-            && command.name != BUILTIN_DISCRETE_REVIEW_COMMAND
-            && command.name != BUILTIN_ADVERSARIAL_REVIEW_COMMAND
-            && command.name != BUILTIN_TERMINALS_COMMAND
-            && command.name != BUILTIN_MEMORY_COMMAND
-            && command.name != BUILTIN_EXIT_COMMAND
-    });
-    if include_fork {
-        commands.insert(0, builtin_fork_command());
-    }
+    commands.retain(|command| !builtin_commands::is_tui_builtin(&command.name));
+    // Shared commands first, then TUI-only ones; the conditional side/fork
+    // pair stays at the end of the palette.
+    let mut builtins: Vec<AvailableCommand> = builtin_commands::SHARED_COMMANDS
+        .iter()
+        .filter(|spec| {
+            spec.name != builtin_commands::SIDE_COMMAND
+                && spec.name != builtin_commands::FORK_COMMAND
+        })
+        .map(tui_shared_command)
+        .chain(
+            builtin_commands::TUI_ONLY_COMMANDS
+                .iter()
+                .map(tui_only_command),
+        )
+        .collect();
     if include_side {
-        commands.insert(0, builtin_side_command());
+        builtins.push(tui_builtin(builtin_commands::SIDE_COMMAND));
     }
-    commands.insert(0, builtin_exit_command());
-    commands.insert(0, builtin_memory_command());
-    commands.insert(0, builtin_mjconfig_command());
-    commands.insert(0, builtin_effort_command());
-    commands.insert(0, builtin_model_command());
-    commands.insert(0, builtin_diff_command());
-    commands.insert(0, builtin_adversarial_review_command());
-    commands.insert(0, builtin_discrete_review_command());
-    commands.insert(0, builtin_terminals_command());
-    commands.insert(0, builtin_subagents_command());
-    commands.insert(0, builtin_agents_command());
-    commands.insert(0, builtin_export_command());
-    commands.insert(0, builtin_load_command());
-    commands.insert(0, builtin_nudge_command());
-    commands.insert(0, builtin_compact_command());
-    commands.insert(0, builtin_clear_command());
-    commands.insert(0, builtin_new_command());
+    if include_fork {
+        builtins.push(tui_builtin(builtin_commands::FORK_COMMAND));
+    }
+    commands.splice(0..0, builtins);
 }
 
 fn install_side_builtin_commands(commands: &mut Vec<AvailableCommand>) {
-    commands.retain(|command| {
-        ![
-            BUILTIN_NEW_COMMAND,
-            BUILTIN_CLEAR_COMMAND,
-            BUILTIN_COMPACT_COMMAND,
-            BUILTIN_NUDGE_COMMAND,
-            BUILTIN_LOAD_COMMAND,
-            BUILTIN_FORK_COMMAND,
-            BUILTIN_SIDE_COMMAND,
-            BUILTIN_DIFF_COMMAND,
-            BUILTIN_MJCONFIG_COMMAND,
-            BUILTIN_MODEL_COMMAND,
-            BUILTIN_EFFORT_COMMAND,
-            BUILTIN_AGENTS_COMMAND,
-            BUILTIN_SUBAGENTS_COMMAND,
-            RETIRED_REVIEW_COMMAND,
-            BUILTIN_DISCRETE_REVIEW_COMMAND,
-            BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
-            BUILTIN_TERMINALS_COMMAND,
-            BUILTIN_MEMORY_COMMAND,
-            BUILTIN_EXIT_COMMAND,
-        ]
-        .contains(&command.name.as_str())
-    });
-    commands.insert(0, builtin_side_command());
-    commands.insert(0, builtin_export_command());
-    commands.insert(0, builtin_nudge_command());
-    commands.insert(0, builtin_effort_command());
-    commands.insert(0, builtin_model_command());
-    commands.insert(0, builtin_exit_side_command());
+    commands.retain(|command| !builtin_commands::is_tui_builtin(&command.name));
+    commands.splice(
+        0..0,
+        [
+            builtin_exit_side_command(),
+            tui_builtin(builtin_commands::MODEL_COMMAND),
+            tui_builtin(builtin_commands::EFFORT_COMMAND),
+            tui_builtin(builtin_commands::NUDGE_COMMAND),
+            tui_builtin(builtin_commands::EXPORT_COMMAND),
+            tui_builtin(builtin_commands::SIDE_COMMAND),
+        ],
+    );
 }
 
 /// How the UI loop ends, so `main` can decide whether to quit entirely
@@ -10982,18 +10821,18 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
-                "nudge",
                 "load",
                 "export",
+                "mjconfig",
+                "model",
+                "effort",
+                "discrete-review",
+                "adversarial-review",
+                "nudge",
                 "agents",
                 "subagents",
                 "terminals",
-                "discrete-review",
-                "adversarial-review",
                 "diff",
-                "model",
-                "effort",
-                "mjconfig",
                 "memory",
                 "exit"
             ]
@@ -11008,7 +10847,7 @@ mod tests {
         let exit_commands: Vec<_> = side
             .available_commands
             .iter()
-            .filter(|command| command.name == BUILTIN_EXIT_COMMAND)
+            .filter(|command| command.name == builtin_commands::EXIT_COMMAND)
             .collect();
         assert_eq!(exit_commands.len(), 1);
         assert_eq!(
@@ -11046,18 +10885,18 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
-                "nudge",
                 "load",
                 "export",
+                "mjconfig",
+                "model",
+                "effort",
+                "discrete-review",
+                "adversarial-review",
+                "nudge",
                 "agents",
                 "subagents",
                 "terminals",
-                "discrete-review",
-                "adversarial-review",
                 "diff",
-                "model",
-                "effort",
-                "mjconfig",
                 "memory",
                 "exit",
                 "fork"
@@ -11100,18 +10939,18 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
-                "nudge",
                 "load",
                 "export",
+                "mjconfig",
+                "model",
+                "effort",
+                "discrete-review",
+                "adversarial-review",
+                "nudge",
                 "agents",
                 "subagents",
                 "terminals",
-                "discrete-review",
-                "adversarial-review",
                 "diff",
-                "model",
-                "effort",
-                "mjconfig",
                 "memory",
                 "exit",
                 "fork",
@@ -11129,18 +10968,22 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[3].description,
-            "ask a quiet active runtime to report status and continue"
-        );
-        assert_eq!(
-            s.available_commands[4].description,
             "load a previous session into the current primary"
         );
         assert_eq!(
-            s.available_commands[5].description,
+            s.available_commands[4].description,
             "export primary transcript; add full for nested agents"
         );
         assert_eq!(
-            s.available_commands[6].description,
+            s.available_commands[5].description,
+            "configure the team, agents, ACP servers, and appearance"
+        );
+        assert_eq!(
+            s.available_commands[10].description,
+            "ask a quiet active runtime to report status and continue"
+        );
+        assert_eq!(
+            s.available_commands[11].description,
             "show active model selections and usage"
         );
         assert_eq!(
@@ -11174,18 +11017,18 @@ mod tests {
                 "new",
                 "clear",
                 "compact",
-                "nudge",
                 "load",
                 "export",
+                "mjconfig",
+                "model",
+                "effort",
+                "discrete-review",
+                "adversarial-review",
+                "nudge",
                 "agents",
                 "subagents",
                 "terminals",
-                "discrete-review",
-                "adversarial-review",
                 "diff",
-                "model",
-                "effort",
-                "mjconfig",
                 "memory",
                 "exit",
                 "review_pr"

@@ -52,6 +52,7 @@ use tracing::{debug, warn};
 use url::Url;
 
 use mj_core::acp;
+use mj_core::builtin_commands;
 use mj_core::config::{self, SelectedAgent};
 use mj_core::event::{
     ElicitationOutcome, ElicitationPrompt, LoadSessionResult, PermissionDecision, PermissionPrompt,
@@ -125,18 +126,13 @@ const SESSION_COOKIE_NAME: &str = "mj_remote_session";
 /// instance and `mj server` on the same host never replays one server's cookie
 /// against the other (browsers scope cookies by host, not port).
 const DESKTOP_SESSION_COOKIE_NAME: &str = "mj_desktop_session";
-const REMOTE_BUILTIN_NEW_COMMAND: &str = "new";
-const REMOTE_BUILTIN_CLEAR_COMMAND: &str = "clear";
-const REMOTE_BUILTIN_COMPACT_COMMAND: &str = "compact";
-const REMOTE_BUILTIN_LOAD_COMMAND: &str = "load";
-const REMOTE_BUILTIN_FORK_COMMAND: &str = "fork";
-const REMOTE_BUILTIN_EXPORT_COMMAND: &str = "export";
-const REMOTE_BUILTIN_MJCONFIG_COMMAND: &str = "mjconfig";
-const REMOTE_RETIRED_REVIEW_COMMAND: &str = "review";
-const REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND: &str = "discrete-review";
-const REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND: &str = "adversarial-review";
-const REMOTE_BUILTIN_SIDE_COMMAND: &str = "side";
-const REMOTE_BUILTIN_EXIT_SIDE_COMMAND: &str = "exit";
+// Builtin command names and descriptions live in `mj_core::builtin_commands`,
+// shared with the TUI. The aliases keep local dispatch readable.
+const REMOTE_BUILTIN_EXPORT_COMMAND: &str = builtin_commands::EXPORT_COMMAND;
+const REMOTE_BUILTIN_FORK_COMMAND: &str = builtin_commands::FORK_COMMAND;
+const REMOTE_BUILTIN_LOAD_COMMAND: &str = builtin_commands::LOAD_COMMAND;
+const REMOTE_BUILTIN_SIDE_COMMAND: &str = builtin_commands::SIDE_COMMAND;
+const REMOTE_BUILTIN_EXIT_SIDE_COMMAND: &str = builtin_commands::EXIT_COMMAND;
 /// Default lifetime of a viewer session cookie, in days. Long enough that an
 /// installed phone PWA stays signed in across app evictions for weeks, short
 /// enough to bound the exposure window if a device is lost. This is the default
@@ -467,66 +463,60 @@ fn command_record(
     }
 }
 
+fn web_shared_record(spec: &builtin_commands::SharedCommand) -> CommandRecord {
+    command_record(
+        spec.name,
+        spec.web_description,
+        spec.web_input_hint.map(str::to_string),
+        "mjolnir",
+    )
+}
+
+fn web_only_record(spec: &builtin_commands::SurfaceCommand) -> CommandRecord {
+    command_record(
+        spec.name,
+        spec.description,
+        spec.input_hint.map(str::to_string),
+        "mjolnir",
+    )
+}
+
+/// Look up a builtin the web viewer advertises by name.
+fn web_builtin(name: &str) -> CommandRecord {
+    builtin_commands::shared_command(name)
+        .map(web_shared_record)
+        .or_else(|| {
+            builtin_commands::WEB_ONLY_COMMANDS
+                .iter()
+                .find(|spec| spec.name == name)
+                .map(web_only_record)
+        })
+        .expect("name is a web builtin")
+}
+
 fn remote_builtin_command_records(include_fork: bool, include_load: bool) -> Vec<CommandRecord> {
-    let mut commands = vec![
-        command_record(
-            REMOTE_BUILTIN_NEW_COMMAND,
-            "start a new web session",
-            None,
-            "mjolnir",
-        ),
-        command_record(
-            REMOTE_BUILTIN_CLEAR_COMMAND,
-            "start a fresh session with the same agent",
-            None,
-            "mjolnir",
-        ),
-        command_record(
-            REMOTE_BUILTIN_COMPACT_COMMAND,
-            "compact the primary agent's session where supported",
-            None,
-            "mjolnir",
-        ),
-        command_record(
-            REMOTE_BUILTIN_EXPORT_COMMAND,
-            "download this transcript as markdown",
-            None,
-            "mjolnir",
-        ),
-        command_record(
-            REMOTE_BUILTIN_MJCONFIG_COMMAND,
-            "open the configuration editor",
-            None,
-            "mjolnir",
-        ),
-        command_record(
-            REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND,
-            "run the configured discrete review",
-            Some("recent|uncommitted|head [quick|extended]".to_string()),
-            "mjolnir",
-        ),
-        command_record(
-            REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND,
-            "alias for discrete-review",
-            Some("recent|uncommitted|head [quick|extended]".to_string()),
-            "mjolnir",
-        ),
-    ];
+    // Shared commands first, then web-only ones. `/side` is installed by
+    // `install_remote_side_mode_command`; the conditional fork/load pair
+    // stays at the end of the list.
+    let mut commands: Vec<CommandRecord> = builtin_commands::SHARED_COMMANDS
+        .iter()
+        .filter(|spec| {
+            spec.name != REMOTE_BUILTIN_SIDE_COMMAND
+                && spec.name != REMOTE_BUILTIN_FORK_COMMAND
+                && spec.name != REMOTE_BUILTIN_LOAD_COMMAND
+        })
+        .map(web_shared_record)
+        .chain(
+            builtin_commands::WEB_ONLY_COMMANDS
+                .iter()
+                .map(web_only_record),
+        )
+        .collect();
     if include_fork {
-        commands.push(command_record(
-            REMOTE_BUILTIN_FORK_COMMAND,
-            "fork the current session",
-            None,
-            "mjolnir",
-        ));
+        commands.push(web_builtin(REMOTE_BUILTIN_FORK_COMMAND));
     }
     if include_load {
-        commands.push(command_record(
-            REMOTE_BUILTIN_LOAD_COMMAND,
-            "load a previous session",
-            None,
-            "mjolnir",
-        ));
+        commands.push(web_builtin(REMOTE_BUILTIN_LOAD_COMMAND));
     }
     commands
 }
@@ -551,12 +541,7 @@ fn install_remote_side_mode_command(
             ),
         );
     } else if side_session_supported {
-        commands.push(command_record(
-            REMOTE_BUILTIN_SIDE_COMMAND,
-            "open an isolated ephemeral conversation",
-            Some("optional question".to_string()),
-            "mjolnir",
-        ));
+        commands.push(web_builtin(REMOTE_BUILTIN_SIDE_COMMAND));
     }
 }
 
@@ -580,32 +565,12 @@ fn remote_side_command_records(commands: &[AvailableCommand]) -> Vec<CommandReco
         ));
     }
     install_remote_side_mode_command(&mut records, true, true);
-    records.push(command_record(
-        REMOTE_BUILTIN_EXPORT_COMMAND,
-        "download this transcript as markdown",
-        None,
-        "mjolnir",
-    ));
+    records.push(web_builtin(REMOTE_BUILTIN_EXPORT_COMMAND));
     records
 }
 
 fn is_remote_reserved_command(name: &str) -> bool {
-    let normalized = name.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        REMOTE_BUILTIN_NEW_COMMAND
-            | REMOTE_BUILTIN_CLEAR_COMMAND
-            | REMOTE_BUILTIN_COMPACT_COMMAND
-            | REMOTE_BUILTIN_LOAD_COMMAND
-            | REMOTE_BUILTIN_FORK_COMMAND
-            | REMOTE_BUILTIN_EXPORT_COMMAND
-            | REMOTE_BUILTIN_MJCONFIG_COMMAND
-            | REMOTE_RETIRED_REVIEW_COMMAND
-            | REMOTE_BUILTIN_DISCRETE_REVIEW_COMMAND
-            | REMOTE_BUILTIN_ADVERSARIAL_REVIEW_COMMAND
-            | REMOTE_BUILTIN_SIDE_COMMAND
-            | REMOTE_BUILTIN_EXIT_SIDE_COMMAND
-    )
+    builtin_commands::is_web_builtin(&name.trim().to_ascii_lowercase())
 }
 
 fn available_command_records(
@@ -694,16 +659,19 @@ fn config_option_records(
         .iter()
         .zip(targets.iter())
         .filter_map(|(option, target)| {
-            if matches!(target, SessionConfigTarget::LegacyMode) {
+            // Legacy model updates are rejected by the runtime, so those
+            // targets are never projected. Legacy mode maps to
+            // `session/set_mode` and stays drivable: legacy thought-level
+            // agents expose `/effort` through it.
+            if matches!(target, SessionConfigTarget::LegacyModel) {
                 return None;
             }
+            // Mode stays out (rendered as the native-mode readout); model and
+            // thought-level options are included so the viewer's `/model` and
+            // `/effort` pickers can drive them, distinguished by `category`.
             if matches!(
                 option.category,
-                Some(
-                    agent_client_protocol::schema::v1::SessionConfigOptionCategory::Mode
-                        | agent_client_protocol::schema::v1::SessionConfigOptionCategory::Model
-                        | agent_client_protocol::schema::v1::SessionConfigOptionCategory::ThoughtLevel
-                )
+                Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Mode)
             ) {
                 return None;
             }
@@ -806,6 +774,7 @@ fn config_target_from_parts(
             config_id: SessionConfigId::from(id.to_string()),
         }),
         "legacy_model" => Some(SessionConfigTarget::LegacyModel),
+        "legacy_mode" => Some(SessionConfigTarget::LegacyMode),
         _ => None,
     }
 }
@@ -17893,8 +17862,25 @@ for (const [field, seat] of [
             .expect("state")
             .snapshot()
             .expect("snapshot");
-        assert_eq!(snapshot.session_config.len(), 1);
+        assert_eq!(snapshot.session_config.len(), 2);
+        assert_eq!(snapshot.session_config[0].target_kind, "config_option");
+        assert_eq!(snapshot.session_config[0].config_id.as_deref(), Some("model"));
         assert_eq!(snapshot.session_config[0].current_value, "gpt-5");
+        assert_eq!(snapshot.session_config[0].choices.len(), 1);
+        assert_eq!(snapshot.session_config[0].choices[0].value, "gpt-5");
+        assert_eq!(snapshot.session_config[0].choices[0].label, "GPT-5");
+        // The reasoning-effort selector is projected too so the viewer's
+        // `/effort` picker can drive it, and it carries everything a queued
+        // change needs to round-trip into a `SessionConfigTarget`.
+        assert_eq!(snapshot.session_config[1].target_kind, "config_option");
+        assert_eq!(
+            snapshot.session_config[1].config_id.as_deref(),
+            Some(acp::REASONING_EFFORT_CONFIG_ID)
+        );
+        assert_eq!(snapshot.session_config[1].category.as_deref(), Some("model"));
+        assert_eq!(snapshot.session_config[1].current_value, "xhigh");
+        assert_eq!(snapshot.session_config[1].choices.len(), 1);
+        assert_eq!(snapshot.session_config[1].choices[0].value, "xhigh");
         assert_eq!(
             snapshot
                 .status
@@ -18035,6 +18021,8 @@ for (const [field, seat] of [
                 "compact",
                 "export",
                 "mjconfig",
+                "model",
+                "effort",
                 "discrete-review",
                 "adversarial-review",
                 "fork",
@@ -18042,9 +18030,9 @@ for (const [field, seat] of [
             ]
         );
         assert_eq!(snapshot.available_commands[0].source, "mjolnir");
-        assert_eq!(snapshot.available_commands[5].source, "mjolnir");
+        assert_eq!(snapshot.available_commands[7].source, "mjolnir");
         assert_eq!(
-            snapshot.available_commands[5].input_hint.as_deref(),
+            snapshot.available_commands[7].input_hint.as_deref(),
             Some("recent|uncommitted|head [quick|extended]")
         );
     }
@@ -18099,6 +18087,8 @@ for (const [field, seat] of [
                 "compact",
                 "export",
                 "mjconfig",
+                "model",
+                "effort",
                 "discrete-review",
                 "adversarial-review",
                 "fork",
@@ -18129,6 +18119,8 @@ for (const [field, seat] of [
                 "compact",
                 "export",
                 "mjconfig",
+                "model",
+                "effort",
                 "discrete-review",
                 "adversarial-review",
                 "fork",
@@ -18741,7 +18733,7 @@ for (const [field, seat] of [
     }
 
     #[test]
-    fn remote_config_hides_harness_owned_model_and_reasoning_controls() {
+    fn remote_config_hides_legacy_model_but_projects_legacy_thought_level() {
         let options = vec![
             SessionConfigOption::select(
                 "model",
@@ -18762,18 +18754,31 @@ for (const [field, seat] of [
             SessionConfigTarget::LegacyModel,
             SessionConfigTarget::LegacyMode,
         ];
-        assert!(config_option_records(&options, &targets).is_empty());
+        let records = config_option_records(&options, &targets);
+        // The legacy model target cannot be applied by the runtime and stays
+        // hidden; the legacy thought-level (mode-backed) selector is what the
+        // `/effort` picker drives on legacy agents.
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].target_kind, "legacy_mode");
+        assert_eq!(records[0].config_id, None);
+        assert_eq!(records[0].category.as_deref(), Some("thought_level"));
+        assert_eq!(records[0].current_value, "high");
+        assert_eq!(records[0].choices.len(), 1);
+        assert_eq!(records[0].choices[0].value, "high");
     }
 
     #[test]
     fn config_target_parts_round_trip_and_reject_bad_input() {
-        let target = SessionConfigTarget::LegacyModel;
-        let (kind, id) = config_target_parts(&target);
-        assert_eq!(config_target_from_parts(&kind, id.as_deref()), Some(target));
+        for target in [
+            SessionConfigTarget::LegacyModel,
+            SessionConfigTarget::LegacyMode,
+        ] {
+            let (kind, id) = config_target_parts(&target);
+            assert_eq!(config_target_from_parts(&kind, id.as_deref()), Some(target));
+        }
         // A config_option target is meaningless without its id, and unknown
         // kinds are refused rather than guessed.
         assert!(config_target_from_parts("config_option", None).is_none());
-        assert!(config_target_from_parts("legacy_mode", None).is_none());
         assert!(config_target_from_parts("nonsense", Some("x")).is_none());
     }
 

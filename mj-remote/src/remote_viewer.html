@@ -1024,6 +1024,30 @@
         }
       }
 
+      /* /model and /effort pickers reuse the filesystem rows; the marker
+         column shows the session's current value, `.is-active` tracks the
+         keyboard cursor like the TUI picker. */
+      .config-pick-row {
+        cursor: pointer;
+
+        & .fs-row-icon {
+          visibility: hidden;
+        }
+
+        &.is-current .fs-row-icon {
+          visibility: visible;
+        }
+
+        &.is-current .fs-row-name {
+          color: var(--red-hot);
+        }
+
+        &:hover,
+        &.is-active {
+          background: var(--row-hover);
+        }
+      }
+
       /* ---- session list: full-bleed hairline rows with a status rail ---- */
 
       #session-lists {
@@ -3556,6 +3580,20 @@
       </div>
     </section>
 
+    <section id="config-picker-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="config-picker-title" hidden>
+      <div class="new-session-panel">
+        <header class="new-session-head">
+          <h2 id="config-picker-title">Session model</h2>
+          <button id="config-picker-close" class="new-session-close" type="button" aria-label="Close the session option picker">×</button>
+        </header>
+        <label class="fs-search">
+          <input id="config-picker-search" type="search" placeholder="Filter choices" autocomplete="off" spellcheck="false" aria-label="Filter choices" />
+        </label>
+        <div id="config-picker-list" class="fs-list" aria-label="Choices"></div>
+        <div id="config-picker-status" class="new-session-status" role="status"></div>
+      </div>
+    </section>
+
     <template id="tpl-session">
       <div class="session-item">
         <button type="button" class="session-open">
@@ -3645,6 +3683,12 @@
       const newSessionProgressEl = $("new-session-progress");
       const newSessionProgressTextEl = $("new-session-progress-text");
       const newSessionWorktreeEl = $("new-session-worktree");
+      const configPickerModalEl = $("config-picker-modal");
+      const configPickerTitleEl = $("config-picker-title");
+      const configPickerCloseEl = $("config-picker-close");
+      const configPickerSearchEl = $("config-picker-search");
+      const configPickerListEl = $("config-picker-list");
+      const configPickerStatusEl = $("config-picker-status");
       const loadSessionModalEl = $("load-session-modal");
       const loadSessionCloseEl = $("load-session-close");
       const loadSessionContextEl = $("load-session-context");
@@ -8704,6 +8748,128 @@
         URL.revokeObjectURL(url);
       }
 
+      /* ---- /model and /effort session pickers ---- */
+
+      let configPicker = null; // { sessionId, option, kind, active }
+
+      function configOptionControlsEffort(option) {
+        return option.category === "thought_level" || option.config_id === "reasoning_effort";
+      }
+
+      // Mirrors the TUI's option selection: the model option is the
+      // model-category record that is not the reasoning-effort selector.
+      function liveSessionConfigOption(session, kind) {
+        const options = sessionConfigOptions(session);
+        return (kind === "model"
+          ? options.find(
+              (option) => option.category === "model" && !configOptionControlsEffort(option),
+            )
+          : options.find(configOptionControlsEffort)) || null;
+      }
+
+      function openSessionConfigPicker(kind) {
+        const session = selectedSession();
+        const option = session ? liveSessionConfigOption(session, kind) : null;
+        if (!option || !(option.choices || []).length) {
+          const label = kind === "model" ? "model" : "reasoning-effort";
+          setQueueStatus(`The active agent does not expose a live ${label} selector.`, true);
+          return;
+        }
+        const current = (option.choices || []).findIndex(
+          (choice) => choice.value === option.current_value,
+        );
+        configPicker = {
+          sessionId: session.session_id,
+          option,
+          kind,
+          active: current >= 0 ? current : 0,
+        };
+        configPickerTitleEl.textContent = kind === "model" ? "Session model" : "Reasoning effort";
+        configPickerSearchEl.value = "";
+        configPickerStatusEl.textContent = "Applies to the active session only.";
+        configPickerModalEl.hidden = false;
+        renderConfigPickerChoices();
+        configPickerSearchEl.focus();
+      }
+
+      function closeConfigPicker() {
+        configPicker = null;
+        configPickerModalEl.hidden = true;
+      }
+
+      function configPickerChoices() {
+        if (!configPicker) {
+          return [];
+        }
+        const query = configPickerSearchEl.value.trim().toLowerCase();
+        return (configPicker.option.choices || []).filter(
+          (choice) =>
+            !query
+            || (choice.label || choice.value).toLowerCase().includes(query)
+            || (choice.description || "").toLowerCase().includes(query),
+        );
+      }
+
+      async function acceptConfigPickerChoice(choice) {
+        const picker = configPicker;
+        closeConfigPicker();
+        if (!picker || !choice || choice.value === picker.option.current_value) {
+          return;
+        }
+        // Report queued only once the POST succeeded; on failure
+        // submitConfigChange has already surfaced the error status.
+        if (await submitConfigChange(picker.sessionId, picker.option, choice.value)) {
+          setQueueStatus(
+            `${picker.kind === "model" ? "Model" : "Reasoning effort"} change queued for the active session.`,
+          );
+        }
+      }
+
+      function renderConfigPickerChoices() {
+        if (!configPicker) {
+          return;
+        }
+        const choices = configPickerChoices();
+        if (configPicker.active >= choices.length) {
+          configPicker.active = choices.length ? 0 : -1;
+        }
+        configPickerListEl.replaceChildren();
+        if (!choices.length) {
+          configPickerListEl.appendChild(emptyNote("No matching choices."));
+          return;
+        }
+        choices.forEach((choice, index) => {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "fs-row config-pick-row";
+          row.classList.toggle("is-current", choice.value === configPicker.option.current_value);
+          row.classList.toggle("is-active", index === configPicker.active);
+          const icon = document.createElement("span");
+          icon.className = "fs-row-icon";
+          icon.textContent = "●";
+          const text = document.createElement("span");
+          text.className = "fs-row-text";
+          const name = document.createElement("span");
+          name.className = "fs-row-name";
+          name.textContent = choice.label || choice.value;
+          text.appendChild(name);
+          if (choice.description) {
+            const desc = document.createElement("span");
+            desc.className = "fs-row-path";
+            desc.textContent = choice.description;
+            text.appendChild(desc);
+          }
+          row.append(icon, text);
+          row.addEventListener("click", () => {
+            void acceptConfigPickerChoice(choice);
+          });
+          configPickerListEl.appendChild(row);
+          if (index === configPicker.active) {
+            row.scrollIntoView({ block: "nearest" });
+          }
+        });
+      }
+
       function consumeLocalSlashCommand(session, text) {
         const trimmed = text.trim();
         if (trimmed === "/new") {
@@ -8720,6 +8886,11 @@
           void openLoadSessionPicker();
         } else if (trimmed === "/mjconfig") {
           void openMjConfig();
+        } else if (trimmed === "/model" || trimmed === "/effort") {
+          if (!session) {
+            return false;
+          }
+          openSessionConfigPicker(trimmed === "/model" ? "model" : "effort");
         } else if (trimmed === "/export") {
           if (!session) {
             return false;
@@ -9427,7 +9598,7 @@
       async function submitConfigChange(sessionId, option, value) {
         const key = configChangeKey(sessionId, option);
         if (sentConfigChanges.get(key)?.value === value) {
-          return;
+          return true;
         }
         sentConfigChanges.set(key, { value, sentAt: Date.now() });
         renderChat();
@@ -9447,12 +9618,16 @@
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
+          return true;
         } catch (error) {
           sentConfigChanges.delete(key);
+          // Repaint first: renderQueue resets the status line, so the error
+          // must land after it or it is wiped immediately.
+          renderChat();
           if (error.message !== "HTTP 401") {
             setQueueStatus(`Config change failed: ${error.message}`, true);
           }
-          renderChat();
+          return false;
         }
       }
 
@@ -10021,6 +10196,39 @@
           closeLoadSessionPicker();
         }
       });
+      configPickerCloseEl.addEventListener("click", closeConfigPicker);
+      configPickerModalEl.addEventListener("click", (event) => {
+        if (event.target === configPickerModalEl) {
+          closeConfigPicker();
+        }
+      });
+      configPickerSearchEl.addEventListener("input", () => {
+        if (!configPicker) {
+          return;
+        }
+        configPicker.active = 0;
+        renderConfigPickerChoices();
+      });
+      configPickerSearchEl.addEventListener("keydown", (event) => {
+        if (!configPicker) {
+          return;
+        }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          const choices = configPickerChoices();
+          if (!choices.length) {
+            return;
+          }
+          const delta = event.key === "ArrowDown" ? 1 : -1;
+          const from = configPicker.active >= 0 ? configPicker.active : 0;
+          configPicker.active = (from + delta + choices.length) % choices.length;
+          renderConfigPickerChoices();
+        } else if (event.key === "Enter") {
+          event.preventDefault();
+          const choices = configPickerChoices();
+          void acceptConfigPickerChoice(choices[configPicker.active >= 0 ? configPicker.active : 0]);
+        }
+      });
       window.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") {
           return;
@@ -10037,6 +10245,9 @@
         } else if (!settingsModalEl.hidden) {
           event.preventDefault();
           closeViewerSettings();
+        } else if (!configPickerModalEl.hidden) {
+          event.preventDefault();
+          closeConfigPicker();
         } else if (!loadSessionModalEl.hidden) {
           event.preventDefault();
           closeLoadSessionPicker();
