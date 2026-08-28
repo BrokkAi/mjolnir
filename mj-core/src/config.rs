@@ -1780,6 +1780,94 @@ pub fn load_saved_session_config(
     }
 }
 
+/// Saved session option values for one seat, together with the coordinates
+/// needed to read them again.
+///
+/// `/mjconfig` writes the shared config file from whichever process the user
+/// happens to be sitting in, so a snapshot taken once at launch goes stale as
+/// soon as another session saves. Every session lifecycle (first session,
+/// `/new`, resume, load) re-reads through [`SavedSessionConfig::reload`]
+/// instead of trusting the launch snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct SavedSessionConfig {
+    values: HashMap<String, String>,
+    origin: Option<SavedSessionConfigOrigin>,
+    /// Keys owned by an explicit seat policy. The reviewer and subagent
+    /// Permissions settings outrank any saved session default, so these are
+    /// dropped from every read rather than once at construction.
+    excluded: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SavedSessionConfigOrigin {
+    path: PathBuf,
+    source_id: String,
+    model_id: String,
+    seat: SessionConfigSeat,
+}
+
+impl SavedSessionConfig {
+    /// Read the saved values for a seat and remember how to re-read them.
+    pub fn load(path: &Path, source_id: &str, model_id: &str, seat: SessionConfigSeat) -> Self {
+        let mut saved = Self {
+            values: HashMap::new(),
+            origin: Some(SavedSessionConfigOrigin {
+                path: path.to_path_buf(),
+                source_id: source_id.to_string(),
+                model_id: model_id.to_string(),
+                seat,
+            }),
+            excluded: Vec::new(),
+        };
+        saved.reload();
+        saved
+    }
+
+    /// Fixed values that never re-read from disk. Used by runtimes with no
+    /// config file of their own (headless lanes, side conversations, tests).
+    pub fn frozen(values: HashMap<String, String>) -> Self {
+        Self {
+            values,
+            origin: None,
+            excluded: Vec::new(),
+        }
+    }
+
+    /// Drop `key` from this and every later read.
+    pub fn exclude(&mut self, key: String) {
+        self.values.remove(&key);
+        if !self.excluded.contains(&key) {
+            self.excluded.push(key);
+        }
+    }
+
+    /// Re-read from disk. Keeps the previous values when this seat has no
+    /// config file to read, so frozen callers are unaffected.
+    pub fn reload(&mut self) {
+        let Some(origin) = self.origin.as_ref() else {
+            return;
+        };
+        let mut values = load_saved_session_config(
+            &origin.path,
+            &origin.source_id,
+            &origin.model_id,
+            origin.seat,
+        );
+        for key in &self.excluded {
+            values.remove(key);
+        }
+        self.values = values;
+    }
+
+    pub fn values(&self) -> &HashMap<String, String> {
+        &self.values
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
 static SESSION_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn save_user_config_preserving_session_routes(path: &Path, config: &mut Config) -> Result<()> {
@@ -2894,6 +2982,56 @@ kimi = "disabled"
             loaded.session_config["codex-acp"].defaults["config:service_tier"],
             "priority"
         );
+    }
+
+    #[test]
+    fn saved_session_config_rereads_a_file_another_process_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).expect("seed config");
+        let mut saved = SavedSessionConfig::load(
+            &path,
+            "claude-acp",
+            "claude-opus-5",
+            SessionConfigSeat::Primary,
+        );
+        assert!(saved.is_empty());
+
+        let mut edited = Config::load(&path).expect("load config");
+        edited
+            .agent
+            .session_defaults
+            .entry("claude-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "auto".to_string());
+        edited.save(&path).expect("save config");
+
+        saved.reload();
+
+        assert_eq!(saved.values()["config:mode"], "auto");
+    }
+
+    #[test]
+    fn excluded_keys_stay_excluded_across_reloads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        let defaults = config
+            .subagents
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default();
+        defaults.insert("config:mode".to_string(), "read-only".to_string());
+        defaults.insert("config:service_tier".to_string(), "fast".to_string());
+        config.save(&path).expect("seed config");
+        let mut saved =
+            SavedSessionConfig::load(&path, "codex-acp", "model-a", SessionConfigSeat::Subagent);
+
+        saved.exclude("config:mode".to_string());
+        saved.reload();
+
+        assert!(!saved.values().contains_key("config:mode"));
+        assert_eq!(saved.values()["config:service_tier"], "fast");
     }
 
     #[test]

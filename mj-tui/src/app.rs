@@ -1477,6 +1477,10 @@ pub struct AppState {
     pub voice_auto_send: crate::config::VoiceAutoSend,
     /// Open `/mjconfig` overlay, if any.
     pub mjconfig_menu: Option<MjConfigMenu>,
+    /// Set when this session writes the shared config file, and cleared by the
+    /// config watcher. The watcher must not re-adopt this session's own save
+    /// as if another session had made it.
+    pub config_written_here: bool,
     pub acp_inventory: crate::roster::AcpInventory,
     /// The ACP session cwd used for workspace-scoped features.
     pub session_cwd: PathBuf,
@@ -2362,6 +2366,7 @@ impl AppState {
             thought_output: crate::config::ThoughtOutput::default(),
             voice_auto_send: crate::config::VoiceAutoSend::default(),
             mjconfig_menu: None,
+            config_written_here: false,
             acp_inventory: crate::roster::AcpInventory::default(),
             session_cwd: PathBuf::from("."),
             memory_store_path: crate::memory::default_path(),

@@ -1083,7 +1083,7 @@ fn spawn_subagent_runtime(
     let mut saved_session_config = role_config
         .as_ref()
         .map(|role| {
-            mj_core::config::load_saved_session_config(
+            mj_core::config::SavedSessionConfig::load(
                 &mj_core::config::default_config_path(),
                 &role.adapter_source_id,
                 &role.model_id,
@@ -1144,13 +1144,16 @@ fn spawn_subagent_runtime(
 /// Permissions owns the provider's mode option for delegated seats. Ignore a
 /// stale saved session default so it cannot overwrite the configured preset.
 fn discard_saved_permission_mode(
-    saved_session_config: &mut HashMap<String, String>,
+    saved_session_config: &mut mj_core::config::SavedSessionConfig,
     role_config: Option<&acp::RuntimeRoleConfig>,
 ) {
     let Some(permission) = role_config.and_then(|role| role.permission.as_ref()) else {
         return;
     };
-    saved_session_config.remove(&format!("config:{}", permission.config_id));
+    // Excluded rather than removed: the runtime re-reads the file at every
+    // session lifecycle, and the seat policy has to keep winning across those
+    // reads too.
+    saved_session_config.exclude(format!("config:{}", permission.config_id));
 }
 
 /// Appended to the MCP server instructions in non-interactive (headless)
@@ -4176,10 +4179,10 @@ mod tests {
 
     #[test]
     fn saved_permission_mode_cannot_replace_the_seat_policy() {
-        let mut saved = HashMap::from([
+        let mut saved = mj_core::config::SavedSessionConfig::frozen(HashMap::from([
             ("config:mode".to_string(), "read-only".to_string()),
             ("config:service_tier".to_string(), "fast".to_string()),
-        ]);
+        ]));
         let mut role = test_config().role_config.expect("role config");
         role.permission = Some(mj_core::config::RuntimePermissionConfig {
             config_id: "mode".to_string(),
@@ -4190,17 +4193,20 @@ mod tests {
 
         discard_saved_permission_mode(&mut saved, Some(&role));
 
-        assert!(!saved.contains_key("config:mode"));
-        assert_eq!(saved["config:service_tier"], "fast");
+        assert!(!saved.values().contains_key("config:mode"));
+        assert_eq!(saved.values()["config:service_tier"], "fast");
     }
 
     #[test]
     fn saved_mode_stays_available_without_a_seat_permission_policy() {
-        let mut saved = HashMap::from([("config:mode".to_string(), "read-only".to_string())]);
+        let mut saved = mj_core::config::SavedSessionConfig::frozen(HashMap::from([(
+            "config:mode".to_string(),
+            "read-only".to_string(),
+        )]));
 
         discard_saved_permission_mode(&mut saved, None);
 
-        assert_eq!(saved["config:mode"], "read-only");
+        assert_eq!(saved.values()["config:mode"], "read-only");
     }
 
     fn test_mcp_handler(controller: Controller) -> McpHandler {

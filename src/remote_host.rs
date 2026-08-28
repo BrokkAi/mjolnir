@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -477,14 +477,17 @@ fn start_server_agent_session(
     );
     let config_path = config::default_config_path();
     let app_config = config::Config::load(&config_path).unwrap_or_default();
-    let saved_session_config = roster.as_ref().map_or_else(HashMap::new, |resolved| {
-        config::load_saved_session_config(
-            &config_path,
-            &resolved.primary.launch.source_id,
-            &resolved.primary.model.model,
-            config::SessionConfigSeat::Primary,
-        )
-    });
+    let saved_session_config =
+        roster
+            .as_ref()
+            .map_or_else(config::SavedSessionConfig::default, |resolved| {
+                config::SavedSessionConfig::load(
+                    &config_path,
+                    &resolved.primary.launch.source_id,
+                    &resolved.primary.model.model,
+                    config::SessionConfigSeat::Primary,
+                )
+            });
     let project_label = mj_core::paths::project_label_from_cwd(&cwd);
     let worktree_label = mj_core::paths::worktree_name_from_cwd(&cwd);
     // With a roster the session has a real primary model; align the published

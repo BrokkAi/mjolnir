@@ -2743,7 +2743,7 @@ async fn run_session(
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: Some(roster.primary.launch.source_id.clone()),
         config_path: Some(config::default_config_path()),
-        saved_session_config: config::load_saved_session_config(
+        saved_session_config: config::SavedSessionConfig::load(
             &config::default_config_path(),
             &roster.primary.launch.source_id,
             &roster.primary.model.model,
