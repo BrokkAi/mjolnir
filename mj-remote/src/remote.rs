@@ -37,7 +37,7 @@ use crossterm::{
 };
 use hmac::{Hmac, Mac};
 use rcgen::generate_simple_self_signed;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
@@ -3631,6 +3631,14 @@ impl RemoteSessionTracker {
         self.connection.lock().ok().and_then(|guard| guard.clone())
     }
 
+    /// The shared session database, which claims read and write directly
+    /// rather than through a server. A missing file means no server has ever
+    /// run here, and nothing can have been queued for this session to claim.
+    fn claim_db_path(&self) -> Option<PathBuf> {
+        let db_path = self.remote_dir.join("sessions.sqlite3");
+        db_path.exists().then_some(db_path)
+    }
+
     async fn reload_connection(&self) -> Option<RemoteConnection> {
         let connection = match self.connection() {
             Some(existing) => {
@@ -3826,11 +3834,11 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.prompt_cancel_claim());
                 if let Some((session_id, prompt_started_at)) = cancel_claim {
-                    let Some(connection) = tracker.reload_connection().await else {
+                    let Some(db_path) = tracker.claim_db_path() else {
                         continue;
                     };
-                    match claim_remote_prompt_cancel(
-                        connection.clone(),
+                    match claim_local_prompt_cancel(
+                        db_path.clone(),
                         &session_id,
                         &prompt_started_at,
                     )
@@ -3846,7 +3854,7 @@ impl RemoteSessionTracker {
                                 .map(|guard| guard.can_steer_queued_prompt_on_cancel())
                                 .unwrap_or(false);
                             let command = if steer_queued_prompt {
-                                match claim_remote_prompt(connection.clone(), &session_id).await {
+                                match claim_local_prompt(db_path.clone(), &session_id).await {
                                     Ok(Some(prompt)) => UiCommand::SteerPrompt {
                                         text: prompt.text,
                                         images: prompt.images,
@@ -3857,7 +3865,6 @@ impl RemoteSessionTracker {
                                         debug!(
                                             "remote queued-prompt claim for Stop steering failed: {error:#}"
                                         );
-                                        tracker.reload_connection().await;
                                         UiCommand::CancelPrompt
                                     }
                                 }
@@ -3872,7 +3879,6 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote prompt-cancel poll failed: {error:#}");
-                            tracker.reload_connection().await;
                             continue;
                         }
                     }
@@ -3889,12 +3895,10 @@ impl RemoteSessionTracker {
                         .ok()
                         .and_then(|guard| guard.permission_claim_session());
                     if let Some(session_id) = claim_session {
-                        let Some(connection) = tracker.reload_connection().await else {
+                        let Some(db_path) = tracker.claim_db_path() else {
                             continue;
                         };
-                        match claim_remote_permission_decision(connection.clone(), &session_id)
-                            .await
-                        {
+                        match claim_local_permission_decision(db_path, &session_id).await {
                             Ok(Some(decision)) => {
                                 let _ = ui_event_tx.send(UiEvent::RemotePermissionDecision {
                                     request_id: decision.request_id,
@@ -3904,7 +3908,6 @@ impl RemoteSessionTracker {
                             Ok(None) => {}
                             Err(error) => {
                                 debug!("remote permission-decision poll failed: {error:#}");
-                                tracker.reload_connection().await;
                             }
                         }
                     }
@@ -3920,10 +3923,10 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
-                    let Some(connection) = tracker.reload_connection().await else {
+                    let Some(db_path) = tracker.claim_db_path() else {
                         continue;
                     };
-                    match claim_remote_config_change(connection.clone(), &session_id).await {
+                    match claim_local_config_change(db_path, &session_id).await {
                         Ok(Some(change)) => {
                             match config_target_from_parts(
                                 &change.target_kind,
@@ -3952,7 +3955,6 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote config-change poll failed: {error:#}");
-                            tracker.reload_connection().await;
                         }
                     }
                 }
@@ -3967,13 +3969,13 @@ impl RemoteSessionTracker {
                     continue;
                 };
 
-                let Some(connection) = tracker.reload_connection().await else {
+                let Some(db_path) = tracker.claim_db_path() else {
                     if let Ok(mut guard) = state.lock() {
                         guard.release_remote_prompt_slot();
                     }
                     continue;
                 };
-                let queued = claim_remote_prompt(connection.clone(), &session_id).await;
+                let queued = claim_local_prompt(db_path, &session_id).await;
                 match queued {
                     Ok(Some(prompt)) => {
                         let (can_fork, can_load, can_side, side_active, cwd) = state
@@ -9153,7 +9155,7 @@ fn finish_session_record(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin session finish transaction")?;
     if let Some(snapshot) = request.snapshot.as_ref() {
         if snapshot.session_id != session_id
@@ -9439,7 +9441,7 @@ fn record_recent_filesystem_directory_at(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let transaction = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin recent filesystem directory transaction")?;
     transaction
         .execute(
@@ -9650,7 +9652,7 @@ fn queue_prompt_record(
     let created_at = now_rfc3339();
     let images_json = serde_json::to_string(images).context("serialize queued-prompt images")?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin queued-prompt transaction")?;
     tx.execute(
         "insert into queued_prompts (session_id, text, images_json, created_at)
@@ -9700,7 +9702,7 @@ fn claim_queued_prompt_record(db_path: &Path, session_id: &str) -> Result<Option
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin queued-prompt transaction")?;
     let prompt = {
         let mut stmt = tx
@@ -9756,7 +9758,7 @@ fn queue_prompt_cancel_record(db_path: &Path, session_id: &str) -> Result<bool> 
     let created_at = now_rfc3339();
     let live_cutoff = connected_session_cutoff_rfc3339();
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin prompt-cancel transaction")?;
     tx.execute(
         "delete from prompt_cancels where session_id = ?1",
@@ -9792,7 +9794,7 @@ fn claim_prompt_cancel_record(
     let prompt_started_at =
         parse_rfc3339_datetime(prompt_started_at).context("parse prompt-start timestamp")?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin prompt-cancel claim transaction")?;
     let records = {
         let mut stmt = tx
@@ -9877,7 +9879,7 @@ fn claim_permission_decision_record(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin permission-decision transaction")?;
     let decision = {
         let mut stmt = tx
@@ -9967,7 +9969,7 @@ fn claim_config_change_record(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin config-change transaction")?;
     let change = {
         let mut stmt = tx
@@ -10114,94 +10116,66 @@ async fn send_finish(
     Ok(())
 }
 
-async fn claim_remote_prompt(
-    connection: RemoteConnection,
-    session_id: &str,
-) -> Result<Option<QueuedPrompt>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimQueuedPromptRequest {
-        session_id: session_id.to_string(),
-    };
-    send_to_live_server(&connection, "claim remote queued prompt", move |base_url| {
-        client
-            .post(format!("{base_url}/api/queued-prompts/claim"))
-            .bearer_auth(token.as_str())
-            .json(&request)
-    })
-    .await?
-    .json::<Option<QueuedPrompt>>()
-    .await
-    .context("decode claimed remote queued prompt")
+/// Claim helpers run the same database calls the server's claim handlers run,
+/// straight from the session process. Every one of those handlers was a single
+/// database call with no server-side state, so going direct removes a hop
+/// rather than changing behavior.
+async fn claim_local<T, F>(description: &'static str, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) => bail!("{description} task panicked: {error}"),
+    }
 }
 
-async fn claim_remote_prompt_cancel(
-    connection: RemoteConnection,
+async fn claim_local_prompt(db_path: PathBuf, session_id: &str) -> Result<Option<QueuedPrompt>> {
+    let session_id = session_id.to_string();
+    claim_local("claim queued prompt", move || {
+        claim_queued_prompt_record(&db_path, &session_id)
+    })
+    .await
+}
+
+async fn claim_local_prompt_cancel(
+    db_path: PathBuf,
     session_id: &str,
     prompt_started_at: &str,
 ) -> Result<Option<PromptCancelRequestRecord>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimPromptCancelRequest {
-        session_id: session_id.to_string(),
-        prompt_started_at: prompt_started_at.to_string(),
-    };
-    send_to_live_server(&connection, "claim remote prompt cancel", move |base_url| {
-        client
-            .post(format!("{base_url}/api/prompt-cancels/claim"))
-            .bearer_auth(token.as_str())
-            .json(&request)
+    debug_assert!(
+        !prompt_started_at.trim().is_empty(),
+        "prompt_started_at must not be empty"
+    );
+    let session_id = session_id.to_string();
+    let prompt_started_at = prompt_started_at.to_string();
+    claim_local("claim prompt cancel", move || {
+        claim_prompt_cancel_record(&db_path, &session_id, &prompt_started_at)
     })
-    .await?
-    .json::<Option<PromptCancelRequestRecord>>()
     .await
-    .context("decode claimed remote prompt cancel")
 }
 
-async fn claim_remote_permission_decision(
-    connection: RemoteConnection,
+async fn claim_local_permission_decision(
+    db_path: PathBuf,
     session_id: &str,
 ) -> Result<Option<PermissionDecisionRecord>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimPermissionDecisionRequest {
-        session_id: session_id.to_string(),
-    };
-    send_to_live_server(
-        &connection,
-        "claim remote permission decision",
-        move |base_url| {
-            client
-                .post(format!("{base_url}/api/permission-decisions/claim"))
-                .bearer_auth(token.as_str())
-                .json(&request)
-        },
-    )
-    .await?
-    .json::<Option<PermissionDecisionRecord>>()
+    let session_id = session_id.to_string();
+    claim_local("claim permission decision", move || {
+        claim_permission_decision_record(&db_path, &session_id)
+    })
     .await
-    .context("decode claimed remote permission decision")
 }
 
-async fn claim_remote_config_change(
-    connection: RemoteConnection,
+async fn claim_local_config_change(
+    db_path: PathBuf,
     session_id: &str,
 ) -> Result<Option<ConfigChangeRecord>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimConfigChangeRequest {
-        session_id: session_id.to_string(),
-    };
-    send_to_live_server(&connection, "claim remote config change", move |base_url| {
-        client
-            .post(format!("{base_url}/api/config-changes/claim"))
-            .bearer_auth(token.as_str())
-            .json(&request)
+    let session_id = session_id.to_string();
+    claim_local("claim config change", move || {
+        claim_config_change_record(&db_path, &session_id)
     })
-    .await?
-    .json::<Option<ConfigChangeRecord>>()
     .await
-    .context("decode claimed remote config change")
 }
 
 /// Stable machine-readable id for a permission option kind, used by the
@@ -16480,6 +16454,59 @@ for (const [field, seat] of [
             .map(|session| session.session_id.as_str())
             .collect();
         assert_eq!(connected_ids, ids);
+    }
+
+    /// Sessions claim straight from the database, so several processes now
+    /// contend for the same queue. A deferred transaction takes its read lock
+    /// first and fails to upgrade under contention, which the busy timeout
+    /// cannot wait out; claiming with an immediate transaction can.
+    #[test]
+    fn concurrent_claims_deliver_each_queued_prompt_exactly_once() {
+        const CLAIMERS: usize = 8;
+        const PROMPTS: usize = 40;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        for index in 0..PROMPTS {
+            queue_prompt_record(&db_path, "sess-1", &format!("prompt-{index}"), &[])
+                .expect("queue prompt");
+        }
+
+        let claimed = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..CLAIMERS)
+                .map(|_| {
+                    let db_path = db_path.clone();
+                    scope.spawn(move || {
+                        let mut mine = Vec::new();
+                        loop {
+                            match claim_queued_prompt_record(&db_path, "sess-1") {
+                                Ok(Some(prompt)) => mine.push(prompt.text),
+                                Ok(None) => break,
+                                Err(error) => panic!("claim failed under contention: {error:#}"),
+                            }
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("claimer thread"))
+                .collect::<Vec<_>>()
+        });
+
+        let unique: std::collections::HashSet<_> = claimed.iter().collect();
+        assert_eq!(
+            claimed.len(),
+            PROMPTS,
+            "every queued prompt should be claimed exactly once"
+        );
+        assert_eq!(unique.len(), PROMPTS, "no prompt should be claimed twice");
+        assert!(
+            load_queued_prompts(&db_path, "sess-1")
+                .expect("load remaining")
+                .is_empty()
+        );
     }
 
     #[test]
