@@ -4,7 +4,6 @@
 //! small event collector. It intentionally requires an already-selected agent in
 //! `~/.config/mj/config.toml`; the interactive picker remains a TUI concern.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -139,7 +138,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: Some(format!("roster:{}", primary.model.model)),
         config_path: Some(config_path),
-        saved_session_config: HashMap::new(),
+        saved_session_config: Default::default(),
         role_config: Some(acp::RuntimeRoleConfig {
             label: "primary".to_string(),
             model_id: primary.model.model.clone(),

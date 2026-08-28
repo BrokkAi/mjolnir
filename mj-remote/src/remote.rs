@@ -37,7 +37,7 @@ use crossterm::{
 };
 use hmac::{Hmac, Mac};
 use rcgen::generate_simple_self_signed;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
@@ -1766,6 +1766,9 @@ pub trait ServerSessionManager: Send + Sync {
     /// Re-resolve reviewer and subagent routes for active sessions whose
     /// primary route still matches their running ACP process.
     async fn reload_auxiliary_agents(&self);
+    /// Ask live sessions to re-read the saved config and adopt its session
+    /// values, so a save here reaches a primary that is already running.
+    async fn reapply_saved_session_config(&self);
     async fn refresh_for_config(
         &self,
         config_path: &Path,
@@ -3631,6 +3634,14 @@ impl RemoteSessionTracker {
         self.connection.lock().ok().and_then(|guard| guard.clone())
     }
 
+    /// The shared session database, which claims read and write directly
+    /// rather than through a server. A missing file means no server has ever
+    /// run here, and nothing can have been queued for this session to claim.
+    fn claim_db_path(&self) -> Option<PathBuf> {
+        let db_path = self.remote_dir.join("sessions.sqlite3");
+        db_path.exists().then_some(db_path)
+    }
+
     async fn reload_connection(&self) -> Option<RemoteConnection> {
         let connection = match self.connection() {
             Some(existing) => {
@@ -3826,11 +3837,11 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.prompt_cancel_claim());
                 if let Some((session_id, prompt_started_at)) = cancel_claim {
-                    let Some(connection) = tracker.reload_connection().await else {
+                    let Some(db_path) = tracker.claim_db_path() else {
                         continue;
                     };
-                    match claim_remote_prompt_cancel(
-                        connection.clone(),
+                    match claim_local_prompt_cancel(
+                        db_path.clone(),
                         &session_id,
                         &prompt_started_at,
                     )
@@ -3846,7 +3857,7 @@ impl RemoteSessionTracker {
                                 .map(|guard| guard.can_steer_queued_prompt_on_cancel())
                                 .unwrap_or(false);
                             let command = if steer_queued_prompt {
-                                match claim_remote_prompt(connection.clone(), &session_id).await {
+                                match claim_local_prompt(db_path.clone(), &session_id).await {
                                     Ok(Some(prompt)) => UiCommand::SteerPrompt {
                                         text: prompt.text,
                                         images: prompt.images,
@@ -3857,7 +3868,6 @@ impl RemoteSessionTracker {
                                         debug!(
                                             "remote queued-prompt claim for Stop steering failed: {error:#}"
                                         );
-                                        tracker.reload_connection().await;
                                         UiCommand::CancelPrompt
                                     }
                                 }
@@ -3872,7 +3882,6 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote prompt-cancel poll failed: {error:#}");
-                            tracker.reload_connection().await;
                             continue;
                         }
                     }
@@ -3889,12 +3898,10 @@ impl RemoteSessionTracker {
                         .ok()
                         .and_then(|guard| guard.permission_claim_session());
                     if let Some(session_id) = claim_session {
-                        let Some(connection) = tracker.reload_connection().await else {
+                        let Some(db_path) = tracker.claim_db_path() else {
                             continue;
                         };
-                        match claim_remote_permission_decision(connection.clone(), &session_id)
-                            .await
-                        {
+                        match claim_local_permission_decision(db_path, &session_id).await {
                             Ok(Some(decision)) => {
                                 let _ = ui_event_tx.send(UiEvent::RemotePermissionDecision {
                                     request_id: decision.request_id,
@@ -3904,7 +3911,6 @@ impl RemoteSessionTracker {
                             Ok(None) => {}
                             Err(error) => {
                                 debug!("remote permission-decision poll failed: {error:#}");
-                                tracker.reload_connection().await;
                             }
                         }
                     }
@@ -3920,10 +3926,10 @@ impl RemoteSessionTracker {
                     .ok()
                     .and_then(|guard| guard.config_claim_session());
                 if let Some(session_id) = config_session {
-                    let Some(connection) = tracker.reload_connection().await else {
+                    let Some(db_path) = tracker.claim_db_path() else {
                         continue;
                     };
-                    match claim_remote_config_change(connection.clone(), &session_id).await {
+                    match claim_local_config_change(db_path, &session_id).await {
                         Ok(Some(change)) => {
                             match config_target_from_parts(
                                 &change.target_kind,
@@ -3952,7 +3958,6 @@ impl RemoteSessionTracker {
                         Ok(None) => {}
                         Err(error) => {
                             debug!("remote config-change poll failed: {error:#}");
-                            tracker.reload_connection().await;
                         }
                     }
                 }
@@ -3967,13 +3972,13 @@ impl RemoteSessionTracker {
                     continue;
                 };
 
-                let Some(connection) = tracker.reload_connection().await else {
+                let Some(db_path) = tracker.claim_db_path() else {
                     if let Ok(mut guard) = state.lock() {
                         guard.release_remote_prompt_slot();
                     }
                     continue;
                 };
-                let queued = claim_remote_prompt(connection.clone(), &session_id).await;
+                let queued = claim_local_prompt(db_path, &session_id).await;
                 match queued {
                     Ok(Some(prompt)) => {
                         let (can_fork, can_load, can_side, side_active, cwd) = state
@@ -4326,9 +4331,18 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
     let _keep_awake = mj_core::keep_awake::KeepAwake::hold(cfg.keep_awake);
 
     let requested_hostname = normalize_requested_hostname(hostname.as_deref());
-    let tailscale_tls = should_detect_tailscale(tailscale_detect, requested_hostname.as_deref())
-        .then(|| detect_tailscale_tls(&remote_control_dir()))
-        .flatten();
+    // `Err` here means tailscale is present but its certificate could not be
+    // minted. The server still starts on loopback, so hold the reason and
+    // report it below rather than aborting a startup that can still serve
+    // local clients.
+    let (tailscale_tls, tailscale_error) =
+        match should_detect_tailscale(tailscale_detect, requested_hostname.as_deref())
+            .then(|| detect_tailscale_tls(&remote_control_dir()))
+            .transpose()
+        {
+            Ok(tls) => (tls.flatten(), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
     let listen = match &tailscale_tls {
         Some(ts) => tailscale_listen_config(&ts.tailscale.cert_domain, port),
         None => server_listen_config(requested_hostname.as_deref(), port)?,
@@ -4430,13 +4444,13 @@ pub async fn run_server_runtime(options: RuntimeServerOptions) -> Result<()> {
             "tls: detected tailscale; serving a trusted certificate for {} (auto-renews daily)",
             ts.tailscale.cert_domain
         );
+    } else if let Some(error) = &tailscale_error {
+        println!("tls: falling back to localhost, {error}");
     }
     if should_render_login_qr(&listen.viewer_host) {
         println!("{}", crate::render_qr(&viewer_url)?);
     } else {
-        println!(
-            "QR code hidden because localhost is only reachable from this machine; connect this machine to a tailnet or pass --hostname for a device-login QR."
-        );
+        println!("{}", qr_hidden_message(tailscale_error.is_some()));
     }
     println!("viewer code: {viewer_code}");
     if logout_all {
@@ -4840,6 +4854,18 @@ struct TailscaleTls {
     key_path: PathBuf,
 }
 
+/// Why the login QR is missing. Telling someone whose machine is already on a
+/// tailnet to "connect this machine to a tailnet" sends them to re-check
+/// something that is working; when the certificate is what failed, point at
+/// the error just printed instead.
+fn qr_hidden_message(tailscale_failed: bool) -> &'static str {
+    if tailscale_failed {
+        "QR code hidden because the server fell back to localhost; resolve the tailscale error above, or pass --hostname for a device-login QR."
+    } else {
+        "QR code hidden because localhost is only reachable from this machine; connect this machine to a tailnet or pass --hostname for a device-login QR."
+    }
+}
+
 /// Whether to probe this machine for a tailscale node. An explicit
 /// `--hostname` names the host the login QR must point at, so detection stays
 /// out of its way; `--no-tailscale-detect` turns detection off outright.
@@ -4848,18 +4874,36 @@ fn should_detect_tailscale(detect: bool, requested_hostname: Option<&str>) -> bo
 }
 
 /// Serve this machine's tailscale certificate when it has a usable tailnet
-/// node. Anything short of that — no tailscale, daemon down, HTTPS
-/// Certificates off, `tailscale cert` failing — falls back to the loopback
-/// default instead of failing the server start.
-fn detect_tailscale_tls(root: &Path) -> Option<TailscaleTls> {
-    match crate::Tailscale::discover().and_then(|tailscale| prepare_tailscale_tls(root, tailscale))
-    {
-        Ok(tls) => Some(tls),
-        Err(error) => {
-            debug!("no tailscale certificate for this server: {error:#}");
-            None
-        }
-    }
+/// node. Neither outcome short of that fails the server start — it falls back
+/// to the loopback default — but they are not equally silent.
+///
+/// `Ok(None)` is reserved for the single unremarkable case: this machine has
+/// no tailscale CLI, so there was never a tailnet to serve from and the
+/// fallback needs no explanation.
+///
+/// Every other failure is an `Err` the caller must surface, because each one
+/// means the user has tailscale and it is not doing what they expect: the
+/// daemon is stopped, the node is not logged in, the tailnet has HTTPS
+/// Certificates switched off, or minting the certificate was denied. Each
+/// carries its own remedy, and each otherwise leaves them staring at a hidden
+/// QR code with no reason for it.
+fn detect_tailscale_tls(root: &Path) -> Result<Option<TailscaleTls>> {
+    tailscale_tls_from_discovery(root, crate::Tailscale::discover()?)
+}
+
+/// Split from [`detect_tailscale_tls`] so tests can supply a discovery
+/// outcome directly. Locating the CLI on `PATH` is not the part that needs
+/// covering — deciding which outcomes stay quiet and which must be reported
+/// is, and that decision lives here.
+fn tailscale_tls_from_discovery(
+    root: &Path,
+    discovered: Option<crate::Tailscale>,
+) -> Result<Option<TailscaleTls>> {
+    let Some(tailscale) = discovered else {
+        debug!("no tailscale CLI on this machine; serving on localhost");
+        return Ok(None);
+    };
+    prepare_tailscale_tls(root, tailscale).map(Some)
 }
 
 fn prepare_tailscale_tls(root: &Path, tailscale: crate::Tailscale) -> Result<TailscaleTls> {
@@ -6516,6 +6560,11 @@ async fn mjconfig_apply(
         Ok(None) => {}
         Err(error) => warn!("saved configuration does not bind a roster yet: {error}"),
     }
+    // Rebinding the roster only rebuilds the delegated seats. A primary that is
+    // already running keeps its own ACP session, so the values saved just now —
+    // the permission mode above all — have to be pushed onto it explicitly, or
+    // it runs the old mode and reports it as active.
+    state.session_manager.reapply_saved_session_config().await;
     Ok(Json(mjconfig_snapshot_response(&state, Some(notice))))
 }
 
@@ -9114,7 +9163,7 @@ fn finish_session_record(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin session finish transaction")?;
     if let Some(snapshot) = request.snapshot.as_ref() {
         if snapshot.session_id != session_id
@@ -9400,7 +9449,7 @@ fn record_recent_filesystem_directory_at(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let transaction = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin recent filesystem directory transaction")?;
     transaction
         .execute(
@@ -9611,7 +9660,7 @@ fn queue_prompt_record(
     let created_at = now_rfc3339();
     let images_json = serde_json::to_string(images).context("serialize queued-prompt images")?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin queued-prompt transaction")?;
     tx.execute(
         "insert into queued_prompts (session_id, text, images_json, created_at)
@@ -9661,7 +9710,7 @@ fn claim_queued_prompt_record(db_path: &Path, session_id: &str) -> Result<Option
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin queued-prompt transaction")?;
     let prompt = {
         let mut stmt = tx
@@ -9717,7 +9766,7 @@ fn queue_prompt_cancel_record(db_path: &Path, session_id: &str) -> Result<bool> 
     let created_at = now_rfc3339();
     let live_cutoff = connected_session_cutoff_rfc3339();
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin prompt-cancel transaction")?;
     tx.execute(
         "delete from prompt_cancels where session_id = ?1",
@@ -9753,7 +9802,7 @@ fn claim_prompt_cancel_record(
     let prompt_started_at =
         parse_rfc3339_datetime(prompt_started_at).context("parse prompt-start timestamp")?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin prompt-cancel claim transaction")?;
     let records = {
         let mut stmt = tx
@@ -9838,7 +9887,7 @@ fn claim_permission_decision_record(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin permission-decision transaction")?;
     let decision = {
         let mut stmt = tx
@@ -9928,7 +9977,7 @@ fn claim_config_change_record(
     init_db(db_path)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin config-change transaction")?;
     let change = {
         let mut stmt = tx
@@ -10075,94 +10124,66 @@ async fn send_finish(
     Ok(())
 }
 
-async fn claim_remote_prompt(
-    connection: RemoteConnection,
-    session_id: &str,
-) -> Result<Option<QueuedPrompt>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimQueuedPromptRequest {
-        session_id: session_id.to_string(),
-    };
-    send_to_live_server(&connection, "claim remote queued prompt", move |base_url| {
-        client
-            .post(format!("{base_url}/api/queued-prompts/claim"))
-            .bearer_auth(token.as_str())
-            .json(&request)
-    })
-    .await?
-    .json::<Option<QueuedPrompt>>()
-    .await
-    .context("decode claimed remote queued prompt")
+/// Claim helpers run the same database calls the server's claim handlers run,
+/// straight from the session process. Every one of those handlers was a single
+/// database call with no server-side state, so going direct removes a hop
+/// rather than changing behavior.
+async fn claim_local<T, F>(description: &'static str, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) => bail!("{description} task panicked: {error}"),
+    }
 }
 
-async fn claim_remote_prompt_cancel(
-    connection: RemoteConnection,
+async fn claim_local_prompt(db_path: PathBuf, session_id: &str) -> Result<Option<QueuedPrompt>> {
+    let session_id = session_id.to_string();
+    claim_local("claim queued prompt", move || {
+        claim_queued_prompt_record(&db_path, &session_id)
+    })
+    .await
+}
+
+async fn claim_local_prompt_cancel(
+    db_path: PathBuf,
     session_id: &str,
     prompt_started_at: &str,
 ) -> Result<Option<PromptCancelRequestRecord>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimPromptCancelRequest {
-        session_id: session_id.to_string(),
-        prompt_started_at: prompt_started_at.to_string(),
-    };
-    send_to_live_server(&connection, "claim remote prompt cancel", move |base_url| {
-        client
-            .post(format!("{base_url}/api/prompt-cancels/claim"))
-            .bearer_auth(token.as_str())
-            .json(&request)
+    debug_assert!(
+        !prompt_started_at.trim().is_empty(),
+        "prompt_started_at must not be empty"
+    );
+    let session_id = session_id.to_string();
+    let prompt_started_at = prompt_started_at.to_string();
+    claim_local("claim prompt cancel", move || {
+        claim_prompt_cancel_record(&db_path, &session_id, &prompt_started_at)
     })
-    .await?
-    .json::<Option<PromptCancelRequestRecord>>()
     .await
-    .context("decode claimed remote prompt cancel")
 }
 
-async fn claim_remote_permission_decision(
-    connection: RemoteConnection,
+async fn claim_local_permission_decision(
+    db_path: PathBuf,
     session_id: &str,
 ) -> Result<Option<PermissionDecisionRecord>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimPermissionDecisionRequest {
-        session_id: session_id.to_string(),
-    };
-    send_to_live_server(
-        &connection,
-        "claim remote permission decision",
-        move |base_url| {
-            client
-                .post(format!("{base_url}/api/permission-decisions/claim"))
-                .bearer_auth(token.as_str())
-                .json(&request)
-        },
-    )
-    .await?
-    .json::<Option<PermissionDecisionRecord>>()
+    let session_id = session_id.to_string();
+    claim_local("claim permission decision", move || {
+        claim_permission_decision_record(&db_path, &session_id)
+    })
     .await
-    .context("decode claimed remote permission decision")
 }
 
-async fn claim_remote_config_change(
-    connection: RemoteConnection,
+async fn claim_local_config_change(
+    db_path: PathBuf,
     session_id: &str,
 ) -> Result<Option<ConfigChangeRecord>> {
-    let client = connection.client.clone();
-    let token = Arc::clone(&connection.token);
-    let request = ClaimConfigChangeRequest {
-        session_id: session_id.to_string(),
-    };
-    send_to_live_server(&connection, "claim remote config change", move |base_url| {
-        client
-            .post(format!("{base_url}/api/config-changes/claim"))
-            .bearer_auth(token.as_str())
-            .json(&request)
+    let session_id = session_id.to_string();
+    claim_local("claim config change", move || {
+        claim_config_change_record(&db_path, &session_id)
     })
-    .await?
-    .json::<Option<ConfigChangeRecord>>()
     .await
-    .context("decode claimed remote config change")
 }
 
 /// Stable machine-readable id for a permission option kind, used by the
@@ -10677,6 +10698,7 @@ mod tests {
     struct TestServerSessionManager {
         roster_refresh_requested: AtomicBool,
         auxiliary_reloads: AtomicU64,
+        session_config_reapplies: AtomicU64,
         roster_refresh_lock: tokio::sync::Mutex<()>,
         launches: Mutex<BTreeMap<u64, ServerSessionLaunchState>>,
         next_launch: AtomicU64,
@@ -10733,6 +10755,10 @@ mod tests {
         async fn shutdown_all(&self) {}
         async fn reload_auxiliary_agents(&self) {
             self.auxiliary_reloads.fetch_add(1, Ordering::Release);
+        }
+        async fn reapply_saved_session_config(&self) {
+            self.session_config_reapplies
+                .fetch_add(1, Ordering::Release);
         }
         async fn refresh_for_config(
             &self,
@@ -11509,6 +11535,12 @@ mod tests {
             manager.auxiliary_reloads.load(Ordering::Acquire),
             1,
             "a successful mjconfig rebind reloads active server sessions' auxiliary routes"
+        );
+        assert_eq!(
+            manager.session_config_reapplies.load(Ordering::Acquire),
+            1,
+            "a save must also reach the primary that is already running, or it \
+             keeps the old permission mode and reports it as active"
         );
     }
 
@@ -16443,6 +16475,59 @@ for (const [field, seat] of [
         assert_eq!(connected_ids, ids);
     }
 
+    /// Sessions claim straight from the database, so several processes now
+    /// contend for the same queue. A deferred transaction takes its read lock
+    /// first and fails to upgrade under contention, which the busy timeout
+    /// cannot wait out; claiming with an immediate transaction can.
+    #[test]
+    fn concurrent_claims_deliver_each_queued_prompt_exactly_once() {
+        const CLAIMERS: usize = 8;
+        const PROMPTS: usize = 40;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sessions.sqlite3");
+        for index in 0..PROMPTS {
+            queue_prompt_record(&db_path, "sess-1", &format!("prompt-{index}"), &[])
+                .expect("queue prompt");
+        }
+
+        let claimed = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..CLAIMERS)
+                .map(|_| {
+                    let db_path = db_path.clone();
+                    scope.spawn(move || {
+                        let mut mine = Vec::new();
+                        loop {
+                            match claim_queued_prompt_record(&db_path, "sess-1") {
+                                Ok(Some(prompt)) => mine.push(prompt.text),
+                                Ok(None) => break,
+                                Err(error) => panic!("claim failed under contention: {error:#}"),
+                            }
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("claimer thread"))
+                .collect::<Vec<_>>()
+        });
+
+        let unique: std::collections::HashSet<_> = claimed.iter().collect();
+        assert_eq!(
+            claimed.len(),
+            PROMPTS,
+            "every queued prompt should be claimed exactly once"
+        );
+        assert_eq!(unique.len(), PROMPTS, "no prompt should be claimed twice");
+        assert!(
+            load_queued_prompts(&db_path, "sess-1")
+                .expect("load remaining")
+                .is_empty()
+        );
+    }
+
     #[test]
     fn queued_prompts_round_trip_and_claim_fifo() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -19785,6 +19870,56 @@ for (const [field, seat] of [
     fn an_explicit_hostname_suppresses_detection() {
         assert!(!should_detect_tailscale(true, Some("example.com")));
         assert!(!should_detect_tailscale(false, Some("example.com")));
+    }
+
+    /// The failure this whole path exists for: discovery succeeds, the user is
+    /// told a certificate is coming, and minting then fails. That error has to
+    /// leave `detect_tailscale_tls` — returning `Ok(None)` here would hide the
+    /// reason behind a localhost fallback, which is the bug being fixed.
+    #[cfg(unix)]
+    #[test]
+    fn a_certificate_that_fails_to_mint_reports_why() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("tailscale");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' 'Access denied: cert access denied' >&2\nexit 1\n",
+        )
+        .expect("write fake tailscale");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("make executable");
+
+        let tailscale = crate::Tailscale::for_test(binary, "mybox.tail1234.ts.net");
+        let error =
+            tailscale_tls_from_discovery(&dir.path().join("remote-control"), Some(tailscale))
+                .expect_err("mint failure must surface");
+        let message = format!("{error:#}");
+        assert!(message.contains("--operator=$USER"), "{message}");
+        assert!(message.contains("mybox.tail1234.ts.net"), "{message}");
+    }
+
+    /// The one outcome that stays quiet, asserted against the same function
+    /// so the contrast with the mint failure above is exact.
+    #[test]
+    fn a_machine_with_no_tailscale_cli_falls_back_without_comment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let detected = tailscale_tls_from_discovery(&dir.path().join("remote-control"), None);
+        assert!(matches!(detected, Ok(None)), "{detected:?}");
+    }
+
+    /// Once the user has been told a certificate is coming, a minting failure
+    /// has to reach them — swallowing it leaves a hidden QR with no reason.
+    #[test]
+    fn qr_hidden_message_points_at_the_tailscale_error_when_minting_failed() {
+        assert!(qr_hidden_message(true).contains("tailscale error above"));
+        assert!(!qr_hidden_message(true).contains("connect this machine to a tailnet"));
+    }
+
+    #[test]
+    fn qr_hidden_message_suggests_a_tailnet_when_there_is_no_tailscale() {
+        assert!(qr_hidden_message(false).contains("connect this machine to a tailnet"));
     }
 
     #[test]

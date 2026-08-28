@@ -164,7 +164,7 @@ pub fn isolated_runtime_config(
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: None,
         config_path: None,
-        saved_session_config: std::collections::HashMap::new(),
+        saved_session_config: Default::default(),
         role_config: None,
         subagents: None,
         memory,

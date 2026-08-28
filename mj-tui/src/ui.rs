@@ -97,6 +97,10 @@ const TERMINAL_OUTPUT_MIN_HEIGHT: u16 = 3;
 /// line. Normal orchestration has at most delegation and review active.
 const WORKFLOW_PROGRESS_VISIBLE_ROWS: usize = 2;
 const CURRENT_BRANCH_PR_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a session checks whether another mj process saved `/mjconfig`.
+/// Config edits are rare and human-paced, so a stat every few seconds is both
+/// cheap and fast enough to feel immediate.
+const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(3);
 const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
     "The cursor position could not be read within a normal duration";
 const INLINE_SETUP_RETRY_DELAY: Duration = Duration::from_millis(75);
@@ -1683,6 +1687,9 @@ async fn ui_loop(
     stream_commit_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut current_pr_tick = tokio::time::interval(CURRENT_BRANCH_PR_POLL_INTERVAL);
     current_pr_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut config_watch_tick = tokio::time::interval(CONFIG_WATCH_INTERVAL);
+    config_watch_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut config_watch = ConfigWatch::new(state.config_path.clone());
 
     if mode == UiMode::InlineChat {
         sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
@@ -2001,6 +2008,16 @@ async fn ui_loop(
                     }
                 }
             }
+            _ = config_watch_tick.tick(),
+                if config_watch.should_poll(&state, main_state.is_some()) => {
+                if config_watch.poll(&mut state, cmd_tx) {
+                    state.record_status_message(
+                        StatusKind::Info,
+                        "settings changed in another mj session; applied here".to_string(),
+                    );
+                    pending_redraw.mark_interactive();
+                }
+            }
             _ = redraw_tick.tick() => {
                 if flush_input_paste_burst_if_due(&mut state, Instant::now(), false) {
                     pending_redraw.mark_interactive();
@@ -2014,6 +2031,15 @@ async fn ui_loop(
                     pending_redraw.mark_animation();
                 }
             }
+        }
+
+        // A save from this session already reconciled everything it needed to,
+        // so the watcher takes that write as read. Anything else — a
+        // cancelled menu, a failed save — leaves the watcher untouched, so a
+        // save another session made while the menu was open is still adopted on
+        // the next tick.
+        if let Some(written) = state.config_written_here.take() {
+            config_watch.accept_own_write(written);
         }
 
         // A freshly opened `/mjconfig` menu gets the cached version list, or
@@ -6218,14 +6244,7 @@ fn persist_mjconfig_selection(
 ) {
     let theme = config.theme;
     let style = config.spinner;
-    let review_changed = state.review_enabled != config.agent.discrete_review
-        || state.review_tier != config.agent.review_tier
-        || state.correction_threshold != config.agent.correction_threshold
-        || state.max_correction_rounds != config.agent.max_correction_rounds;
-    let feature_hints_enabled = config.feature_hints;
-    let keep_awake_enabled = config.keep_awake;
-    let thought_output = config.thought_output;
-    let voice_auto_send = config.voice_auto_send;
+    let review_changed = review_policy_changed(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
     // seat model; flip such seats to auto and tell the user, instead of
     // letting the next /new or restart fail to resolve.
@@ -6238,30 +6257,13 @@ fn persist_mjconfig_selection(
     if let Some(path) = state.config_path.clone() {
         match config::save_user_config_preserving_session_routes(&path, &mut config) {
             Ok(()) => {
-                state.configured_models = config.model_names();
-                state.acp_inventory =
-                    crate::roster::rediscover_inventory(&config, &state.acp_inventory);
-                state.review_enabled = config.agent.discrete_review;
-                state.review_tier = config.agent.review_tier;
-                state.correction_threshold = config.agent.correction_threshold;
-                state.max_correction_rounds = config.agent.max_correction_rounds;
-                state.feature_hints_enabled = feature_hints_enabled;
-                state.keep_awake.set_enabled(keep_awake_enabled);
-                state.set_thought_output(thought_output);
-                state.voice_auto_send = voice_auto_send;
-                if review_changed {
-                    let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
-                        enabled: config.agent.discrete_review,
-                        tier: config.agent.review_tier,
-                        correction_threshold: config.agent.correction_threshold,
-                        max_correction_rounds: config.agent.max_correction_rounds,
-                    });
-                }
+                // Tell the config watcher exactly what this session wrote; the
+                // state below already reflects it. `config` matches the file:
+                // the save merged the session routes it preserved back into it.
+                state.config_written_here = Some(config.clone());
+                adopt_live_config(state, cmd_tx, &config, live_session_updates, review_changed);
                 if auxiliary_agents_update_live {
                     let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
-                }
-                for (target, value) in live_session_updates {
-                    let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
                 }
                 if primary_team_switch_pending {
                     let selected = config
@@ -6312,6 +6314,177 @@ fn persist_mjconfig_selection(
     }
 }
 
+/// Whether the live review policy differs from `config`.
+fn review_policy_changed(state: &AppState, config: &config::Config) -> bool {
+    state.review_enabled != config.agent.discrete_review
+        || state.review_tier != config.agent.review_tier
+        || state.correction_threshold != config.agent.correction_threshold
+        || state.max_correction_rounds != config.agent.max_correction_rounds
+}
+
+/// Adopt a config that is now on disk into this running session: cached
+/// catalogs, appearance, review policy, and the live ACP session's option
+/// values.
+///
+/// Shared by the `/mjconfig` save path and the external-change watcher so a
+/// change saved in another mj process lands exactly like one saved here.
+/// `live_session_updates` is computed by the caller, before it mutates state.
+fn adopt_live_config(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    config: &config::Config,
+    live_session_updates: Vec<(SessionConfigTarget, SessionConfigValueId)>,
+    review_changed: bool,
+) {
+    state.configured_models = config.model_names();
+    state.acp_inventory = crate::roster::rediscover_inventory(config, &state.acp_inventory);
+    state.review_enabled = config.agent.discrete_review;
+    state.review_tier = config.agent.review_tier;
+    state.correction_threshold = config.agent.correction_threshold;
+    state.max_correction_rounds = config.agent.max_correction_rounds;
+    state.feature_hints_enabled = config.feature_hints;
+    state.keep_awake.set_enabled(config.keep_awake);
+    state.set_theme(config.theme);
+    state.set_spinner_style(config.spinner);
+    state.set_thought_output(config.thought_output);
+    state.voice_auto_send = config.voice_auto_send;
+    if review_changed {
+        let _ = cmd_tx.send(UiCommand::SetReviewPolicy {
+            enabled: config.agent.discrete_review,
+            tier: config.agent.review_tier,
+            correction_threshold: config.agent.correction_threshold,
+            max_correction_rounds: config.agent.max_correction_rounds,
+        });
+    }
+    for (target, value) in live_session_updates {
+        let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
+    }
+}
+
+/// Identity of the config file's current contents, cheap enough to poll.
+/// Modification time alone can miss a same-second rewrite, so length joins it.
+fn config_file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// Watches the shared config file for saves made by other mj sessions.
+///
+/// Holds everything the polling tick needs so the loop arm is a single call:
+/// the identity of the last content this session acted on, and the config that
+/// content held, which [`adopt_externally_changed_config`] diffs against.
+struct ConfigWatch {
+    path: Option<PathBuf>,
+    stamp: Option<(std::time::SystemTime, u64)>,
+    last_seen: Option<config::Config>,
+}
+
+impl ConfigWatch {
+    fn new(path: Option<PathBuf>) -> Self {
+        let stamp = path.as_deref().and_then(config_file_stamp);
+        let last_seen = path
+            .as_deref()
+            .and_then(|path| config::Config::load(path).ok());
+        Self {
+            path,
+            stamp,
+            last_seen,
+        }
+    }
+
+    /// Whether this tick should look at the file at all.
+    ///
+    /// Not while `/mjconfig` is open: the menu edits its own copy and writes it
+    /// on save, so adopting a concurrent change underneath it would be
+    /// overwritten a moment later. Not inside a side conversation either, whose
+    /// ephemeral session is not the one these settings describe. Neither case
+    /// advances the stamp, so a change made meanwhile is adopted once the
+    /// session returns to the main conversation with the menu closed.
+    fn should_poll(&self, state: &AppState, in_side_session: bool) -> bool {
+        self.path.is_some() && state.mjconfig_menu.is_none() && !in_side_session
+    }
+
+    /// Adopt a save made by another session, returning whether anything
+    /// changed here.
+    ///
+    /// A failed load leaves the stamp alone, so a file caught mid-write is
+    /// retried on the next tick rather than skipped forever.
+    fn poll(&mut self, state: &mut AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) -> bool {
+        let Some(path) = self.path.clone() else {
+            return false;
+        };
+        let Some(current) = config_file_stamp(&path) else {
+            return false;
+        };
+        if Some(current) == self.stamp {
+            return false;
+        }
+        let Ok(config) = config::Config::load(&path) else {
+            return false;
+        };
+        self.stamp = Some(current);
+        let adopted =
+            adopt_externally_changed_config(state, cmd_tx, self.last_seen.as_ref(), &config);
+        self.last_seen = Some(config);
+        adopted
+    }
+
+    /// Record the config this session just wrote, so its own save does not come
+    /// back through [`Self::poll`] as if another session had made it. A
+    /// cancelled menu deliberately does not call this, so a save another
+    /// session made while it was open is still picked up.
+    ///
+    /// The stamp is cleared rather than advanced to whatever the file now
+    /// holds: another session can land a save between this session's write and
+    /// this call, and stamping past it would mark that change seen without ever
+    /// applying it. Clearing costs one extra read on the next poll, which then
+    /// adopts only what differs from what was written here — nothing at all in
+    /// the common case.
+    fn accept_own_write(&mut self, written: config::Config) {
+        self.stamp = None;
+        self.last_seen = Some(written);
+    }
+}
+
+/// Reconcile this session with a `/mjconfig` save made in another mj process.
+///
+/// mj sessions are separate processes sharing one config file, so without this
+/// a change only reaches the session the user happened to save it from; every
+/// other session keeps running the old settings and reports them as active.
+///
+/// Only options whose configured value actually moved between `previous` and
+/// the file are pushed. The runtime also writes accepted live values back to
+/// the same file, so reconciling every disagreement here would let an
+/// unrelated write undo a deliberate in-session `/mode` change. Repairing
+/// drift stays the job of an explicit `/mjconfig` save.
+///
+/// Returns whether anything was adopted, for the status line.
+fn adopt_externally_changed_config(
+    state: &mut AppState,
+    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    previous: Option<&config::Config>,
+    config: &config::Config,
+) -> bool {
+    let live_session_updates = match previous {
+        Some(previous) => {
+            let before = primary_session_config_values(state, previous);
+            live_primary_session_config_updates(state, config)
+                .into_iter()
+                .filter(|(target, desired)| {
+                    !before
+                        .iter()
+                        .any(|(candidate, value)| candidate == target && value == desired)
+                })
+                .collect()
+        }
+        None => live_primary_session_config_updates(state, config),
+    };
+    let review_changed = review_policy_changed(state, config);
+    let adopted = review_changed || !live_session_updates.is_empty();
+    adopt_live_config(state, cmd_tx, config, live_session_updates, review_changed);
+    adopted
+}
+
 fn primary_route_stays_active(state: &AppState, config: &config::Config) -> bool {
     state.session_id.is_some() && primary_config_matches_active_route(state, config)
 }
@@ -6350,6 +6523,26 @@ fn primary_config_matches_active_route(state: &AppState, config: &config::Config
 /// resumed session, a save made while no session was up, an update the
 /// adapter rejected) permanently unrepairable from the panel.
 fn live_primary_session_config_updates(
+    state: &AppState,
+    config: &config::Config,
+) -> Vec<(SessionConfigTarget, SessionConfigValueId)> {
+    primary_session_config_values(state, config)
+        .into_iter()
+        .filter(|(target, desired)| {
+            state
+                .session_config_options
+                .iter()
+                .zip(state.session_config_targets.iter())
+                .find(|(_, candidate)| *candidate == target)
+                .and_then(|(option, _)| crate::app::config_option_current_value_id(option))
+                .is_some_and(|current| current != desired)
+        })
+        .collect()
+}
+
+/// The value `config` selects for each live session option, whether or not the
+/// session already carries it.
+fn primary_session_config_values(
     state: &AppState,
     config: &config::Config,
 ) -> Vec<(SessionConfigTarget, SessionConfigValueId)> {
@@ -6414,11 +6607,8 @@ fn live_primary_session_config_updates(
             } else {
                 SessionConfigValueId::from(saved_value()?)
             };
-            let current = crate::app::config_option_current_value_id(option)?;
-            if !crate::acp::session_config_option_contains_value(option, &desired) {
-                return None;
-            }
-            (current != &desired).then(|| (target.clone(), desired))
+            crate::acp::session_config_option_contains_value(option, &desired)
+                .then(|| (target.clone(), desired))
         })
         .collect()
 }
@@ -20867,6 +21057,406 @@ mod tests {
                 target: SessionConfigTarget::ConfigOption { config_id },
                 value,
             }) if config_id.to_string() == "service_tier" && value.to_string() == "priority"
+        ));
+    }
+
+    /// A session with a live primary whose `mode` option is on `default`,
+    /// pointed at `path` for its config.
+    fn watching_session(path: &Path, live_mode: impl Into<String>) -> AppState {
+        let mut state = AppState::new();
+        state.config_path = Some(path.to_path_buf());
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                live_mode.into(),
+                vec![
+                    SessionConfigSelectOption::new("default", "Default"),
+                    SessionConfigSelectOption::new("auto", "Auto"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "mode".into(),
+        }];
+        state
+    }
+
+    /// The handoff the ui loop performs after every iteration.
+    fn take_own_write(state: &mut AppState, watch: &mut ConfigWatch) {
+        if let Some(written) = state.config_written_here.take() {
+            watch.accept_own_write(written);
+        }
+    }
+
+    fn save_permission_mode(config: &mut config::Config, path: &Path, mode: &str) {
+        config
+            .agent
+            .session_defaults
+            .entry("claude-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), mode.to_string());
+        config.save(path).expect("save config");
+    }
+
+    /// The condition guarding the watcher's tick arm. A wrong answer here is
+    /// exactly the failure the polling body cannot catch: sync silently stops.
+    #[test]
+    fn the_config_watcher_polls_only_when_the_session_owns_the_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        config::Config::default().save(&path).expect("seed config");
+        let mut state = watching_session(&path, "default");
+        let watch = ConfigWatch::new(Some(path.clone()));
+
+        assert!(watch.should_poll(&state, false));
+        assert!(
+            !watch.should_poll(&state, true),
+            "a side conversation is not the session these settings describe"
+        );
+
+        state.open_mjconfig_menu();
+        assert!(
+            !watch.should_poll(&state, false),
+            "an open menu owns the config until it closes"
+        );
+
+        assert!(
+            !ConfigWatch::new(None).should_poll(&state, false),
+            "a session with no config file has nothing to watch"
+        );
+    }
+
+    /// End to end across the watcher: another session writes the permission
+    /// mode, this session polls, and the live ACP session is told exactly once.
+    #[test]
+    fn a_config_written_by_another_session_reaches_the_live_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.save(&path).expect("seed config");
+        let mut state = watching_session(&path, "default");
+        let mut watch = ConfigWatch::new(Some(path.clone()));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        assert!(
+            !watch.poll(&mut state, &cmd_tx),
+            "an unchanged file must not wake the session every tick"
+        );
+
+        save_permission_mode(&mut config, &path, "auto");
+
+        assert!(watch.poll(&mut state, &cmd_tx));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "mode" && value.to_string() == "auto"
+        ));
+        assert!(
+            !watch.poll(&mut state, &cmd_tx),
+            "the same write must not be adopted twice"
+        );
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    /// A cancelled `/mjconfig` wrote nothing, so a save another session made
+    /// while the menu was open is still waiting to be adopted.
+    #[test]
+    fn a_change_made_while_the_menu_was_open_is_adopted_after_it_closes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.save(&path).expect("seed config");
+        let mut state = watching_session(&path, "default");
+        let mut watch = ConfigWatch::new(Some(path.clone()));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        state.open_mjconfig_menu();
+        assert!(!watch.should_poll(&state, false));
+        // Another session saves while this one sits in the menu.
+        save_permission_mode(&mut config, &path, "auto");
+        state.mjconfig_menu_cancel();
+
+        // Nothing was written here, so the watcher was never told otherwise.
+        assert!(state.config_written_here.is_none());
+        assert!(watch.should_poll(&state, false));
+        assert!(watch.poll(&mut state, &cmd_tx));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption { value, .. })
+                if value.to_string() == "auto"
+        ));
+    }
+
+    /// The save path reconciles this session itself, so its own write must not
+    /// return through the watcher as another session's change.
+    #[test]
+    fn a_save_made_here_is_not_re_adopted_as_an_external_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.save(&path).expect("seed config");
+        let mut state = watching_session(&path, "auto");
+        let mut watch = ConfigWatch::new(Some(path.clone()));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        save_permission_mode(&mut config, &path, "auto");
+        state.config_written_here = Some(config.clone());
+        take_own_write(&mut state, &mut watch);
+
+        assert!(
+            !watch.poll(&mut state, &cmd_tx),
+            "this session already matches the file it just wrote"
+        );
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    /// Another session can land a save in the window between this session's
+    /// write and the watcher being told about it. Marking that write seen
+    /// without applying it would strand this session on the old mode, since no
+    /// later save re-sends a value the watcher already believes it has.
+    #[test]
+    fn a_save_racing_this_sessions_own_write_is_still_adopted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut ours = config::Config::default();
+        ours.save(&path).expect("seed config");
+        let mut state = watching_session(&path, "default");
+        let mut watch = ConfigWatch::new(Some(path.clone()));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        // This session saves an unrelated setting...
+        ours.feature_hints = !ours.feature_hints;
+        ours.save(&path).expect("save from this session");
+        state.config_written_here = Some(ours.clone());
+        // ...and another session sets the permission mode before this one gets
+        // to record its own write.
+        let mut theirs = ours.clone();
+        save_permission_mode(&mut theirs, &path, "auto");
+        take_own_write(&mut state, &mut watch);
+
+        assert!(
+            watch.poll(&mut state, &cmd_tx),
+            "the racing save must still reach this session"
+        );
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption { value, .. })
+                if value.to_string() == "auto"
+        ));
+    }
+
+    /// A file caught mid-write must be retried, not stamped past: skipping it
+    /// would strand this session on the old settings until the next save.
+    #[test]
+    fn a_config_caught_mid_write_is_retried_rather_than_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.save(&path).expect("seed config");
+        let mut state = watching_session(&path, "default");
+        let mut watch = ConfigWatch::new(Some(path.clone()));
+        let seeded_stamp = watch.stamp;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        std::fs::write(&path, "this is not = valid toml [").expect("write a torn config");
+
+        assert!(!watch.poll(&mut state, &cmd_tx));
+        assert_eq!(
+            watch.stamp, seeded_stamp,
+            "a failed load must not advance the stamp"
+        );
+
+        save_permission_mode(&mut config, &path, "auto");
+
+        assert!(
+            watch.poll(&mut state, &cmd_tx),
+            "the completed write must still be picked up"
+        );
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption { value, .. })
+                if value.to_string() == "auto"
+        ));
+    }
+
+    #[test]
+    fn a_config_saved_by_another_session_updates_this_live_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config
+            .agent
+            .session_defaults
+            .entry("claude-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "auto".to_string());
+        config.save(&path).expect("save the other session's config");
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "default",
+                vec![
+                    SessionConfigSelectOption::new("default", "Default"),
+                    SessionConfigSelectOption::new("auto", "Auto"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "mode".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        let adopted = adopt_externally_changed_config(
+            &mut state,
+            &cmd_tx,
+            Some(&config::Config::default()),
+            &config,
+        );
+
+        assert!(adopted, "the permission mode change must be reported");
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "mode" && value.to_string() == "auto"
+        ));
+    }
+
+    #[test]
+    fn an_unrelated_config_write_leaves_the_live_session_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config
+            .agent
+            .session_defaults
+            .entry("claude-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "auto".to_string());
+        config.save(&path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.review_enabled = config.agent.discrete_review;
+        state.review_tier = config.agent.review_tier;
+        state.correction_threshold = config.agent.correction_threshold;
+        state.max_correction_rounds = config.agent.max_correction_rounds;
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "auto",
+                vec![
+                    SessionConfigSelectOption::new("default", "Default"),
+                    SessionConfigSelectOption::new("auto", "Auto"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "mode".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        let adopted = adopt_externally_changed_config(&mut state, &cmd_tx, Some(&config), &config);
+
+        assert!(
+            !adopted,
+            "a session already matching the file changed nothing"
+        );
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    /// The runtime writes accepted live values back to the shared config, so
+    /// an unrelated save must not travel back as a revert of a `/mode` change
+    /// this session made deliberately.
+    #[test]
+    fn an_unrelated_save_does_not_revert_an_in_session_mode_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config
+            .agent
+            .session_defaults
+            .entry("claude-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "auto".to_string());
+        config.save(&path).expect("save config");
+        // Same session defaults, different unrelated setting.
+        let mut next = config.clone();
+        next.feature_hints = !config.feature_hints;
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.session_id = Some("session-1".to_string());
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.review_enabled = config.agent.discrete_review;
+        state.review_tier = config.agent.review_tier;
+        state.correction_threshold = config.agent.correction_threshold;
+        state.max_correction_rounds = config.agent.max_correction_rounds;
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "plan",
+                vec![
+                    SessionConfigSelectOption::new("plan", "Plan"),
+                    SessionConfigSelectOption::new("auto", "Auto"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        ];
+        state.session_config_targets = vec![SessionConfigTarget::ConfigOption {
+            config_id: "mode".into(),
+        }];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        let adopted = adopt_externally_changed_config(&mut state, &cmd_tx, Some(&config), &next);
+
+        assert!(!adopted);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "the live mode must survive a save that did not touch it"
+        );
+    }
+
+    #[test]
+    fn a_review_policy_saved_elsewhere_reaches_the_orchestrator() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = config::Config::default();
+        config.agent.discrete_review = !config.agent.discrete_review;
+        config.save(&path).expect("save config");
+        let mut state = AppState::new();
+        state.config_path = Some(path.clone());
+        state.review_enabled = !config.agent.discrete_review;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+
+        let adopted = adopt_externally_changed_config(
+            &mut state,
+            &cmd_tx,
+            Some(&config::Config::default()),
+            &config,
+        );
+
+        assert!(adopted);
+        assert_eq!(state.review_enabled, config.agent.discrete_review);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetReviewPolicy { enabled, .. }) if enabled == config.agent.discrete_review
         ));
     }
 

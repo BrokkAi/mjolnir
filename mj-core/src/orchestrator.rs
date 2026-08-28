@@ -2197,21 +2197,11 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                 correction_rounds,
                 max_correction_rounds,
             );
-            if correction_review_base.is_some() && correction_changed && !correction_rearm {
-                let error = format!(
-                    "Automatic verification did not run because the correction-round limit is {max_correction_rounds}; {correction_rounds} verification pass(es) had already run."
-                );
-                emit_workflow(
-                    &workflow,
-                    WorkflowEvent::new(
-                        WorkflowId::review(active.epoch),
-                        WorkflowTransition::CoverageChanged {
-                            coverage: WorkflowCoverage::Degraded,
-                            error: Some(error),
-                        },
-                    ),
-                );
-            }
+            // Spending the configured correction-round budget is the designed
+            // end of the turn, not degraded coverage: the last correction pass
+            // is already told no verification follows and to validate itself.
+            // Reporting it as an incomplete review made every corrected turn
+            // announce a failure that was never one.
             if correction_review_base.is_some()
                 && correction_changed
                 && max_correction_rounds > 0
@@ -2224,10 +2214,6 @@ pub fn spawn(mut runtime_events: mpsc::UnboundedReceiver<UiEvent>, mut config: C
                     max_correction_rounds,
                     "correction round budget exhausted; releasing the turn without another pass"
                 );
-                let _ = events_tx.send(UiEvent::Info(format!(
-                    "discrete review · incomplete verification: {}",
-                    workflow_coverage_error(&workflow, WorkflowId::review(active.epoch))
-                )));
             }
             let checkpoint_covers_workspace =
                 clean_review_checkpoint.as_ref().is_some_and(|checkpoint| {
@@ -5163,6 +5149,10 @@ mod tests {
 
         let recap = next_prompt(&mut command_rx).await;
         assert!(recap.contains("the original work completed"));
+        assert!(
+            !recap.contains("incomplete verification"),
+            "spending the configured round budget is expected; the recap must not call the review incomplete: {recap}"
+        );
         runtime_tx.send(completion()).expect("complete final recap");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -5177,15 +5167,16 @@ mod tests {
                 event,
                 UiEvent::Workflow(WorkflowEvent {
                     transition: WorkflowTransition::Terminal {
-                        outcome: WorkflowOutcome::Degraded,
-                        coverage: WorkflowCoverage::Degraded,
+                        outcome: WorkflowOutcome::Completed,
+                        coverage: WorkflowCoverage::Complete,
                     },
                     ..
                 })
             ) {
                 workflow_completed = true;
             }
-            if matches!(&event, UiEvent::Info(text) if text.contains("correction-round limit is 1; 1 verification pass(es) had already run"))
+            if matches!(&event, UiEvent::Info(text) if text.contains("incomplete verification"))
+                || matches!(&event, UiEvent::Warning(text) if text.contains("incomplete verification"))
             {
                 cap_announced = true;
             }
@@ -5203,7 +5194,10 @@ mod tests {
             "the capped turn must not dispatch a third correction"
         );
         assert!(workflow_completed, "the review workflow must terminate");
-        assert!(cap_announced, "hitting the cap must be visible to the user");
+        assert!(
+            !cap_announced,
+            "an exhausted round budget is expected policy, not a reportable degradation"
+        );
 
         drop(runtime_tx);
         running.task.await.expect("orchestrator task");

@@ -25,10 +25,15 @@ pub struct Tailscale {
 
 impl Tailscale {
     /// Locate the tailscale CLI and confirm the node can mint certificates.
-    pub fn discover() -> Result<Self> {
-        let binary = find_binary()
-            .ok_or_else(|| anyhow!("tailscale CLI not found in PATH or the macOS app bundle"))?;
-        Self::discover_with_binary(binary)
+    ///
+    /// `Ok(None)` — no CLI on this machine — is the only silent outcome, and
+    /// the ordinary state of a machine that does not use tailscale. Every
+    /// other failure means tailscale *is* installed and something the user
+    /// can act on is wrong with it: the daemon is stopped, the node is not
+    /// logged in, or the tailnet has HTTPS Certificates switched off. Those
+    /// carry the remedy in their message and must not be swallowed.
+    pub fn discover() -> Result<Option<Self>> {
+        find_binary().map(Self::discover_with_binary).transpose()
     }
 
     fn discover_with_binary(binary: PathBuf) -> Result<Self> {
@@ -39,7 +44,7 @@ impl Tailscale {
         if !output.status.success() {
             bail!(
                 "`tailscale status` failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                condense(&String::from_utf8_lossy(&output.stderr))
             );
         }
         let status: Status = serde_json::from_slice(&output.stdout)
@@ -66,13 +71,53 @@ impl Tailscale {
             .output()
             .with_context(|| format!("run `{} cert`", self.binary.display()))?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
                 "`tailscale cert {}` failed: {}",
                 self.cert_domain,
-                String::from_utf8_lossy(&output.stderr).trim()
+                operator_hint(&stderr).map_or_else(|| condense(&stderr), str::to_string)
             );
         }
         Ok(())
+    }
+}
+
+/// Fold a CLI's stderr onto one line. Tailscale writes blank-line-separated
+/// advice, and these errors are rendered as a single line, so the newlines
+/// would otherwise break the surrounding message apart. Empty stderr still
+/// has to say something — `failed: ` with nothing after it reads as a bug.
+fn condense(stderr: &str) -> String {
+    let condensed = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if condensed.is_empty() {
+        "no output".to_string()
+    } else {
+        condensed
+    }
+}
+
+/// `tailscale cert` refuses non-root callers unless the user is the daemon's
+/// operator, which is the default on the snap and systemd packages and so by
+/// far the most common reason minting fails. Tailscale's own stderr says this,
+/// but leads with a `sudo …` re-run of our exact argv (temporary cert paths
+/// and all); the operator setting is the part worth surfacing.
+fn operator_hint(stderr: &str) -> Option<&'static str> {
+    stderr.contains("cert access denied").then_some(
+        "this user is not the tailscaled operator; run `sudo tailscale set --operator=$USER` \
+         once, then restart the server",
+    )
+}
+
+// Gated on unix as well as test: the only caller drives a shell script, so on
+// Windows this would be dead code and CI builds clippy with `-D warnings`.
+#[cfg(all(test, unix))]
+impl Tailscale {
+    /// Build a handle around a stand-in CLI so callers in other modules can
+    /// exercise certificate minting without a real tailnet.
+    pub(crate) fn for_test(binary: PathBuf, cert_domain: &str) -> Self {
+        Self {
+            binary,
+            cert_domain: cert_domain.to_string(),
+        }
     }
 }
 
@@ -280,6 +325,23 @@ exit 9
         assert_eq!(tailscale.cert_domain, "node.tail1234.ts.net");
     }
 
+    /// A machine with no tailscale CLI is not a fault to report, so it is the
+    /// one outcome that stays quiet.
+    #[test]
+    fn discover_is_silent_when_no_cli_is_installed() {
+        assert!(find_binary_in_path(OsStr::new("")).is_none());
+    }
+
+    /// Contrast with the above: tailscale is installed but unusable, and the
+    /// message names the fix, so this must reach the caller as an error.
+    #[test]
+    fn an_installed_but_unusable_tailscale_is_an_error_not_silence() {
+        let stopped = status("Stopped", Some(vec!["mybox.tail1234.ts.net"]));
+        assert!(cert_domain(&stopped).is_err());
+        let no_https = status("Running", Some(vec![]));
+        assert!(cert_domain(&no_https).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn discover_reports_status_command_failure() {
@@ -371,6 +433,61 @@ exit 5
             message.contains("certificate permission denied"),
             "{message}"
         );
+    }
+
+    /// The snap and systemd packages run tailscaled as root, so an ordinary
+    /// user's `tailscale cert` is denied until they are made operator. That is
+    /// the common failure, and the message has to name the one-line fix.
+    #[cfg(unix)]
+    #[test]
+    fn mint_cert_explains_the_operator_permission_failure() {
+        let (_dir, binary) = fake_tailscale(
+            r#"#!/bin/sh
+printf '%s\n' 'Access denied: cert access denied' >&2
+printf '\n' >&2
+printf '%s\n' "Use 'sudo tailscale --socket /var/run/tailscale.sock cert ...'." >&2
+printf '%s\n' "To not require root, use 'sudo tailscale set --operator=\$USER' once." >&2
+exit 1
+"#,
+        );
+        let output = tempfile::tempdir().expect("output tempdir");
+        let tailscale = Tailscale {
+            binary,
+            cert_domain: "node.tail1234.ts.net".to_string(),
+        };
+
+        let error = retry_text_file_busy(|| {
+            tailscale.mint_cert(
+                &output.path().join("node.crt"),
+                &output.path().join("node.key"),
+            )
+        })
+        .expect_err("access denied");
+        let message = error.to_string();
+        assert!(message.contains("--operator=$USER"), "{message}");
+        assert!(!message.contains('\n'), "must stay on one line: {message}");
+        // The sudo re-run of our own argv is noise next to the real fix.
+        assert!(!message.contains("--socket"), "{message}");
+    }
+
+    #[test]
+    fn condense_folds_multi_line_advice_onto_one_line() {
+        assert_eq!(
+            condense("first line\n\n  second line \n"),
+            "first line second line"
+        );
+    }
+
+    /// A command can fail with nothing on stderr; `failed: ` with an empty
+    /// tail reads as a bug in us rather than a report about tailscale.
+    #[test]
+    fn condense_names_the_absence_of_output() {
+        assert_eq!(condense("   \n "), "no output");
+    }
+
+    #[test]
+    fn operator_hint_ignores_unrelated_failures() {
+        assert!(operator_hint("no such host").is_none());
     }
 
     #[cfg(windows)]

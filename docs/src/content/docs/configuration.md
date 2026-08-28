@@ -108,6 +108,17 @@ changes made during a turn apply after it finishes. Team and ACP routing changes
 still apply to a new session. A `max_parallel` above 16 is a configuration
 error, not a silently clamped value.
 
+Every mj session shares one config file, so a `/mjconfig` save reaches sessions
+already running elsewhere. Other terminal sessions notice the save within a few
+seconds and adopt the settings a live session can take — session options such as
+the permission mode, the review policy, and appearance — while routing changes
+still wait for a new session. Only options the save actually changed are pushed,
+so a `/mode` chosen inside another session survives. Each session lifecycle
+(first session, `/new`, resume, load) re-reads the file, so a session started
+after the save honors it whether or not it was running at the time. Saving from
+the `mj remote` web panel reaches the sessions that host is already running, so
+a permission mode set there applies without waiting for a new session.
+
 Onboarding, the **Team** tab in `/mjconfig`, and **Shift+Tab** during a session
 all offer the same four configurations:
 

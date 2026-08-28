@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-agents"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -524,14 +524,14 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-anvil"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "brokk-mj-core",
 ]
 
 [[package]]
 name = "brokk-mj-app"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "anyhow",
  "brokk-mj-core",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-remote"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "anyhow",
  "bzip2 0.6.1",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "1.14.2"
+version = "1.15.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",

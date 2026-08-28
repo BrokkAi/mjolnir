@@ -482,6 +482,13 @@ pub enum UiCommand {
     /// the active primary ACP session. The command is accepted only when the
     /// resolved primary still matches that session.
     ReloadAuxiliaryAgents,
+    /// Re-read the shared config file and push its saved session values onto
+    /// the live session, as a `/mjconfig` save made anywhere would.
+    ///
+    /// The runtime owns this reconciliation because it is the only party that
+    /// holds both the saved values and the session's advertised options; a
+    /// frontend that cannot see the live options can still ask for it.
+    ReapplySavedSessionConfig,
     /// Run one Mjolnir-owned discrete review while the primary is idle.
     RunReview { request: ReviewRequest },
     /// Cancel only the active discrete review. The coordinator consumes this

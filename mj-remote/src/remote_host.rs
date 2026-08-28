@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -429,6 +429,20 @@ impl RootServerSessionManager {
     }
 
     async fn reload_auxiliary_agents(&self) {
+        self.broadcast(|| UiCommand::ReloadAuxiliaryAgents);
+    }
+
+    /// Ask every live session to re-read the shared config and adopt its saved
+    /// session values, the way a `/mjconfig` save reaches a terminal session.
+    /// Without this a web save only reached seats that get rebuilt, leaving the
+    /// running primary on its old permission mode.
+    async fn reapply_saved_session_config(&self) {
+        self.broadcast(|| UiCommand::ReapplySavedSessionConfig);
+    }
+
+    /// `UiCommand` carries responders and is not `Clone`, so each live session
+    /// gets a freshly built command.
+    fn broadcast(&self, command: impl Fn() -> UiCommand) {
         let commands = self
             .sessions
             .lock()
@@ -441,7 +455,7 @@ impl RootServerSessionManager {
             })
             .unwrap_or_default();
         for command_tx in commands {
-            let _ = command_tx.send(UiCommand::ReloadAuxiliaryAgents);
+            let _ = command_tx.send(command());
         }
     }
 }
@@ -479,14 +493,17 @@ fn start_server_agent_session(
     );
     let config_path = config::default_config_path();
     let app_config = config::Config::load(&config_path).unwrap_or_default();
-    let saved_session_config = roster.as_ref().map_or_else(HashMap::new, |resolved| {
-        config::load_saved_session_config(
-            &config_path,
-            &resolved.primary.launch.source_id,
-            &resolved.primary.model.model,
-            config::SessionConfigSeat::Primary,
-        )
-    });
+    let saved_session_config =
+        roster
+            .as_ref()
+            .map_or_else(config::SavedSessionConfig::default, |resolved| {
+                config::SavedSessionConfig::load(
+                    &config_path,
+                    &resolved.primary.launch.source_id,
+                    &resolved.primary.model.model,
+                    config::SessionConfigSeat::Primary,
+                )
+            });
     let project_label = mj_core::paths::project_label_from_cwd(&cwd);
     let worktree_label = mj_core::paths::worktree_name_from_cwd(&cwd);
     // With a roster the session has a real primary model; align the published
@@ -821,7 +838,8 @@ fn start_server_agent_session(
                     }
                     let (command, force_main) = match command {
                         UiCommand::Main(command) => (*command, true),
-                        command @ UiCommand::ReloadAuxiliaryAgents => (command, true),
+                        command @ (UiCommand::ReloadAuxiliaryAgents
+                        | UiCommand::ReapplySavedSessionConfig) => (command, true),
                         command => (command, false),
                     };
                     if !force_main && side_runtime.is_some() {
@@ -1135,6 +1153,9 @@ impl remote::ServerSessionManager for RootServerSessionManager {
     }
     async fn reload_auxiliary_agents(&self) {
         RootServerSessionManager::reload_auxiliary_agents(self).await
+    }
+    async fn reapply_saved_session_config(&self) {
+        RootServerSessionManager::reapply_saved_session_config(self).await
     }
     async fn refresh_for_config(
         &self,
