@@ -1766,6 +1766,9 @@ pub trait ServerSessionManager: Send + Sync {
     /// Re-resolve reviewer and subagent routes for active sessions whose
     /// primary route still matches their running ACP process.
     async fn reload_auxiliary_agents(&self);
+    /// Ask live sessions to re-read the saved config and adopt its session
+    /// values, so a save here reaches a primary that is already running.
+    async fn reapply_saved_session_config(&self);
     async fn refresh_for_config(
         &self,
         config_path: &Path,
@@ -6555,6 +6558,11 @@ async fn mjconfig_apply(
         Ok(None) => {}
         Err(error) => warn!("saved configuration does not bind a roster yet: {error}"),
     }
+    // Rebinding the roster only rebuilds the delegated seats. A primary that is
+    // already running keeps its own ACP session, so the values saved just now —
+    // the permission mode above all — have to be pushed onto it explicitly, or
+    // it runs the old mode and reports it as active.
+    state.session_manager.reapply_saved_session_config().await;
     Ok(Json(mjconfig_snapshot_response(&state, Some(notice))))
 }
 
@@ -10716,6 +10724,7 @@ mod tests {
     struct TestServerSessionManager {
         roster_refresh_requested: AtomicBool,
         auxiliary_reloads: AtomicU64,
+        session_config_reapplies: AtomicU64,
         roster_refresh_lock: tokio::sync::Mutex<()>,
         launches: Mutex<BTreeMap<u64, ServerSessionLaunchState>>,
         next_launch: AtomicU64,
@@ -10772,6 +10781,10 @@ mod tests {
         async fn shutdown_all(&self) {}
         async fn reload_auxiliary_agents(&self) {
             self.auxiliary_reloads.fetch_add(1, Ordering::Release);
+        }
+        async fn reapply_saved_session_config(&self) {
+            self.session_config_reapplies
+                .fetch_add(1, Ordering::Release);
         }
         async fn refresh_for_config(
             &self,
@@ -11548,6 +11561,12 @@ mod tests {
             manager.auxiliary_reloads.load(Ordering::Acquire),
             1,
             "a successful mjconfig rebind reloads active server sessions' auxiliary routes"
+        );
+        assert_eq!(
+            manager.session_config_reapplies.load(Ordering::Acquire),
+            1,
+            "a save must also reach the primary that is already running, or it \
+             keeps the old permission mode and reports it as active"
         );
     }
 

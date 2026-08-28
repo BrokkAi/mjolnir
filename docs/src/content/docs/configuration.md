@@ -115,8 +115,9 @@ the permission mode, the review policy, and appearance — while routing changes
 still wait for a new session. Only options the save actually changed are pushed,
 so a `/mode` chosen inside another session survives. Each session lifecycle
 (first session, `/new`, resume, load) re-reads the file, so a session started
-after the save honors it whether or not it was running at the time. `mj remote`
-hosts pick up saved values at the next session lifecycle rather than live.
+after the save honors it whether or not it was running at the time. Saving from
+the `mj remote` web panel reaches the sessions that host is already running, so
+a permission mode set there applies without waiting for a new session.
 
 Onboarding, the **Team** tab in `/mjconfig`, and **Shift+Tab** during a session
 all offer the same four configurations:

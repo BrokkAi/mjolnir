@@ -2724,8 +2724,23 @@ async fn drive_session(
         VecDeque::new();
     let mut deferred_config_updates: VecDeque<(SessionConfigTarget, SessionConfigValueId)> =
         VecDeque::new();
+    // A `/mjconfig` save that arrives while another operation owns `ui_rx`.
+    // Collapsed to a flag rather than queued: the reconciliation re-reads the
+    // file, so two requests and one request do the same work.
+    let mut deferred_reapply = false;
 
     loop {
+        if std::mem::take(&mut deferred_reapply) {
+            reapply_saved_session_config(
+                &conn,
+                &session_id,
+                &mut session_config,
+                &mut saved_session_config,
+                &hidden_config_ids,
+                ui_tx,
+            )
+            .await;
+        }
         let cmd = match deferred_config_updates.pop_front() {
             Some((target, value)) => UiCommand::SetSessionConfigOption { target, value },
             None => match deferred_prompts.pop_front() {
@@ -2794,6 +2809,7 @@ async fn drive_session(
                     session_has_history,
                     &mut deferred_prompts,
                     &mut deferred_config_updates,
+                    &mut deferred_reapply,
                     PromptSteeringConfig {
                         supported: steering_supported,
                         side_prompt_policy,
@@ -2805,6 +2821,17 @@ async fn drive_session(
                     break;
                 }
                 next_turn_diff_id = next_turn_diff_id.saturating_add(1);
+            }
+            UiCommand::ReapplySavedSessionConfig => {
+                reapply_saved_session_config(
+                    &conn,
+                    &session_id,
+                    &mut session_config,
+                    &mut saved_session_config,
+                    &hidden_config_ids,
+                    ui_tx,
+                )
+                .await;
             }
             UiCommand::SetSessionConfigOption { target, value } => {
                 if !drive_config_update(
@@ -2818,6 +2845,7 @@ async fn drive_session(
                     ui_rx,
                     &mut deferred_prompts,
                     &mut deferred_config_updates,
+                    &mut deferred_reapply,
                     config_path.as_deref(),
                     agent_source_id.as_deref(),
                     role_config.as_ref().map(|role| role.model_id.as_str()),
@@ -2849,6 +2877,7 @@ async fn drive_session(
                     ui_tx,
                     ui_rx,
                     &mut deferred_prompts,
+                    &mut deferred_reapply,
                 )
                 .await?
                 {
@@ -3358,6 +3387,7 @@ async fn drive_fork_session(
     ui_tx: &mpsc::UnboundedSender<UiEvent>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
+    deferred_reapply: &mut bool,
 ) -> Result<bool> {
     let source_session_id = session_id.clone();
     let fork = fork_session(
@@ -3433,6 +3463,9 @@ async fn drive_fork_session(
                         let _ = ui_tx.send(UiEvent::Warning(
                             "session fork already in flight".to_string(),
                         ));
+                    }
+                    Some(UiCommand::ReapplySavedSessionConfig) => {
+                        *deferred_reapply = true;
                     }
                     Some(UiCommand::ForkSession) => {
                         let _ = ui_tx.send(UiEvent::Warning(
@@ -5284,6 +5317,42 @@ fn warn_runtime_permission_failure(
     warnings.push(text);
 }
 
+/// Re-read the shared config file and push its saved values onto the live
+/// session, then re-publish the session's options.
+///
+/// This is what a `/mjconfig` save asks of a session that is already running.
+/// The runtime performs it because it is the only party holding both the saved
+/// values and the options the agent advertises: a frontend that never sees the
+/// live options (the remote server projects a filtered view) can still ask for
+/// the reconciliation and get it.
+async fn reapply_saved_session_config(
+    conn: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    session_config: &mut SessionConfigCache,
+    saved_session_config: &mut crate::config::SavedSessionConfig,
+    hidden_config_ids: &[String],
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) {
+    saved_session_config.reload();
+    if !saved_session_config.is_empty() {
+        apply_saved_session_config(
+            conn,
+            session_id,
+            session_config,
+            saved_session_config.values(),
+            ui_tx,
+        )
+        .await;
+    }
+    // Published even when nothing moved: the request exists because a frontend
+    // could not tell, and a stale "active" reading is half the bug.
+    let _ = ui_tx.send(UiEvent::SessionConfigOptions {
+        options: session_config.options.clone(),
+        targets: session_config.targets.clone(),
+        hidden_config_ids: hidden_config_ids.to_vec(),
+    });
+}
+
 async fn apply_saved_session_config(
     conn: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -5618,6 +5687,7 @@ async fn drive_config_update(
     ui_rx: &mut mpsc::UnboundedReceiver<UiCommand>,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
     deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
+    deferred_reapply: &mut bool,
     config_path: Option<&Path>,
     agent_source_id: Option<&str>,
     model_id: Option<&str>,
@@ -5710,6 +5780,9 @@ async fn drive_config_update(
                         let _ = ui_tx.send(UiEvent::Info(
                             "session config update queued".to_string(),
                         ));
+                    }
+                    Some(UiCommand::ReapplySavedSessionConfig) => {
+                        *deferred_reapply = true;
                     }
                     Some(UiCommand::ForkSession) => {
                         let _ = ui_tx.send(UiEvent::Warning(
@@ -6066,6 +6139,7 @@ async fn drive_prompt_turn(
     side_source_has_history: bool,
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
     deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
+    deferred_reapply: &mut bool,
     steering: PromptSteeringConfig,
 ) -> Result<bool> {
     let turn_diff_tracker =
@@ -6236,6 +6310,9 @@ async fn drive_prompt_turn(
                             "session config update queued until the current turn completes"
                                 .to_string(),
                         ));
+                    }
+                    Some(UiCommand::ReapplySavedSessionConfig) => {
+                        *deferred_reapply = true;
                     }
                     Some(UiCommand::ForkSession) => {
                         let _ = ui_tx.send(UiEvent::Warning(
@@ -12770,6 +12847,50 @@ mod tests {
             .expect("request a new session");
 
         wait_for_recorded_update(&updates, ("mode", "auto"), "new-session").await;
+
+        shutdown_lifecycle_rig(cmd_tx, client_task, agent_task).await;
+    }
+
+    /// A `/mjconfig` save made where the live session's options are not visible
+    /// — the remote web panel — asks the runtime to reconcile instead. The
+    /// session must adopt the file as it stands now, not as it stood at launch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reapply_pushes_config_saved_after_the_session_started() {
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let config_path = config_dir.path().join("config.toml");
+        crate::config::Config::default()
+            .save(&config_path)
+            .expect("seed config");
+        let saved = crate::config::SavedSessionConfig::load(
+            &config_path,
+            "codex-acp",
+            "model-a",
+            crate::config::SessionConfigSeat::Primary,
+        );
+        let SavedConfigLifecycleRig {
+            agent_task,
+            client_task,
+            cmd_tx,
+            mut ui_rx,
+            updates,
+        } = saved_config_lifecycle_rig(saved, None, Some(config_path.clone()));
+        wait_for_session_started(&mut ui_rx, "test-session").await;
+
+        // A save from another surface, after this session was configured.
+        let mut edited = crate::config::Config::load(&config_path).expect("load config");
+        edited
+            .agent
+            .session_defaults
+            .entry("codex-acp".to_string())
+            .or_default()
+            .insert("config:mode".to_string(), "auto".to_string());
+        edited.save(&config_path).expect("save config");
+
+        cmd_tx
+            .send(UiCommand::ReapplySavedSessionConfig)
+            .expect("request a reconciliation");
+
+        wait_for_recorded_update(&updates, ("mode", "auto"), "reapply").await;
 
         shutdown_lifecycle_rig(cmd_tx, client_task, agent_task).await;
     }

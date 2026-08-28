@@ -427,6 +427,20 @@ impl RootServerSessionManager {
     }
 
     async fn reload_auxiliary_agents(&self) {
+        self.broadcast(|| UiCommand::ReloadAuxiliaryAgents);
+    }
+
+    /// Ask every live session to re-read the shared config and adopt its saved
+    /// session values, the way a `/mjconfig` save reaches a terminal session.
+    /// Without this a web save only reached seats that get rebuilt, leaving the
+    /// running primary on its old permission mode.
+    async fn reapply_saved_session_config(&self) {
+        self.broadcast(|| UiCommand::ReapplySavedSessionConfig);
+    }
+
+    /// `UiCommand` carries responders and is not `Clone`, so each live session
+    /// gets a freshly built command.
+    fn broadcast(&self, command: impl Fn() -> UiCommand) {
         let commands = self
             .sessions
             .lock()
@@ -439,7 +453,7 @@ impl RootServerSessionManager {
             })
             .unwrap_or_default();
         for command_tx in commands {
-            let _ = command_tx.send(UiCommand::ReloadAuxiliaryAgents);
+            let _ = command_tx.send(command());
         }
     }
 }
@@ -820,7 +834,8 @@ fn start_server_agent_session(
                     }
                     let (command, force_main) = match command {
                         UiCommand::Main(command) => (*command, true),
-                        command @ UiCommand::ReloadAuxiliaryAgents => (command, true),
+                        command @ (UiCommand::ReloadAuxiliaryAgents
+                        | UiCommand::ReapplySavedSessionConfig) => (command, true),
                         command => (command, false),
                     };
                     if !force_main && side_runtime.is_some() {
@@ -1131,6 +1146,9 @@ impl remote::ServerSessionManager for RootServerSessionManager {
     }
     async fn reload_auxiliary_agents(&self) {
         RootServerSessionManager::reload_auxiliary_agents(self).await
+    }
+    async fn reapply_saved_session_config(&self) {
+        RootServerSessionManager::reapply_saved_session_config(self).await
     }
     async fn refresh_for_config(
         &self,
