@@ -137,7 +137,6 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         fs_max_text_bytes: cfg.fs_max_text_bytes,
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: Some(format!("roster:{}", primary.model.model)),
-        config_path: Some(config_path),
         saved_session_config: Default::default(),
         role_config: Some(acp::RuntimeRoleConfig {
             label: "primary".to_string(),

@@ -86,6 +86,35 @@ pub fn subagent_failover_roles(roster: &Roster) -> Vec<ResolvedAgent> {
     failover_roles(initial, &available, false, &roster.subagent_acp_priority)
 }
 
+/// Re-derive an `auto` subagent seat against `roster.primary`, mirroring
+/// [`rebind_auto_review_for_primary`]. Explicit subagent pins are untouched.
+pub fn rebind_auto_subagents_for_primary(roster: &mut Roster, config: &Config) {
+    if config.subagents.model != "auto" {
+        return;
+    }
+    let available = source_candidates(&roster.available, config.subagents.acp_source.as_deref());
+    let rows = roster
+        .choices
+        .iter()
+        .filter(|choice| choice.ranked)
+        .map(|choice| Row {
+            model: choice.model.clone(),
+            reasoning_effort: None,
+            pass_at_1: choice.pass_at_1,
+            mean_cost_usd: choice.mean_cost_usd,
+        })
+        .collect::<Vec<_>>();
+    roster.subagent_default = choose_secondary_auto(
+        &roster.primary,
+        &rows,
+        &available,
+        &config.subagents.acp_priority,
+    );
+    if let Some(subagent_default) = roster.subagent_default.as_mut() {
+        subagent_default.reasoning_effort = config.subagents.reasoning_effort.clone();
+    }
+}
+
 pub fn rebind_auto_review_for_primary(roster: &mut Roster, config: &Config) {
     if !config.agent.needs_review_route() {
         roster.review_supervisor = None;
@@ -1839,6 +1868,91 @@ mod tests {
         let review = roster.review_supervisor.expect("review rebound");
         assert_eq!(review.model.model, "gpt-5-6-sol");
         assert_eq!(review.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn auto_subagents_rebind_after_primary_is_pinned() {
+        let mut config = Config::default();
+        config.subagents.reasoning_effort = Some("medium".to_string());
+        let gpt = role("gpt-5-6-sol", 0.70);
+        let claude = role("claude-fable-5", 0.64);
+        let mut roster = Roster {
+            primary: gpt.clone(),
+            review_supervisor: None,
+            subagent_default: Some(claude.clone()),
+            available: vec![gpt, claude.clone()],
+            choices: vec![
+                ModelChoice {
+                    model: "gpt-5-6-sol".to_string(),
+                    pass_at_1: 0.70,
+                    mean_cost_usd: 1.0,
+                    available: true,
+                    disabled_reason: None,
+                    adapter: Some("codex-acp".to_string()),
+                    ranked: true,
+                },
+                ModelChoice {
+                    model: "claude-fable-5".to_string(),
+                    pass_at_1: 0.64,
+                    mean_cost_usd: 1.0,
+                    available: true,
+                    disabled_reason: None,
+                    adapter: Some("claude-acp".to_string()),
+                    ranked: true,
+                },
+                ModelChoice {
+                    model: "claude-sonnet-5".to_string(),
+                    pass_at_1: 0.60,
+                    mean_cost_usd: 7.0,
+                    available: false,
+                    disabled_reason: None,
+                    adapter: None,
+                    ranked: true,
+                },
+            ],
+            warnings: Vec::new(),
+            inventory: AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
+        };
+
+        roster.primary = claude;
+        rebind_auto_subagents_for_primary(&mut roster, &config);
+
+        let subagent = roster.subagent_default.expect("subagent rebound");
+        assert_eq!(subagent.model.model, "gpt-5-6-sol");
+        assert_eq!(subagent.reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn explicit_subagents_are_not_rebound_after_primary_is_pinned() {
+        let mut config = Config::default();
+        config.subagents.model = "claude-fable-5".to_string();
+        let gpt = role("gpt-5-6-sol", 0.70);
+        let claude = role("claude-fable-5", 0.64);
+        let mut roster = Roster {
+            primary: gpt.clone(),
+            review_supervisor: None,
+            subagent_default: Some(claude.clone()),
+            available: vec![gpt, claude.clone()],
+            choices: Vec::new(),
+            warnings: Vec::new(),
+            inventory: AcpInventory::default(),
+            subagent_acp_priority: Vec::new(),
+            subagent_acp_source: None,
+        };
+
+        roster.primary = claude;
+        rebind_auto_subagents_for_primary(&mut roster, &config);
+
+        assert_eq!(
+            roster
+                .subagent_default
+                .expect("explicit subagent kept")
+                .model
+                .model,
+            "claude-fable-5"
+        );
     }
 
     #[test]

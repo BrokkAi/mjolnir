@@ -2048,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_panel_saves_seat_option_without_overwriting_live_route_cache() {
+    fn reviewer_panel_saves_seat_option() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -2069,15 +2069,6 @@ mod tests {
                 SessionConfigSelectOption::new("priority", "Priority"),
             ],
         )];
-        editor
-            .config
-            .session_config
-            .entry(server_id.clone())
-            .or_default()
-            .models
-            .entry("model-a".to_string())
-            .or_default()
-            .insert("config:service_tier".to_string(), "default".to_string());
         editor.config.review.acp_source = Some(server_id.clone());
         editor.tab = SettingsTab::Reviewer;
         editor.selected = 2;
@@ -2096,10 +2087,6 @@ mod tests {
         assert_eq!(
             editor.config.review.session_defaults[&server_id]["config:service_tier"],
             "priority"
-        );
-        assert!(
-            editor.config.session_config[&server_id].models["model-a"]
-                .contains_key("config:service_tier")
         );
     }
 

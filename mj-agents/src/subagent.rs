@@ -1086,7 +1086,6 @@ fn spawn_subagent_runtime(
             mj_core::config::SavedSessionConfig::load(
                 &mj_core::config::default_config_path(),
                 &role.adapter_source_id,
-                &role.model_id,
                 match config.usage_seat {
                     Seat::Primary => mj_core::config::SessionConfigSeat::Primary,
                     Seat::Subagent => mj_core::config::SessionConfigSeat::Subagent,
@@ -1114,7 +1113,6 @@ fn spawn_subagent_runtime(
         fs_max_text_bytes: context.fs_max_text_bytes,
         access_mode: context.access_mode,
         agent_source_id,
-        config_path: Some(mj_core::config::default_config_path()),
         saved_session_config,
         role_config,
         subagents: None,

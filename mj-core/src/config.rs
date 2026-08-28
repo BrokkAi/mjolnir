@@ -41,7 +41,6 @@ const V5_CONFIG_VERSION: u32 = 5;
 const V6_CONFIG_VERSION: u32 = 6;
 
 /// Saved ACP session defaults are scoped to the seat that will consume them.
-/// Live accepted values remain in the top-level `session_config` cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionConfigSeat {
     Primary,
@@ -271,11 +270,10 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AcpSessionConfig {
     /// Defaults chosen in `/mjconfig` for future sessions on this server.
+    /// Live in-session changes are deliberately never written back here:
+    /// they apply to that session alone.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub defaults: BTreeMap<String, String>,
-    /// Values accepted by live sessions, keyed by configured model identity.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub models: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Config {
@@ -1679,7 +1677,6 @@ pub fn default_config_path() -> PathBuf {
 pub fn load_saved_session_config(
     path: &Path,
     source_id: &str,
-    model_id: &str,
     seat: SessionConfigSeat,
 ) -> HashMap<String, String> {
     match Config::load(path) {
@@ -1687,9 +1684,6 @@ pub fn load_saved_session_config(
             let mut values = HashMap::new();
             if let Some(saved) = config.session_config.get(source_id) {
                 values.extend(saved.defaults.clone());
-                if let Some(route) = saved.models.get(model_id) {
-                    values.extend(route.clone());
-                }
             }
             let scoped = match seat {
                 SessionConfigSeat::Primary => config.agent.session_defaults.get(source_id),
@@ -1734,19 +1728,17 @@ pub struct SavedSessionConfig {
 struct SavedSessionConfigOrigin {
     path: PathBuf,
     source_id: String,
-    model_id: String,
     seat: SessionConfigSeat,
 }
 
 impl SavedSessionConfig {
     /// Read the saved values for a seat and remember how to re-read them.
-    pub fn load(path: &Path, source_id: &str, model_id: &str, seat: SessionConfigSeat) -> Self {
+    pub fn load(path: &Path, source_id: &str, seat: SessionConfigSeat) -> Self {
         let mut saved = Self {
             values: HashMap::new(),
             origin: Some(SavedSessionConfigOrigin {
                 path: path.to_path_buf(),
                 source_id: source_id.to_string(),
-                model_id: model_id.to_string(),
                 seat,
             }),
             excluded: Vec::new(),
@@ -1779,12 +1771,8 @@ impl SavedSessionConfig {
         let Some(origin) = self.origin.as_ref() else {
             return;
         };
-        let mut values = load_saved_session_config(
-            &origin.path,
-            &origin.source_id,
-            &origin.model_id,
-            origin.seat,
-        );
+        let mut values =
+            load_saved_session_config(&origin.path, &origin.source_id, origin.seat);
         for key in &self.excluded {
             values.remove(key);
         }
@@ -1802,56 +1790,12 @@ impl SavedSessionConfig {
 
 static SESSION_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub fn save_user_config_preserving_session_routes(path: &Path, config: &mut Config) -> Result<()> {
+/// Save the user config under the shared write lock so concurrent saves (the
+/// TUI menu and the web `/mjconfig` page) serialize instead of interleaving.
+pub fn save_user_config(path: &Path, config: &Config) -> Result<()> {
     let _guard = SESSION_CONFIG_WRITE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let latest = Config::load(path)?;
-    for (source_id, saved) in latest.session_config {
-        let changed_defaults = config
-            .session_config
-            .get(&source_id)
-            .map(|edited| {
-                edited
-                    .defaults
-                    .iter()
-                    .filter(|(key, value)| saved.defaults.get(*key) != Some(*value))
-                    .map(|(key, _)| key.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if !saved.models.is_empty() {
-            let routes = &mut config.session_config.entry(source_id).or_default().models;
-            routes.clone_from(&saved.models);
-            for route in routes.values_mut() {
-                for key in &changed_defaults {
-                    route.remove(key);
-                }
-            }
-        }
-    }
-    config.save(path)
-}
-
-pub fn persist_accepted_session_config(
-    path: &Path,
-    source_id: &str,
-    model_id: &str,
-    key: String,
-    value: String,
-) -> Result<()> {
-    let _guard = SESSION_CONFIG_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut config = Config::load(path)?;
-    config
-        .session_config
-        .entry(source_id.to_string())
-        .or_default()
-        .models
-        .entry(model_id.to_string())
-        .or_default()
-        .insert(key, value);
     config.save(path)
 }
 
@@ -2914,12 +2858,7 @@ kimi = "disabled"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         Config::default().save(&path).expect("seed config");
-        let mut saved = SavedSessionConfig::load(
-            &path,
-            "claude-acp",
-            "claude-opus-5",
-            SessionConfigSeat::Primary,
-        );
+        let mut saved = SavedSessionConfig::load(&path, "claude-acp", SessionConfigSeat::Primary);
         assert!(saved.is_empty());
 
         let mut edited = Config::load(&path).expect("load config");
@@ -2949,8 +2888,7 @@ kimi = "disabled"
         defaults.insert("config:mode".to_string(), "read-only".to_string());
         defaults.insert("config:service_tier".to_string(), "fast".to_string());
         config.save(&path).expect("seed config");
-        let mut saved =
-            SavedSessionConfig::load(&path, "codex-acp", "model-a", SessionConfigSeat::Subagent);
+        let mut saved = SavedSessionConfig::load(&path, "codex-acp", SessionConfigSeat::Subagent);
 
         saved.exclude("config:mode".to_string());
         saved.reload();
@@ -2960,32 +2898,48 @@ kimi = "disabled"
     }
 
     #[test]
-    fn saved_session_config_merges_server_defaults_with_model_route() {
+    fn saved_session_config_loads_server_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut cfg = Config::default();
-        let saved = cfg
-            .session_config
+        cfg.session_config
             .entry("codex-acp".to_string())
-            .or_default();
-        saved
+            .or_default()
             .defaults
             .insert("config:service_tier".to_string(), "default".to_string());
-        saved
-            .models
-            .entry("model-a".to_string())
-            .or_default()
-            .insert("config:service_tier".to_string(), "priority".to_string());
         cfg.save(&path).expect("save");
 
         assert_eq!(
-            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Primary,)["config:service_tier"],
-            "priority"
-        );
-        assert_eq!(
-            load_saved_session_config(&path, "codex-acp", "model-b", SessionConfigSeat::Primary,)["config:service_tier"],
+            load_saved_session_config(&path, "codex-acp", SessionConfigSeat::Primary)["config:service_tier"],
             "default"
         );
+    }
+
+    /// Older builds wrote live-accepted values into per-model route tables.
+    /// Those are session-local now: a leftover table still parses (so old
+    /// configs keep loading) but never reaches a new session's defaults.
+    #[test]
+    fn stale_model_route_tables_are_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+version = {CONFIG_VERSION}
+
+[session_config.codex-acp.defaults]
+"config:service_tier" = "default"
+
+[session_config.codex-acp.models.model-a]
+"config:service_tier" = "priority"
+"#
+            ),
+        )
+        .expect("write");
+
+        let saved = load_saved_session_config(&path, "codex-acp", SessionConfigSeat::Primary);
+        assert_eq!(saved["config:service_tier"], "default");
     }
 
     #[test]
@@ -3011,122 +2965,48 @@ kimi = "disabled"
         cfg.save(&path).expect("save");
 
         assert_eq!(
-            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Primary,)["config:mode"],
+            load_saved_session_config(&path, "codex-acp", SessionConfigSeat::Primary)["config:mode"],
             "primary"
         );
         assert_eq!(
-            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Subagent,)
-                ["config:mode"],
+            load_saved_session_config(&path, "codex-acp", SessionConfigSeat::Subagent)["config:mode"],
             "subagent"
         );
         assert_eq!(
-            load_saved_session_config(&path, "codex-acp", "model-a", SessionConfigSeat::Review,)["config:mode"],
+            load_saved_session_config(&path, "codex-acp", SessionConfigSeat::Review)["config:mode"],
             "review"
         );
     }
 
+    /// A `/mjconfig` save writes the edited defaults verbatim; there is no
+    /// merge with live-session state because live changes are never persisted.
     #[test]
-    fn accepted_session_config_is_route_isolated_and_merge_safe() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let mut cfg = Config::default();
-        cfg.agent.discrete_review = false;
-        cfg.save(&path).expect("save initial config");
-
-        persist_accepted_session_config(
-            &path,
-            "codex-acp",
-            "model-a",
-            "config:service_tier".to_string(),
-            "priority".to_string(),
-        )
-        .expect("persist model a");
-        persist_accepted_session_config(
-            &path,
-            "codex-acp",
-            "model-b",
-            "config:service_tier".to_string(),
-            "economy".to_string(),
-        )
-        .expect("persist model b");
-
-        let loaded = Config::load(&path).expect("load merged config");
-        assert!(!loaded.agent.discrete_review);
-        assert_eq!(
-            loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
-            "priority"
-        );
-        assert_eq!(
-            loaded.session_config["codex-acp"].models["model-b"]["config:service_tier"],
-            "economy"
-        );
-    }
-
-    #[test]
-    fn settings_save_preserves_a_concurrent_accepted_route() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let mut editor_snapshot = Config::default();
-        editor_snapshot
-            .session_config
-            .entry("codex-acp".to_string())
-            .or_default()
-            .defaults
-            .insert("config:service_tier".to_string(), "default".to_string());
-        editor_snapshot.save(&path).expect("save editor snapshot");
-
-        persist_accepted_session_config(
-            &path,
-            "codex-acp",
-            "model-a",
-            "config:service_tier".to_string(),
-            "priority".to_string(),
-        )
-        .expect("persist accepted route");
-        editor_snapshot.feature_hints = false;
-        save_user_config_preserving_session_routes(&path, &mut editor_snapshot)
-            .expect("save settings");
-
-        let loaded = Config::load(&path).expect("load merged config");
-        assert!(!loaded.feature_hints);
-        assert_eq!(
-            loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
-            "priority"
-        );
-    }
-
-    #[test]
-    fn changing_a_default_clears_that_key_from_saved_routes() {
+    fn user_config_save_round_trips_edited_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let mut config = Config::default();
-        let saved = config
+        config
             .session_config
             .entry("codex-acp".to_string())
-            .or_default();
-        saved
+            .or_default()
             .defaults
             .insert("config:service_tier".to_string(), "default".to_string());
-        saved
-            .models
-            .entry("model-a".to_string())
-            .or_default()
-            .insert("config:service_tier".to_string(), "priority".to_string());
         config.save(&path).expect("save initial config");
 
+        config.agent.discrete_review = false;
         config
             .session_config
             .get_mut("codex-acp")
             .unwrap()
             .defaults
             .insert("config:service_tier".to_string(), "economy".to_string());
-        save_user_config_preserving_session_routes(&path, &mut config)
-            .expect("save changed default");
+        save_user_config(&path, &config).expect("save settings");
 
         let loaded = Config::load(&path).expect("load config");
-        assert!(
-            !loaded.session_config["codex-acp"].models["model-a"]
-                .contains_key("config:service_tier")
+        assert!(!loaded.agent.discrete_review);
+        assert_eq!(
+            loaded.session_config["codex-acp"].defaults["config:service_tier"],
+            "economy"
         );
     }
 

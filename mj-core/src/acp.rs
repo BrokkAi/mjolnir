@@ -81,10 +81,9 @@ pub struct AcpRuntimeConfig {
     pub fs_max_text_bytes: u64,
     /// Host capabilities exposed to the agent for this runtime.
     pub access_mode: RuntimeAccessMode,
-    /// Stable configured agent id used for per-agent session-config memory.
+    /// Stable configured agent id ("codex-acp", ...) identifying the adapter
+    /// this runtime launched.
     pub agent_source_id: Option<String>,
-    /// Config file to update when a prompt snapshots current session options.
-    pub config_path: Option<PathBuf>,
     /// Values remembered from the last prompt submitted for this agent.
     /// Re-read at every session lifecycle so a `/mjconfig` save made in
     /// another process is not ignored until this one restarts.
@@ -1276,8 +1275,6 @@ pub async fn run(
             fatal_emitted.clone(),
             cfg.fs_max_text_bytes,
             cfg.access_mode,
-            cfg.agent_source_id.clone(),
-            cfg.config_path.clone(),
             cfg.saved_session_config.clone(),
             cfg.role_config.clone(),
             cfg.subagents.clone(),
@@ -1988,8 +1985,6 @@ where
         fatal_emitted,
         DEFAULT_FS_TEXT_BYTES,
         RuntimeAccessMode::Full,
-        None,
-        None,
         Default::default(),
         None,
         None,
@@ -2024,8 +2019,6 @@ where
         fatal_emitted,
         DEFAULT_FS_TEXT_BYTES,
         RuntimeAccessMode::Full,
-        None,
-        None,
         Default::default(),
         None,
         None,
@@ -2061,8 +2054,6 @@ where
         fatal_emitted,
         DEFAULT_FS_TEXT_BYTES,
         RuntimeAccessMode::Full,
-        None,
-        None,
         Default::default(),
         None,
         None,
@@ -2086,8 +2077,6 @@ async fn drive_client_with_fs_limit<T>(
     fatal_emitted: Arc<AtomicBool>,
     fs_max_text_bytes: u64,
     access_mode: RuntimeAccessMode,
-    agent_source_id: Option<String>,
-    config_path: Option<PathBuf>,
     saved_session_config: crate::config::SavedSessionConfig,
     role_config: Option<RuntimeRoleConfig>,
     subagents: Option<Arc<dyn RuntimeService>>,
@@ -2354,8 +2343,6 @@ where
                 drive_terminals,
                 access_mode,
                 fs_max_text_bytes,
-                agent_source_id,
-                config_path,
                 saved_session_config,
                 role_config,
                 subagents,
@@ -2403,8 +2390,6 @@ async fn drive_session(
     terminals: Arc<ManagedTerminals>,
     access_mode: RuntimeAccessMode,
     fs_max_text_bytes: u64,
-    agent_source_id: Option<String>,
-    config_path: Option<PathBuf>,
     mut saved_session_config: crate::config::SavedSessionConfig,
     role_config: Option<RuntimeRoleConfig>,
     subagents: Option<Arc<dyn RuntimeService>>,
@@ -2846,9 +2831,6 @@ async fn drive_session(
                     &mut deferred_prompts,
                     &mut deferred_config_updates,
                     &mut deferred_reapply,
-                    config_path.as_deref(),
-                    agent_source_id.as_deref(),
-                    role_config.as_ref().map(|role| role.model_id.as_str()),
                 )
                 .await?
                 {
@@ -5688,23 +5670,13 @@ async fn drive_config_update(
     deferred_prompts: &mut VecDeque<(String, Vec<PromptImage>, Vec<PromptResource>)>,
     deferred_config_updates: &mut VecDeque<(SessionConfigTarget, SessionConfigValueId)>,
     deferred_reapply: &mut bool,
-    config_path: Option<&Path>,
-    agent_source_id: Option<&str>,
-    model_id: Option<&str>,
 ) -> Result<bool> {
-    let persistable = session_config
-        .options
-        .iter()
-        .zip(session_config.targets.iter())
-        .find(|(_, candidate)| *candidate == &target)
-        .is_some_and(|(option, candidate)| session_config_option_is_persistable(option, candidate));
     let update = send_config_update(conn, session_id, target.clone(), value.clone());
     tokio::pin!(update);
 
     loop {
         tokio::select! {
             result = &mut update => {
-                let accepted = result.is_ok();
                 match result {
                     Ok(Some(options)) => {
                         session_config.targets = config_option_targets(&options);
@@ -5734,22 +5706,9 @@ async fn drive_config_update(
                         )));
                     }
                 }
-                if accepted
-                    && persistable
-                    && let (Some(path), Some(source_id), Some(model_id)) =
-                        (config_path, agent_source_id, model_id)
-                    && let Err(error) = crate::config::persist_accepted_session_config(
-                        path,
-                        source_id,
-                        model_id,
-                        session_config_target_key(&target),
-                        value.to_string(),
-                    )
-                {
-                    let _ = ui_tx.send(UiEvent::Warning(format!(
-                        "session config changed but could not be saved: {error:#}"
-                    )));
-                }
+                // Deliberately no write-back to the config file: a live
+                // change belongs to this session alone. Defaults for new
+                // sessions change only through `/mjconfig`.
                 return Ok(true);
             }
             maybe_cmd = ui_rx.recv() => {
@@ -8841,8 +8800,6 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::ReadOnly,
-            Some("codex-acp".to_string()),
-            None,
             crate::config::SavedSessionConfig::frozen(HashMap::from([(
                 "config:mode".to_string(),
                 "agent".to_string(),
@@ -10780,8 +10737,6 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::Full,
-            None,
-            None,
             Default::default(),
             Some(role_config),
             None,
@@ -12702,7 +12657,6 @@ mod tests {
     fn saved_config_lifecycle_rig(
         saved_session_config: crate::config::SavedSessionConfig,
         resume_session: Option<String>,
-        config_path: Option<PathBuf>,
     ) -> SavedConfigLifecycleRig {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
@@ -12726,8 +12680,6 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::ReadOnly,
-            Some("codex-acp".to_string()),
-            config_path,
             saved_session_config,
             None,
             None,
@@ -12796,7 +12748,6 @@ mod tests {
                 "auto".to_string(),
             )])),
             Some("selected-session".to_string()),
-            None,
         );
 
         wait_for_session_started(&mut ui_rx, "selected-session").await;
@@ -12818,7 +12769,6 @@ mod tests {
         let saved = crate::config::SavedSessionConfig::load(
             &config_path,
             "codex-acp",
-            "model-a",
             crate::config::SessionConfigSeat::Primary,
         );
         assert!(saved.is_empty(), "the launch snapshot starts empty");
@@ -12828,7 +12778,7 @@ mod tests {
             cmd_tx,
             mut ui_rx,
             updates,
-        } = saved_config_lifecycle_rig(saved, None, Some(config_path.clone()));
+        } = saved_config_lifecycle_rig(saved, None);
         wait_for_session_started(&mut ui_rx, "test-session").await;
 
         // Another mj process saves `/mjconfig` while this one is running.
@@ -12864,7 +12814,6 @@ mod tests {
         let saved = crate::config::SavedSessionConfig::load(
             &config_path,
             "codex-acp",
-            "model-a",
             crate::config::SessionConfigSeat::Primary,
         );
         let SavedConfigLifecycleRig {
@@ -12873,7 +12822,7 @@ mod tests {
             cmd_tx,
             mut ui_rx,
             updates,
-        } = saved_config_lifecycle_rig(saved, None, Some(config_path.clone()));
+        } = saved_config_lifecycle_rig(saved, None);
         wait_for_session_started(&mut ui_rx, "test-session").await;
 
         // A save from another surface, after this session was configured.
@@ -12914,7 +12863,6 @@ mod tests {
         let saved = crate::config::SavedSessionConfig::load(
             &config_path,
             "codex-acp",
-            "model-a",
             crate::config::SessionConfigSeat::Primary,
         );
         let SavedConfigLifecycleRig {
@@ -12923,7 +12871,7 @@ mod tests {
             cmd_tx,
             mut ui_rx,
             updates,
-        } = saved_config_lifecycle_rig(saved, None, Some(config_path.clone()));
+        } = saved_config_lifecycle_rig(saved, None);
         wait_for_session_started(&mut ui_rx, "test-session").await;
         wait_for_recorded_update(&updates, ("mode", "auto"), "switch:first-session").await;
         updates
@@ -12973,7 +12921,6 @@ mod tests {
         let saved = crate::config::SavedSessionConfig::load(
             &config_path,
             "codex-acp",
-            "model-a",
             crate::config::SessionConfigSeat::Primary,
         );
         let SavedConfigLifecycleRig {
@@ -12982,7 +12929,7 @@ mod tests {
             cmd_tx,
             mut ui_rx,
             updates,
-        } = saved_config_lifecycle_rig(saved, None, Some(config_path.clone()));
+        } = saved_config_lifecycle_rig(saved, None);
         wait_for_session_started(&mut ui_rx, "test-session").await;
         wait_for_recorded_update(&updates, ("mode", "auto"), "load:first-session").await;
         updates
@@ -13005,8 +12952,11 @@ mod tests {
         shutdown_lifecycle_rig(cmd_tx, client_task, agent_task).await;
     }
 
+    /// A live in-session change belongs to that session alone: it must apply
+    /// to the running ACP session and never be written back to the config
+    /// file, so other sessions and future sessions are unaffected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn accepted_live_config_update_persists_for_the_exact_route() {
+    async fn accepted_live_config_update_is_never_persisted() {
         let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = split(client_side);
         let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
@@ -13027,8 +12977,6 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::Full,
-            Some("codex-acp".to_string()),
-            Some(config_path.clone()),
             Default::default(),
             Some(RuntimeRoleConfig {
                 label: "primary".to_string(),
@@ -13060,37 +13008,172 @@ mod tests {
                 value: SessionConfigValueId::new("priority"),
             })
             .expect("send config update");
-        cmd_tx
-            .send(UiCommand::SetSessionConfigOption {
-                target: SessionConfigTarget::ConfigOption {
-                    config_id: SessionConfigId::new("response_style"),
-                },
-                value: SessionConfigValueId::new("concise"),
-            })
-            .expect("queue second config update");
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let loaded = crate::config::Config::load(&config_path).expect("load config");
-            let route = loaded
-                .session_config
-                .get("codex-acp")
-                .and_then(|saved| saved.models.get("model-a"));
-            if route
-                .and_then(|values| values.get("config:service_tier"))
-                .is_some_and(|value| value == "priority")
-                && route
-                    .and_then(|values| values.get("config:response_style"))
-                    .is_some_and(|value| value == "concise")
-            {
-                break;
+        // Session start publishes the options once; the next publish only
+        // happens after the agent accepted the update. Wait for the second.
+        let mut options_published = 0;
+        while options_published < 2 {
+            let ev = tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
+                .await
+                .expect("timeout waiting for config acceptance")
+                .expect("channel closed");
+            if matches!(ev, UiEvent::SessionConfigOptions { .. }) {
+                options_published += 1;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "accepted value was not persisted"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+
+        // The accepted value stays session-local: no config file appears.
+        assert!(
+            !config_path.exists(),
+            "a live session change must not be written to the config file"
+        );
+
+        cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
+        tokio::time::timeout(EVENT_DEADLINE, client_task)
+            .await
+            .expect("client shutdown timeout")
+            .expect("client task")
+            .expect("client result");
+        agent_task.abort();
+    }
+
+    async fn run_mock_agent_recording_slow_config_updates(
+        stream: tokio::io::DuplexStream,
+        updates: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    ) {
+        let (r, w) = split(stream);
+        let transport = ByteStreams::new(w.compat_write(), r.compat());
+        let _ = AgentRole
+            .builder()
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::InitializeRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(InitializeResponse::new(
+                        agent_client_protocol::schema::ProtocolVersion::V1,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_req: agent_client_protocol::schema::v1::NewSessionRequest,
+                            responder,
+                            _cx| {
+                    responder.respond(
+                        NewSessionResponse::new(SessionId::new("test-session"))
+                            .config_options(slow_config_options()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |req: SetSessionConfigOptionRequest, responder, _cx| {
+                    let value = match &req.value {
+                        agent_client_protocol::schema::v1::SessionConfigOptionValue::ValueId {
+                            value,
+                        } => value.to_string(),
+                        agent_client_protocol::schema::v1::SessionConfigOptionValue::Boolean {
+                            value,
+                        } => value.to_string(),
+                        other => panic!("unexpected config option value: {other:?}"),
+                    };
+                    updates
+                        .lock()
+                        .expect("updates lock")
+                        .push((req.config_id.to_string(), value));
+                    responder.respond(SetSessionConfigOptionResponse::new(slow_config_options()))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, |_cx| async move {
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+            .await;
+    }
+
+    /// A `/mjconfig` save made after the runtime launched must reach the next
+    /// fresh session (the server's clear/new flow): the reload source re-reads
+    /// the saved defaults from disk instead of replaying the launch snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fresh_session_reloads_saved_defaults_from_disk() {
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_side);
+        let client_transport = ByteStreams::new(cw.compat_write(), cr.compat());
+        let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent_task = tokio::spawn(run_mock_agent_recording_slow_config_updates(
+            agent_side,
+            updates.clone(),
+        ));
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let config_path = config_dir.path().join("config.toml");
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+        let client_task = tokio::spawn(drive_client_with_fs_limit(
+            client_transport,
+            std::env::temp_dir(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            SessionRestoreMode::Continue,
+            ui_tx,
+            cmd_rx,
+            Arc::new(AtomicBool::new(false)),
+            DEFAULT_FS_TEXT_BYTES,
+            RuntimeAccessMode::Full,
+            crate::config::SavedSessionConfig::load(
+                &config_path,
+                "codex-acp",
+                crate::config::SessionConfigSeat::Primary,
+            ),
+            None,
+            None,
+            None,
+            false,
+            None,
+        ));
+
+        while !matches!(
+            tokio::time::timeout(EVENT_DEADLINE, ui_rx.recv())
+                .await
+                .expect("handshake timeout")
+                .expect("channel closed"),
+            UiEvent::SessionStarted { .. }
+        ) {}
+        assert!(
+            updates.lock().expect("updates lock").is_empty(),
+            "no defaults were saved yet, so nothing is applied at launch"
+        );
+
+        // The `/mjconfig` save happens while the runtime is already running.
+        let mut saved = crate::config::Config::default();
+        saved
+            .session_config
+            .entry("codex-acp".to_string())
+            .or_default()
+            .defaults
+            .insert("config:service_tier".to_string(), "priority".to_string());
+        saved.save(&config_path).expect("save config");
+
+        let (responder, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::NewSession { responder })
+            .expect("send new session");
+        assert_eq!(
+            tokio::time::timeout(EVENT_DEADLINE, response)
+                .await
+                .expect("new session timeout")
+                .expect("new session response"),
+            LoadSessionResult::Switched
+        );
+
+        assert!(
+            updates
+                .lock()
+                .expect("updates lock")
+                .contains(&("service_tier".to_string(), "priority".to_string())),
+            "the fresh session applies the defaults saved after launch"
+        );
 
         cmd_tx.send(UiCommand::Shutdown).expect("shutdown");
         tokio::time::timeout(EVENT_DEADLINE, client_task)
@@ -13245,7 +13328,6 @@ mod tests {
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
             access_mode: RuntimeAccessMode::Full,
             agent_source_id: None,
-            config_path: None,
             saved_session_config: Default::default(),
             role_config: None,
             subagents: None,
@@ -13308,7 +13390,6 @@ mod tests {
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
             access_mode: RuntimeAccessMode::Full,
             agent_source_id: None,
-            config_path: None,
             saved_session_config: Default::default(),
             role_config: None,
             subagents: None,
@@ -13469,7 +13550,6 @@ mod tests {
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
             access_mode: RuntimeAccessMode::Full,
             agent_source_id: None,
-            config_path: None,
             saved_session_config: Default::default(),
             role_config: None,
             subagents: None,
@@ -13586,7 +13666,6 @@ mod tests {
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
             access_mode: RuntimeAccessMode::Full,
             agent_source_id: None,
-            config_path: None,
             saved_session_config: Default::default(),
             role_config: None,
             subagents: None,
@@ -13618,7 +13697,6 @@ mod tests {
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
             access_mode: RuntimeAccessMode::Full,
             agent_source_id: None,
-            config_path: None,
             saved_session_config: Default::default(),
             role_config: None,
             subagents: None,
@@ -13646,7 +13724,6 @@ mod tests {
             fs_max_text_bytes: DEFAULT_FS_TEXT_BYTES,
             access_mode: RuntimeAccessMode::Full,
             agent_source_id: None,
-            config_path: None,
             saved_session_config: Default::default(),
             role_config: None,
             subagents: None,
@@ -14246,8 +14323,6 @@ mod tests {
             fatal_emitted.clone(),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::Full,
-            None,
-            None,
             Default::default(),
             None,
             None,
@@ -14460,8 +14535,6 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             DEFAULT_FS_TEXT_BYTES,
             RuntimeAccessMode::Full,
-            None,
-            None,
             Default::default(),
             None,
             None,

@@ -426,34 +426,36 @@ impl RootServerSessionManager {
         }
     }
 
-    async fn reload_auxiliary_agents(&self) {
-        self.broadcast(|| UiCommand::ReloadAuxiliaryAgents);
+    async fn reload_auxiliary_agents(&self, session_id: &str) {
+        // Only the session the `/mjconfig` save came from re-resolves its
+        // reviewer and subagent routes; other running sessions are left alone.
+        self.send_to_session(session_id, UiCommand::ReloadAuxiliaryAgents);
     }
 
-    /// Ask every live session to re-read the shared config and adopt its saved
-    /// session values, the way a `/mjconfig` save reaches a terminal session.
-    /// Without this a web save only reached seats that get rebuilt, leaving the
-    /// running primary on its old permission mode.
-    async fn reapply_saved_session_config(&self) {
-        self.broadcast(|| UiCommand::ReapplySavedSessionConfig);
+    /// Ask the session a `/mjconfig` save came from to re-read the shared
+    /// config and adopt its saved session values, the way a save reaches a
+    /// terminal session. Without this a web save only reached seats that get
+    /// rebuilt, leaving the running primary on its old permission mode. Other
+    /// running sessions keep the values they are running with.
+    async fn reapply_saved_session_config(&self, session_id: &str) {
+        self.send_to_session(session_id, UiCommand::ReapplySavedSessionConfig);
     }
 
-    /// `UiCommand` carries responders and is not `Clone`, so each live session
-    /// gets a freshly built command.
-    fn broadcast(&self, command: impl Fn() -> UiCommand) {
-        let commands = self
-            .sessions
-            .lock()
-            .map(|mut sessions| {
-                sessions.retain(|session| !session.task.is_finished());
-                sessions
-                    .iter()
-                    .map(|session| session.command_tx.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for command_tx in commands {
-            let _ = command_tx.send(command());
+    fn send_to_session(&self, session_id: &str, command: UiCommand) {
+        let command_tx = self.sessions.lock().ok().and_then(|mut sessions| {
+            sessions.retain(|session| !session.task.is_finished());
+            sessions
+                .iter()
+                .find(|session| {
+                    session
+                        .session_id
+                        .lock()
+                        .is_ok_and(|current| current.as_deref() == Some(session_id))
+                })
+                .map(|session| session.command_tx.clone())
+        });
+        if let Some(command_tx) = command_tx {
+            let _ = command_tx.send(command);
         }
     }
 }
@@ -483,8 +485,8 @@ fn start_server_agent_session(
     let session_id = Arc::new(Mutex::new(resume_session.clone()));
     let published_session_id = Arc::clone(&session_id);
     // The adapter source id ("codex-acp", ...) — not the synthetic
-    // `roster:{model}` launch id — so saved session options load from and
-    // accepted live values persist to the same buckets the TUI uses.
+    // `roster:{model}` launch id — so saved session options load from the
+    // same buckets the TUI uses.
     let agent_source_id = roster.as_ref().map_or_else(
         || agent.source_id.clone(),
         |resolved| resolved.primary.launch.source_id.clone(),
@@ -498,7 +500,6 @@ fn start_server_agent_session(
                 config::SavedSessionConfig::load(
                     &config_path,
                     &resolved.primary.launch.source_id,
-                    &resolved.primary.model.model,
                     config::SessionConfigSeat::Primary,
                 )
             });
@@ -650,7 +651,6 @@ fn start_server_agent_session(
         fs_max_text_bytes,
         access_mode: mj_core::acp::RuntimeAccessMode::Full,
         agent_source_id: Some(agent_source_id),
-        config_path: Some(config_path),
         saved_session_config,
         role_config,
         subagents,
@@ -868,7 +868,8 @@ fn start_server_agent_session(
                                 continue;
                             }
                         };
-                        let updated_roster = match roster::resolve(&updated_config, &side_cwd).await
+                        let mut updated_roster = match roster::resolve(&updated_config, &side_cwd)
+                            .await
                         {
                             Ok(roster) => roster,
                             Err(error) => {
@@ -879,11 +880,24 @@ fn start_server_agent_session(
                             }
                         };
                         if !crate::primary_route_matches(command_primary, &updated_roster.primary) {
+                            // The primary itself only changes with a new
+                            // server session, but the reviewer and subagent
+                            // lanes still follow the saved config for this
+                            // one. Auto seats re-pair against the primary
+                            // that keeps running.
+                            updated_roster.primary = command_primary.clone();
+                            roster::rebind_auto_review_for_primary(
+                                &mut updated_roster,
+                                &updated_config,
+                            );
+                            roster::rebind_auto_subagents_for_primary(
+                                &mut updated_roster,
+                                &updated_config,
+                            );
                             tracker.observe_event(&UiEvent::Info(
                                 "primary agent changed; start a new server session to apply that route"
                                     .to_string(),
                             ));
-                            continue;
                         }
                         let (roles, codex_home) = match crate::isolated_subagent_roles(
                             roster::subagent_failover_roles(&updated_roster),
@@ -1144,11 +1158,11 @@ impl remote::ServerSessionManager for RootServerSessionManager {
     async fn shutdown_all(&self) {
         RootServerSessionManager::shutdown_all(self).await
     }
-    async fn reload_auxiliary_agents(&self) {
-        RootServerSessionManager::reload_auxiliary_agents(self).await
+    async fn reload_auxiliary_agents(&self, session_id: &str) {
+        RootServerSessionManager::reload_auxiliary_agents(self, session_id).await
     }
-    async fn reapply_saved_session_config(&self) {
-        RootServerSessionManager::reapply_saved_session_config(self).await
+    async fn reapply_saved_session_config(&self, session_id: &str) {
+        RootServerSessionManager::reapply_saved_session_config(self, session_id).await
     }
     async fn refresh_for_config(
         &self,
@@ -1234,7 +1248,11 @@ mod tests {
                 task,
             });
 
-        manager.reload_auxiliary_agents().await;
+        // A reload addressed to another session must not reach this one.
+        manager.reload_auxiliary_agents("some-other-session").await;
+        assert!(command_rx.try_recv().is_err());
+
+        manager.reload_auxiliary_agents("server-session").await;
 
         assert!(matches!(
             command_rx.try_recv(),

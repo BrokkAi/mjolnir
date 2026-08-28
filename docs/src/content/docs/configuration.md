@@ -101,12 +101,23 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `subagents.progress_wake_minutes` | Minutes a primary parked on running subagents may go without a report before it is woken with their progress alone; default 20, `0` disables. Config file only |
 | `voice_auto_send` | `off` (default), `two_seconds`, `four_seconds`, `six_seconds`, or `eight_seconds`; submit a recognized voice prompt after that much detected silence |
 
-In an active primary session, the `/model` and `/effort` commands and the
-F1–F8 session-config shortcut row under the quota numbers update the current
-ACP session without a restart when the connected agent advertises the
-corresponding selectors; changes made during a turn apply after it finishes. Team and ACP routing changes
-still apply to a new session. A `max_parallel` above 16 is a configuration
-error, not a silently clamped value.
+Session settings follow one rule: a change made anywhere in mj applies to the
+session it was made in, and only `/mjconfig` also changes the defaults that
+new sessions start from. Concretely:
+
+- `/model`, `/effort`, and the F1–F8 session-config shortcut row under the
+  quota numbers update the current ACP session without a restart (when the
+  connected agent advertises the corresponding selectors; changes made during
+  a turn apply after it finishes). They are session-local: nothing is written
+  to the config file, and neither other running sessions nor future sessions
+  are affected.
+- Saving `/mjconfig` updates the session it was opened from the same way, and
+  persists the chosen models and session options as the defaults for every
+  session started afterwards. Other running sessions are never touched.
+- Team and ACP routing changes still apply to a new session.
+
+A `max_parallel` above 16 is a configuration error, not a silently clamped
+value.
 
 Every mj session shares one config file, so a `/mjconfig` save reaches sessions
 already running elsewhere. Other terminal sessions notice the save within a few
@@ -268,10 +279,12 @@ The **Reviewer** and **Subagents** tabs list the selectable session options
 advertised by that role's selected ACP source. Each role stores its defaults
 separately. The primary agent has no tab: its live session is driven by
 `/model`, `/effort`, and the F1–F8 session-config shortcut row instead of
-saved `/mjconfig` defaults. Team, reviewer, and subagent changes apply only to
-sessions started later, never to ones that are already running. A saved value
-that a newly selected adapter no longer advertises stays intact and is shown
-as unavailable until you select a compatible value.
+saved `/mjconfig` defaults. Saving `/mjconfig` reaches the session the panel
+was opened from — its reviewer and subagent routes re-resolve via a reload —
+while other running sessions keep the settings they have; the saved defaults
+reach them only as new sessions start. A saved value that a newly selected
+adapter no longer advertises stays intact and is shown as unavailable until
+you select a compatible value.
 
 The same role-scoped defaults can be written directly in TOML:
 

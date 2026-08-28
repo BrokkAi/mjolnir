@@ -163,7 +163,6 @@ pub fn isolated_runtime_config(
         fs_max_text_bytes,
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: None,
-        config_path: None,
         saved_session_config: Default::default(),
         role_config: None,
         subagents: None,
@@ -233,7 +232,6 @@ mod tests {
         assert!(cfg.subagents.is_none());
         assert!(cfg.role_config.is_none());
         assert!(cfg.agent_source_id.is_none());
-        assert!(cfg.config_path.is_none());
         assert!(cfg.saved_session_config.is_empty());
         assert!(cfg.side_prompt_policy);
         assert_eq!(cfg.resume_session.as_deref(), Some("child-session"));

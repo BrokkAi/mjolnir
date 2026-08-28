@@ -4929,7 +4929,7 @@ fn set_memory_toggle(state: &mut AppState, toggle: MemoryToggle, enabled: bool) 
         MemoryToggle::Use => config.memory.use_memories = enabled,
         MemoryToggle::Generate => config.memory.generate_memories = enabled,
     }
-    match config::save_user_config_preserving_session_routes(&path, &mut config) {
+    match config::save_user_config(&path, &config) {
         Ok(()) => state.record_status_message(
             StatusKind::Info,
             format!(
@@ -5001,20 +5001,28 @@ fn persist_mjconfig_selection(
     let reroute_notices =
         crate::settings::reset_unroutable_models(&mut config, &state.model_choices);
     let team_changed = initial_config.team != config.team;
-    let auxiliary_agents_update_live = primary_route_stays_active(state, &config);
-    let primary_team_switch_pending = team_changed && !auxiliary_agents_update_live;
+    // The switch prompt keys off whether the saved primary still matches the
+    // running process; the auxiliary reload does not. Reviewer and subagent
+    // lanes re-resolve from the saved config for this session even when the
+    // primary change itself can only apply on /new or a confirmed switch.
+    // `cmd_tx` addresses only this session's runtime, so the reload can never
+    // reach another session.
+    let primary_route_live = primary_route_stays_active(state, &config);
+    let primary_team_switch_pending = team_changed && !primary_route_live;
     let live_session_updates = live_primary_session_config_updates(state, &config);
     if let Some(path) = state.config_path.clone() {
-        match config::save_user_config_preserving_session_routes(&path, &mut config) {
+        match config::save_user_config(&path, &config) {
             Ok(()) => {
                 // Tell the config watcher exactly what this session wrote; the
                 // state below already reflects it. `config` matches the file:
-                // the save merged the session routes it preserved back into it.
+                // live changes are never written back, so there is nothing to
+                // merge.
                 state.config_written_here = Some(config.clone());
+                // The reviewer and subagent lanes always re-resolve from the
+                // saved config for this session; the primary-route check gates
+                // only the switch-primary prompt below.
+                let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
                 adopt_live_config(state, cmd_tx, &config, live_session_updates, review_changed);
-                if auxiliary_agents_update_live {
-                    let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
-                }
                 if primary_team_switch_pending {
                     let selected = config
                         .team
@@ -5034,7 +5042,7 @@ fn persist_mjconfig_selection(
                 }
                 let mut message = if primary_team_switch_pending {
                     "config saved; choose whether to switch the primary now".to_string()
-                } else if team_changed && auxiliary_agents_update_live {
+                } else if team_changed {
                     "config saved; reviewer and subagent configuration is updating now".to_string()
                 } else {
                     format!(
@@ -6432,20 +6440,18 @@ fn persist_team_picker_selection(
         }
     };
     preset.apply(&mut config);
-    // Presets reset the primary selector to `auto`. Reload the reviewer and
-    // subagent routes only when that post-preset route is still the primary
-    // process already running in this session.
-    let apply_auxiliaries_live = primary_config_matches_active_route(state, &config);
-    match config::save_user_config_preserving_session_routes(path, &mut config) {
+    // Whether the post-preset primary route is still the process already
+    // running decides only the switch-primary prompt. The reviewer and
+    // subagent lanes reload from the saved config for this session either way.
+    let primary_unchanged = primary_config_matches_active_route(state, &config);
+    match config::save_user_config(path, &config) {
         Ok(()) => {
             state.configured_models = config.model_names();
             state.acp_inventory =
                 crate::roster::rediscover_inventory(&config, &state.acp_inventory);
-            if apply_auxiliaries_live {
-                let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
-            }
+            let _ = cmd_tx.send(UiCommand::ReloadAuxiliaryAgents);
             state.record_status_message(StatusKind::Info, format!("{} team saved", preset.label()));
-            Some(apply_auxiliaries_live)
+            Some(primary_unchanged)
         }
         Err(error) => {
             state.record_status_message(
@@ -16912,6 +16918,12 @@ mod tests {
             Some(config::TeamPreset::Claude)
         );
         assert!(!state.review_enabled, "active session policy is unchanged");
+        // The reviewer/subagent lanes still reload for this session; the
+        // review policy itself is untouched until the transfer completes.
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
         assert!(cmd_rx.try_recv().is_err(), "no live policy update is sent");
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
@@ -17365,7 +17377,13 @@ mod tests {
                 .as_ref()
                 .is_some_and(|picker| { picker.step == TeamPickerStep::SwitchPrimary })
         );
-        assert!(cmd_rx.try_recv().is_err(), "no live reload is sent");
+        // The auxiliary lanes reload for this session; the primary repin
+        // itself still waits for the new-session step.
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
+        assert!(cmd_rx.try_recv().is_err(), "the primary is not reloaded");
     }
 
     #[test]
@@ -18123,6 +18141,12 @@ mod tests {
             config::ReviewCorrectionThreshold::P2
         );
         assert_eq!(saved.agent.max_correction_rounds, Some(0));
+        // The save always re-resolves this session's auxiliary lanes first,
+        // then applies the review policy live.
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(UiCommand::SetReviewPolicy {
@@ -18187,6 +18211,13 @@ mod tests {
         assert_eq!(picker.step, TeamPickerStep::SwitchPrimary);
         assert_eq!(picker.selected, 1, "Claude is selected");
         assert!(picker.switch_primary_now);
+        // The reviewer and subagent lanes update for this session even while
+        // the primary switch is still pending confirmation; the primary
+        // itself is not reloaded.
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
         assert!(
             cmd_rx.try_recv().is_err(),
             "the old primary is not reloaded"
@@ -18237,6 +18268,13 @@ mod tests {
 
         persist_mjconfig_selection(&mut state, &cmd_tx, initial_config, config);
 
+        // A combined save — team change replacing the primary plus a session
+        // option — still applies both to this session: the auxiliary reload
+        // and the live option update.
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(UiCommand::SetSessionConfigOption {
@@ -18281,6 +18319,10 @@ mod tests {
         let picker = state.team_picker.as_ref().expect("primary switch prompt");
         assert_eq!(picker.step, TeamPickerStep::SwitchPrimary);
         assert!(picker.switch_primary_now);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
         assert!(cmd_rx.try_recv().is_err());
 
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
@@ -18345,6 +18387,11 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
 
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -18786,6 +18833,11 @@ mod tests {
 
         persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
+
         assert!(
             cmd_rx.try_recv().is_err(),
             "a saved value that matches the active session must not be re-sent"
@@ -18824,6 +18876,11 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
 
         assert!(
             matches!(
@@ -18865,6 +18922,11 @@ mod tests {
 
         persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
 
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
+
         assert!(
             cmd_rx.try_recv().is_err(),
             "the selected seat effort belongs to another provider's route"
@@ -18898,6 +18960,11 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
 
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -18938,6 +19005,11 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
         persist_mjconfig_selection(&mut state, &cmd_tx, config.clone(), config);
+
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::ReloadAuxiliaryAgents)
+        ));
 
         assert!(matches!(
             cmd_rx.try_recv(),

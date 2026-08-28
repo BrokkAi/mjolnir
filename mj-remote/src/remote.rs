@@ -1732,12 +1732,15 @@ pub trait ServerSessionManager: Send + Sync {
     fn resume_session(&self, cwd: PathBuf, session_id: String) -> u64;
     fn owns_session(&self, session_id: &str) -> bool;
     async fn archive_session(&self, session_id: &str) -> bool;
-    /// Re-resolve reviewer and subagent routes for active sessions whose
-    /// primary route still matches their running ACP process.
-    async fn reload_auxiliary_agents(&self);
-    /// Ask live sessions to re-read the saved config and adopt its session
-    /// values, so a save here reaches a primary that is already running.
-    async fn reapply_saved_session_config(&self);
+    /// Re-resolve reviewer and subagent routes for the one session a
+    /// `/mjconfig` save was made from. Other running sessions are never
+    /// touched; they keep the routes they started with.
+    async fn reload_auxiliary_agents(&self, session_id: &str);
+    /// Ask the one session a `/mjconfig` save was made from to re-read the
+    /// saved config and adopt its session values, so a save here reaches a
+    /// primary that is already running. Other sessions keep the values they
+    /// are running with.
+    async fn reapply_saved_session_config(&self, session_id: &str);
     async fn refresh_for_config(
         &self,
         config_path: &Path,
@@ -5552,6 +5555,10 @@ struct MjLoginStatus {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MjConfigApplyRequest {
+    /// The session the `/mjconfig` panel was opened from. Live updates
+    /// (auxiliary-route reloads) apply to this session only; absent, the
+    /// save changes defaults for new sessions and touches no live session.
+    session_id: Option<String>,
     /// One of the four supported coder/reviewer team ids.
     team: Option<String>,
     review_model: Option<String>,
@@ -6440,8 +6447,9 @@ fn mjconfig_option_controls_reasoning_effort(
 
 async fn mjconfig_apply(
     State(state): State<ServerState>,
-    Json(request): Json<MjConfigApplyRequest>,
+    Json(mut request): Json<MjConfigApplyRequest>,
 ) -> std::result::Result<Json<MjConfigSnapshot>, (StatusCode, String)> {
+    let invoking_session = request.session_id.take();
     let mut config = mjconfig_load(&state);
     if let Some(warning) = config.newer_build_notice() {
         return Err((StatusCode::CONFLICT, warning));
@@ -6468,7 +6476,7 @@ async fn mjconfig_apply(
         &choices,
         active_models.as_ref(),
     )?;
-    config::save_user_config_preserving_session_routes(&state.mjconfig.config_path, &mut config)
+    config::save_user_config(&state.mjconfig.config_path, &config)
         .map_err(|error| internal_error(format!("save config: {error:#}")))?;
     let notice = if reroute_notices.is_empty() {
         "Saved".to_string()
@@ -6487,7 +6495,14 @@ async fn mjconfig_apply(
     {
         Ok(Some(roster)) => {
             state.mjconfig.update_from_roster(&roster);
-            state.session_manager.reload_auxiliary_agents().await;
+            // Live updates reach only the session the save was made from;
+            // every other running session keeps its current routes.
+            if let Some(session_id) = invoking_session.as_deref() {
+                state
+                    .session_manager
+                    .reload_auxiliary_agents(session_id)
+                    .await;
+            }
         }
         Ok(None) => {}
         Err(error) => warn!("saved configuration does not bind a roster yet: {error}"),
@@ -6495,8 +6510,14 @@ async fn mjconfig_apply(
     // Rebinding the roster only rebuilds the delegated seats. A primary that is
     // already running keeps its own ACP session, so the values saved just now —
     // the permission mode above all — have to be pushed onto it explicitly, or
-    // it runs the old mode and reports it as active.
-    state.session_manager.reapply_saved_session_config().await;
+    // it runs the old mode and reports it as active. Scoped to the invoking
+    // session: other running primaries keep the values they are running with.
+    if let Some(session_id) = invoking_session.as_deref() {
+        state
+            .session_manager
+            .reapply_saved_session_config(session_id)
+            .await;
+    }
     Ok(Json(mjconfig_snapshot_response(&state, Some(notice))))
 }
 
@@ -10629,8 +10650,8 @@ mod tests {
     #[derive(Default)]
     struct TestServerSessionManager {
         roster_refresh_requested: AtomicBool,
-        auxiliary_reloads: AtomicU64,
-        session_config_reapplies: AtomicU64,
+        auxiliary_reloads: Mutex<Vec<String>>,
+        session_config_reapplies: Mutex<Vec<String>>,
         roster_refresh_lock: tokio::sync::Mutex<()>,
         launches: Mutex<BTreeMap<u64, ServerSessionLaunchState>>,
         next_launch: AtomicU64,
@@ -10685,12 +10706,17 @@ mod tests {
             true
         }
         async fn shutdown_all(&self) {}
-        async fn reload_auxiliary_agents(&self) {
-            self.auxiliary_reloads.fetch_add(1, Ordering::Release);
+        async fn reload_auxiliary_agents(&self, session_id: &str) {
+            self.auxiliary_reloads
+                .lock()
+                .expect("auxiliary reloads")
+                .push(session_id.to_string());
         }
-        async fn reapply_saved_session_config(&self) {
+        async fn reapply_saved_session_config(&self, session_id: &str) {
             self.session_config_reapplies
-                .fetch_add(1, Ordering::Release);
+                .lock()
+                .expect("session config reapplies")
+                .push(session_id.to_string());
         }
         async fn refresh_for_config(
             &self,
@@ -11443,7 +11469,10 @@ mod tests {
             .oneshot(mjconfig_request(
                 "POST",
                 Some(token),
-                Some(serde_json::json!({ "team": "codex" })),
+                Some(serde_json::json!({
+                    "team": "codex",
+                    "session_id": "mjconfig-session",
+                })),
             ))
             .await
             .expect("response");
@@ -11460,15 +11489,18 @@ mod tests {
         let discovery = runtime.discovery.lock().expect("discovery lock");
         assert_eq!(discovery.choices.len(), 1);
         assert_eq!(
-            manager.auxiliary_reloads.load(Ordering::Acquire),
-            1,
-            "a successful mjconfig rebind reloads active server sessions' auxiliary routes"
+            *manager.auxiliary_reloads.lock().expect("auxiliary reloads"),
+            vec!["mjconfig-session".to_string()],
+            "a successful mjconfig rebind reloads only the invoking session's auxiliary routes"
         );
         assert_eq!(
-            manager.session_config_reapplies.load(Ordering::Acquire),
-            1,
-            "a save must also reach the primary that is already running, or it \
-             keeps the old permission mode and reports it as active"
+            *manager
+                .session_config_reapplies
+                .lock()
+                .expect("session config reapplies"),
+            vec!["mjconfig-session".to_string()],
+            "a save must also reach the invoking session's running primary, or \
+             it keeps the old permission mode and reports it as active"
         );
     }
 

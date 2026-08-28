@@ -2657,11 +2657,9 @@ async fn run_session(
         fs_max_text_bytes: runtime_options.fs_max_text_bytes,
         access_mode: acp::RuntimeAccessMode::Full,
         agent_source_id: Some(roster.primary.launch.source_id.clone()),
-        config_path: Some(config::default_config_path()),
         saved_session_config: config::SavedSessionConfig::load(
             &config::default_config_path(),
             &roster.primary.launch.source_id,
-            &roster.primary.model.model,
             config::SessionConfigSeat::Primary,
         ),
         role_config: Some(acp::RuntimeRoleConfig {
@@ -2938,7 +2936,7 @@ async fn run_session(
                         continue;
                     }
                 };
-                let updated_roster = match roster::resolve(&updated_config, &side_cwd).await {
+                let mut updated_roster = match roster::resolve(&updated_config, &side_cwd).await {
                     Ok(roster) => roster,
                     Err(error) => {
                         let _ = side_ui_event_tx.send(UiEvent::Warning(format!(
@@ -2948,11 +2946,17 @@ async fn run_session(
                     }
                 };
                 if !primary_route_matches(&command_primary, &updated_roster.primary) {
+                    // The primary itself only changes on /new or /clear, but
+                    // the reviewer and subagent lanes still follow the saved
+                    // config for this session. Auto seats re-pair against the
+                    // primary that keeps running.
+                    updated_roster.primary = command_primary.clone();
+                    roster::rebind_auto_review_for_primary(&mut updated_roster, &updated_config);
+                    roster::rebind_auto_subagents_for_primary(&mut updated_roster, &updated_config);
                     let _ = side_ui_event_tx.send(UiEvent::Info(
                         "primary agent changed; start /new or /clear to apply that route"
                             .to_string(),
                     ));
-                    continue;
                 }
                 let (roles, codex_home) = match isolated_subagent_roles(
                     roster::subagent_failover_roles(&updated_roster),

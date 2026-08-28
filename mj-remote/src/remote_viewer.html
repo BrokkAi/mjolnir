@@ -5007,10 +5007,16 @@
         mjSetStatus("Saving…");
         try {
           const edits = mjcfg.edits;
+          // The save carries the session it was made from: live updates
+          // (auxiliary-route reloads, session-option reconciliation) apply
+          // to that session only, never to other running sessions.
+          const payload = selectedSessionId
+            ? { ...edits, session_id: selectedSessionId }
+            : edits;
           const response = await apiFetch("/api/mjconfig", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(edits),
+            body: JSON.stringify(payload),
           });
           if (!response.ok) {
             mjSetStatus((await response.text()) || `HTTP ${response.status}`, true);
