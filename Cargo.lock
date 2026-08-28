@@ -530,6 +530,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-app"
+version = "1.14.2"
+dependencies = [
+ "anyhow",
+ "brokk-mj-core",
+ "brokk-mj-desktop",
+ "brokk-mj-remote",
+ "clap",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "brokk-mj-core"
 version = "1.14.2"
 dependencies = [
@@ -694,7 +707,6 @@ dependencies = [
  "brokk-mj-agents",
  "brokk-mj-anvil",
  "brokk-mj-core",
- "brokk-mj-desktop",
  "brokk-mj-remote",
  "brokk-mj-tui",
  "chrono",

@@ -118,9 +118,10 @@ brew install brokkai/tap/mjolnir
 **npm or npx:** macOS, Linux, Windows, and Android with Node.js 18 or later:
 
 ```bash
-# Linux: install the WebKitGTK 4.1 runtime first.
-# Ubuntu/Debian: sudo apt-get install libwebkit2gtk-4.1-0
-# Fedora: sudo dnf install webkit2gtk4.1
+# No system libraries required: `mj` links no desktop toolkit, so the CLI, the
+# TUI, and `mj server` all run on a headless machine. Only `mj app` needs the
+# WebKitGTK 4.1 runtime on Linux (Ubuntu/Debian: libwebkit2gtk-4.1-0,
+# Fedora: webkit2gtk4.1); it runs in the bundled `mj-app` binary.
 npm install -g @brokkai/mjolnir
 # Or run without a global install:
 npx -y @brokkai/mjolnir
@@ -129,10 +130,13 @@ npx -y @brokkai/mjolnir
 **crates.io:** install the terminal client and desktop voice worker with Rust:
 
 ```bash
-# Linux: install WebKitGTK 4.1 development files first for `mj app`.
+# `brokk-mjolnir` builds with no desktop or audio system dependencies.
+cargo install --locked brokk-mjolnir
+# Optional: the desktop shell (`mj app`) and Ctrl-R dictation. On Linux these
+# need development files first --
 # Ubuntu/Debian: sudo apt-get install libwebkit2gtk-4.1-dev libasound2-dev
 # Fedora: sudo dnf install webkit2gtk4.1-devel alsa-lib-devel
-cargo install --locked brokk-mjolnir brokk-mj-voice-worker
+cargo install --locked brokk-mj-app brokk-mj-voice-worker
 ```
 
 **Release archive:** download the archive for Linux, macOS, Windows, or

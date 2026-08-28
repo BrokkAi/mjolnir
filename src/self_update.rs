@@ -21,6 +21,8 @@ const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
 const VOICE_WORKER_NAME: &str = "mj-voice-worker";
 const WINDOWS_VOICE_WORKER_NAME: &str = "mj-voice-worker.exe";
+const DESKTOP_APP_NAME: &str = "mj-app";
+const WINDOWS_DESKTOP_APP_NAME: &str = "mj-app.exe";
 const NPM_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPM";
 const NPX_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPX";
 const HOMEBREW_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_HOMEBREW";
@@ -339,10 +341,16 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
     let new_binary =
         extract_mj_binary(&update.asset.name, &archive).context("extract mj binary")?;
     let current_exe = std::env::current_exe().context("resolve current executable")?;
-    if !cfg!(target_os = "android")
-        && let Some(worker) = extract_optional_voice_worker(&update.asset.name, &archive)
-    {
-        install_voice_worker(&current_exe, &worker).context("install voice worker")?;
+    if !cfg!(target_os = "android") {
+        if let Some(worker) = extract_optional_voice_worker(&update.asset.name, &archive) {
+            install_voice_worker(&current_exe, &worker).context("install voice worker")?;
+        }
+        // The desktop shell speaks the same bootstrap-cookie and certificate
+        // contract as the server `mj` starts for it, so it has to move in
+        // lockstep with `mj` rather than be left at the previous release.
+        if let Some(app) = extract_optional_desktop_app(&update.asset.name, &archive) {
+            install_desktop_app(&current_exe, &app).context("install desktop shell")?;
+        }
     }
     let replacement =
         replace_current_exe(&current_exe, &new_binary).context("replace current executable")?;
@@ -428,6 +436,28 @@ fn extract_optional_voice_worker(archive_name: &str, archive_bytes: &[u8]) -> Op
     }
 }
 
+fn extract_desktop_app_binary(archive_name: &str, archive_bytes: &[u8]) -> Result<Vec<u8>> {
+    extract_named_binary(
+        archive_name,
+        archive_bytes,
+        DESKTOP_APP_NAME,
+        WINDOWS_DESKTOP_APP_NAME,
+    )
+}
+
+/// Same sidecar rule as the voice worker: an archive without the desktop shell
+/// must not fail the update, it just leaves `mj app` reporting that the shell
+/// is not installed.
+fn extract_optional_desktop_app(archive_name: &str, archive_bytes: &[u8]) -> Option<Vec<u8>> {
+    match extract_desktop_app_binary(archive_name, archive_bytes) {
+        Ok(app) => Some(app),
+        Err(e) => {
+            eprintln!("mj: skipping desktop shell update: {e:#}");
+            None
+        }
+    }
+}
+
 fn extract_named_binary(
     archive_name: &str,
     archive_bytes: &[u8],
@@ -490,6 +520,15 @@ fn install_voice_worker(current_exe: &Path, bytes: &[u8]) -> Result<()> {
         current_exe,
         VOICE_WORKER_NAME,
         WINDOWS_VOICE_WORKER_NAME,
+        bytes,
+    )
+}
+
+fn install_desktop_app(current_exe: &Path, bytes: &[u8]) -> Result<()> {
+    install_sibling_binary(
+        current_exe,
+        DESKTOP_APP_NAME,
+        WINDOWS_DESKTOP_APP_NAME,
         bytes,
     )
 }

@@ -16,8 +16,6 @@ mod config;
 #[cfg(test)]
 mod deepswe;
 mod discrete_review;
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
-use mj_desktop as desktop;
 mod event;
 mod headless;
 mod keep_awake;
@@ -192,7 +190,7 @@ enum Commands {
     /// Install repository guidance for coding agents.
     Agents(AgentsArgs),
     /// Open the remote viewer in a native desktop window.
-    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     App(AppArgs),
     /// Pipe stdin/stdout to an in-process MCP tool server of a parent mj
     /// process. Spawned by ACP agents as an advertised stdio MCP server;
@@ -215,7 +213,7 @@ enum Commands {
     Server(ServerArgs),
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, clap::Args)]
 struct AppArgs {
     /// Days of disconnected-session history to keep. Pass 0 to retain it
@@ -548,7 +546,7 @@ fn should_run_startup_update_check(cli: &Cli) -> bool {
     }
     match &cli.command {
         Some(Commands::Agents(_)) => false,
-        #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         Some(Commands::App(_)) => false,
         Some(Commands::McpBridge(_)) => false,
         Some(Commands::Memory(_)) => false,
@@ -655,18 +653,14 @@ async fn main() -> Result<()> {
             Commands::Agents(args) => match args.command {
                 AgentsCommand::Install(args) => agent_instructions::install(&cwd, args.yes),
             },
-            #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
-            Commands::App(args) => {
-                run_desktop_app(
-                    args,
-                    cwd,
-                    top_level_additional_directories,
-                    snapshot_exclusions,
-                    fs_max_text_bytes,
-                    termination.token(),
-                )
-                .await
-            }
+            #[cfg(not(target_os = "android"))]
+            Commands::App(args) => launch_desktop_app(
+                args,
+                &cwd,
+                &top_level_additional_directories,
+                &snapshot_exclusions,
+                fs_max_text_bytes,
+            ),
             // Dispatched before the termination coordinator installs; kept
             // here only for match exhaustiveness.
             Commands::McpBridge(args) => mj_core::mcp_bridge::run_bridge(&args.addr).await,
@@ -991,136 +985,95 @@ fn role_for_session_entry<'a>(
         })
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
-async fn run_desktop_app(
-    args: AppArgs,
-    cwd: PathBuf,
-    additional_directories: Vec<PathBuf>,
-    snapshot_exclusions: Vec<PathBuf>,
-    fs_max_text_bytes: u64,
-    termination: CancellationToken,
-) -> Result<()> {
-    let workspace_roots = validate_workspace_roots(&cwd, &additional_directories)?;
-    let config_path = config::default_config_path();
-    let mut cfg =
-        Config::load(&config_path).with_context(|| format!("load {}", config_path.display()))?;
-    cfg.apply_default_team();
-    let resolved = match roster::resolve(&cfg, &cwd).await {
-        Ok(roster) => Ok(roster),
-        Err(error) => match error.downcast_ref::<mj_core::roster::NothingLaunchable>() {
-            Some(nothing) => Err(remote::SetupPending(nothing.message.clone())),
-            None => return Err(error),
-        },
-    };
-    let session_manager = desktop_session_manager(
-        &resolved,
-        remote_host::config_file_hash(&config_path),
-        &cwd,
-        workspace_roots.additional_directories(),
-        &snapshot_exclusions,
-        fs_max_text_bytes,
-    );
+#[cfg(not(target_os = "android"))]
+const DESKTOP_APP_BIN: &str = if cfg!(target_os = "windows") {
+    "mj-app.exe"
+} else {
+    "mj-app"
+};
 
-    let server_stop = termination.child_token();
-    let (handle, serve) = remote::prepare_desktop_server(remote::DesktopServerOptions {
-        config: cfg,
-        roster: resolved,
-        history_days: args.history_days,
-        cwd,
-        additional_directories: workspace_roots.additional_directories().to_vec(),
-        snapshot_exclusions,
-        fs_max_text_bytes,
-        session_manager,
-        termination: server_stop.clone(),
-    })
-    .await?;
-
-    let (failure_tx, failure_rx) = tokio::sync::oneshot::channel::<String>();
-    let server_task = tokio::spawn({
-        let server_stop = server_stop.clone();
-        async move {
-            let result = serve.await;
-            if !server_stop.is_cancelled() {
-                let message = match &result {
-                    Ok(()) => "desktop server exited unexpectedly".to_string(),
-                    Err(error) => format!("desktop server failed: {error:#}"),
-                };
-                let _ = failure_tx.send(message);
-            }
-            result
-        }
-    });
-    let (shell_tx, shell_rx) = tokio::sync::oneshot::channel::<desktop::DesktopShellRemote>();
-    let watchdog = tokio::spawn({
-        let termination = termination.clone();
-        async move {
-            let failure = tokio::select! {
-                _ = termination.cancelled() => None,
-                failure = failure_rx => match failure {
-                    Ok(message) => Some(message),
-                    Err(_) => return,
-                },
-            };
-            let Ok(shell) = shell_rx.await else {
-                return;
-            };
-            match failure {
-                Some(message) => shell.fail(message),
-                None => shell.close(),
-            }
-        }
-    });
-
-    println!("Opening the Mjolnir desktop viewer at {}", handle.origin);
-    let shell_result = desktop::run(
-        desktop::DesktopShellOptions {
-            origin: handle.origin,
-            certificate_der: handle.certificate_der,
-            bootstrap_cookie_name: handle.bootstrap_cookie_name,
-            bootstrap_cookie_value: handle.bootstrap_cookie_value,
-        },
-        move |shell| {
-            let _ = shell_tx.send(shell);
-        },
-    );
-
-    server_stop.cancel();
-    let serve_result = server_task.await.context("join desktop server")?;
-    watchdog.abort();
-    match (shell_result, serve_result) {
-        (Ok(_), Ok(())) => Ok(()),
-        (Err(shell_error), _) => Err(shell_error),
-        (Ok(_), Err(serve_error)) => Err(serve_error),
-    }
+/// Locate the desktop shell binary. It ships beside `mj` in every release
+/// archive and npm bundle, so prefer the sibling path and fall back to `PATH`
+/// for source builds and package-manager layouts that split the two.
+#[cfg(not(target_os = "android"))]
+fn desktop_app_binary() -> Result<PathBuf> {
+    desktop_app_binary_from(std::env::current_exe().ok().as_deref())
 }
 
-#[cfg(all(feature = "desktop-app", not(target_os = "android")))]
-fn desktop_session_manager(
-    resolved: &std::result::Result<roster::Roster, remote::SetupPending>,
-    config_hash: Option<u64>,
+#[cfg(not(target_os = "android"))]
+fn desktop_app_binary_from(current_exe: Option<&Path>) -> Result<PathBuf> {
+    if let Some(dir) = current_exe.and_then(Path::parent) {
+        let sibling = dir.join(DESKTOP_APP_BIN);
+        if sibling.is_file() {
+            return Ok(sibling);
+        }
+    }
+    anyhow::bail!(
+        "the Mjolnir desktop shell ({DESKTOP_APP_BIN}) is not installed next to `mj`.\n\
+         `mj` itself needs no desktop libraries; only the shell does. Install the \
+         desktop package, or build it from source with `cargo build --release -p brokk-mj-app`.\n\
+         On Linux the shell additionally needs WebKitGTK 4.1 \
+         (Ubuntu/Debian: `libwebkit2gtk-4.1-0`, Fedora: `webkit2gtk4.1`)."
+    )
+}
+
+/// Run `mj app` by launching the separate desktop binary. The webview links
+/// WebKitGTK on Linux and WebView2 on Windows; keeping it out of `mj` is what
+/// lets `mj server` and the TUI start on a machine with no desktop libraries
+/// installed.
+#[cfg(not(target_os = "android"))]
+fn launch_desktop_app(
+    args: AppArgs,
     cwd: &Path,
     additional_directories: &[PathBuf],
     snapshot_exclusions: &[PathBuf],
     fs_max_text_bytes: u64,
-) -> Arc<remote_host::RootServerSessionManager> {
-    Arc::new(match resolved {
-        Ok(roster) => remote_host::RootServerSessionManager::new_roster(
-            roster.clone(),
-            config_hash,
-            cwd.to_path_buf(),
-            additional_directories.to_vec(),
-            snapshot_exclusions.to_vec(),
-            fs_max_text_bytes,
-        ),
-        Err(remote::SetupPending(reason)) => remote_host::RootServerSessionManager::new_unresolved(
-            reason.clone(),
-            config_hash,
-            cwd.to_path_buf(),
-            additional_directories.to_vec(),
-            snapshot_exclusions.to_vec(),
-            fs_max_text_bytes,
-        ),
-    })
+) -> Result<()> {
+    // Validate before spawning so a bad workspace root fails here, with the
+    // same message it produced when the shell ran in-process.
+    let workspace_roots = validate_workspace_roots(cwd, additional_directories)?;
+    let binary = desktop_app_binary()?;
+
+    let mut command = std::process::Command::new(&binary);
+    command
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--history-days")
+        .arg(args.history_days.to_string())
+        .arg("--fs-max-text-bytes")
+        .arg(fs_max_text_bytes.to_string());
+    for directory in workspace_roots.additional_directories() {
+        command.arg("--additional-directory").arg(directory);
+    }
+    for exclusion in snapshot_exclusions {
+        command.arg("--snapshot-exclusion").arg(exclusion);
+    }
+
+    let status = command
+        .status()
+        .with_context(|| format!("launch {}", binary.display()))?;
+    if status.success() {
+        return Ok(());
+    }
+    match status.code() {
+        // 127 is what the dynamic loader leaves behind when the shell is
+        // present but its platform webview libraries are not -- the common
+        // case on a server that self-updated into a desktop-capable archive.
+        Some(127) => anyhow::bail!(desktop_shell_unavailable_message(&binary)),
+        Some(code) => std::process::exit(code),
+        None => anyhow::bail!("{} terminated by signal", binary.display()),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn desktop_shell_unavailable_message(binary: &Path) -> String {
+    format!(
+        "{} could not start: its platform webview libraries are missing.\n\
+         `mj` and `mj server` do not need them; only the desktop shell does.\n\
+         On Linux install WebKitGTK 4.1 (Ubuntu/Debian: `libwebkit2gtk-4.1-0`, \
+         Fedora: `webkit2gtk4.1`).",
+        binary.display()
+    )
 }
 
 /// Handle the `mj resume` subcommand: pick the agent to resume from, list
@@ -3667,6 +3620,7 @@ fn idle_usage_update(
 #[cfg(test)]
 mod tests {
     use crate::live::{isolated_subagent_role, isolated_subagent_role_from_home};
+    use crate::remote_host::desktop_session_manager;
     // Keep the remaining orchestration boundaries explicit: `main`, `run_resume`,
     // `run_app`, and `run_session` own real process-wide configuration, agent
     // subprocesses, and terminal state. Their deterministic decisions are tested
@@ -4787,7 +4741,36 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn missing_desktop_shell_names_the_binary_and_the_linux_runtime() {
+        let message = format!(
+            "{:#}",
+            desktop_app_binary_from(Some(Path::new("/nonexistent/bin/mj")))
+                .expect_err("no sibling shell")
+        );
+        assert!(
+            message.contains(DESKTOP_APP_BIN),
+            "names the binary: {message}"
+        );
+        assert!(
+            message.contains("libwebkit2gtk-4.1-0"),
+            "points Linux users at the runtime package: {message}"
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn unavailable_webview_message_separates_the_cli_from_the_shell() {
+        let message = desktop_shell_unavailable_message(Path::new("/opt/mj/mj-app"));
+        assert!(message.contains("/opt/mj/mj-app"));
+        assert!(
+            message.contains("`mj` and `mj server` do not need them"),
+            "must not imply the CLI needs a webview: {message}"
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn parse_app_subcommand() {
         let cli = try_parse_hermetic(&["mj", "app"]).expect("parse app");
@@ -4803,19 +4786,17 @@ mod tests {
         ));
     }
 
-    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
-    #[tokio::test]
-    async fn app_rejects_invalid_workspace_before_starting_a_desktop_shell() {
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn app_rejects_invalid_workspace_before_starting_a_desktop_shell() {
         let cwd = tempfile::tempdir().expect("tempdir");
-        let error = run_desktop_app(
+        let error = launch_desktop_app(
             AppArgs { history_days: 30 },
-            cwd.path().to_path_buf(),
-            vec![PathBuf::from("relative")],
-            Vec::new(),
+            cwd.path(),
+            &[PathBuf::from("relative")],
+            &[],
             acp::DEFAULT_FS_TEXT_BYTES,
-            CancellationToken::new(),
         )
-        .await
         .expect_err("relative workspace roots must be rejected");
 
         assert!(
@@ -4824,7 +4805,6 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
     #[test]
     fn desktop_session_manager_keeps_setup_pending_reason() {
         use remote::ServerSessionManager;
@@ -4847,7 +4827,6 @@ mod tests {
         ));
     }
 
-    #[cfg(all(feature = "desktop-app", not(target_os = "android")))]
     #[test]
     fn desktop_session_manager_binds_a_resolved_roster() {
         let cwd = tempfile::tempdir().expect("tempdir");

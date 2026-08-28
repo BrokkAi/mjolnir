@@ -9,12 +9,14 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
 [workspace]
-members = ["mj-core", "mj-agents", "mj-anvil", "mj-tui", "mj-desktop", "mj-remote", "voice-worker"]
+members = ["mj-core", "mj-agents", "mj-anvil", "mj-tui", "mj-desktop", "mj-app", "mj-remote", "voice-worker"]
 # Bare `cargo test`/`cargo clippy`/`cargo build` must cover the binary and every
 # crate its code was extracted into, or those crates lose their lint and test
-# gate. `mj-desktop` and `voice-worker` keep their own CI jobs because their
-# tests need native desktop and audio dependencies; the default `mj` binary
-# still links the desktop shell on supported desktop platforms.
+# gate. `mj-desktop`, `mj-app`, and `voice-worker` keep their own CI jobs
+# because their builds need native desktop and audio dependencies. `mj` no
+# longer links the desktop shell at all -- `mj app` launches the separate
+# `mj-app` binary -- so `mj` has no WebKitGTK/WebView2 dependency and starts on
+# a headless machine.
 # `mj-anvil` only ships in the Android binary, so it also stays out of the
 # default set; the Android CI job carries its lint and test gate.
 default-members = [".", "mj-core", "mj-agents", "mj-tui", "mj-remote"]
@@ -41,16 +43,11 @@ mj-anvil = { package = "brokk-mj-anvil", path = "mj-anvil", version = "1.14.2" }
 mj-tui = { package = "brokk-mj-tui", path = "mj-tui", version = "1.14.2" }
 mj-remote = { package = "brokk-mj-remote", path = "mj-remote", version = "1.14.2" }
 mj-desktop = { package = "brokk-mj-desktop", path = "mj-desktop", version = "1.14.2" }
+mj-app = { package = "brokk-mj-app", path = "mj-app", version = "1.14.2" }
 
 [[bin]]
 name = "mj"
 path = "src/main.rs"
-
-[features]
-default = ["desktop-app"]
-# Android deliberately has no dependency entries for this feature, and the
-# `mj app` command is excluded from its CLI.
-desktop-app = ["dep:mj-desktop"]
 
 [dependencies]
 mj-core.workspace = true
@@ -108,10 +105,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-
-[target.'cfg(not(target_os = "android"))'.dependencies.mj-desktop]
-workspace = true
-optional = true
 
 # Anvil is the self-contained ACP route on Android, where the npx-based
 # built-in adapters cannot run (issue #685). Other targets never compile it.

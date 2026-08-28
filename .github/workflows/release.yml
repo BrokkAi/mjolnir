@@ -41,6 +41,9 @@ jobs:
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
 
+      - name: Build desktop shell
+        run: cargo build --release --locked -p brokk-mj-app --target x86_64-unknown-linux-gnu
+
       - name: Package archive
         shell: bash
         run: |
@@ -48,6 +51,7 @@ jobs:
           mkdir "$name"
           cp "target/x86_64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
+          cp "target/x86_64-unknown-linux-gnu/release/mj-app" "$name/"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -94,6 +98,9 @@ jobs:
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
 
+      - name: Build desktop shell
+        run: cargo build --release --locked -p brokk-mj-app --target aarch64-unknown-linux-gnu
+
       - name: Package archive
         shell: bash
         run: |
@@ -101,6 +108,7 @@ jobs:
           mkdir "$name"
           cp "target/aarch64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
+          cp "target/aarch64-unknown-linux-gnu/release/mj-app" "$name/"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -188,6 +196,9 @@ jobs:
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-pc-windows-msvc
 
+      - name: Build desktop shell
+        run: cargo build --release --locked -p brokk-mj-app --target x86_64-pc-windows-msvc
+
       - name: Package archive
         shell: pwsh
         run: |
@@ -195,6 +206,7 @@ jobs:
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item "target\x86_64-pc-windows-msvc\release\mj.exe" -Destination $name
           Copy-Item "target\x86_64-pc-windows-msvc\release\mj-voice-worker.exe" -Destination $name
+          Copy-Item "target\x86_64-pc-windows-msvc\release\mj-app.exe" -Destination $name
           Copy-Item "README.md" -Destination $name
           Copy-Item "LICENSE" -Destination $name
           New-Item -ItemType Directory -Path "$name\licenses" | Out-Null
@@ -232,11 +244,17 @@ jobs:
       - name: Build x86_64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-apple-darwin
 
+      - name: Build desktop shell (x86_64)
+        run: cargo build --release --locked -p brokk-mj-app --target x86_64-apple-darwin
+
       - name: Build aarch64 binary
         run: cargo build --release --locked --target aarch64-apple-darwin
 
       - name: Build aarch64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-apple-darwin
+
+      - name: Build desktop shell (aarch64)
+        run: cargo build --release --locked -p brokk-mj-app --target aarch64-apple-darwin
 
       - name: Create universal binary
         run: |
@@ -251,6 +269,11 @@ jobs:
             target/aarch64-apple-darwin/release/mj-voice-worker \
             -output target/universal-apple-darwin/release/mj-voice-worker
           lipo -info target/universal-apple-darwin/release/mj-voice-worker
+          lipo -create \
+            target/x86_64-apple-darwin/release/mj-app \
+            target/aarch64-apple-darwin/release/mj-app \
+            -output target/universal-apple-darwin/release/mj-app
+          lipo -info target/universal-apple-darwin/release/mj-app
 
       - name: Package archive
         run: |
@@ -258,6 +281,7 @@ jobs:
           mkdir "$name"
           cp target/universal-apple-darwin/release/mj "$name/"
           cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
+          cp target/universal-apple-darwin/release/mj-app "$name/"
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"

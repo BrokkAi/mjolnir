@@ -176,9 +176,17 @@ async function stagePlatform(platform, version, source, stagingRoot) {
   }
   await cp(path.join(source, platform.binary), path.join(destination, "bin", platform.binary));
   if (platform.desktop) {
-    const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
-    await cp(path.join(source, worker), path.join(destination, "bin", worker));
-    await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");
+    const windows = platform.binary === "mj.exe";
+    // The desktop shell and the voice worker ship beside `mj` rather than
+    // inside it: each links native libraries (WebKitGTK/WebView2, ALSA) that
+    // `mj` itself must not depend on, so headless installs still work.
+    for (const companion of [
+      windows ? "mj-voice-worker.exe" : "mj-voice-worker",
+      windows ? "mj-app.exe" : "mj-app",
+    ]) {
+      await cp(path.join(source, companion), path.join(destination, "bin", companion));
+      await ensureBinary(path.join(destination, "bin", companion), !windows);
+    }
   }
   await ensureBinary(path.join(destination, "bin", platform.binary), platform.binary !== "mj.exe");
   await writeManifest(destination, platformManifest(platform, version));

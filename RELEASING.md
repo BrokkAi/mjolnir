@@ -59,14 +59,14 @@ already-published release.
 
 `publish.yml` publishes `brokk-mj-voice-worker`, `brokk-mj-core`,
 `brokk-mj-agents`, `brokk-mj-anvil`, `brokk-mj-tui`, `brokk-mj-remote`,
-`brokk-mj-desktop`, and `brokk-mjolnir` in dependency order: each library crate
+`brokk-mj-desktop`, `brokk-mj-app`, and `brokk-mjolnir` in dependency order: each library crate
 must reach the registry before anything that depends on it.
 It refuses to publish when the tag differs from any workspace crate version. It
 packages the whole workspace in one `cargo package --workspace` run — so the
 same-release sibling versions resolve against the crates packaged beside them
 rather than the registry, where they do not exist yet — and builds the root
-crate with `desktop-app` ahead of the `crates-io` environment gate so a failure
-surfaces without spending an approval.
+crate and the separate `brokk-mj-app` desktop shell ahead of the `crates-io`
+environment gate so a failure surfaces without spending an approval.
 
 Publishing runs automatically once the release workflow succeeds. The automated
 release job explicitly dispatches `publish.yml` after creating the GitHub

@@ -46,10 +46,13 @@ npx -y @brokkai/mjolnir --version
 
 The package contains the native Mjolnir release bundle for your platform. It
 does not download a product binary on first run. On macOS, Linux, and Windows,
-the bundle keeps `mj-voice-worker` beside `mj`; Android omits voice support.
+the bundle keeps `mj-voice-worker` and `mj-app` beside `mj`; Android omits
+both.
 
-Linux npm packages require glibc and the WebKitGTK 4.1 runtime because the
-default `mj` binary includes `mj app`:
+Linux npm packages require glibc. Beyond that, `mj` itself links no desktop
+toolkit, so the CLI, the TUI, and `mj server` need no system libraries at all --
+a headless server or container works out of the box. Only the desktop shell that
+`mj app` launches (the bundled `mj-app` binary) needs the WebKitGTK 4.1 runtime:
 
 ```bash
 # Ubuntu or Debian
@@ -136,10 +139,11 @@ sudo dnf install webkit2gtk4.1-devel alsa-lib-devel
 Install the terminal client and voice worker together on desktop:
 
 ```bash
-cargo install --locked brokk-mjolnir brokk-mj-voice-worker
+cargo install --locked brokk-mjolnir brokk-mj-app brokk-mj-voice-worker
 ```
 
-Installing only `brokk-mjolnir` is supported but disables Ctrl-R dictation.
+Installing only `brokk-mjolnir` needs no desktop or audio system dependencies
+at all, but disables `mj app` and Ctrl-R dictation.
 Android users should omit the voice worker.
 
 ### Build from source

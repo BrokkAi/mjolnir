@@ -60,13 +60,16 @@ jobs:
         run: |
           # Packaging the whole workspace in one run lets cargo resolve the
           # same-release sibling versions (brokk-mj-core, brokk-mj-agents,
-          # brokk-mj-tui, brokk-mj-remote, brokk-mj-desktop) against the crates
+          # brokk-mj-tui, brokk-mj-remote, brokk-mj-desktop, brokk-mj-app)
+          # against the crates
           # packaged alongside them
           # instead of against the registry, where this version does not exist
           # until the publish job.
           cargo package --locked --workspace
-          # Build the normal desktop CLI after package verification.
+          # Build the CLI and the separate desktop shell after package
+          # verification. `mj` no longer links the shell, so both need building.
           cargo build --locked -p brokk-mjolnir
+          cargo build --locked -p brokk-mj-app
 
       - uses: actions/upload-artifact@v7
         with:
@@ -144,11 +147,12 @@ jobs:
           }
           # Dependency order: brokk-mj-core has no workspace dependencies;
           # brokk-mj-agents and brokk-mj-anvil need it; brokk-mj-tui needs core
-          # and agents; brokk-mj-remote needs core; and the root binary needs
-          # all of them plus brokk-mj-desktop. brokk-mj-voice-worker is
-          # independent. Publishing out of this order fails on a missing
-          # registry dependency.
-          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-agents brokk-mj-anvil brokk-mj-tui brokk-mj-remote brokk-mj-desktop brokk-mjolnir; do
+          # and agents; brokk-mj-remote needs core; brokk-mj-app needs core,
+          # remote, and desktop; and the root binary needs core, agents, tui,
+          # and remote -- it no longer depends on brokk-mj-desktop.
+          # brokk-mj-voice-worker is independent. Publishing out of this order
+          # fails on a missing registry dependency.
+          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-agents brokk-mj-anvil brokk-mj-tui brokk-mj-remote brokk-mj-desktop brokk-mj-app brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"
               continue

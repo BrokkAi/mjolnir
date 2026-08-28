@@ -8,7 +8,7 @@ Use idiomatic Rust formatted by rustfmt. Prefer clear module boundaries that mat
 
 ## Testing Guidelines
 
-Add focused unit tests near the code under test using `#[cfg(test)] mod tests`. Follow the existing descriptive test naming style, e.g. `autocomplete_updates_matches_for_prefix`. For state-machine changes, test the event transition or input handling directly rather than relying only on manual TUI checks. The default desktop `mj` build includes `mj app`: contributors need the Xcode Command Line Tools on macOS (`xcode-select --install`) or WebKitGTK 4.1 development files on Linux (`libwebkit2gtk-4.1-dev` on Ubuntu or Debian, `webkit2gtk4.1-devel` on Fedora). Run `cargo test` and `cargo clippy --all-targets -- -D warnings` before submitting desktop-shell changes.
+Add focused unit tests near the code under test using `#[cfg(test)] mod tests`. Follow the existing descriptive test naming style, e.g. `autocomplete_updates_matches_for_prefix`. For state-machine changes, test the event transition or input handling directly rather than relying only on manual TUI checks. `mj` no longer links the desktop shell: `mj app` launches the separate `mj-app` binary, so a default `cargo build` needs no desktop libraries and works on a headless machine. Building `mj-app` or `mj-desktop` still needs the Xcode Command Line Tools on macOS (`xcode-select --install`) or WebKitGTK 4.1 development files on Linux (`libwebkit2gtk-4.1-dev` on Ubuntu or Debian, `webkit2gtk4.1-devel` on Fedora). Run `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo clippy -p brokk-mj-app --all-targets -- -D warnings` before submitting desktop-shell changes.
 
 ## GitHub Authentication
 

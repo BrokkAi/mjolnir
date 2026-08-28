@@ -230,7 +230,9 @@ impl RootServerSessionManager {
         )
     }
 
-    #[cfg(test)]
+    /// Whether a resolved roster is bound, so sessions can actually launch.
+    /// Consumed by callers' tests across the crate boundary, so this cannot be
+    /// `#[cfg(test)]` -- dependents build this crate without its test cfg.
     pub fn is_bound(&self) -> bool {
         self.launch
             .read()
@@ -1140,6 +1142,36 @@ impl remote::ServerSessionManager for RootServerSessionManager {
     ) -> std::result::Result<Option<roster::Roster>, String> {
         RootServerSessionManager::refresh_for_config(self, config_path).await
     }
+}
+
+/// Build the session manager a desktop or app-shell server runs on, preserving
+/// the resolver's setup-pending reason when no model is launchable.
+pub fn desktop_session_manager(
+    resolved: &std::result::Result<roster::Roster, remote::SetupPending>,
+    config_hash: Option<u64>,
+    cwd: &Path,
+    additional_directories: &[PathBuf],
+    snapshot_exclusions: &[PathBuf],
+    fs_max_text_bytes: u64,
+) -> Arc<RootServerSessionManager> {
+    Arc::new(match resolved {
+        Ok(roster) => RootServerSessionManager::new_roster(
+            roster.clone(),
+            config_hash,
+            cwd.to_path_buf(),
+            additional_directories.to_vec(),
+            snapshot_exclusions.to_vec(),
+            fs_max_text_bytes,
+        ),
+        Err(remote::SetupPending(reason)) => RootServerSessionManager::new_unresolved(
+            reason.clone(),
+            config_hash,
+            cwd.to_path_buf(),
+            additional_directories.to_vec(),
+            snapshot_exclusions.to_vec(),
+            fs_max_text_bytes,
+        ),
+    })
 }
 
 #[cfg(test)]
