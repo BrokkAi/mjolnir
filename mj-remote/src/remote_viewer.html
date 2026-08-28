@@ -2726,26 +2726,6 @@
         }
       }
 
-      .config-native-mode {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        min-width: 0;
-        padding: 5px 0;
-      }
-
-      .config-native-mode-summary {
-        color: var(--text-control);
-        font: 500 12px/1.35 var(--font-mono);
-      }
-
-      .config-native-mode-name {
-        color: var(--dim);
-        font: 700 9.5px/1 var(--font-mono);
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-      }
-
       .config-combo {
         position: relative;
         min-width: 0;
@@ -9366,28 +9346,9 @@
         return sent ? sent.value : option.current_value || "";
       }
 
-      function createNativeModeStatus(session) {
-        const root = document.createElement("div");
-        root.className = "config-native-mode";
-        root.dataset.nativeMode = "true";
-        const summary = document.createElement("div");
-        summary.className = "config-native-mode-summary";
-        const name = document.createElement("span");
-        name.className = "config-native-mode-name";
-        name.textContent = "Native session mode:";
-        const value = document.createElement("span");
-        value.className = "config-native-mode-value";
-        value.textContent = session.native_mode?.label || "unavailable";
-        value.title =
-          "Current mode reported by the active ACP harness.";
-        summary.append(name, " ", value);
-        root.append(summary);
-        return root;
-      }
-
-      // The strip under the composer stays compact: the native-mode readout
-      // plus one button into the Agent tab, where primary ACP session options
-      // live alongside the primary model.
+      // The strip under the composer stays compact: one button into the Agent
+      // tab, where primary ACP session options live alongside the primary
+      // model.
       function renderConfig(session) {
         const options = sessionConfigOptions(session);
         // Forget sent changes the session has applied (current_value caught
@@ -9412,7 +9373,6 @@
         }
         sessionConfigEl.replaceChildren();
         if (!session) return;
-        sessionConfigEl.appendChild(createNativeModeStatus(session));
         const open = document.createElement("button");
         open.type = "button";
         open.className = "mjconfig-open-button";
