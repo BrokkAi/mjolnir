@@ -107,7 +107,9 @@ fn operator_hint(stderr: &str) -> Option<&'static str> {
     )
 }
 
-#[cfg(test)]
+// Gated on unix as well as test: the only caller drives a shell script, so on
+// Windows this would be dead code and CI builds clippy with `-D warnings`.
+#[cfg(all(test, unix))]
 impl Tailscale {
     /// Build a handle around a stand-in CLI so callers in other modules can
     /// exercise certificate minting without a real tailnet.
