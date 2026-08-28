@@ -2,6 +2,7 @@
 
 mod qr;
 pub mod remote;
+pub mod remote_host;
 #[allow(dead_code)]
 mod settings;
 mod tailscale;

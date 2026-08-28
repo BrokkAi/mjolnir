@@ -1,6 +1,7 @@
 //! Multi-agent orchestration, review, and workspace product layer.
 
 pub mod discrete_review;
+pub mod live;
 pub mod quota;
 pub mod subagent;
 
