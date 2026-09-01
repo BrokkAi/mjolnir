@@ -34,12 +34,11 @@ use crossterm::terminal::{
     LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use ratatui::backend::{Backend, ClearType};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect, Size};
+use ratatui::Terminal;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
-use ratatui::{Terminal, TerminalOptions, Viewport};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -81,13 +80,7 @@ use crate::version::mjolnir_version_label;
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
 const TRANSCRIPT_SCROLL_WHEEL_STEP: usize = 3;
 const PROMPT_SIDE_PADDING: u16 = 1;
-pub const INLINE_CHAT_HEIGHT: u16 = 8;
-const INLINE_EXPANDED_MAX_HEIGHT: u16 = 20;
-const INLINE_TRANSCRIPT_TAIL_MAX_ROWS: usize = 12;
-const INLINE_HELP_HEIGHT: u16 = 18;
 const HELP_SCROLL_PAGE_STEP: u16 = 10;
-/// Inline viewport height for the `/mjconfig` overlay (border + two sections).
-const INLINE_MJCONFIG_HEIGHT: u16 = 24;
 const QUEUED_PROMPT_VISIBLE_ROWS: usize = 3;
 /// Keep the terminal selector compact so its output pane always has room.
 const TERMINAL_ROSTER_VISIBLE_ROWS: u16 = 5;
@@ -103,13 +96,10 @@ const CURRENT_BRANCH_PR_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(3);
 const CURSOR_POSITION_TIMEOUT_MESSAGE: &str =
     "The cursor position could not be read within a normal duration";
-const INLINE_SETUP_RETRY_DELAY: Duration = Duration::from_millis(75);
-const INLINE_NON_CURSOR_SETUP_ATTEMPTS: usize = 3;
 const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
 const PASTE_BURST_IDLE_TIMEOUT: Duration = Duration::from_millis(16);
 const PASTE_BURST_MIN_CHARS: usize = 3;
 const NOTIFICATION_PREVIEW_CHARS: usize = 80;
-const INLINE_RESIZE_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 /// Codex's streaming commit cadence: one completed source line per 120 FPS
 /// frame while output is keeping up.
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_nanos(8_333_334);
@@ -451,12 +441,6 @@ fn prose_kind_for_event(event: &UiEvent) -> Option<ProseKind> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UiMode {
-    InlineChat,
-    FullscreenTui,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderLabels {
     pub project: String,
@@ -471,37 +455,8 @@ enum TerminalRequest {
     ToggleTextSelectionMode,
     StartDictation,
     StopDictation,
-    ForceInlineRepair,
     CopyText(String),
     Authenticate(crate::auth::AuthVendor),
-}
-
-fn terminal_request_forces_inline_repair(request: &TerminalRequest) -> bool {
-    matches!(request, TerminalRequest::ForceInlineRepair)
-}
-
-fn inline_transcript_viewer_accepts_input(state: &AppState) -> bool {
-    state.transcript_viewer && !state.has_pending_permission() && !state.has_pending_elicitation()
-}
-
-fn inline_reader_accepts_input(state: &AppState) -> bool {
-    inline_transcript_viewer_accepts_input(state)
-        || (state.nested_agent_viewer
-            && !state.has_pending_permission()
-            && !state.has_pending_elicitation())
-        || (state.workspace_diff_viewer
-            && !state.has_pending_permission()
-            && !state.has_pending_elicitation())
-        || (state.terminals_viewer
-            && !state.has_pending_permission()
-            && !state.has_pending_elicitation())
-}
-
-fn inline_reader_is_open(state: &AppState) -> bool {
-    state.transcript_viewer
-        || state.nested_agent_viewer
-        || state.workspace_diff_viewer
-        || state.terminals_viewer
 }
 
 #[derive(Debug)]
@@ -510,33 +465,6 @@ enum DictationEvent {
     Level(f32),
     Status(String),
     Finished(std::result::Result<DictationResult, String>),
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalFeature {
-    RawMode,
-    AlternateScreen,
-    MouseCapture,
-    BracketedPaste,
-}
-
-#[cfg(test)]
-fn terminal_setup_features(mode: UiMode) -> Vec<TerminalFeature> {
-    let mut features = vec![TerminalFeature::RawMode];
-    match mode {
-        UiMode::InlineChat => {
-            features.push(TerminalFeature::BracketedPaste);
-        }
-        UiMode::FullscreenTui => {
-            features.extend([
-                TerminalFeature::AlternateScreen,
-                TerminalFeature::MouseCapture,
-                TerminalFeature::BracketedPaste,
-            ]);
-        }
-    }
-    features
 }
 
 #[derive(Debug, Default)]
@@ -549,10 +477,6 @@ struct TranscriptScrollState {
     /// it out when nothing visible changed (e.g. while the user is
     /// typing in the input box or navigating modals).
     cache: Option<TranscriptCache>,
-    /// Same cache for the Ctrl-T full-history reader. It renders every entry
-    /// expanded, so it cannot share `cache` with the collapsed chat pane even
-    /// though both are keyed the same way.
-    viewer_cache: Option<TranscriptCache>,
     /// Rendered lines for the settled transcript prefix, kept across
     /// transcript revisions. While a turn streams, every reveal tick bumps
     /// the revision; without this cache each bump re-rendered and re-measured
@@ -595,138 +519,6 @@ struct TranscriptCache {
     row_starts: Vec<usize>,
     /// Wrapped rows contributed by the settled prefix cache ahead of `lines`.
     prefix_rows: usize,
-}
-
-#[derive(Debug, Default)]
-struct TranscriptSink {
-    emitted_entries: usize,
-}
-
-impl TranscriptSink {
-    fn pending_lines(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
-        let stable_entries = stable_transcript_entry_count(state);
-        if stable_entries <= self.emitted_entries {
-            return Vec::new();
-        }
-        let lines = render_transcript_entry_range(
-            state,
-            width,
-            self.emitted_entries..stable_entries,
-            transcript_collapse_limit(state),
-            state.theme,
-            false,
-        );
-        self.emitted_entries = stable_entries;
-        lines
-    }
-
-    fn pending_lines_for_exit(&mut self, state: &AppState, width: u16) -> Vec<Line<'static>> {
-        let mut out = self.pending_lines(state, width);
-        if self.emitted_entries < state.transcript.len() {
-            out.extend(render_transcript_entry_range(
-                state,
-                width,
-                self.emitted_entries..state.transcript.len(),
-                transcript_collapse_limit(state),
-                state.theme,
-                false,
-            ));
-            self.emitted_entries = state.transcript.len();
-        }
-        out
-    }
-
-    fn mark_emitted(&mut self, entries: usize) {
-        self.emitted_entries = entries;
-    }
-}
-
-#[derive(Debug, Default)]
-struct InlineResizeReflow {
-    last_observed_size: Option<Size>,
-    pending_until: Option<Instant>,
-}
-
-impl InlineResizeReflow {
-    fn note_resize(&mut self, size: Size, now: Instant) {
-        if self.last_observed_size == Some(size) {
-            return;
-        }
-        self.last_observed_size = Some(size);
-        self.pending_until = Some(now + INLINE_RESIZE_REFLOW_DEBOUNCE);
-    }
-
-    fn is_pending(&self) -> bool {
-        self.pending_until.is_some()
-    }
-
-    fn is_due(&self, now: Instant) -> bool {
-        self.pending_until.is_some_and(|deadline| now >= deadline)
-    }
-
-    fn waiting(&self, now: Instant) -> bool {
-        self.pending_until.is_some_and(|deadline| now < deadline)
-    }
-
-    fn clear(&mut self) {
-        self.pending_until = None;
-    }
-}
-
-fn stable_transcript_entry_count(state: &AppState) -> usize {
-    // Force-committed entries are already in scrollback; the natural
-    // stability scan resumes after them so one never-settling entry cannot
-    // pin the boundary once the overflow valve has moved past it.
-    let committed = state.committed_transcript_entries();
-    let mut stable = committed;
-    for idx in committed..state.transcript.len() {
-        if transcript_entry_is_stable(state, idx, &state.transcript[idx]) {
-            stable = idx + 1;
-        } else {
-            break;
-        }
-    }
-    stable
-}
-
-/// #615 fix B: the commit boundary normally waits for entries to settle, but
-/// an entry that never settles (a terminal that never exits, a tool call that
-/// never resolves) would pin it forever while the tail viewport silently
-/// scrolls everything after it out of existence. Once the uncommitted region
-/// no longer fits the tail, commit the pinned entry frozen as-is — a far
-/// smaller loss than discarding every row that follows. The trailing entry is
-/// never forced: it may still be streaming, and committing it early would
-/// truncate it in scrollback permanently.
-fn force_commit_overflowing_tail(state: &mut AppState, width: u16) -> bool {
-    if width == 0 {
-        return false;
-    }
-    let mut changed = false;
-    loop {
-        let stable = stable_transcript_entry_count(state);
-        if stable + 1 >= state.transcript.len() {
-            break;
-        }
-        let lines = render_transcript_entry_range(
-            state,
-            width,
-            stable..state.transcript.len(),
-            transcript_collapse_limit(state),
-            state.theme,
-            false,
-        );
-        let rows = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .line_count(width);
-        if rows <= INLINE_TRANSCRIPT_TAIL_MAX_ROWS {
-            break;
-        }
-        if !state.force_commit_transcript_entries(stable + 1) {
-            break;
-        }
-        changed = true;
-    }
-    changed
 }
 
 fn search_text_contains(text: &str, query: &str) -> bool {
@@ -1128,22 +920,6 @@ fn turn_tool_summary(state: &AppState, start: usize, end: usize) -> Option<TurnT
 }
 
 fn transcript_entry_is_stable(state: &AppState, idx: usize, entry: &Entry) -> bool {
-    // Scrollback already holds these rows and cannot retract them, so they
-    // are immutable by fiat even if their backing state would still change.
-    if idx < state.committed_transcript_entries() {
-        return true;
-    }
-    transcript_entry_settles_naturally(state, idx, entry)
-}
-
-/// Stability on the entry's own terms, ignoring the committed-by-fiat
-/// shortcut above. The settled-prefix boundary must use this: an entry
-/// force-committed by the inline overflow valve counts as stable for
-/// scrollback purposes while its backing state (a still-running terminal,
-/// an open message) can still change how it renders — freezing that render
-/// would keep e.g. a `running · /terminals to view` reference line on
-/// screen after the terminal exits.
-fn transcript_entry_settles_naturally(state: &AppState, idx: usize, entry: &Entry) -> bool {
     match entry {
         Entry::UserPrompt(_)
         | Entry::System(_)
@@ -1196,10 +972,9 @@ impl TranscriptScrollState {
 }
 
 /// Run the UI loop until the user quits or asks for a new session. The
-/// caller owns the terminal lifecycle (`setup_fullscreen_terminal` or
-/// `setup_inline_chat_terminal`, with the matching restore function).
-/// Returns the reason the loop exited so `main` knows whether to
-/// terminate or run the picker again.
+/// caller owns the terminal lifecycle (`setup_fullscreen_terminal` and
+/// `restore_fullscreen_terminal`). Returns the reason the loop exited so
+/// `main` knows whether to terminate or run the picker again.
 ///
 /// Prompt history is loaded from `history_path` (if set) and persisted
 /// on exit. `initial_agent_label` pre-populates the status line so we show
@@ -1215,7 +990,6 @@ pub struct UiPersistencePaths<'a> {
 #[derive(Clone)]
 pub struct UiRunOptions<'a> {
     pub persistence: UiPersistencePaths<'a>,
-    pub mode: UiMode,
     pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub thought_output: config::ThoughtOutput,
@@ -1375,7 +1149,6 @@ pub async fn run(
             primary_acp_name: options.primary_acp_name,
             primary_reasoning_effort: options.primary_reasoning_effort,
         },
-        options.mode,
         options.termination,
     )
     .await?;
@@ -1402,10 +1175,6 @@ const FRAME_BUDGET: Duration = Duration::from_millis(33);
 /// Slower redraw rate for streaming transcript updates in the fullscreen TUI.
 /// User input is intentionally not throttled by this budget.
 const STREAMING_FRAME_BUDGET: Duration = STREAM_COMMIT_INTERVAL;
-
-/// Slower redraw rate for streaming transcript updates in inline chat. Spinner
-/// animation has its own cadence, so queued-prompt typing can stay responsive.
-const INLINE_STREAMING_FRAME_BUDGET: Duration = STREAM_COMMIT_INTERVAL;
 
 /// Spinner-only redraw cadence. Tied to the fastest spinner so wall-clock
 /// frame selection and animation wakeups cannot drift.
@@ -1468,23 +1237,16 @@ impl PendingRedraw {
         *self = Self::default();
     }
 
-    fn budget(self, mode: UiMode) -> Duration {
+    fn budget(self) -> Duration {
         if self.interactive {
             FRAME_BUDGET
         } else if self.stream {
-            streaming_redraw_budget(mode)
+            STREAMING_FRAME_BUDGET
         } else if self.animation {
             SPINNER_FRAME_BUDGET
         } else {
             FRAME_BUDGET
         }
-    }
-}
-
-fn streaming_redraw_budget(mode: UiMode) -> Duration {
-    match mode {
-        UiMode::InlineChat => INLINE_STREAMING_FRAME_BUDGET,
-        UiMode::FullscreenTui => STREAMING_FRAME_BUDGET,
     }
 }
 
@@ -1609,7 +1371,6 @@ async fn ui_loop(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     event_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
     initial: UiInitialState,
-    mode: UiMode,
     termination: CancellationToken,
 ) -> Result<UiLoopOutcome> {
     let import_resumed_session = initial.import_resumed_session;
@@ -1657,10 +1418,7 @@ async fn ui_loop(
     }
     let mut main_state: Option<AppState> = None;
     let mut transcript_scroll = TranscriptScrollState::default();
-    let mut transcript_sink = TranscriptSink::default();
     let mut main_transcript_scroll: Option<TranscriptScrollState> = None;
-    let mut main_transcript_sink: Option<TranscriptSink> = None;
-    let mut inline_resize_reflow = InlineResizeReflow::default();
     let mut stream_reveal = StreamRevealController::default();
     let mut notification_backend = TerminalNotificationBackend::detect();
     let mut crossterm_events = EventStream::new();
@@ -1673,7 +1431,6 @@ async fn ui_loop(
     let mut bifrost_version_probe_in_flight = false;
     let mut bifrost_version_result: Option<std::result::Result<Vec<String>, String>> = None;
     let (file_scan_tx, mut file_scan_rx) = mpsc::unbounded_channel::<FileAutocompleteScan>();
-    let mut inline_height = INLINE_CHAT_HEIGHT;
     // Wake-up timers so queued input can render at the interactive cadence
     // while spinner-only animation advances at a calmer progress cadence.
     // `Delay` keeps either timer from burst-firing after a long busy period.
@@ -1689,15 +1446,9 @@ async fn ui_loop(
     config_watch_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut config_watch = ConfigWatch::new(state.config_path.clone());
 
-    if mode == UiMode::InlineChat {
-        sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-    }
-    let initial_rendered = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
+    let initial_rendered = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll)?;
     let mut pending_redraw = PendingRedraw::from_failed_initial_draw(initial_rendered);
     let mut last_draw = Instant::now();
-    let mut force_inline_repair = false;
-    let mut force_soft_inline_repair = false;
-    let mut restore_inline_after_reader = false;
     let mut shutdown_deadline: Option<Instant> = None;
 
     loop {
@@ -1718,49 +1469,13 @@ async fn ui_loop(
             maybe_ct = crossterm_events.next() => {
                 match maybe_ct {
                     Some(Ok(ev)) => {
-                        if mode == UiMode::InlineChat
-                            && let CtEvent::Resize(width, height) = &ev
-                        {
-                            inline_resize_reflow.note_resize(
-                                Size {
-                                    width: *width,
-                                    height: *height,
-                                },
-                                Instant::now(),
-                            );
-                        }
-                        if should_force_inline_repair_for_event(mode, &state, &ev) {
-                            force_inline_repair = true;
-                        }
-                        let inline_reader_was_active =
-                            mode == UiMode::InlineChat && inline_reader_accepts_input(&state);
-                        let inline_reader_was_open =
-                            mode == UiMode::InlineChat && inline_reader_is_open(&state);
-                        let request = handle_crossterm(&mut state, cmd_tx, ev, mode);
-                        if mode == UiMode::InlineChat
-                            && inline_reader_was_active != inline_reader_accepts_input(&state)
-                        {
-                            set_mouse_capture(
-                                terminal,
-                                inline_reader_accepts_input(&state),
-                            )?;
-                        }
-                        if mode == UiMode::InlineChat
-                            && terminal_request_forces_inline_repair(&request)
-                        {
-                            force_soft_inline_repair = true;
-                        }
-                        if inline_reader_was_open && !inline_reader_is_open(&state) {
-                            restore_inline_after_reader = true;
-                            force_soft_inline_repair = false;
-                        }
+                        let request = handle_crossterm(&mut state, cmd_tx, ev);
                         apply_terminal_request(
                             terminal,
                             &mut state,
                             request,
                             &dictation_tx,
                             &mut dictation_cancel_tx,
-                            mode,
                         )
                         .await?;
                     }
@@ -1877,8 +1592,6 @@ async fn ui_loop(
                                     transcript_scroll = main_transcript_scroll
                                         .take()
                                         .unwrap_or_default();
-                                    transcript_sink =
-                                        main_transcript_sink.take().unwrap_or_default();
                                 } else {
                                     state.record_status_message(StatusKind::Warning, message);
                                 }
@@ -1903,14 +1616,8 @@ async fn ui_loop(
                             }
                             event => event,
                         };
-                        let inline_reader_was_active =
-                            mode == UiMode::InlineChat && inline_reader_accepts_input(&state);
-                        let inline_reader_was_open =
-                            mode == UiMode::InlineChat && inline_reader_is_open(&state);
                         let redraw_cause = ui_event_redraw_cause(&ev);
-                        let force_repair_for_event =
-                            should_force_inline_repair_for_ui_event(mode, &ev);
-                        let notification = notification_message_for_event(mode, &state, &ev);
+                        let notification = notification_message_for_event(&state, &ev);
                         let prose_event = prose_kind_for_event(&ev).is_some();
                         let failed_side_start = state.is_side
                             && state.session_id.is_none()
@@ -1935,39 +1642,6 @@ async fn ui_loop(
                             state.exit_reason = Some(UiExitReason::Quit);
                         }
                         drain_queued_prompt(&mut state, cmd_tx);
-                        if mode == UiMode::InlineChat
-                            && inline_reader_was_active != inline_reader_accepts_input(&state)
-                        {
-                            set_mouse_capture(
-                                terminal,
-                                inline_reader_accepts_input(&state),
-                            )?;
-                        }
-                        if inline_reader_was_open && !inline_reader_is_open(&state) {
-                            restore_inline_after_reader = true;
-                        }
-                        if force_repair_for_event {
-                            force_inline_repair = true;
-                            // Defer the repair while a resize reflow is pending:
-                            // the reflow rebuilds the viewport from transcript
-                            // state, and the deferred repair path picks up
-                            // `force_inline_repair` afterward. Repairing now
-                            // would paint at mid-resize geometry that the reflow
-                            // immediately discards.
-                            if !inline_resize_reflow.is_pending() {
-                                sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-                                let repaired = repair_inline_viewport(
-                                    terminal,
-                                    &mut state,
-                                    &mut transcript_scroll,
-                                    InlineRepairMode::Hard,
-                                );
-                                if repaired {
-                                    last_draw = Instant::now();
-                                    force_inline_repair = false;
-                                }
-                            }
-                        }
                         post_terminal_notification(
                             terminal,
                             &mut notification_backend,
@@ -2004,12 +1678,12 @@ async fn ui_loop(
                 if flush_input_paste_burst_if_due(&mut state, Instant::now(), false) {
                     pending_redraw.mark_interactive();
                 }
-                if timer_driven_live_redraw(mode, &state) {
+                if needs_live_redraw(&state) {
                     pending_redraw.mark_animation();
                 }
             }
             _ = animation_tick.tick() => {
-                if timer_driven_live_redraw(mode, &state) {
+                if needs_live_redraw(&state) {
                     pending_redraw.mark_animation();
                 }
             }
@@ -2070,7 +1744,6 @@ async fn ui_loop(
                 initial_prompt: question,
             });
             main_transcript_scroll = Some(std::mem::take(&mut transcript_scroll));
-            main_transcript_sink = Some(std::mem::take(&mut transcript_sink));
             stream_reveal = StreamRevealController::resume(&mut state);
             pending_redraw.mark_interactive();
         }
@@ -2091,72 +1764,9 @@ async fn ui_loop(
                 }
                 state = main;
                 transcript_scroll = main_transcript_scroll.take().unwrap_or_default();
-                transcript_sink = main_transcript_sink.take().unwrap_or_default();
                 stream_reveal = StreamRevealController::resume(&mut state);
                 pending_redraw.mark_interactive();
             }
-        }
-
-        if !inline_resize_reflow.is_pending()
-            && should_attempt_inline_repair_before_flush(force_inline_repair, mode, &state)
-        {
-            force_inline_repair = false;
-            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-            let repaired = repair_inline_viewport(
-                terminal,
-                &mut state,
-                &mut transcript_scroll,
-                InlineRepairMode::Hard,
-            );
-            if repaired {
-                last_draw = Instant::now();
-                pending_redraw.clear();
-            } else {
-                pending_redraw.mark_interactive();
-            }
-        }
-
-        if maybe_run_inline_resize_reflow(
-            terminal,
-            &mut inline_resize_reflow,
-            &mut transcript_sink,
-            &state,
-            &mut inline_height,
-        )? {
-            restore_inline_after_reader = false;
-            pending_redraw.mark_interactive();
-        }
-
-        if mode == UiMode::InlineChat
-            && restore_inline_after_reader
-            && !inline_resize_reflow.is_pending()
-        {
-            force_soft_inline_repair = false;
-            restore_inline_after_reader = !restore_inline_viewport_after_reader(
-                terminal,
-                &mut transcript_sink,
-                &state,
-                &mut inline_height,
-            )?;
-            pending_redraw.mark_interactive();
-        }
-
-        // Pause scrollback flushing while the full-transcript reader owns the
-        // viewport: `insert_before` would scroll the terminal under the user
-        // mid-read. Entries that go stable meanwhile are flushed on close.
-        if mode == UiMode::InlineChat
-            && !state.transcript_viewer
-            && !state.nested_agent_viewer
-            && !state.workspace_diff_viewer
-            && !state.terminals_viewer
-            && !inline_resize_reflow.is_pending()
-        {
-            flush_transcript_to_scrollback(
-                terminal,
-                &mut transcript_sink,
-                &mut state,
-                &mut inline_resize_reflow,
-            )?;
         }
 
         if shutdown_deadline.is_some_and(|d| Instant::now() >= d) {
@@ -2164,15 +1774,11 @@ async fn ui_loop(
         }
 
         if let Some(reason) = state.exit_reason {
-            // In fullscreen mode, a Quit while the runtime is still alive
-            // enters ShuttingDown instead of returning immediately. The
-            // spinner keeps animating while main.rs tears down the ACP
-            // runtime; the deadline expires after 3s (covering the 2s ACP
-            // abort timeout in main.rs).
-            if reason == UiExitReason::Quit
-                && mode == UiMode::FullscreenTui
-                && shutdown_deadline.is_none()
-                && !state.runtime_closed
+            // A Quit while the runtime is still alive enters ShuttingDown
+            // instead of returning immediately. The spinner keeps animating
+            // while main.rs tears down the ACP runtime; the deadline expires
+            // after 3s (covering the 2s ACP abort timeout in main.rs).
+            if reason == UiExitReason::Quit && shutdown_deadline.is_none() && !state.runtime_closed
             {
                 state.set_connection_state(ConnectionState::ShuttingDown);
                 state.record_status_message(StatusKind::Info, "shutting down\u{2026}");
@@ -2188,20 +1794,10 @@ async fn ui_loop(
                 let _ = cmd_tx.send(UiCommand::Shutdown);
             }
             cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
-            if mode == UiMode::InlineChat {
-                flush_transcript_to_scrollback_for_exit(
-                    terminal,
-                    &mut transcript_sink,
-                    &mut state,
-                )?;
-                sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-            }
-            let _ = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
-            if mode == UiMode::FullscreenTui {
-                reset_text_selection_mode_for_exit(&mut state, |enabled| {
-                    set_mouse_capture(terminal, enabled)
-                })?;
-            }
+            let _ = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll)?;
+            reset_text_selection_mode_for_exit(&mut state, |enabled| {
+                set_mouse_capture(terminal, enabled)
+            })?;
             let outcome_state = main_state.as_ref().unwrap_or(&state);
             let is_handoff = matches!(
                 reason,
@@ -2225,54 +1821,12 @@ async fn ui_loop(
             });
         }
 
-        if force_soft_inline_repair && !inline_resize_reflow.is_pending() {
-            force_soft_inline_repair = false;
-            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-            let repaired = repair_inline_viewport(
-                terminal,
-                &mut state,
-                &mut transcript_scroll,
-                InlineRepairMode::Soft,
-            );
-            if repaired {
-                last_draw = Instant::now();
-                pending_redraw.clear();
-            } else {
-                pending_redraw.mark_interactive();
-            }
-        }
-
-        if !inline_resize_reflow.is_pending()
-            && should_attempt_inline_repair(force_inline_repair, mode)
-        {
-            force_inline_repair = false;
-            sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-            let repaired = repair_inline_viewport(
-                terminal,
-                &mut state,
-                &mut transcript_scroll,
-                InlineRepairMode::Hard,
-            );
-            if repaired {
-                last_draw = Instant::now();
-                pending_redraw.clear();
-            } else {
-                pending_redraw.mark_interactive();
-            }
-        }
-
         // Throttle by redraw cause. Under a flood of runtime events (`biased`
         // select keeps picking event arms before timers), this elapsed-time
         // check coalesces stream chunks. Interactive input remains on the fast
         // budget even while a spinner is active.
-        if pending_redraw.any() && last_draw.elapsed() >= pending_redraw.budget(mode) {
-            if mode == UiMode::InlineChat && inline_resize_reflow.waiting(Instant::now()) {
-                continue;
-            }
-            if mode == UiMode::InlineChat {
-                sync_inline_terminal_height(terminal, &state, &mut inline_height)?;
-            }
-            let rendered = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll, mode)?;
+        if pending_redraw.any() && last_draw.elapsed() >= pending_redraw.budget() {
+            let rendered = draw_terminal_frame(terminal, &mut state, &mut transcript_scroll)?;
             if rendered {
                 pending_redraw.clear();
             } else {
@@ -2281,15 +1835,8 @@ async fn ui_loop(
             last_draw = Instant::now();
         }
     }
-    if mode == UiMode::InlineChat {
-        flush_transcript_to_scrollback_for_exit(terminal, &mut transcript_sink, &mut state)?;
-    }
     cancel_dictation_for_exit(&mut state, &mut dictation_cancel_tx);
-    if mode == UiMode::FullscreenTui {
-        reset_text_selection_mode_for_exit(&mut state, |enabled| {
-            set_mouse_capture(terminal, enabled)
-        })?;
-    }
+    reset_text_selection_mode_for_exit(&mut state, |enabled| set_mouse_capture(terminal, enabled))?;
     Ok(UiLoopOutcome {
         reason: UiExitReason::Quit,
         session_id: None,
@@ -2302,15 +1849,7 @@ async fn ui_loop(
     })
 }
 
-fn notification_message_for_event(
-    mode: UiMode,
-    state: &AppState,
-    event: &UiEvent,
-) -> Option<String> {
-    if mode == UiMode::InlineChat && matches!(event, UiEvent::PermissionRequest(_)) {
-        return None;
-    }
-
+fn notification_message_for_event(state: &AppState, event: &UiEvent) -> Option<String> {
     match event {
         UiEvent::PromptDone { stop_reason, .. } => {
             if *stop_reason == StopReason::Cancelled {
@@ -2394,133 +1933,11 @@ fn draw_terminal_frame(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
-    mode: UiMode,
 ) -> Result<bool> {
-    match terminal.draw(|f| draw(f, state, transcript_scroll, mode)) {
+    match terminal.draw(|f| draw(f, state, transcript_scroll)) {
         Ok(_) => Ok(true),
-        Err(e) if mode == UiMode::InlineChat && is_cursor_position_timeout_io(&e) => {
-            trace_inline_cursor_position_timeout("redraw", &e);
-            Ok(false)
-        }
         Err(e) => Err(e).context("draw terminal"),
     }
-}
-
-fn should_force_inline_repair_for_event(mode: UiMode, state: &AppState, ev: &CtEvent) -> bool {
-    if mode != UiMode::InlineChat {
-        return false;
-    }
-
-    if matches!(ev, CtEvent::FocusGained) {
-        return true;
-    }
-
-    if matches!(ev, CtEvent::Paste(_))
-        && !state.help_overlay
-        && !state.has_pending_permission()
-        && !state.has_pending_elicitation()
-        && state.config_picker.is_none()
-        && !state.transcript_viewer
-        && !state.nested_agent_viewer
-        && !state.workspace_diff_viewer
-    {
-        return true;
-    }
-
-    // Permission and elicitation prompts get a few early repair attempts
-    // right after opening, and a hard repair when the inline viewport is
-    // resized while the modal is open.
-    (state.has_pending_permission() || state.has_pending_elicitation())
-        && matches!(ev, CtEvent::Resize(_, _))
-}
-
-fn should_force_inline_repair_for_ui_event(mode: UiMode, ev: &UiEvent) -> bool {
-    // A remote decision can dismiss the inline permission view, which
-    // needs the same viewport repair as the view appearing.
-    mode == UiMode::InlineChat
-        && matches!(
-            ev,
-            UiEvent::PermissionRequest(_)
-                | UiEvent::CancelPendingPermissions
-                | UiEvent::RemotePermissionDecision { .. }
-                | UiEvent::ElicitationRequest(_)
-                | UiEvent::Subagent(
-                    crate::event::SubagentEvent::PermissionRequest { .. }
-                        | crate::event::SubagentEvent::ElicitationRequest { .. }
-                        | crate::event::SubagentEvent::CancelPendingPermissions { .. }
-                )
-        )
-}
-
-fn should_attempt_inline_repair_before_flush(
-    force_inline_repair: bool,
-    mode: UiMode,
-    state: &AppState,
-) -> bool {
-    mode == UiMode::InlineChat
-        && force_inline_repair
-        && (state.has_pending_permission() || state.has_pending_elicitation())
-}
-
-fn should_attempt_inline_repair(force_inline_repair: bool, mode: UiMode) -> bool {
-    mode == UiMode::InlineChat && force_inline_repair
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InlineRepairMode {
-    Soft,
-    Hard,
-}
-
-fn repair_inline_viewport(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    state: &mut AppState,
-    transcript_scroll: &mut TranscriptScrollState,
-    mode: InlineRepairMode,
-) -> bool {
-    match terminal.autoresize() {
-        Ok(()) => {}
-        Err(e) if is_cursor_position_timeout_io(&e) => {
-            trace_inline_cursor_position_timeout("repair autoresize", &e);
-            return false;
-        }
-        Err(e) => {
-            tracing::warn!("skip inline repair autoresize: {e}");
-            return false;
-        }
-    }
-
-    if matches!(mode, InlineRepairMode::Hard) {
-        match terminal.clear() {
-            Ok(()) => {}
-            Err(e) if is_cursor_position_timeout_io(&e) => {
-                trace_inline_cursor_position_timeout("repair clear", &e);
-                return false;
-            }
-            Err(e) => {
-                tracing::warn!("skip inline repair: {e}");
-                return false;
-            }
-        }
-    }
-
-    match draw_terminal_frame(terminal, state, transcript_scroll, UiMode::InlineChat) {
-        Ok(rendered) => rendered,
-        Err(e) => {
-            tracing::warn!("skip inline repair redraw: {e:#}");
-            false
-        }
-    }
-}
-
-fn timer_driven_live_redraw(mode: UiMode, state: &AppState) -> bool {
-    if mode == UiMode::InlineChat && state.is_busy() {
-        // Workflow progress animates on wall-clock time, so it needs the timer
-        // even in the inline mode that otherwise suppresses it.
-        return should_show_spinner(state) || state.has_active_workflows();
-    }
-
-    needs_live_redraw(state)
 }
 
 fn should_show_spinner(state: &AppState) -> bool {
@@ -2548,567 +1965,10 @@ fn needs_live_redraw(state: &AppState) -> bool {
         || should_show_spinner(state)
 }
 
-fn flush_transcript_to_scrollback(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    sink: &mut TranscriptSink,
-    state: &mut AppState,
-    reflow: &mut InlineResizeReflow,
-) -> Result<()> {
-    flush_transcript_lines_to_scrollback(terminal, sink, state, Some(reflow), false)
-}
-
-fn flush_transcript_to_scrollback_for_exit(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    sink: &mut TranscriptSink,
-    state: &mut AppState,
-) -> Result<()> {
-    flush_transcript_lines_to_scrollback(terminal, sink, state, None, true)
-}
-
-fn flush_transcript_lines_to_scrollback(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    sink: &mut TranscriptSink,
-    state: &mut AppState,
-    reflow: Option<&mut InlineResizeReflow>,
-    exiting: bool,
-) -> Result<()> {
-    let size = match terminal.size() {
-        Ok(size) => size,
-        Err(e) if is_cursor_position_timeout_io(&e) => {
-            trace_inline_cursor_position_timeout("transcript flush size query", &e);
-            return Ok(());
-        }
-        Err(e) => return Err(e).context("query terminal size for transcript flush"),
-    };
-    let width = size.width;
-    if width == 0 {
-        return Ok(());
-    }
-    if !reconcile_inline_geometry_before_flush(terminal, size, reflow)? {
-        return Ok(());
-    }
-    force_commit_overflowing_tail(state, width);
-    let lines = if exiting {
-        sink.pending_lines_for_exit(state, width)
-    } else {
-        sink.pending_lines(state, width)
-    };
-    if lines.is_empty() {
-        return Ok(());
-    }
-    insert_lines_before_inline_viewport(terminal, lines, width)
-}
-
-/// The terminal can change size before the crossterm `Resize` event is
-/// observed (the reflow gate only sees consumed events), and ratatui's
-/// `insert_before` never autoresizes: its scroll math would run against the
-/// stale cached area, overwriting committed rows and leaving a permanent
-/// screen-sized blank band in scrollback (#755). Reconcile the cached
-/// geometry against the just-queried size before committing anything.
-///
-/// Returns `true` when the flush may proceed. When the geometry did change,
-/// the commit is deferred to the debounced resize reflow instead — it rebuilds
-/// the scrollback at the new width, pending entries included. Callers without
-/// a reflow (the exit flush cannot defer) proceed at the reconciled geometry.
-fn reconcile_inline_geometry_before_flush<B>(
-    terminal: &mut Terminal<B>,
-    size: Size,
-    reflow: Option<&mut InlineResizeReflow>,
-) -> Result<bool>
-where
-    B: Backend,
-    B::Error: Error + Send + Sync + 'static,
-{
-    let viewport_before = terminal.get_frame().area();
-    match terminal.autoresize() {
-        Ok(()) => {}
-        Err(e) if is_cursor_position_timeout_error(&e) => {
-            trace_inline_cursor_position_timeout("transcript flush geometry reconcile", &e);
-            return Ok(false);
-        }
-        Err(e) => return Err(e).context("reconcile terminal geometry for transcript flush"),
-    }
-    if terminal.get_frame().area() == viewport_before {
-        return Ok(true);
-    }
-    match reflow {
-        Some(reflow) => {
-            reflow.note_resize(size, Instant::now());
-            Ok(false)
-        }
-        None => Ok(true),
-    }
-}
-
-fn maybe_run_inline_resize_reflow(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    reflow: &mut InlineResizeReflow,
-    sink: &mut TranscriptSink,
-    state: &AppState,
-    inline_height: &mut u16,
-) -> Result<bool> {
-    if !should_run_inline_resize_reflow(reflow, state, Instant::now()) {
-        return Ok(false);
-    }
-    reflow.clear();
-    rebuild_inline_scrollback(terminal, sink, state, inline_height)?;
-    Ok(true)
-}
-
-fn should_run_inline_resize_reflow(
-    reflow: &InlineResizeReflow,
-    state: &AppState,
-    now: Instant,
-) -> bool {
-    reflow.is_due(now)
-        && !state.transcript_viewer
-        && !state.nested_agent_viewer
-        && !state.workspace_diff_viewer
-        && !state.terminals_viewer
-}
-
-struct InlineResizeReflowSnapshot {
-    width: u16,
-    desired_height: u16,
-    actual_height: u16,
-    stable_entries: usize,
-    lines: Vec<Line<'static>>,
-}
-
-fn inline_resize_reflow_snapshot(
-    state: &AppState,
-    size: Size,
-) -> Option<InlineResizeReflowSnapshot> {
-    if size.width == 0 || size.height == 0 {
-        return None;
-    }
-
-    let desired_height = desired_inline_height(state, size);
-    let actual_height = clamped_inline_height(desired_height, size);
-    let stable_entries = stable_transcript_entry_count(state);
-    let lines = render_transcript_entry_range(
-        state,
-        size.width,
-        0..stable_entries,
-        transcript_collapse_limit(state),
-        state.theme,
-        false,
-    );
-
-    Some(InlineResizeReflowSnapshot {
-        width: size.width,
-        desired_height,
-        actual_height,
-        stable_entries,
-        lines,
-    })
-}
-
-fn rebuild_inline_scrollback(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    sink: &mut TranscriptSink,
-    state: &AppState,
-    inline_height: &mut u16,
-) -> Result<()> {
-    let size = match terminal.size() {
-        Ok(size) => size,
-        Err(e) if is_cursor_position_timeout_io(&e) => {
-            trace_inline_cursor_position_timeout("resize reflow size query", &e);
-            return Ok(());
-        }
-        Err(e) => return Err(e).context("query terminal size for resize reflow"),
-    };
-    let Some(snapshot) = inline_resize_reflow_snapshot(state, size) else {
-        return Ok(());
-    };
-
-    reset_inline_terminal_for_reflow(terminal, snapshot.desired_height, size)?;
-    *inline_height = snapshot.actual_height;
-    sink.mark_emitted(snapshot.stable_entries);
-    insert_lines_before_inline_viewport(terminal, snapshot.lines, snapshot.width)
-}
-
-fn reset_inline_terminal_for_reflow(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    desired_height: u16,
-    size: Size,
-) -> Result<u16> {
-    let height = clamped_inline_height(desired_height, size);
-    let origin = Position::new(0, size.height.saturating_sub(height));
-
-    terminal
-        .backend_mut()
-        .write_all(b"\x1b[r\x1b[0m")
-        .context("reset terminal state for resize reflow")?;
-    // Purge (`\x1b[3J`) drops the scrollback, not just the visible screen.
-    // This deliberately discards the inline transcript rows we previously
-    // pushed up with `insert_before`: the terminal hard-wrapped them at the
-    // old width and would otherwise reflow them into garbled rows. We rebuild
-    // them from transcript state at the new width below. Tradeoff: any
-    // pre-existing terminal content above the inline viewport (shell history,
-    // earlier command output) is purged too and is not restored — only
-    // Mjolnir's transcript is replayed. We keep this deliberate tradeoff
-    // because there is no portable terminal primitive for deleting only the
-    // stale Mjolnir-owned scrollback rows while preserving foreign scrollback.
-    execute!(
-        terminal.backend_mut(),
-        CrosstermClear(CrosstermClearType::All),
-        CrosstermClear(CrosstermClearType::Purge)
-    )
-    .context("clear terminal for resize reflow")?;
-    terminal
-        .backend_mut()
-        .set_cursor_position(origin)
-        .context("position inline viewport for resize reflow")?;
-    Write::flush(terminal.backend_mut()).context("flush resize reflow clear")?;
-
-    let backend = TrackedBackend::with_cursor_position(io::stdout(), origin);
-    let next = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(height),
-        },
-    )
-    .context("recreate inline terminal for resize reflow")?;
-    *terminal = next;
-    Ok(height)
-}
-
-fn clamped_inline_height(desired_height: u16, size: Size) -> u16 {
-    desired_height.min(size.height).max(1)
-}
-
-fn insert_lines_before_inline_viewport(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    lines: Vec<Line<'static>>,
-    width: u16,
-) -> Result<()> {
-    if lines.is_empty() || width == 0 {
-        return Ok(());
-    }
-    let height = Paragraph::new(lines.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-        .min(u16::MAX as usize) as u16;
-    if height == 0 {
-        return Ok(());
-    }
-    terminal
-        .insert_before(height, |buf| {
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .render(buf.area, buf);
-        })
-        .or_else(|e| {
-            if is_cursor_position_timeout_io(&e) {
-                trace_inline_cursor_position_timeout("transcript flush", &e);
-                Ok(())
-            } else {
-                Err(e).context("insert transcript lines into scrollback")
-            }
-        })?;
-    Ok(())
-}
-
-fn insert_stable_transcript_tail_before_inline_viewport<B>(
-    terminal: &mut Terminal<B>,
-    state: &AppState,
-    width: u16,
-    max_rows: u16,
-) -> Result<bool>
-where
-    B: Backend,
-    B::Error: Error + Send + Sync + 'static,
-{
-    if width == 0 || max_rows == 0 {
-        return Ok(false);
-    }
-    let stable_entries = stable_transcript_entry_count(state);
-    let lines = render_transcript_entry_range(
-        state,
-        width,
-        0..stable_entries,
-        transcript_collapse_limit(state),
-        state.theme,
-        false,
-    );
-    if lines.is_empty() {
-        return Ok(true);
-    }
-    let total = Paragraph::new(lines.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(width);
-    let height = total.min(usize::from(max_rows)).min(usize::from(u16::MAX)) as u16;
-    if height == 0 {
-        return Ok(true);
-    }
-    let top = total
-        .saturating_sub(usize::from(height))
-        .min(usize::from(u16::MAX)) as u16;
-    match terminal.insert_before(height, |buf| {
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((top, 0))
-            .render(buf.area, buf);
-    }) {
-        Ok(()) => Ok(true),
-        Err(e) if is_cursor_position_timeout_error(&e) => {
-            trace_inline_cursor_position_timeout("reader transcript restore", &e);
-            Ok(false)
-        }
-        Err(e) => Err(e).context("restore transcript after inline reader"),
-    }
-}
-
-/// A full-height inline reader temporarily paints over transcript rows on the
-/// visible screen. Restore the stable transcript tail into those rows before
-/// returning to the compact viewport; older terminal scrollback is left
-/// untouched.
-fn restore_inline_viewport_after_reader(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    sink: &mut TranscriptSink,
-    state: &AppState,
-    current_height: &mut u16,
-) -> Result<bool> {
-    let size = match terminal.size() {
-        Ok(size) => size,
-        Err(e) if is_cursor_position_timeout_io(&e) => {
-            trace_inline_cursor_position_timeout("reader restore size query", &e);
-            return Ok(false);
-        }
-        Err(e) => {
-            tracing::warn!("skip inline reader restore: size query failed: {e}");
-            return Ok(false);
-        }
-    };
-    let height = clamped_inline_height(desired_inline_height(state, size), size);
-    let origin = Position::new(0, size.height.saturating_sub(height));
-
-    if let Err(e) = terminal.backend_mut().write_all(b"\x1b[r\x1b[0m") {
-        tracing::warn!("skip inline reader restore: reset failed: {e}");
-        return Ok(false);
-    }
-    if let Err(e) = terminal.backend_mut().clear_region(ClearType::All) {
-        tracing::warn!("skip inline reader restore: clear failed: {e}");
-        return Ok(false);
-    }
-    if let Err(e) = terminal.backend_mut().set_cursor_position(origin) {
-        if is_cursor_position_timeout_io(&e) {
-            trace_inline_cursor_position_timeout("reader restore cursor move", &e);
-        } else {
-            tracing::warn!("skip inline reader restore: cursor move failed: {e}");
-        }
-        return Ok(false);
-    }
-    if let Err(e) = Write::flush(terminal.backend_mut()) {
-        tracing::warn!("skip inline reader restore: flush failed: {e}");
-        return Ok(false);
-    }
-
-    let backend = TrackedBackend::with_cursor_position(io::stdout(), origin);
-    let next = match Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(height),
-        },
-    ) {
-        Ok(next) => next,
-        Err(e) => {
-            tracing::warn!("skip inline reader restore: recreate failed: {e:#}");
-            return Ok(false);
-        }
-    };
-    *terminal = next;
-    *current_height = height;
-    let restored = insert_stable_transcript_tail_before_inline_viewport(
-        terminal,
-        state,
-        size.width,
-        size.height.saturating_sub(height),
-    )?;
-    if restored {
-        sink.mark_emitted(stable_transcript_entry_count(state));
-    }
-    Ok(restored)
-}
-
-fn sync_inline_terminal_height(
-    terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    state: &AppState,
-    current_height: &mut u16,
-) -> Result<()> {
-    let size = match terminal.size() {
-        Ok(size) => size,
-        Err(e) if is_cursor_position_timeout_io(&e) => {
-            trace_inline_cursor_position_timeout("viewport resize size query", &e);
-            return Ok(());
-        }
-        Err(e) => return Err(e).context("query terminal size for inline viewport resize"),
-    };
-    let area = terminal.get_frame().area();
-    let Some(plan) = inline_viewport_resize_plan(state, area, size, *current_height) else {
-        return Ok(());
-    };
-
-    if let Err(e) = terminal.backend_mut().set_cursor_position(plan.origin) {
-        if is_cursor_position_timeout_io(&e) {
-            trace_inline_cursor_position_timeout("viewport resize cursor move", &e);
-            return Ok(());
-        }
-        tracing::warn!("skip inline viewport resize: set cursor position failed: {e}");
-        return Ok(());
-    }
-    let clear_type = if plan.clear_visible_screen {
-        ClearType::All
-    } else {
-        ClearType::AfterCursor
-    };
-    if let Err(e) = terminal.backend_mut().clear_region(clear_type) {
-        tracing::warn!("skip inline viewport resize: clear region failed: {e}");
-        return Ok(());
-    }
-    if let Err(e) = Write::flush(terminal.backend_mut()) {
-        tracing::warn!("skip inline viewport resize: flush failed: {e}");
-        return Ok(());
-    }
-
-    // Seed the new backend with the anchor the cursor was just moved to, so
-    // creating the inline viewport never issues a CPR query. A real query
-    // here deadlocks against the crossterm EventStream lock and times out,
-    // leaving the freshly cleared region blank until the next input event.
-    let backend = TrackedBackend::with_cursor_position(io::stdout(), plan.origin);
-    let next = match Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(plan.height),
-        },
-    )
-    .context("resize inline terminal")
-    {
-        Ok(next) => next,
-        Err(e) => {
-            tracing::warn!("skip inline viewport resize: {e:#}");
-            return Ok(());
-        }
-    };
-    *terminal = next;
-    *current_height = plan.height;
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InlineViewportResizePlan {
-    height: u16,
-    origin: Position,
-    clear_visible_screen: bool,
-}
-
-fn inline_viewport_resize_plan(
-    state: &AppState,
-    current_area: Rect,
-    size: Size,
-    current_height: u16,
-) -> Option<InlineViewportResizePlan> {
-    let height = clamped_inline_height(desired_inline_height(state, size), size);
-    let reader_active = inline_reader_accepts_input(state);
-    let reader_geometry_changed = reader_active
-        && (current_area.width != size.width
-            || current_area.height != height
-            || current_area.y != size.height.saturating_sub(height));
-    if height == current_height && !reader_geometry_changed {
-        return None;
-    }
-
-    let origin = if reader_active {
-        Position::new(0, size.height.saturating_sub(height))
-    } else {
-        current_area.as_position()
-    };
-    Some(InlineViewportResizePlan {
-        height,
-        origin,
-        clear_visible_screen: reader_active,
-    })
-}
-
-fn desired_inline_height(state: &AppState, terminal_size: Size) -> u16 {
-    // Full-history readers take the whole terminal (minus one row) so long
-    // documents and complete nested-actor rosters are calm to page through.
-    if (state.transcript_viewer
-        || state.nested_agent_viewer
-        || state.workspace_diff_viewer
-        || state.terminals_viewer)
-        && !state.has_pending_permission()
-        && !state.has_pending_elicitation()
-    {
-        return terminal_size
-            .height
-            .saturating_sub(1)
-            .max(INLINE_CHAT_HEIGHT);
-    }
-    // URL setup steps contain OAuth links plus QR codes. The QR must keep its
-    // aspect ratio and quiet zone, so let this view use the full inline pane
-    // instead of the generic compact overlay cap.
-    if matches!(state.elicitation_view(), Some(ElicitationView::Url { .. })) {
-        return terminal_size
-            .height
-            .saturating_sub(1)
-            .max(INLINE_CHAT_HEIGHT);
-    }
-    let max_height = terminal_size
-        .height
-        .saturating_sub(1)
-        .clamp(INLINE_CHAT_HEIGHT, INLINE_EXPANDED_MAX_HEIGHT);
-    let width = terminal_size.width.saturating_sub(2).max(1);
-    let desired = if state.help_overlay {
-        usize::from(INLINE_HELP_HEIGHT)
-    } else if state.mjconfig_menu.is_some() {
-        usize::from(INLINE_MJCONFIG_HEIGHT)
-    } else if state.team_picker.is_some() {
-        8
-    } else if state.review_picker.is_some() {
-        6
-    } else if let Some(pending) = state.pending_permission() {
-        permission_view_lines(
-            pending,
-            state.pending_permission_count(),
-            width,
-            state.theme,
-        )
-        .len()
-            + 1
-    } else if let Some(pending) = state.pending_elicitation() {
-        elicitation_view_lines(
-            pending,
-            state.pending_elicitation_count(),
-            width,
-            state.theme,
-        )
-        .lines
-        .len()
-            + 1
-    } else if state.config_picker.is_some() {
-        inline_config_view_line_count(state, width)
-    } else {
-        // Queued prompts and the spinner-anchored tip render above the
-        // input; request extra rows so the input box keeps its full height
-        // while they are visible.
-        usize::from(INLINE_CHAT_HEIGHT)
-            + usize::from(queued_prompt_row_count(state))
-            + usize::from(workflow_progress_row_count(state))
-            + usize::from(review_board_row_count(state))
-            + usize::from(should_show_spinner(state) && state.feature_tips_active())
-            + usage_quota_row_count(state, width)
-    };
-
-    (desired.min(usize::from(u16::MAX)) as u16).clamp(INLINE_CHAT_HEIGHT, max_height)
-}
-
 fn handle_crossterm(
     state: &mut AppState,
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     ev: CtEvent,
-    mode: UiMode,
 ) -> TerminalRequest {
     let key = match ev {
         CtEvent::Key(k) => k,
@@ -3127,7 +1987,6 @@ fn handle_crossterm(
                 && !state.review_issue_viewer
                 && !state.nested_agent_viewer
                 && !state.workspace_diff_viewer
-                && (state.transcript_viewer || mode == UiMode::FullscreenTui)
             {
                 let cleaned: String = text.chars().filter(|ch| !ch.is_control()).collect();
                 if let Some(search) = state.transcript_search.as_mut() {
@@ -3156,7 +2015,6 @@ fn handle_crossterm(
                 || state.team_picker.is_some()
                 || state.config_picker.is_some()
                 || state.mjconfig_menu.is_some()
-                || state.transcript_viewer
                 || state.nested_agent_viewer
                 || state.workspace_diff_viewer
             {
@@ -3167,11 +2025,7 @@ fn handle_crossterm(
             return TerminalRequest::None;
         }
         CtEvent::Mouse(mouse) => {
-            if mode == UiMode::InlineChat && inline_transcript_viewer_accepts_input(state) {
-                handle_transcript_viewer_mouse(state, mouse);
-            } else if mode == UiMode::FullscreenTui {
-                handle_mouse(state, mouse);
-            }
+            handle_mouse(state, mouse);
             return TerminalRequest::None;
         }
         _ => return TerminalRequest::None,
@@ -3180,7 +2034,7 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    if mode == UiMode::FullscreenTui && is_text_selection_key(key.modifiers, key.code) {
+    if is_text_selection_key(key.modifiers, key.code) {
         return TerminalRequest::ToggleTextSelectionMode;
     }
 
@@ -3220,7 +2074,7 @@ fn handle_crossterm(
     if state.help_overlay {
         if is_help_key(key.modifiers, key.code) || matches!(key.code, KeyCode::Esc) {
             state.help_overlay = false;
-            return inline_repair_request(mode);
+            return TerminalRequest::None;
         }
         scroll_help_overlay(state, key.code);
         return TerminalRequest::None;
@@ -3234,7 +2088,7 @@ fn handle_crossterm(
         && !state.has_pending_permission()
         && !state.has_pending_elicitation()
     {
-        return handle_mjconfig_menu_key(state, cmd_tx, key.modifiers, key.code, mode);
+        return handle_mjconfig_menu_key(state, cmd_tx, key.modifiers, key.code);
     }
 
     if should_open_help(key.modifiers, key.code) {
@@ -3254,7 +2108,7 @@ fn handle_crossterm(
         } else {
             state.open_review_issue_viewer();
         }
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
 
     if !state.has_pending_permission()
@@ -3269,7 +2123,7 @@ fn handle_crossterm(
         } else if !state.open_nested_agent_viewer() {
             state.status_line = Some(StatusMessage::info("no nested agents to inspect"));
         }
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
 
     if !state.has_pending_permission()
@@ -3288,7 +2142,7 @@ fn handle_crossterm(
             // a rebase — so opening is the only honest time to look.
             let _ = cmd_tx.send(UiCommand::RefreshWorkspaceDiff);
         }
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
 
     // The full-transcript reader owns the keyboard while open so scrolling
@@ -3298,7 +2152,7 @@ fn handle_crossterm(
         && !state.has_pending_permission()
         && !state.has_pending_elicitation()
     {
-        return handle_workspace_diff_viewer_key(state, cmd_tx, key.modifiers, key.code, mode);
+        return handle_workspace_diff_viewer_key(state, cmd_tx, key.modifiers, key.code);
     }
     if state.review_issue_viewer
         && !state.has_pending_permission()
@@ -3326,36 +2180,24 @@ fn handle_crossterm(
             KeyCode::End => state.review_issue_scroll_offset = usize::MAX,
             _ => {}
         }
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
     if state.terminals_viewer && !state.has_pending_permission() && !state.has_pending_elicitation()
     {
-        return handle_terminals_viewer_key(state, key.modifiers, key.code, mode);
+        return handle_terminals_viewer_key(state, key.modifiers, key.code);
     }
     if state.nested_agent_viewer
         && !state.has_pending_permission()
         && !state.has_pending_elicitation()
     {
-        return handle_nested_agent_viewer_key(state, key.modifiers, key.code, mode);
+        return handle_nested_agent_viewer_key(state, key.modifiers, key.code);
     }
-    if state.transcript_viewer
-        && !state.has_pending_permission()
-        && !state.has_pending_elicitation()
-    {
-        return handle_transcript_viewer_key(state, key.modifiers, key.code, mode);
-    }
-
     if state.runtime_closed {
         let search_was_active = state.transcript_search.is_some();
-        if mode == UiMode::FullscreenTui
-            && handle_active_transcript_search_key(state, key.modifiers, key.code)
-        {
+        if handle_active_transcript_search_key(state, key.modifiers, key.code) {
             return TerminalRequest::None;
         }
-        if mode == UiMode::FullscreenTui
-            && search_was_active
-            && is_plain_character_input(key.modifiers, key.code)
-        {
+        if search_was_active && is_plain_character_input(key.modifiers, key.code) {
             return TerminalRequest::None;
         }
         match (key.modifiers, key.code) {
@@ -3373,7 +2215,7 @@ fn handle_crossterm(
                 state.exit_reason = Some(UiExitReason::NewSession);
                 return TerminalRequest::None;
             }
-            (KeyModifiers::ALT, KeyCode::Char('t' | 'T')) if mode == UiMode::FullscreenTui => {
+            (KeyModifiers::ALT, KeyCode::Char('t' | 'T')) => {
                 toggle_latest_visible_tool(state, true);
                 return TerminalRequest::None;
             }
@@ -3386,34 +2228,34 @@ fn handle_crossterm(
                             | KeyModifiers::META,
                     ) =>
             {
-                toggle_transcript_expansion(state, mode);
+                state.toggle_expand_transcript_details();
                 return TerminalRequest::None;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
                 copy_last_agent_message(state);
                 return TerminalRequest::None;
             }
-            (_, KeyCode::PageUp) if mode == UiMode::FullscreenTui => {
+            (_, KeyCode::PageUp) => {
                 state.scroll_offset = state.scroll_offset.saturating_add(5);
                 return TerminalRequest::None;
             }
-            (_, KeyCode::PageDown) if mode == UiMode::FullscreenTui => {
+            (_, KeyCode::PageDown) => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(5);
                 return TerminalRequest::None;
             }
-            (_, KeyCode::Up) if mode == UiMode::FullscreenTui => {
+            (_, KeyCode::Up) => {
                 state.scroll_offset = state.scroll_offset.saturating_add(1);
                 return TerminalRequest::None;
             }
-            (_, KeyCode::Down) if mode == UiMode::FullscreenTui => {
+            (_, KeyCode::Down) => {
                 state.scroll_offset = state.scroll_offset.saturating_sub(1);
                 return TerminalRequest::None;
             }
-            (_, KeyCode::Home) if mode == UiMode::FullscreenTui => {
+            (_, KeyCode::Home) => {
                 scroll_to_top(state);
                 return TerminalRequest::None;
             }
-            (_, KeyCode::End) if mode == UiMode::FullscreenTui => {
+            (_, KeyCode::End) => {
                 scroll_to_bottom(state);
                 return TerminalRequest::None;
             }
@@ -3423,43 +2265,41 @@ fn handle_crossterm(
 
     // Permission modal owns the keyboard while it's open.
     if state.has_pending_permission() {
-        return handle_permission_key(state, key.code, mode);
+        return handle_permission_key(state, key.code);
     }
 
     // Elicitation modal owns the keyboard next. Permission is safety-critical
     // and wins if both are somehow pending (its check runs first above).
     if state.has_pending_elicitation() {
-        return handle_elicitation_key(state, key.code, mode);
+        return handle_elicitation_key(state, key.code);
     }
 
     if state.team_picker.is_some() {
-        return handle_team_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
+        return handle_team_picker_key(state, cmd_tx, key.modifiers, key.code);
     }
 
     if state.review_picker.is_some() {
-        return handle_review_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
+        return handle_review_picker_key(state, cmd_tx, key.modifiers, key.code);
     }
 
     if state.config_picker.is_some() {
-        return handle_config_picker_key(state, cmd_tx, key.modifiers, key.code, mode);
+        return handle_config_picker_key(state, cmd_tx, key.modifiers, key.code);
     }
 
-    if mode == UiMode::FullscreenTui {
-        let search_was_active = state.transcript_search.is_some();
-        if handle_active_transcript_search_key(state, key.modifiers, key.code) {
-            return TerminalRequest::None;
-        }
-        if search_was_active && is_plain_character_input(key.modifiers, key.code) {
-            return TerminalRequest::None;
-        }
-        if key.modifiers == KeyModifiers::CONTROL
-            && matches!(key.code, KeyCode::Char('f' | 'F'))
-            && state.input.is_empty()
-            && attachment_count(state) == 0
-        {
-            open_transcript_search(state);
-            return TerminalRequest::None;
-        }
+    let search_was_active = state.transcript_search.is_some();
+    if handle_active_transcript_search_key(state, key.modifiers, key.code) {
+        return TerminalRequest::None;
+    }
+    if search_was_active && is_plain_character_input(key.modifiers, key.code) {
+        return TerminalRequest::None;
+    }
+    if key.modifiers == KeyModifiers::CONTROL
+        && matches!(key.code, KeyCode::Char('f' | 'F'))
+        && state.input.is_empty()
+        && attachment_count(state) == 0
+    {
+        open_transcript_search(state);
+        return TerminalRequest::None;
     }
 
     // Shift+Tab is the primary team-switch binding: unlike Ctrl+Tab it has a
@@ -3485,7 +2325,7 @@ fn handle_crossterm(
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Enter) => {
                 state.autocomplete_accept();
-                return inline_repair_request(mode);
+                return TerminalRequest::None;
             }
             (KeyModifiers::NONE, KeyCode::Up) => {
                 state.autocomplete_move(-1);
@@ -3497,7 +2337,7 @@ fn handle_crossterm(
             }
             (_, KeyCode::Esc) => {
                 state.autocomplete_dismiss();
-                return inline_repair_request(mode);
+                return TerminalRequest::None;
             }
             _ => {}
         }
@@ -3511,7 +2351,7 @@ fn handle_crossterm(
         return TerminalRequest::None;
     }
 
-    if mode == UiMode::FullscreenTui && key.modifiers == KeyModifiers::CONTROL {
+    if key.modifiers == KeyModifiers::CONTROL {
         match key.code {
             KeyCode::PageUp => {
                 state.scroll_offset = state
@@ -3568,7 +2408,7 @@ fn handle_crossterm(
         (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
             state.exit_reason = Some(UiExitReason::NewSession);
         }
-        (KeyModifiers::ALT, KeyCode::Char('t' | 'T')) if mode == UiMode::FullscreenTui => {
+        (KeyModifiers::ALT, KeyCode::Char('t' | 'T')) => {
             toggle_latest_visible_tool(state, true);
         }
         (modifiers, KeyCode::Char('t' | 'T'))
@@ -3580,7 +2420,7 @@ fn handle_crossterm(
                         | KeyModifiers::META,
                 ) =>
         {
-            toggle_transcript_expansion(state, mode);
+            state.toggle_expand_transcript_details();
         }
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
             copy_last_agent_message(state);
@@ -4097,29 +2937,12 @@ fn capture_fullscreen_selection_surface(f: &mut ratatui::Frame, state: &mut AppS
     }
 }
 
-fn handle_transcript_viewer_mouse(state: &mut AppState, mouse: MouseEvent) {
-    match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            state.scroll_offset = state
-                .scroll_offset
-                .saturating_sub(TRANSCRIPT_SCROLL_WHEEL_STEP);
-        }
-        MouseEventKind::ScrollDown => {
-            state.scroll_offset = state
-                .scroll_offset
-                .saturating_add(TRANSCRIPT_SCROLL_WHEEL_STEP);
-        }
-        _ => {}
-    }
-}
-
 async fn apply_terminal_request(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
     state: &mut AppState,
     request: TerminalRequest,
     dictation_tx: &mpsc::UnboundedSender<DictationEvent>,
     dictation_cancel_tx: &mut Option<std_mpsc::Sender<()>>,
-    mode: UiMode,
 ) -> Result<()> {
     match request {
         TerminalRequest::None => Ok(()),
@@ -4142,15 +2965,14 @@ async fn apply_terminal_request(
             stop_dictation(state, dictation_cancel_tx);
             Ok(())
         }
-        TerminalRequest::ForceInlineRepair => Ok(()),
         TerminalRequest::CopyText(text) => {
             copy_text_to_clipboard(state, &text, Some("URL"));
             Ok(())
         }
         TerminalRequest::Authenticate(vendor) => {
-            restore_terminal_for_auth(terminal, mode)?;
+            restore_terminal_for_auth(terminal)?;
             let login = crate::auth::run_login(vendor).await;
-            let resumed = resume_terminal_after_auth(terminal, mode);
+            let resumed = resume_terminal_after_auth(terminal);
             let notice = match (login, resumed) {
                 (Ok(outcome), Ok(())) => outcome.into_message(),
                 (Err(error), Ok(())) => format!("Sign-in failed: {error:#}"),
@@ -5097,17 +3919,6 @@ fn scroll_to_bottom(state: &mut AppState) {
     state.scroll_offset = 0;
 }
 
-/// Ctrl-T behaviour. The fullscreen TUI can retroactively toggle all compacted
-/// transcript details. Inline scrollback is immutable once flushed, so Ctrl-T
-/// opens a full reader with every message and tool output expanded.
-fn toggle_transcript_expansion(state: &mut AppState, mode: UiMode) {
-    if mode == UiMode::InlineChat {
-        state.open_transcript_viewer();
-    } else {
-        state.toggle_expand_transcript_details();
-    }
-}
-
 /// The latest tool which is both rendered in this view and has an output body.
 /// Compact completed turns omit successful tools, but failed tools remain visible.
 fn latest_visible_tool_call_id(state: &AppState, compact_completed_turns: bool) -> Option<String> {
@@ -5148,65 +3959,6 @@ fn toggle_latest_visible_tool(state: &mut AppState, compact_completed_turns: boo
     }
 }
 
-/// Keyboard handling while the inline full-transcript reader is open. The
-/// reader reuses `scroll_offset` as the index of the top visible line (0 =
-/// top); it is clamped to the last screen of content during draw, so adding
-/// past the end and `usize::MAX` (jump to bottom) are both safe here.
-fn handle_transcript_viewer_key(
-    state: &mut AppState,
-    modifiers: KeyModifiers,
-    code: KeyCode,
-    mode: UiMode,
-) -> TerminalRequest {
-    if handle_active_transcript_search_key(state, modifiers, code) {
-        return TerminalRequest::None;
-    }
-    if (modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Char('f' | 'F')))
-        || (modifiers == KeyModifiers::NONE && matches!(code, KeyCode::Char('/')))
-    {
-        open_transcript_search(state);
-        return TerminalRequest::None;
-    }
-
-    let closes_reader = matches!(code, KeyCode::Esc)
-        || (modifiers == KeyModifiers::NONE && matches!(code, KeyCode::Char('q')))
-        || (modifiers.contains(KeyModifiers::CONTROL)
-            && !modifiers.intersects(
-                KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
-            )
-            && matches!(code, KeyCode::Char('t' | 'T')));
-    if closes_reader {
-        state.close_transcript_viewer();
-        // Shrinking the viewport back down needs an inline repair so the
-        // vacated rows are cleared cleanly.
-        return inline_repair_request(mode);
-    }
-
-    if modifiers == KeyModifiers::ALT && matches!(code, KeyCode::Char('t' | 'T')) {
-        toggle_latest_visible_tool(state, false);
-        return TerminalRequest::None;
-    }
-
-    match code {
-        KeyCode::Up => state.scroll_offset = state.scroll_offset.saturating_sub(1),
-        KeyCode::Down => state.scroll_offset = state.scroll_offset.saturating_add(1),
-        KeyCode::PageUp => {
-            state.scroll_offset = state
-                .scroll_offset
-                .saturating_sub(TRANSCRIPT_SCROLL_PAGE_STEP)
-        }
-        KeyCode::PageDown => {
-            state.scroll_offset = state
-                .scroll_offset
-                .saturating_add(TRANSCRIPT_SCROLL_PAGE_STEP)
-        }
-        KeyCode::Home => state.scroll_offset = 0,
-        KeyCode::End => state.scroll_offset = usize::MAX,
-        _ => {}
-    }
-    TerminalRequest::None
-}
-
 fn latest_nested_tool_call_id(state: &AppState) -> Option<String> {
     state
         .selected_nested_agent()?
@@ -5224,14 +3976,13 @@ fn handle_nested_agent_viewer_key(
     state: &mut AppState,
     modifiers: KeyModifiers,
     code: KeyCode,
-    mode: UiMode,
 ) -> TerminalRequest {
     if matches!(code, KeyCode::Esc)
         || (modifiers.is_empty() && matches!(code, KeyCode::F(11)))
         || (modifiers.is_empty() && matches!(code, KeyCode::Char('q')))
     {
         state.close_nested_agent_viewer();
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
 
     if modifiers == KeyModifiers::ALT && matches!(code, KeyCode::Char('t' | 'T')) {
@@ -5280,12 +4031,11 @@ fn handle_terminals_viewer_key(
     state: &mut AppState,
     modifiers: KeyModifiers,
     code: KeyCode,
-    mode: UiMode,
 ) -> TerminalRequest {
     if matches!(code, KeyCode::Esc) || (modifiers.is_empty() && matches!(code, KeyCode::Char('q')))
     {
         state.close_terminals_viewer();
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
 
     match code {
@@ -5324,7 +4074,6 @@ fn handle_workspace_diff_viewer_key(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
-    mode: UiMode,
 ) -> TerminalRequest {
     let ctrl_g = modifiers.contains(KeyModifiers::CONTROL)
         && !modifiers.intersects(
@@ -5333,7 +4082,7 @@ fn handle_workspace_diff_viewer_key(
         && matches!(code, KeyCode::Char('g' | 'G'));
     if matches!(code, KeyCode::Esc) || ctrl_g {
         state.close_workspace_diff_viewer();
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
     match code {
         KeyCode::Up => {
@@ -6182,22 +4931,21 @@ fn handle_mjconfig_menu_key(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
-    mode: UiMode,
 ) -> TerminalRequest {
     if modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('c') {
         state.mjconfig_menu_cancel();
-        return inline_repair_request(mode);
+        return TerminalRequest::None;
     }
     match state.mjconfig_menu_key(code) {
         SettingsAction::Cancel => {
             state.mjconfig_menu_cancel();
-            inline_repair_request(mode)
+            TerminalRequest::None
         }
         SettingsAction::Save => {
             if let Some((initial_config, config)) = state.mjconfig_menu_accept() {
                 persist_mjconfig_selection(state, cmd_tx, initial_config, config);
             }
-            inline_repair_request(mode)
+            TerminalRequest::None
         }
         SettingsAction::Authenticate(vendor) => {
             if state.is_busy() || state.has_pending_permission() || state.has_pending_elicitation()
@@ -7372,7 +6120,7 @@ fn clamp_permission_selected(selected: usize, option_count: usize) -> usize {
     selected.min(option_count.saturating_sub(1))
 }
 
-fn handle_permission_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> TerminalRequest {
+fn handle_permission_key(state: &mut AppState, code: KeyCode) -> TerminalRequest {
     let Some(pending) = state.pending_permission_mut() else {
         return TerminalRequest::None;
     };
@@ -7417,13 +6165,13 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> T
                 .unwrap_or(PermissionDecision::Cancelled);
             let _ = prompt.responder.send(decision);
             state.update_autocomplete();
-            return inline_repair_request(mode);
+            return TerminalRequest::None;
         }
         KeyCode::Esc => {
             let pending = state.take_pending_permission().expect("checked above");
             let _ = pending.prompt.responder.send(PermissionDecision::Cancelled);
             state.update_autocomplete();
-            return inline_repair_request(mode);
+            return TerminalRequest::None;
         }
         _ => {}
     }
@@ -7433,7 +6181,7 @@ fn handle_permission_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> T
 /// Keyboard handler for the elicitation modal. Up/Down move an option cursor,
 /// Space toggles multi-select choices, and Enter advances/submits the form.
 /// PgUp/PgDn/Home/End scroll content taller than the modal.
-fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> TerminalRequest {
+fn handle_elicitation_key(state: &mut AppState, code: KeyCode) -> TerminalRequest {
     let Some(view) = state.elicitation_view() else {
         return TerminalRequest::None;
     };
@@ -7454,11 +6202,11 @@ fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> 
             }
             KeyCode::Enter => {
                 state.resolve_elicitation_accept();
-                return inline_repair_request(mode);
+                return TerminalRequest::None;
             }
             KeyCode::Esc => {
                 state.resolve_elicitation_dismiss();
-                return inline_repair_request(mode);
+                return TerminalRequest::None;
             }
             KeyCode::PageUp => {
                 if let Some(pending) = state.pending_elicitation_mut() {
@@ -7531,23 +6279,15 @@ fn handle_elicitation_key(state: &mut AppState, code: KeyCode, mode: UiMode) -> 
         KeyCode::Down | KeyCode::Char('j') => state.elicitation_select_move(1),
         KeyCode::Enter => {
             state.resolve_elicitation_accept();
-            return inline_repair_request(mode);
+            return TerminalRequest::None;
         }
         KeyCode::Esc => {
             state.resolve_elicitation_dismiss();
-            return inline_repair_request(mode);
+            return TerminalRequest::None;
         }
         _ => {}
     }
     TerminalRequest::None
-}
-
-fn inline_repair_request(mode: UiMode) -> TerminalRequest {
-    if mode == UiMode::InlineChat {
-        TerminalRequest::ForceInlineRepair
-    } else {
-        TerminalRequest::None
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7573,7 +6313,6 @@ fn handle_team_picker_key(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
-    mode: UiMode,
 ) -> TerminalRequest {
     let Some(step) = state.team_picker.as_ref().map(|picker| picker.step) else {
         return TerminalRequest::None;
@@ -7595,7 +6334,7 @@ fn handle_team_picker_key(
                     "team saved; switch the primary when ready",
                 );
             }
-            inline_repair_request(mode)
+            TerminalRequest::None
         }
         PickerKeyAction::Accept => {
             match step {
@@ -7641,7 +6380,7 @@ fn handle_team_picker_key(
                     }
                 }
             }
-            inline_repair_request(mode)
+            TerminalRequest::None
         }
         PickerKeyAction::Move(delta) => {
             match step {
@@ -7706,7 +6445,6 @@ fn handle_config_picker_key(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
-    mode: UiMode,
 ) -> TerminalRequest {
     let action = if matches!(code, KeyCode::Tab) {
         PickerKeyAction::Accept
@@ -7716,13 +6454,13 @@ fn handle_config_picker_key(
     match action {
         PickerKeyAction::Cancel => {
             state.dismiss_config_picker();
-            inline_repair_request(mode)
+            TerminalRequest::None
         }
         PickerKeyAction::Accept => {
             if let Some((target, value)) = state.config_picker_accept() {
                 state.status_line = Some(StatusMessage::info("updating config..."));
                 let _ = cmd_tx.send(UiCommand::SetSessionConfigOption { target, value });
-                inline_repair_request(mode)
+                TerminalRequest::None
             } else {
                 TerminalRequest::None
             }
@@ -7767,18 +6505,17 @@ fn handle_review_picker_key(
     cmd_tx: &mpsc::UnboundedSender<UiCommand>,
     modifiers: KeyModifiers,
     code: KeyCode,
-    mode: UiMode,
 ) -> TerminalRequest {
     match picker_key_action(modifiers, code) {
         PickerKeyAction::Cancel => {
             state.review_picker = None;
-            inline_repair_request(mode)
+            TerminalRequest::None
         }
         PickerKeyAction::Accept => {
             if let Some(request) = state.review_picker_accept() {
                 state.record_status_message(StatusKind::Info, "preparing discrete review…");
                 let _ = cmd_tx.send(UiCommand::RunReview { request });
-                inline_repair_request(mode)
+                TerminalRequest::None
             } else {
                 TerminalRequest::None
             }
@@ -7855,104 +6592,22 @@ pub fn clear_terminal_screen(terminal: &mut Terminal<TrackedBackend<Stdout>>) ->
     Ok(())
 }
 
-pub fn setup_inline_chat_terminal(initial_height: u16) -> Result<Terminal<TrackedBackend<Stdout>>> {
-    let mut stdout = io::stdout();
-    stdout.flush().context("flush stdout before inline setup")?;
-    let mut stderr = io::stderr();
-    let _ = stderr.flush();
-
-    let mut attempt = 0;
-    let final_error = loop {
-        if attempt > 0 {
-            std::thread::sleep(INLINE_SETUP_RETRY_DELAY);
-        }
-
-        enable_raw_mode().context("enable raw mode")?;
-        let mut stdout = io::stdout();
-        if let Err(err) = execute!(stdout, EnableBracketedPaste) {
-            let _ = disable_raw_mode();
-            return Err(err).context("enable bracketed paste");
-        }
-        if let Err(err) = stdout.flush() {
-            let mut stdout = io::stdout();
-            let _ = execute!(stdout, DisableBracketedPaste);
-            let _ = disable_raw_mode();
-            return Err(err).context("ratatui inline terminal");
-        }
-
-        let backend = TrackedBackend::new(stdout);
-        match Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(initial_height),
-            },
-        ) {
-            Ok(terminal) => return Ok(terminal),
-            Err(err) => {
-                let cursor_position_timeout = is_cursor_position_timeout_io(&err);
-                let mut stdout = io::stdout();
-                let _ = execute!(stdout, DisableBracketedPaste);
-                let _ = disable_raw_mode();
-                if cursor_position_timeout {
-                    tracing::warn!(
-                        "inline terminal setup is waiting for cursor position response; retrying"
-                    );
-                } else if attempt + 1 >= INLINE_NON_CURSOR_SETUP_ATTEMPTS {
-                    break err;
-                }
-            }
-        }
-        attempt += 1;
-    };
-
-    Err(final_error).context("ratatui inline terminal")
-}
-
-pub fn restore_inline_chat_terminal(terminal: &mut Terminal<TrackedBackend<Stdout>>) -> Result<()> {
-    if let Err(e) = clear_inline_viewport_for_exit(terminal) {
-        tracing::warn!("skip inline exit cleanup: {e}");
-    } else if let Err(e) = Write::flush(terminal.backend_mut()) {
-        tracing::warn!("skip inline exit cleanup flush: {e}");
-    }
-    // As with fullscreen restoration, attempt all terminal cleanup before
-    // reporting a failure so Drop's one restoration attempt is comprehensive.
-    let terminal_modes = execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        DisableBracketedPaste
-    );
-    let raw_mode = disable_raw_mode();
-    let cursor = terminal.show_cursor();
-    terminal_modes?;
-    raw_mode?;
-    cursor?;
-    Ok(())
-}
-
 pub(crate) fn restore_terminal_for_auth(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    mode: UiMode,
 ) -> Result<()> {
-    match mode {
-        UiMode::InlineChat => restore_inline_chat_terminal(terminal),
-        UiMode::FullscreenTui => restore_fullscreen_terminal(terminal),
-    }
+    restore_fullscreen_terminal(terminal)
 }
 
 pub(crate) fn resume_terminal_after_auth(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
-    mode: UiMode,
 ) -> Result<()> {
     enable_raw_mode().context("enable raw mode after sign-in")?;
-    let modes = match mode {
-        UiMode::InlineChat => execute!(terminal.backend_mut(), EnableBracketedPaste),
-        UiMode::FullscreenTui => execute!(
-            terminal.backend_mut(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        ),
-    };
+    let modes = execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    );
     if let Err(error) = modes {
         let _ = disable_raw_mode();
         return Err(error).context("restore terminal modes after sign-in");
@@ -7960,41 +6615,26 @@ pub(crate) fn resume_terminal_after_auth(
     match terminal.autoresize() {
         Ok(()) => {}
         Err(error) if is_cursor_position_timeout_io(&error) => {
-            trace_inline_cursor_position_timeout("post-sign-in autoresize", &error);
+            trace_cursor_position_timeout("post-sign-in autoresize", &error);
         }
         Err(error) => return Err(error).context("resize terminal after sign-in"),
     }
     match terminal.clear() {
         Ok(()) => {}
         Err(error) if is_cursor_position_timeout_io(&error) => {
-            trace_inline_cursor_position_timeout("post-sign-in clear", &error);
+            trace_cursor_position_timeout("post-sign-in clear", &error);
         }
         Err(error) => return Err(error).context("clear terminal after sign-in"),
     }
     Ok(())
 }
 
-fn clear_inline_viewport_for_exit<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
-    let origin = terminal.get_frame().area().as_position();
-    terminal.backend_mut().set_cursor_position(origin)?;
-    terminal
-        .backend_mut()
-        .clear_region(ClearType::CurrentLine)?;
-    terminal
-        .backend_mut()
-        .clear_region(ClearType::AfterCursor)?;
-    terminal.backend_mut().set_cursor_position(origin)?;
-    Ok(())
+fn trace_cursor_position_timeout(action: &str, error: &(dyn Error + 'static)) {
+    tracing::trace!("ignored transient cursor-position timeout during {action}: {error}");
 }
 
 fn is_cursor_position_timeout_io(error: &io::Error) -> bool {
     is_cursor_position_timeout_error(error)
-}
-
-fn trace_inline_cursor_position_timeout(action: &str, error: &(dyn Error + 'static)) {
-    tracing::trace!(
-        "ignored transient inline cursor-position timeout during {action}; keeping inline UI active: {error}"
-    );
 }
 
 fn is_cursor_position_timeout_error(error: &(dyn Error + 'static)) -> bool {
@@ -8027,13 +6667,8 @@ fn draw(
     f: &mut ratatui::Frame,
     state: &mut AppState,
     transcript_scroll: &mut TranscriptScrollState,
-    mode: UiMode,
 ) {
     ensure_transcript_search_matches(state);
-    if mode == UiMode::InlineChat {
-        draw_inline_chat(f, state, transcript_scroll);
-        return;
-    }
 
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
 
@@ -8046,7 +6681,7 @@ fn draw(
     let queued_row = queued_prompt_row_count(state);
     let workflow_rows = workflow_progress_row_count(state);
     let terminal_rows = running_terminals_row_count(state);
-    let feature_tip = current_feature_tip(state, mode);
+    let feature_tip = current_feature_tip(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -8096,7 +6731,7 @@ fn draw(
     draw_running_terminals_row(f, chunks[3], state);
     draw_queued_prompt_row(f, chunks[4], state);
     draw_feature_tip_row(f, chunks[5], feature_tip, state.theme);
-    draw_input(f, chunks[6], state, mode);
+    draw_input(f, chunks[6], state);
     draw_status_line(f, chunks[7], state);
     draw_usage_quota_row(f, chunks[8], state);
 
@@ -8121,7 +6756,7 @@ fn draw(
     }
 
     if state.help_overlay {
-        draw_help_modal(f, f.area(), mode, state.theme, &mut state.help_scroll);
+        draw_help_modal(f, f.area(), state.theme, &mut state.help_scroll);
     }
 
     if state.mjconfig_menu.is_some() {
@@ -8150,83 +6785,10 @@ fn draw(
     capture_fullscreen_selection_surface(f, state);
 }
 
-fn inline_transcript_tail_lines(state: &AppState, width: u16) -> Vec<Line<'static>> {
-    if width == 0 || state.help_overlay {
-        return Vec::new();
-    }
-    let stable_entries = stable_transcript_entry_count(state);
-    render_transcript_entry_range(
-        state,
-        width,
-        stable_entries..state.transcript.len(),
-        transcript_collapse_limit(state),
-        state.theme,
-        false,
-    )
-}
-
-fn draw_inline_transcript_tail(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let lines = inline_transcript_tail_lines(state, area.width);
-    if lines.is_empty() {
-        return;
-    }
-    let total = Paragraph::new(lines.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(area.width);
-    let top = total
-        .saturating_sub(usize::from(area.height))
-        .min(u16::MAX as usize) as u16;
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((top, 0)),
-        area,
-    );
-}
-
-fn inline_transcript_tail_height(state: &AppState, area: Rect) -> u16 {
-    if state.help_overlay {
-        return 0;
-    }
-    let reserved_rows = 1u16
-        .saturating_add(workflow_progress_row_count(state))
-        .saturating_add(review_board_row_count(state))
-        .saturating_add(running_terminals_row_count(state))
-        .saturating_add(queued_prompt_row_count(state))
-        .saturating_add(MIN_INPUT_HEIGHT)
-        .saturating_add(usage_quota_row_count(state, area.width) as u16)
-        .saturating_add(1);
-    area.height
-        .saturating_sub(reserved_rows)
-        .min(INLINE_TRANSCRIPT_TAIL_MAX_ROWS as u16)
-}
-
-fn inline_chat_layout(state: &AppState, area: Rect, tip_rows: u16) -> [Rect; 10] {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(inline_transcript_tail_height(state, area)),
-            Constraint::Length(1),
-            Constraint::Length(workflow_progress_row_count(state)),
-            Constraint::Length(review_board_row_count(state)),
-            Constraint::Length(running_terminals_row_count(state)),
-            Constraint::Length(queued_prompt_row_count(state)),
-            Constraint::Length(tip_rows),
-            Constraint::Min(MIN_INPUT_HEIGHT),
-            Constraint::Length(1),
-            Constraint::Length(usage_quota_row_count(state, area.width) as u16),
-        ])
-        .split(area);
-    std::array::from_fn(|index| chunks[index])
-}
-
 /// The rotating tip anchored to the activity spinner, modeled on Claude
 /// Code's under-spinner tips: present only while a turn is in flight, one
 /// dim line, advancing on a fixed cadence. `None` hides the row entirely.
-fn current_feature_tip(state: &mut AppState, mode: UiMode) -> Option<&'static str> {
+fn current_feature_tip(state: &mut AppState) -> Option<&'static str> {
     if !should_show_spinner(state) {
         return None;
     }
@@ -8236,7 +6798,6 @@ fn current_feature_tip(state: &mut AppState, mode: UiMode) -> Option<&'static st
         fork: state.session_fork_supported,
         side: state.side_session_supported,
         images: state.prompt_images_supported,
-        fullscreen: mode == UiMode::FullscreenTui,
     };
     state.feature_tip(capabilities, Instant::now())
 }
@@ -8260,153 +6821,6 @@ fn draw_feature_tip_row(
             .add_modifier(Modifier::ITALIC),
     ));
     f.render_widget(Paragraph::new(line), area);
-}
-
-fn draw_inline_chat(
-    f: &mut ratatui::Frame,
-    state: &mut AppState,
-    transcript_scroll: &mut TranscriptScrollState,
-) {
-    ensure_transcript_search_matches(state);
-    if let Some(pending) = state.pending_permission() {
-        draw_inline_permission_view(
-            f,
-            f.area(),
-            pending,
-            state.pending_permission_count(),
-            state.theme,
-        );
-        return;
-    }
-
-    if let Some(pending) = state.pending_elicitation() {
-        draw_inline_elicitation_view(
-            f,
-            f.area(),
-            pending,
-            state.pending_elicitation_count(),
-            state.theme,
-        );
-        return;
-    }
-
-    if state.team_picker.is_some() {
-        draw_inline_team_picker(f, f.area(), state);
-        return;
-    }
-
-    if state.review_picker.is_some() {
-        draw_inline_review_picker(f, f.area(), state);
-        return;
-    }
-
-    if state.config_picker.is_some() {
-        draw_inline_config_value_picker(f, f.area(), state);
-        return;
-    }
-
-    if state.mjconfig_menu.is_some() {
-        draw_mjconfig_menu(f, f.area(), state);
-        return;
-    }
-
-    if state.transcript_viewer {
-        draw_inline_transcript_viewer(f, f.area(), state, transcript_scroll);
-        return;
-    }
-    // The reader's fully expanded render is the larger of the two caches and
-    // is dead once it closes; reopening pays one rebuild instead of holding
-    // it for the rest of the session.
-    transcript_scroll.viewer_cache = None;
-
-    if state.review_issue_viewer {
-        draw_review_issue_viewer(f, f.area(), state);
-        return;
-    }
-
-    if state.terminals_viewer {
-        draw_terminals_viewer(f, f.area(), state, true);
-        return;
-    }
-    if state.nested_agent_viewer {
-        draw_nested_agent_viewer(f, f.area(), state, true);
-        return;
-    }
-
-    if state.workspace_diff_viewer {
-        draw_workspace_diff_viewer(f, f.area(), state, true);
-        return;
-    }
-
-    let feature_tip = current_feature_tip(state, UiMode::InlineChat);
-    let chunks = inline_chat_layout(state, f.area(), u16::from(feature_tip.is_some()));
-
-    draw_inline_transcript_tail(f, chunks[0], state);
-    draw_header(f, chunks[1], state);
-    draw_workflow_progress_rows(f, chunks[2], state);
-    draw_review_board(f, chunks[3], state);
-    draw_running_terminals_row(f, chunks[4], state);
-    draw_queued_prompt_row(f, chunks[5], state);
-    draw_feature_tip_row(f, chunks[6], feature_tip, state.theme);
-    draw_input(f, chunks[7], state, UiMode::InlineChat);
-    draw_status_line(f, chunks[8], state);
-    draw_usage_quota_row(f, chunks[9], state);
-
-    if state.autocomplete.visible
-        && !state.has_pending_permission()
-        && !state.has_pending_elicitation()
-    {
-        draw_inline_autocomplete_popover(f, f.area(), state);
-    }
-
-    if state.help_overlay {
-        draw_help_modal(
-            f,
-            f.area(),
-            UiMode::InlineChat,
-            state.theme,
-            &mut state.help_scroll,
-        );
-    }
-}
-
-fn inline_content_rect(area: Rect) -> Rect {
-    Rect::new(
-        area.x.saturating_add(1),
-        area.y,
-        area.width.saturating_sub(2),
-        area.height,
-    )
-}
-
-fn draw_inline_permission_view(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    pending: &PendingPermission,
-    queue_len: usize,
-    theme: TerminalTheme,
-) {
-    f.render_widget(Clear, area);
-    let content = inline_content_rect(area);
-    if content.width == 0 || content.height < 4 {
-        return;
-    }
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(content);
-
-    let lines = permission_view_lines(pending, queue_len, content.width, theme);
-    let visible_lines =
-        visible_permission_content_lines(pending, &lines, content.width, layout[0].height);
-    f.render_widget(Paragraph::new(visible_lines), layout[0]);
-
-    f.render_widget(
-        Paragraph::new("Up/Down choose | PgUp/PgDn read | Enter to confirm | Esc cancel")
-            .style(Style::default().ink(theme.muted)),
-        layout[1],
-    );
 }
 
 fn centered_visible_range(total: usize, selected: usize, visible: usize) -> Range<usize> {
@@ -8437,320 +6851,12 @@ fn team_picker_items(state: &AppState, width: u16) -> Vec<ListItem<'static>> {
         .collect()
 }
 
-fn draw_inline_team_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    f.render_widget(Clear, area);
-    let content = inline_content_rect(area);
-    if content.width == 0 || content.height < 5 {
-        return;
-    }
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(content);
-    f.render_widget(
-        Paragraph::new("Switch coding team").style(
-            Style::default()
-                .ink(state.theme.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        layout[0],
-    );
-    let step = state
-        .team_picker
-        .as_ref()
-        .map(|picker| picker.step)
-        .unwrap_or(TeamPickerStep::Choose);
-    let detail = match step {
-        TeamPickerStep::Choose => "Choose who codes and who reviews",
-        TeamPickerStep::SwitchPrimary => "Saved. Switch to the new primary now?",
-    };
-    f.render_widget(
-        Paragraph::new(detail).style(Style::default().ink(state.theme.muted)),
-        layout[1],
-    );
-    match step {
-        TeamPickerStep::Choose => {
-            f.render_widget(
-                List::new(team_picker_items(state, layout[2].width)),
-                layout[2],
-            );
-        }
-        TeamPickerStep::SwitchPrimary => {
-            let switch_primary_now = state
-                .team_picker
-                .as_ref()
-                .is_some_and(|picker| picker.switch_primary_now);
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(if switch_primary_now {
-                        "› switch primary now"
-                    } else {
-                        "  switch primary now"
-                    }),
-                    Line::from(if switch_primary_now {
-                        "  keep current session"
-                    } else {
-                        "› keep current session"
-                    }),
-                ]),
-                layout[2],
-            );
-        }
-    }
-    let footer = match step {
-        TeamPickerStep::Choose => "Shift+Tab/Up/Down choose | Enter save | Esc cancel",
-        TeamPickerStep::SwitchPrimary => "Up/Down choose | Enter confirm | Esc keep current",
-    };
-    f.render_widget(
-        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
-        layout[3],
-    );
-}
-
-fn draw_inline_config_value_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    f.render_widget(Clear, area);
-    let content = inline_content_rect(area);
-    if content.width == 0 || content.height < 6 {
-        return;
-    }
-
-    let Some(picker) = state.config_picker.as_ref() else {
-        return;
-    };
-    let Some(option) = state.session_config_options.get(picker.selected_option) else {
-        return;
-    };
-    let Some(choices) = config_option_choices(option) else {
-        return;
-    };
-
-    let title = format!("{} values", option.name);
-    let detail = option
-        .description
-        .clone()
-        .unwrap_or_else(|| config_option_current_value_label(option));
-    let detail_lines = wrap_text_to_width(&detail, content.width)
-        .into_iter()
-        .take(2)
-        .map(Line::from)
-        .collect::<Vec<_>>();
-    let detail_height = detail_lines.len().max(1).min(u16::MAX as usize) as u16;
-    let scope_lines = wrap_text_to_width(session_config_picker_scope_notice(state), content.width)
-        .into_iter()
-        .map(|line| Line::from(Span::styled(line, Style::default().ink(state.theme.muted))))
-        .collect::<Vec<_>>();
-    let scope_height = scope_lines.len().max(1).min(u16::MAX as usize) as u16;
-    // Score attribution, rendered as its own row just above the footer.
-    let legend = model_score_legend(state, option);
-    let legend_rows = u16::from(legend.is_some());
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(detail_height),
-            Constraint::Length(scope_height),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(legend_rows),
-            Constraint::Length(1),
-        ])
-        .split(content);
-
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            title,
-            Style::default()
-                .ink(state.theme.primary)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        layout[0],
-    );
-    f.render_widget(Paragraph::new(detail_lines), layout[1]);
-    f.render_widget(Paragraph::new(scope_lines), layout[2]);
-
-    let search_text = if picker.search_query.is_empty() {
-        "filter:".to_string()
-    } else {
-        format!("filter: {}", picker.search_query)
-    };
-    f.render_widget(
-        Paragraph::new(search_text).style(Style::default().ink(state.theme.muted)),
-        layout[3],
-    );
-
-    let total = picker.filtered_indices.len();
-    if total == 0 {
-        f.render_widget(
-            Paragraph::new("No matches").style(Style::default().ink(state.theme.muted)),
-            layout[4],
-        );
-    } else {
-        let selected = picker.selected_value;
-        let range = centered_visible_range(total, selected, usize::from(layout[4].height));
-        let start = range.start;
-        let items = picker.filtered_indices[range]
-            .iter()
-            .enumerate()
-            .map(|(offset, &full_idx)| {
-                let absolute = start + offset;
-                let marker = if absolute == selected { ">" } else { " " };
-                let choice = &choices[full_idx];
-                let score = model_choice_score(state, option, choice);
-                let line = config_value_row_text(choice, score.as_deref(), layout[4].width);
-                truncate_line(line, layout[4].width, marker == ">", state.theme)
-            })
-            .collect::<Vec<ListItem>>();
-        f.render_widget(List::new(items), layout[4]);
-    }
-
-    if let Some(legend) = legend {
-        f.render_widget(
-            Paragraph::new(legend).style(Style::default().ink(state.theme.muted)),
-            layout[5],
-        );
-    }
-
-    let footer = if picker.search_query.is_empty() {
-        "Up/Down choose | type to filter | Enter apply | Esc cancel"
-    } else {
-        "Up/Down choose | Backspace clear | Enter apply | Esc cancel"
-    };
-    f.render_widget(
-        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
-        layout[6],
-    );
-}
-
 fn session_config_picker_scope_notice(state: &AppState) -> &'static str {
     if state.config_path.is_some() {
         "Saved for future sessions on this ACP model route; applied after /mjconfig defaults."
     } else {
         "Current-session only: configuration is unavailable, so this selection cannot be saved."
     }
-}
-
-/// Full-screen inline reader for the entire transcript with all details
-/// expanded. `scroll_offset` is the index of the top visible line and is
-/// clamped here so End / PageDown can never scroll past the final screen.
-fn draw_inline_transcript_viewer(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    state: &mut AppState,
-    transcript_scroll: &mut TranscriptScrollState,
-) {
-    ensure_transcript_search_matches(state);
-    f.render_widget(Clear, area);
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" transcript — full history · / or Ctrl-F searches ")
-        .style(Style::default().ink(state.theme.agent));
-    let inner = block.inner(layout[0]);
-    f.render_widget(block, layout[0]);
-
-    if inner.width > 0 && inner.height > 0 {
-        let search_query = state
-            .transcript_search
-            .as_ref()
-            .filter(|search| !search.query.is_empty())
-            .map(|search| search.query.clone());
-        // Re-rendering and re-measuring the entire expanded history on every
-        // frame is what made scrolling this reader crawl on long sessions.
-        // Cache it against the transcript revision, width, and search query,
-        // then hand `Paragraph` only the rows the viewport can show.
-        let revision = state.transcript_revision();
-        let cache_hit = matches!(
-            transcript_scroll.viewer_cache.as_ref(),
-            Some(cache)
-                if cache.revision == revision
-                    && cache.width == inner.width
-                    && cache.search_query == search_query
-        );
-        if !cache_hit {
-            transcript_scroll.viewer_cache = Some(build_transcript_cache(
-                state,
-                inner.width,
-                revision,
-                search_query.clone(),
-                true,
-            ));
-        }
-        let cache = transcript_scroll
-            .viewer_cache
-            .as_ref()
-            .expect("cache populated above");
-        let total = cache.line_count;
-        let max_offset = total.saturating_sub(usize::from(inner.height));
-        state.scroll_offset = state.scroll_offset.min(max_offset);
-        if state
-            .transcript_search
-            .as_ref()
-            .is_some_and(|search| search.jump_pending)
-        {
-            if let Some(entry_index) = selected_transcript_search_entry(state)
-                && let Some(Some(target_row)) = transcript_scroll
-                    .viewer_cache
-                    .as_ref()
-                    .and_then(|cache| cache.entry_row_starts.get(entry_index))
-            {
-                state.scroll_offset = target_row
-                    .saturating_sub(usize::from(inner.height) / 3)
-                    .min(max_offset);
-            }
-            if let Some(search) = state.transcript_search.as_mut() {
-                search.jump_pending = false;
-            }
-        }
-        let cache = transcript_scroll
-            .viewer_cache
-            .as_ref()
-            .expect("cache populated above");
-        let (window, inner_scroll) = wrapped_visible_window(
-            &cache.lines,
-            &cache.row_starts,
-            state.scroll_offset,
-            inner.height,
-        );
-        f.render_widget(
-            Paragraph::new(window)
-                .wrap(Wrap { trim: false })
-                .scroll((inner_scroll, 0)),
-            inner,
-        );
-    }
-
-    let footer = if let Some(search) = state.transcript_search.as_ref() {
-        let matches = transcript_search_matches(state);
-        if search.editing {
-            format!("Search: {}▌ · Enter apply · Esc cancel", search.query)
-        } else if matches.is_empty() {
-            format!("Search: {} · no matches · / edit · Esc clear", search.query)
-        } else {
-            format!(
-                "Search: {} · {}/{} · n/N next/previous · / edit · Esc clear",
-                search.query,
-                search.selected.min(matches.len() - 1) + 1,
-                matches.len()
-            )
-        }
-    } else {
-        "Alt-T latest tool · / search · Up/Down PgUp/PgDn · Home/End · Esc or Ctrl-T close"
-            .to_string()
-    };
-    f.render_widget(
-        Paragraph::new(footer).style(Style::default().ink(state.theme.muted)),
-        layout[1],
-    );
 }
 
 fn draw_review_issue_viewer(f: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
@@ -9694,26 +7800,6 @@ fn draw_workspace_diff_notice(
     );
 }
 
-fn inline_config_view_line_count(state: &AppState, width: u16) -> usize {
-    let Some(picker) = state.config_picker.as_ref() else {
-        return usize::from(INLINE_CHAT_HEIGHT);
-    };
-    let Some(option) = state.session_config_options.get(picker.selected_option) else {
-        return usize::from(INLINE_CHAT_HEIGHT);
-    };
-    let detail = option
-        .description
-        .clone()
-        .unwrap_or_else(|| config_option_current_value_label(option));
-    let detail_rows = wrap_text_to_width(&detail, width).len().max(1);
-    let scope_rows = wrap_text_to_width(session_config_picker_scope_notice(state), width)
-        .len()
-        .max(1);
-    let option_rows = picker.filtered_indices.len().max(1);
-    let legend_rows = usize::from(model_score_legend(state, option).is_some());
-    1 + detail_rows + scope_rows + 1 + option_rows + legend_rows + 1
-}
-
 fn draw_header(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let width = area.width as usize;
     let mut spans = vec![Span::styled(
@@ -10358,7 +8444,7 @@ fn settled_entry_boundary_from(state: &AppState, turns: &[TranscriptTurn], start
     state.transcript[start..boundary]
         .iter()
         .enumerate()
-        .find(|&(offset, entry)| !transcript_entry_settles_naturally(state, start + offset, entry))
+        .find(|&(offset, entry)| !transcript_entry_is_stable(state, start + offset, entry))
         .map_or(boundary, |(offset, _)| start + offset)
 }
 
@@ -11005,37 +9091,14 @@ fn render_transcript_entry_range_with_turns(
                         Some(false) => Some(TOOL_OUTPUT_COLLAPSED_LINES),
                         None => collapse_limit,
                     };
-                    // #615 fix A: this terminal was still running when its
-                    // entry crossed the irrevocable scrollback boundary. A
-                    // half-painted live window would freeze there forever, so
-                    // commit a reference line instead; the live output stays
-                    // readable via /terminals.
-                    let committed_while_running = entry_index
-                        < state.committed_transcript_entries()
-                        && view.body.iter().any(|output| {
-                            matches!(
-                                output,
-                                ToolCallOutput::Terminal {
-                                    exit_status: None,
-                                    ..
-                                }
-                            )
-                        });
-                    if committed_while_running {
-                        block.push(Line::from(Span::styled(
-                            "  running · /terminals to view",
-                            Style::default().ink(theme.muted),
-                        )));
-                    } else {
-                        push_tool_outputs(
-                            &mut block,
-                            &view.body,
-                            view.status,
-                            content_width,
-                            tool_collapse_limit,
-                            theme,
-                        );
-                    }
+                    push_tool_outputs(
+                        &mut block,
+                        &view.body,
+                        view.status,
+                        content_width,
+                        tool_collapse_limit,
+                        theme,
+                    );
                     for line in block {
                         for row in wrap_tool_line(line, content_width as usize) {
                             out.push(with_tool_gutter(row, color));
@@ -14265,16 +12328,11 @@ fn draw_queued_prompt_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) 
     f.render_widget(chip, area);
 }
 
-fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode) {
-    let text_selection_hint = match mode {
-        UiMode::InlineChat => String::new(),
-        UiMode::FullscreenTui => {
-            if state.text_selection_mode {
-                " | F12 resume wheel".to_string()
-            } else {
-                " | F12 select text".to_string()
-            }
-        }
+fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let text_selection_hint = if state.text_selection_mode {
+        " | F12 resume wheel".to_string()
+    } else {
+        " | F12 select text".to_string()
     };
     let title = if state.runtime_closed {
         Line::raw(" runtime closed (/clear same agent | /new picker | Ctrl-C quit) ")
@@ -14369,7 +12427,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, mode: UiMode
         && state.config_picker.is_none()
         && !state.help_overlay
         && state.mjconfig_menu.is_none()
-        && (mode == UiMode::InlineChat || !state.text_selection_mode)
+        && !state.text_selection_mode
     {
         let (cursor_row, cursor_col) =
             input_cursor_visual_position_with_attachments(state, content_width as usize);
@@ -15236,48 +13294,6 @@ fn draw_elicitation_modal(
     f.render_widget(footer, layout[1]);
 }
 
-fn draw_inline_elicitation_view(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    pending: &PendingElicitation,
-    queue_len: usize,
-    theme: TerminalTheme,
-) {
-    f.render_widget(Clear, area);
-    let content = inline_content_rect(area);
-    if content.width == 0 || content.height < 4 {
-        return;
-    }
-
-    let view = classify_elicitation(&pending.prompt);
-    let content_width = if matches!(view, ElicitationView::Url { .. }) {
-        elicitation_content_width_hint(&view, &pending.prompt.message)
-            .max(elicitation_footer_text(&view).width())
-            .min(content.width as usize) as u16
-    } else {
-        content.width
-    };
-    let x = content
-        .x
-        .saturating_add((content.width.saturating_sub(content_width)) / 2);
-    let content = Rect::new(x, content.y, content_width, content.height);
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(content);
-
-    let content_lines = elicitation_view_lines(pending, queue_len, content.width, theme);
-    let visible_lines =
-        elicitation_visible_window(&content_lines, pending.scroll_offset, layout[0].height);
-    f.render_widget(Paragraph::new(visible_lines), layout[0]);
-
-    f.render_widget(
-        Paragraph::new(elicitation_footer_text(&view)).style(Style::default().ink(theme.muted)),
-        layout[1],
-    );
-}
-
 fn wrap_prefixed_text_to_width(
     text: &str,
     width: u16,
@@ -15423,7 +13439,6 @@ fn pad_text_to_width(mut line: String, width: u16) -> String {
 fn draw_help_modal(
     f: &mut ratatui::Frame,
     area: Rect,
-    mode: UiMode,
     theme: TerminalTheme,
     help_scroll: &mut u16,
 ) {
@@ -15445,7 +13460,7 @@ fn draw_help_modal(
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let lines = help_modal_lines(mode, voice_input_supported(), theme);
+    let lines = help_modal_lines(voice_input_supported(), theme);
 
     let paragraph = Paragraph::new(lines)
         .style(Style::default().ink(theme.text))
@@ -15459,11 +13474,7 @@ fn draw_help_modal(
     f.render_widget(paragraph, inner);
 }
 
-fn help_modal_lines(
-    mode: UiMode,
-    voice_input_supported: bool,
-    theme: TerminalTheme,
-) -> Vec<Line<'static>> {
+fn help_modal_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<Line<'static>> {
     let mut lines = vec![
         help_section_line("Agent seats", theme),
         help_binding_line_with_color(
@@ -15497,40 +13508,28 @@ fn help_modal_lines(
         help_blank_line(),
     ];
     lines.extend(general_help_lines(voice_input_supported, theme));
-    if mode == UiMode::FullscreenTui {
-        lines.extend([
-            help_binding_line(
-                "mouse drag",
-                "select visible text; released selection is copied to the clipboard",
-                theme,
-            ),
-            help_binding_line(
-                "F12",
-                "toggle mouse text selection / wheel scrolling",
-                theme,
-            ),
-            help_blank_line(),
-            help_section_line("Scroll transcript", theme),
-            help_binding_line(
-                "Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T",
-                "",
-                theme,
-            ),
-            help_binding_line("Ctrl-F", "search transcript; n/N moves between hits", theme),
-            help_binding_line("Alt-T", "expand/collapse latest visible tool output", theme),
-            help_blank_line(),
-        ]);
-    } else {
-        lines.extend([
-            help_section_line("Read transcript", theme),
-            help_binding_line(
-                "Ctrl-T",
-                "open full transcript reader (/ or Ctrl-F searches; n/N moves hits)",
-                theme,
-            ),
-            help_blank_line(),
-        ]);
-    }
+    lines.extend([
+        help_binding_line(
+            "mouse drag",
+            "select visible text; released selection is copied to the clipboard",
+            theme,
+        ),
+        help_binding_line(
+            "F12",
+            "toggle mouse text selection / wheel scrolling",
+            theme,
+        ),
+        help_blank_line(),
+        help_section_line("Scroll transcript", theme),
+        help_binding_line(
+            "Wheel / Ctrl+Up/Down / Ctrl+PageUp/Down / Ctrl+Home/End / Ctrl-T",
+            "",
+            theme,
+        ),
+        help_binding_line("Ctrl-F", "search transcript; n/N moves between hits", theme),
+        help_binding_line("Alt-T", "expand/collapse latest visible tool output", theme),
+        help_blank_line(),
+    ]);
     lines.extend([
         help_section_line("Overlays", theme),
         help_binding_line(
@@ -15773,36 +13772,6 @@ fn draw_review_picker_modal(f: &mut ratatui::Frame, area: Rect, state: &AppState
         Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
             .style(Style::default().ink(state.theme.muted)),
         layout[1],
-    );
-}
-
-fn draw_inline_review_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    f.render_widget(Clear, area);
-    let content = inline_content_rect(area);
-    if content.width == 0 || content.height < 5 {
-        return;
-    }
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .split(content);
-    f.render_widget(
-        Paragraph::new("Discrete review target").style(
-            Style::default()
-                .ink(state.theme.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        layout[0],
-    );
-    f.render_widget(Paragraph::new(review_picker_lines(state)), layout[1]);
-    f.render_widget(
-        Paragraph::new("Up/Down choose | Enter discrete review | Esc cancel")
-            .style(Style::default().ink(state.theme.muted)),
-        layout[2],
     );
 }
 
@@ -16075,49 +14044,6 @@ fn draw_autocomplete_popover(f: &mut ratatui::Frame, input_area: Rect, state: &A
     f.render_widget(list, inner);
 }
 
-fn draw_inline_autocomplete_popover(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let max_visible_rows = 8u16;
-    let desired_rows = (state.autocomplete.matches.len() as u16).min(max_visible_rows);
-    if desired_rows == 0 || area.height < 4 {
-        return;
-    }
-    let height = (desired_rows + 2).min(area.height.saturating_sub(1));
-    if height < 3 {
-        return;
-    }
-    let rect = Rect::new(area.x, area.y, area.width, height);
-
-    f.render_widget(Clear, rect);
-    let title = match state.autocomplete.kind {
-        AutocompleteKind::Commands => " commands (Tab/Enter accept, Esc cancel) ",
-        AutocompleteKind::Files { .. } => " files (Tab/Enter attach, Esc cancel) ",
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .style(Style::default().ink(state.theme.primary));
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-
-    let visible_rows = usize::from(inner.height);
-    let total = state.autocomplete.matches.len();
-    let selected = state.autocomplete.selected;
-    let range = centered_visible_range(total, selected, visible_rows);
-    let start = range.start;
-
-    let items: Vec<ListItem> = state.autocomplete.matches[range]
-        .iter()
-        .enumerate()
-        .map(|(offset, &match_index)| {
-            let absolute = start + offset;
-            let marker = if absolute == selected { ">" } else { " " };
-            let line = autocomplete_row_text(state, match_index, marker);
-            truncate_line(line, inner.width, marker == ">", state.theme)
-        })
-        .collect();
-    f.render_widget(List::new(items), inner);
-}
-
 fn autocomplete_row_text(state: &AppState, match_index: usize, marker: &str) -> String {
     match state.autocomplete.kind {
         AutocompleteKind::Commands => {
@@ -16223,10 +14149,7 @@ fn fit_width(text: impl Into<String>, width: usize) -> String {
 mod tests {
     use crate::app::StatusKind;
     use crate::claude_usage::{ClaudeUsageReport, ClaudeUsageStatus};
-    use crate::event::{
-        ElicitationPrompt, InternalMessage, SessionConfigTarget, SubagentEvent,
-        TerminalOutputSnapshot,
-    };
+    use crate::event::{ElicitationPrompt, InternalMessage, SessionConfigTarget, SubagentEvent};
     use crate::workflow::{
         WorkflowActorId, WorkflowActorRole, WorkflowCoverage, WorkflowEvent, WorkflowId,
         WorkflowKind, WorkflowOutcome, WorkflowPhase, WorkflowStage, WorkflowTransition,
@@ -16332,13 +14255,6 @@ mod tests {
             3,
             "header plus one row per issue"
         );
-        let area = Rect::new(0, 0, 120, 30);
-        let chunks = inline_chat_layout(&state, area, 0);
-        assert_eq!(
-            chunks[3].height, 3,
-            "the inline viewport reserves the board block"
-        );
-
         let backend = TestBackend::new(120, 3);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -16405,7 +14321,6 @@ mod tests {
             0,
             "a finished review leaves the board to the verdict banner"
         );
-        assert_eq!(inline_chat_layout(&state, area, 0)[3].height, 0);
     }
 
     #[test]
@@ -16501,14 +14416,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(100, 14)).expect("terminal");
         terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut TranscriptScrollState::default(),
-                    UiMode::FullscreenTui,
-                )
-            })
+            .draw(|frame| draw(frame, &mut state, &mut TranscriptScrollState::default()))
             .expect("draw");
         let lines = buffer_lines(terminal.backend().buffer());
         let issue_row = lines
@@ -16536,14 +14444,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
         terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut TranscriptScrollState::default(),
-                    UiMode::FullscreenTui,
-                )
-            })
+            .draw(|frame| draw(frame, &mut state, &mut TranscriptScrollState::default()))
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("M J O L N I R"), "{rendered}");
@@ -16561,14 +14462,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
         terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut TranscriptScrollState::default(),
-                    UiMode::FullscreenTui,
-                )
-            })
+            .draw(|frame| draw(frame, &mut state, &mut TranscriptScrollState::default()))
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(!rendered.contains("M J O L N I R"), "{rendered}");
@@ -16757,11 +14651,11 @@ mod tests {
         EnumOption, PermissionOption, PermissionOptionKind, PlanEntry, PlanEntryPriority,
         PlanEntryStatus, SessionConfigOption, SessionConfigOptionCategory,
         SessionConfigSelectOption, SessionConfigValueId, SessionUpdate, StopReason,
-        StringPropertySchema, TerminalExitStatus, TextContent, ToolCall, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        StringPropertySchema, TerminalExitStatus, TextContent, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields, ToolKind,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
 
     fn key(code: KeyCode) -> CtEvent {
@@ -16870,82 +14764,6 @@ mod tests {
     }
 
     #[test]
-    fn alt_t_in_inline_reader_collapses_only_latest_failed_tool() {
-        let mut state = AppState::new();
-        insert_tool_output(
-            &mut state,
-            "older",
-            ToolCallStatus::Completed,
-            long_tool_output("INLINE_OLDER_HIDDEN_HEAD", "INLINE_OLDER_VISIBLE_TAIL"),
-        );
-        insert_tool_output(
-            &mut state,
-            "latest-failed",
-            ToolCallStatus::Failed,
-            long_tool_output("INLINE_LATEST_HIDDEN_HEAD", "INLINE_LATEST_VISIBLE_TAIL"),
-        );
-        state.open_transcript_viewer();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let before = render_full_transcript_lines(&state, 100)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert!(
-            before
-                .iter()
-                .any(|line| line.contains("INLINE_OLDER_HIDDEN_HEAD"))
-        );
-        assert!(
-            before
-                .iter()
-                .any(|line| line.contains("INLINE_LATEST_HIDDEN_HEAD"))
-        );
-
-        handle_inline_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Char('t'), KeyModifiers::ALT),
-        );
-
-        assert!(state.transcript_viewer);
-        assert!(!state.expand_transcript_details);
-        assert_eq!(state.tool_detail_expanded("older"), None);
-        assert_eq!(state.tool_detail_expanded("latest-failed"), Some(false));
-        let after = render_full_transcript_lines(&state, 100)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert!(
-            after
-                .iter()
-                .any(|line| line.contains("INLINE_OLDER_HIDDEN_HEAD"))
-        );
-        assert!(
-            !after
-                .iter()
-                .any(|line| line.contains("INLINE_LATEST_HIDDEN_HEAD"))
-        );
-        assert!(
-            after
-                .iter()
-                .any(|line| line.contains("INLINE_OLDER_VISIBLE_TAIL"))
-        );
-        assert!(
-            after
-                .iter()
-                .any(|line| line.contains("INLINE_LATEST_VISIBLE_TAIL"))
-        );
-        assert!(
-            after
-                .iter()
-                .filter(|line| line.contains("hidden"))
-                .all(|line| line.contains("Alt-T")),
-            "collapsed reader rows must name the Alt-T control: {after:?}"
-        );
-    }
-
-    #[test]
     fn alt_t_skips_successful_tool_omitted_by_compact_completed_turn() {
         let mut state = AppState::new();
         state.record_user_prompt("prompt".to_string());
@@ -17037,22 +14855,6 @@ mod tests {
 
     fn text_chunk(s: &str) -> ContentChunk {
         ContentChunk::new(ContentBlock::Text(TextContent::new(s)))
-    }
-
-    fn handle_crossterm(
-        state: &mut AppState,
-        cmd_tx: &mpsc::UnboundedSender<UiCommand>,
-        ev: CtEvent,
-    ) -> TerminalRequest {
-        super::handle_crossterm(state, cmd_tx, ev, UiMode::FullscreenTui)
-    }
-
-    fn handle_inline_crossterm(
-        state: &mut AppState,
-        cmd_tx: &mpsc::UnboundedSender<UiCommand>,
-        ev: CtEvent,
-    ) -> TerminalRequest {
-        super::handle_crossterm(state, cmd_tx, ev, UiMode::InlineChat)
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -17197,6 +14999,8 @@ mod tests {
         }
     }
 
+    use ratatui::widgets::Widget;
+
     fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
         (0..buffer.area().height)
             .map(|y| {
@@ -17212,7 +15016,7 @@ mod tests {
         let mut state = AppState::new();
         state.push_session_boundary("new claude-acp session started");
 
-        assert_eq!(stable_transcript_entry_count(&state), 1);
+        assert!(transcript_entry_is_stable(&state, 0, &state.transcript[0]));
         let rendered: Vec<String> = render_transcript_lines(&state, 50)
             .iter()
             .map(line_text)
@@ -17486,36 +15290,34 @@ mod tests {
 
     #[test]
     fn status_line_renders_directly_above_usage_quota() {
-        for mode in [UiMode::FullscreenTui, UiMode::InlineChat] {
-            let mut state = AppState::new();
-            state.active_models.primary = "gpt-status-line".to_string();
-            state.active_models.primary_source = Some("claude-acp".to_string());
-            state.project_label = "~/code/mjolnir".to_string();
-            state.set_claude_usage(ClaudeUsageStatus::Unavailable(
-                "quota-row-marker".to_string(),
-            ));
-            let mut transcript_scroll = TranscriptScrollState::default();
-            let backend = TestBackend::new(160, 20);
-            let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = AppState::new();
+        state.active_models.primary = "gpt-status-line".to_string();
+        state.active_models.primary_source = Some("claude-acp".to_string());
+        state.project_label = "~/code/mjolnir".to_string();
+        state.set_claude_usage(ClaudeUsageStatus::Unavailable(
+            "quota-row-marker".to_string(),
+        ));
+        let mut transcript_scroll = TranscriptScrollState::default();
+        let backend = TestBackend::new(160, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
 
-            terminal
-                .draw(|frame| draw(frame, &mut state, &mut transcript_scroll, mode))
-                .expect("draw");
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut transcript_scroll))
+            .expect("draw");
 
-            let lines = buffer_lines(terminal.backend().buffer());
-            assert!(
-                lines[lines.len() - 2].contains("gpt-status-line"),
-                "{mode:?} status line must sit directly above quota:\n{}",
-                lines.join("\n")
-            );
-            assert!(
-                lines
-                    .last()
-                    .is_some_and(|line| line.contains("quota-row-marker")),
-                "{mode:?} quota must render below the status line:\n{}",
-                lines.join("\n")
-            );
-        }
+        let lines = buffer_lines(terminal.backend().buffer());
+        assert!(
+            lines[lines.len() - 2].contains("gpt-status-line"),
+            "status line must sit directly above quota:\n{}",
+            lines.join("\n")
+        );
+        assert!(
+            lines
+                .last()
+                .is_some_and(|line| line.contains("quota-row-marker")),
+            "quota must render below the status line:\n{}",
+            lines.join("\n")
+        );
     }
 
     #[test]
@@ -17772,10 +15574,10 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         let render = |state: &mut AppState| {
-            let backend = TestBackend::new(80, 14);
+            let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|frame| draw_inline_chat(frame, state, &mut TranscriptScrollState::default()))
+                .draw(|frame| draw(frame, state, &mut TranscriptScrollState::default()))
                 .expect("draw");
             buffer_lines(terminal.backend().buffer()).join("\n")
         };
@@ -17785,7 +15587,7 @@ mod tests {
         assert!(first.contains("Fast model"), "rendered:\n{first}");
         assert!(first.contains("Smart model"), "rendered:\n{first}");
 
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
         let second = render(&mut state);
         assert!(second.contains("Field 2 of 2"), "rendered:\n{second}");
         assert!(second.contains("Other"), "rendered:\n{second}");
@@ -17824,31 +15626,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_chat_replaces_content_with_elicitation_view() {
-        let mut state = AppState::new();
-        state.agent_label = "opencode".to_string();
-        state.record_user_prompt("hello".to_string());
-        state.apply_event(UiEvent::ElicitationRequest(
-            single_select_elicitation_prompt(),
-        ));
-        let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("setup request"), "rendered:\n{rendered}");
-        assert!(
-            !rendered.contains("agent opencode"),
-            "elicitation view must replace the chat header; rendered:\n{rendered}"
-        );
-    }
-
-    #[test]
     fn inline_elicitation_view_handles_keyboard_selection() {
         let mut state = AppState::new();
         state.apply_event(UiEvent::ElicitationRequest(
@@ -17856,7 +15633,7 @@ mod tests {
         ));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
 
         let pending = state.pending_elicitation().expect("pending elicitation");
         assert_eq!(pending.selected, 1);
@@ -17871,7 +15648,7 @@ mod tests {
         ));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('c')));
+        let request = handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('c')));
 
         assert_eq!(request, TerminalRequest::CopyText(url.to_string()));
         assert!(
@@ -17879,51 +15656,8 @@ mod tests {
             "copy must not dismiss login prompt"
         );
 
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('C')));
+        let request = handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('C')));
         assert_eq!(request, TerminalRequest::CopyText(url.to_string()));
-    }
-
-    #[test]
-    fn inline_url_elicitation_uses_full_height_and_preserves_qr_width() {
-        let mut state = AppState::new();
-        let url = "https://auth.openai.com/oauth/authorize?client_id=codex_cli&scope=openid%20profile%20email&code_challenge=abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789&state=abcdefghijklmnopqrstuvwxyz0123456789";
-        state.apply_event(UiEvent::ElicitationRequest(
-            url_elicitation_prompt_with_url(url),
-        ));
-        let terminal_size = Size {
-            width: 140,
-            height: 50,
-        };
-
-        let desired = desired_inline_height(&state, terminal_size);
-        assert_eq!(desired, terminal_size.height - 1);
-        assert!(desired > INLINE_EXPANDED_MAX_HEIGHT);
-
-        let qr_width = crate::qr::render_qr(url)
-            .expect("qr")
-            .lines()
-            .map(|line| line.width())
-            .max()
-            .expect("qr lines");
-        assert!(qr_width <= usize::from(terminal_size.width - 2));
-
-        let backend = TestBackend::new(terminal_size.width, desired);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("press c to copy"),
-            "rendered:\n{rendered}"
-        );
-        assert!(
-            rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'),
-            "QR should render in the inline URL view; rendered:\n{rendered}"
-        );
     }
 
     fn text_elicitation_prompt() -> ElicitationPrompt {
@@ -17992,9 +15726,9 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         for c in ['s', 'k', '-', 'j'] {
-            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char(c)));
+            handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char(c)));
         }
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Backspace));
 
         let pending = state.pending_elicitation().expect("pending elicitation");
         assert_eq!(pending.input, "sk-");
@@ -18008,7 +15742,7 @@ mod tests {
         state.apply_event(UiEvent::ElicitationRequest(text_elicitation_prompt()));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_inline_crossterm(
+        handle_crossterm(
             &mut state,
             &cmd_tx,
             CtEvent::Paste("sk-or-xyz\n".to_string()),
@@ -18045,95 +15779,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_help_close_requests_one_repair() {
-        let mut state = AppState::new();
-        state.help_overlay = true;
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
-
-        assert_eq!(request, TerminalRequest::ForceInlineRepair);
-        assert!(!state.help_overlay);
-    }
-
-    #[test]
-    fn inline_autocomplete_accept_requests_one_repair() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.available_commands = vec![
-            AvailableCommand::new("help", "show help"),
-            AvailableCommand::new("hello", "say hello"),
-        ];
-        state.input = "/he".to_string();
-        state.input_cursor = state.input.chars().count();
-        state.update_autocomplete();
-        assert!(state.autocomplete.visible);
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Tab));
-
-        assert_eq!(request, TerminalRequest::ForceInlineRepair);
-        assert!(!state.autocomplete.visible);
-    }
-
-    #[test]
-    fn inline_autocomplete_dismiss_requests_one_repair() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.available_commands = vec![
-            AvailableCommand::new("help", "show help"),
-            AvailableCommand::new("hello", "say hello"),
-        ];
-        state.input = "/he".to_string();
-        state.input_cursor = state.input.chars().count();
-        state.update_autocomplete();
-        assert!(state.autocomplete.visible);
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
-
-        assert_eq!(request, TerminalRequest::ForceInlineRepair);
-        assert!(!state.autocomplete.visible);
-    }
-
-    #[test]
-    fn inline_permission_close_requests_one_repair() {
-        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-
-        assert_eq!(request, TerminalRequest::ForceInlineRepair);
-        assert!(!state.has_pending_permission());
-    }
-
-    #[test]
-    fn inline_config_picker_close_requests_one_repair() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.session_config_options = vec![SessionConfigOption::select(
-            "model",
-            "Model",
-            "claude-sonnet",
-            vec![
-                SessionConfigSelectOption::new("claude-sonnet", "Claude Sonnet"),
-                SessionConfigSelectOption::new("gpt-4.1", "GPT-4.1"),
-            ],
-        )];
-        state.session_config_targets = vec![SessionConfigTarget::LegacyModel];
-        assert!(state.open_config_value_picker(0));
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
-
-        assert_eq!(request, TerminalRequest::ForceInlineRepair);
-        assert!(state.config_picker.is_none());
-    }
-
-    #[test]
     fn runtime_closed_allows_new_session_command() {
         let mut state = AppState::new();
         state.runtime_closed = true;
@@ -18146,47 +15791,6 @@ mod tests {
 
         assert_eq!(state.exit_reason, Some(UiExitReason::NewSession));
         assert!(state.input.is_empty());
-    }
-
-    #[test]
-    fn force_inline_repair_requests_one_soft_repair() {
-        assert!(terminal_request_forces_inline_repair(
-            &TerminalRequest::ForceInlineRepair
-        ));
-        assert!(!terminal_request_forces_inline_repair(
-            &TerminalRequest::None
-        ));
-    }
-
-    #[test]
-    fn inline_streaming_uses_spinner_timer_without_repair_heartbeat() {
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Streaming);
-
-        assert!(needs_live_redraw(&state));
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
-        assert_eq!(
-            PendingRedraw {
-                animation: true,
-                ..PendingRedraw::default()
-            }
-            .budget(UiMode::InlineChat),
-            SPINNER_FRAME_BUDGET
-        );
-        assert_eq!(
-            PendingRedraw {
-                interactive: true,
-                animation: true,
-                ..PendingRedraw::default()
-            }
-            .budget(UiMode::InlineChat),
-            FRAME_BUDGET
-        );
-        assert_eq!(
-            SPINNER_FRAME_BUDGET,
-            Duration::from_millis(crate::spinner::SPINNER_REDRAW_INTERVAL_MS as u64)
-        );
     }
 
     #[test]
@@ -18638,31 +16242,6 @@ mod tests {
         );
     }
 
-    /// The reader takes the whole inline viewport like the other readers, so
-    /// it has to count as active for mouse capture and viewport geometry.
-    /// Otherwise the pane is sized full-height but never repositioned.
-    #[test]
-    fn open_terminals_viewer_counts_as_an_active_inline_reader() {
-        let mut state = AppState::new();
-        state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
-        assert!(!inline_reader_accepts_input(&state));
-        assert!(state.open_terminals_viewer());
-
-        assert!(inline_reader_is_open(&state));
-        assert!(
-            inline_reader_accepts_input(&state),
-            "the reader owns the viewport, so it must accept input"
-        );
-        let size = Size {
-            width: 80,
-            height: 40,
-        };
-        assert!(
-            desired_inline_height(&state, size) > INLINE_CHAT_HEIGHT,
-            "a full-height reader must grow the inline viewport"
-        );
-    }
-
     /// A wheel event while the reader is open must not reach the transcript
     /// hidden underneath it.
     #[test]
@@ -18703,12 +16282,7 @@ mod tests {
         state.apply_event(terminal_tool_call_event("call-1", "npm run dev", "term-1"));
         assert!(state.open_terminals_viewer());
 
-        let _ = handle_terminals_viewer_key(
-            &mut state,
-            KeyModifiers::empty(),
-            KeyCode::Esc,
-            UiMode::InlineChat,
-        );
+        let _ = handle_terminals_viewer_key(&mut state, KeyModifiers::empty(), KeyCode::Esc);
         assert!(!state.terminals_viewer);
     }
 
@@ -18794,36 +16368,26 @@ mod tests {
         for id in 1..=15 {
             start_subagent(&mut state, id, &format!("actor-{id}"), "work");
         }
-        let terminal_size = Size {
-            width: 100,
-            height: 40,
-        };
         assert!(state.open_nested_agent_viewer());
-        assert_eq!(
-            desired_inline_height(&state, terminal_size),
-            terminal_size.height - 1,
-            "the nested viewer needs enough height for every retained actor"
-        );
         assert_eq!(state.nested_agent_selected, Some(15));
         state.close_nested_agent_viewer();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        let ctrl_l = handle_inline_crossterm(
+        let ctrl_l = handle_crossterm(
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('l'), KeyModifiers::CONTROL),
         );
         assert!(!state.nested_agent_viewer, "Ctrl-L remains unclaimed");
         assert_eq!(ctrl_l, TerminalRequest::None);
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
         assert!(state.nested_agent_viewer);
-        assert_ne!(request, TerminalRequest::None);
         state.nested_agent_scroll_offset = 100;
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
         assert_eq!(
             state.nested_agent_scroll_offset,
             100 - TRANSCRIPT_SCROLL_PAGE_STEP
         );
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
         assert_eq!(state.nested_agent_scroll_offset, 100);
 
         let backend = TestBackend::new(24, 20);
@@ -18847,7 +16411,7 @@ mod tests {
         assert!(rendered.contains("nested agents — 10 ne"), "{rendered}");
         #[cfg(target_os = "macos")]
         assert!(rendered.contains("Fn+Up/Down"), "{rendered}");
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(11)));
         assert!(!state.nested_agent_viewer, "F11 closes the viewer");
 
         let mut pending =
@@ -18938,8 +16502,7 @@ mod tests {
         state.set_connection_state(ConnectionState::Ready);
         assert!(!should_show_spinner(&state));
         assert!(!needs_live_redraw(&state));
-        assert!(!timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(!timer_driven_live_redraw(UiMode::FullscreenTui, &state));
+        assert!(!needs_live_redraw(&state));
 
         let workflow_id = WorkflowId::delegation(1);
         start_workflow(
@@ -18952,8 +16515,7 @@ mod tests {
             needs_live_redraw(&state),
             "elapsed time must keep ticking with an idle primary"
         );
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
+        assert!(needs_live_redraw(&state));
 
         apply_workflow(
             &mut state,
@@ -18969,8 +16531,7 @@ mod tests {
             "the frozen terminal outcome remains visible"
         );
         assert!(!needs_live_redraw(&state));
-        assert!(!timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(!timer_driven_live_redraw(UiMode::FullscreenTui, &state));
+        assert!(!needs_live_redraw(&state));
     }
 
     #[test]
@@ -19006,85 +16567,21 @@ mod tests {
     }
 
     #[test]
-    fn permission_open_uses_hard_inline_repair() {
-        assert_eq!(InlineRepairMode::Hard, InlineRepairMode::Hard);
-    }
-
-    #[test]
-    fn permission_open_repairs_before_inline_flush() {
-        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
-
-        assert!(should_attempt_inline_repair_before_flush(
-            true,
-            UiMode::InlineChat,
-            &state,
-        ));
-        assert!(!should_attempt_inline_repair_before_flush(
-            false,
-            UiMode::InlineChat,
-            &state,
-        ));
-        assert!(!should_attempt_inline_repair_before_flush(
-            true,
-            UiMode::FullscreenTui,
-            &state,
-        ));
-
-        let mut ready = AppState::new();
-        ready.set_connection_state(ConnectionState::Ready);
-        assert!(!should_attempt_inline_repair_before_flush(
-            true,
-            UiMode::InlineChat,
-            &ready,
-        ));
-    }
-
-    #[test]
-    fn inline_streaming_keeps_timer_redraws_but_disables_repair_heartbeat() {
-        let mut state = AppState::new();
-
-        state.set_connection_state(ConnectionState::Launching);
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
-
-        state.set_connection_state(ConnectionState::Streaming);
-        assert!(needs_live_redraw(&state));
-        assert!(should_show_spinner(&state));
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
-
-        state.set_connection_state(ConnectionState::Cancelling);
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(timer_driven_live_redraw(UiMode::FullscreenTui, &state));
-    }
-
-    #[test]
     fn pending_redraw_budget_prioritizes_interactive_input_over_streaming_and_animation() {
         assert_eq!(
             PendingRedraw {
                 stream: true,
                 ..PendingRedraw::default()
             }
-            .budget(UiMode::FullscreenTui),
+            .budget(),
             STREAMING_FRAME_BUDGET
-        );
-        assert_eq!(
-            PendingRedraw {
-                stream: true,
-                ..PendingRedraw::default()
-            }
-            .budget(UiMode::InlineChat),
-            INLINE_STREAMING_FRAME_BUDGET
         );
         assert_eq!(
             PendingRedraw {
                 animation: true,
                 ..PendingRedraw::default()
             }
-            .budget(UiMode::InlineChat),
+            .budget(),
             SPINNER_FRAME_BUDGET
         );
         assert_eq!(
@@ -19093,7 +16590,7 @@ mod tests {
                 stream: true,
                 animation: true,
             }
-            .budget(UiMode::InlineChat),
+            .budget(),
             FRAME_BUDGET
         );
     }
@@ -19104,8 +16601,6 @@ mod tests {
         state.open_mjconfig_menu();
 
         assert!(state.mjconfig_menu.is_some());
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
-        assert!(!should_attempt_inline_repair(false, UiMode::InlineChat));
         assert_ne!(MJCONFIG_FRAME_BUDGET, FRAME_BUDGET);
         assert_eq!(MJCONFIG_FRAME_BUDGET, SPINNER_FRAME_BUDGET);
         assert_eq!(
@@ -19113,7 +16608,7 @@ mod tests {
                 animation: true,
                 ..PendingRedraw::default()
             }
-            .budget(UiMode::FullscreenTui),
+            .budget(),
             MJCONFIG_FRAME_BUDGET
         );
         assert_eq!(
@@ -19122,7 +16617,7 @@ mod tests {
                 animation: true,
                 ..PendingRedraw::default()
             }
-            .budget(UiMode::FullscreenTui),
+            .budget(),
             FRAME_BUDGET
         );
     }
@@ -19145,324 +16640,23 @@ mod tests {
                 stream: true,
                 ..PendingRedraw::default()
             }
-            .budget(UiMode::InlineChat),
-            INLINE_STREAMING_FRAME_BUDGET
+            .budget(),
+            STREAMING_FRAME_BUDGET
         );
         assert_eq!(
             PendingRedraw {
                 stream: true,
                 ..PendingRedraw::default()
             }
-            .budget(UiMode::FullscreenTui),
+            .budget(),
             STREAMING_FRAME_BUDGET
         );
         assert!(needs_live_redraw(&state));
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
 
         state.set_connection_state(ConnectionState::Cancelling);
         assert!(state.is_streaming());
         assert!(should_show_spinner(&state));
         assert!(needs_live_redraw(&state));
-        assert!(timer_driven_live_redraw(UiMode::InlineChat, &state));
-    }
-
-    #[test]
-    fn inline_focus_gain_forces_repair_even_without_live_redraw_state() {
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-
-        assert!(should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::FocusGained
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::FullscreenTui,
-            &state,
-            &CtEvent::FocusGained
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::FocusLost
-        ));
-    }
-
-    #[test]
-    fn inline_paste_forces_repair_when_input_is_focused() {
-        let state = AppState::new();
-
-        assert!(should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Paste("clipboard".to_string())
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::FullscreenTui,
-            &state,
-            &CtEvent::Paste("clipboard".to_string())
-        ));
-    }
-
-    #[test]
-    fn inline_paste_does_not_force_repair_when_modal_owns_input() {
-        let mut state = AppState::new();
-        state.help_overlay = true;
-
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Paste("clipboard".to_string())
-        ));
-    }
-
-    #[test]
-    fn permission_resize_forces_inline_repair() {
-        let pending =
-            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
-
-        assert!(should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Resize(120, 40)
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::FullscreenTui,
-            &state,
-            &CtEvent::Resize(120, 40)
-        ));
-    }
-
-    #[test]
-    fn permission_key_no_longer_forces_inline_repair() {
-        let pending =
-            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
-
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-        ));
-        assert!(should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Resize(120, 40)
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-        ));
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::FullscreenTui,
-            &state,
-            &CtEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-        ));
-    }
-
-    #[test]
-    fn inline_repairs_require_an_explicit_inline_request() {
-        assert!(should_attempt_inline_repair(true, UiMode::InlineChat));
-        assert!(!should_attempt_inline_repair(false, UiMode::InlineChat));
-        assert!(!should_attempt_inline_repair(true, UiMode::FullscreenTui));
-    }
-
-    #[test]
-    fn inline_permission_request_skips_terminal_notification() {
-        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
-        let state = AppState::new();
-
-        assert!(
-            notification_message_for_event(
-                UiMode::FullscreenTui,
-                &state,
-                &UiEvent::PermissionRequest(pending.prompt),
-            )
-            .is_some()
-        );
-
-        let other_pending =
-            permission_pending_with_options("run shell command", &["Allow once"], 0);
-        assert!(
-            notification_message_for_event(
-                UiMode::InlineChat,
-                &state,
-                &UiEvent::PermissionRequest(other_pending.prompt),
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn inline_permission_ui_event_forces_repair() {
-        let pending = permission_pending_with_options("run shell command", &["Allow once"], 0);
-
-        assert!(should_force_inline_repair_for_ui_event(
-            UiMode::InlineChat,
-            &UiEvent::PermissionRequest(pending.prompt)
-        ));
-        let other_pending =
-            permission_pending_with_options("run shell command", &["Allow once"], 0);
-        assert!(!should_force_inline_repair_for_ui_event(
-            UiMode::FullscreenTui,
-            &UiEvent::PermissionRequest(other_pending.prompt)
-        ));
-    }
-
-    #[test]
-    fn streaming_inline_help_overlay_renders_after_f10() {
-        let mut state = AppState::new();
-        state.record_user_prompt("hello".to_string());
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(10)));
-
-        assert!(state.is_streaming());
-        assert!(state.help_overlay);
-
-        let desired = desired_inline_height(
-            &state,
-            Size {
-                width: 100,
-                height: 40,
-            },
-        );
-        assert!(
-            desired > INLINE_CHAT_HEIGHT,
-            "help overlay must request enough inline rows to render while streaming"
-        );
-
-        let backend = TestBackend::new(100, desired);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Agent seats"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("automatic review"),
-            "rendered:\n{rendered}"
-        );
-    }
-
-    #[test]
-    fn streaming_inline_config_shortcut_does_not_disrupt_help_overlay() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.session_config_options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "model-1",
-                vec![
-                    SessionConfigSelectOption::new("model-1", "Model 1"),
-                    SessionConfigSelectOption::new("model-2", "Model 2"),
-                ],
-            ),
-            SessionConfigOption::select(
-                "mode",
-                "Mode",
-                "ask",
-                vec![
-                    SessionConfigSelectOption::new("ask", "Ask"),
-                    SessionConfigSelectOption::new("code", "Code"),
-                ],
-            ),
-        ];
-        state.record_user_prompt("hello".to_string());
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(10)));
-        let overlay_height = desired_inline_height(
-            &state,
-            Size {
-                width: 100,
-                height: 40,
-            },
-        );
-        assert!(overlay_height > INLINE_CHAT_HEIGHT);
-
-        handle_inline_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Char('1'), KeyModifiers::CONTROL),
-        );
-
-        assert!(state.is_streaming());
-        assert!(
-            state.help_overlay,
-            "help overlay should remain open while streaming"
-        );
-        assert!(
-            state.config_picker.is_none(),
-            "streaming must not open config picker"
-        );
-        assert!(
-            state.status_line.is_none(),
-            "help overlay should keep unrelated shortcuts from mutating status"
-        );
-        assert_eq!(
-            desired_inline_height(
-                &state,
-                Size {
-                    width: 100,
-                    height: 40,
-                },
-            ),
-            overlay_height,
-            "streaming config shortcut must not collapse the inline overlay"
-        );
-
-        let backend = TestBackend::new(100, overlay_height);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Agent seats"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("Model values"), "rendered:\n{rendered}");
-    }
-
-    #[test]
-    fn terminal_setup_features_keep_inline_out_of_alt_screen_and_mouse_capture() {
-        let inline = terminal_setup_features(UiMode::InlineChat);
-        assert!(inline.contains(&TerminalFeature::RawMode));
-        assert!(inline.contains(&TerminalFeature::BracketedPaste));
-        assert!(!inline.contains(&TerminalFeature::AlternateScreen));
-        assert!(!inline.contains(&TerminalFeature::MouseCapture));
-
-        let fullscreen = terminal_setup_features(UiMode::FullscreenTui);
-        assert!(fullscreen.contains(&TerminalFeature::AlternateScreen));
-        assert!(fullscreen.contains(&TerminalFeature::MouseCapture));
     }
 
     #[derive(Debug)]
@@ -19503,145 +16697,6 @@ mod tests {
 
         let other = std::io::Error::other("terminal unavailable");
         assert!(!is_cursor_position_timeout_io(&other));
-    }
-
-    #[test]
-    fn inline_reader_restore_replays_the_stable_transcript_tail() {
-        let mut state = AppState::new();
-        for id in 0..12 {
-            state.push_system_message(format!("stable transcript marker {id}"));
-        }
-        let mut backend = TestBackend::new(80, 24);
-        backend
-            .set_cursor_position(Position::new(0, 20))
-            .expect("cursor position");
-        let mut terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(4),
-            },
-        )
-        .expect("terminal");
-
-        assert!(
-            insert_stable_transcript_tail_before_inline_viewport(&mut terminal, &state, 80, 4,)
-                .expect("restore transcript tail")
-        );
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("stable transcript marker 11"),
-            "{rendered}"
-        );
-        assert!(
-            !rendered.contains("stable transcript marker 0"),
-            "restore must replay the tail rather than the oldest rows: {rendered}"
-        );
-    }
-
-    #[test]
-    fn inline_chat_draw_survives_nonzero_viewport_origin_after_insert_before() {
-        let mut backend = TestBackend::new(80, 24);
-        backend
-            .set_cursor_position(Position::new(0, 20))
-            .expect("cursor position");
-        let mut terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(INLINE_CHAT_HEIGHT),
-            },
-        )
-        .expect("terminal");
-        let mut state = AppState::new();
-        let mut transcript_scroll = TranscriptScrollState::default();
-
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut transcript_scroll,
-                    UiMode::InlineChat,
-                )
-            })
-            .expect("initial draw");
-        terminal
-            .insert_before(2, |buf| {
-                Paragraph::new(vec![Line::from("one"), Line::from("two")]).render(buf.area, buf);
-            })
-            .expect("insert before");
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut transcript_scroll,
-                    UiMode::InlineChat,
-                )
-            })
-            .expect("draw after insert");
-    }
-
-    #[test]
-    fn inline_exit_clears_viewport_and_resets_cursor_to_prompt_origin() {
-        let mut backend = TestBackend::new(60, 16);
-        backend
-            .set_cursor_position(Position::new(0, 12))
-            .expect("cursor position");
-        let mut terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(INLINE_CHAT_HEIGHT),
-            },
-        )
-        .expect("terminal");
-
-        terminal
-            .insert_before(2, |buf| {
-                Paragraph::new(vec![
-                    Line::from("transcript one"),
-                    Line::from("transcript two"),
-                ])
-                .render(buf.area, buf);
-            })
-            .expect("insert before");
-
-        let mut state = AppState::new();
-        state.input = "hello world".to_string();
-        state.input_cursor = state.input.chars().count();
-        let mut transcript_scroll = TranscriptScrollState::default();
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut transcript_scroll,
-                    UiMode::InlineChat,
-                )
-            })
-            .expect("draw");
-
-        let origin = terminal.get_frame().area().as_position();
-        clear_inline_viewport_for_exit(&mut terminal).expect("clear inline viewport");
-
-        terminal.backend_mut().assert_cursor_position(origin);
-
-        let rendered = buffer_lines(terminal.backend().buffer());
-        assert!(
-            rendered
-                .iter()
-                .take(origin.y as usize)
-                .any(|line| line.contains("transcript one")),
-            "transcript above inline viewport should remain visible:\n{}",
-            rendered.join("\n")
-        );
-        assert!(
-            rendered
-                .iter()
-                .skip(origin.y as usize)
-                .all(|line| line.trim().is_empty()),
-            "inline viewport should be blank after exit cleanup:\n{}",
-            rendered.join("\n")
-        );
     }
 
     #[test]
@@ -20773,13 +17828,7 @@ mod tests {
         let editor = &mut state.mjconfig_menu.as_mut().expect("menu").editor;
         editor.tab = crate::settings::SettingsTab::AcpServers;
         editor.selected = crate::settings::SERVER_ROW_OFFSET;
-        handle_mjconfig_menu_key(
-            &mut state,
-            &cmd_tx,
-            KeyModifiers::NONE,
-            KeyCode::Char(' '),
-            UiMode::FullscreenTui,
-        );
+        handle_mjconfig_menu_key(&mut state, &cmd_tx, KeyModifiers::NONE, KeyCode::Char(' '));
 
         // Appearance tab: preview theme, spinner, and thought output live.
         state.mjconfig_menu.as_mut().expect("menu").editor.tab =
@@ -20815,13 +17864,7 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
 
-        handle_mjconfig_menu_key(
-            &mut state,
-            &cmd_tx,
-            KeyModifiers::NONE,
-            KeyCode::Enter,
-            UiMode::FullscreenTui,
-        );
+        handle_mjconfig_menu_key(&mut state, &cmd_tx, KeyModifiers::NONE, KeyCode::Enter);
 
         assert!(state.mjconfig_menu.is_none(), "menu closes on accept");
         let saved = config::Config::load(&path).expect("load saved config");
@@ -21687,13 +18730,7 @@ mod tests {
         assert!(state.theme_kind != orig_theme || state.spinner_style != orig_spinner);
         assert_ne!(state.thought_output, orig_thought_output);
 
-        handle_mjconfig_menu_key(
-            &mut state,
-            &cmd_tx,
-            KeyModifiers::NONE,
-            KeyCode::Esc,
-            UiMode::FullscreenTui,
-        );
+        handle_mjconfig_menu_key(&mut state, &cmd_tx, KeyModifiers::NONE, KeyCode::Esc);
 
         assert!(state.mjconfig_menu.is_none(), "menu closes on cancel");
         assert_eq!(state.theme_kind, orig_theme, "theme reverted");
@@ -21746,14 +18783,7 @@ mod tests {
         let mut transcript_scroll = TranscriptScrollState::default();
 
         terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &mut state,
-                    &mut transcript_scroll,
-                    UiMode::FullscreenTui,
-                )
-            })
+            .draw(|frame| draw(frame, &mut state, &mut transcript_scroll))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -22151,33 +19181,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_transcript_never_announces_scrollback() {
-        let mut state = AppState::new();
-        let mut tracker = TranscriptScrollState::default();
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        // Establish the viewport, then receive a scroll event while there is
-        // still no rendered history to move through.
-        terminal
-            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
-            .expect("initial draw");
-        handle_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
-        assert_eq!(state.scroll_offset, TRANSCRIPT_SCROLL_WHEEL_STEP);
-
-        terminal
-            .draw(|frame| draw(frame, &mut state, &mut tracker, UiMode::FullscreenTui))
-            .expect("scroll draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert_eq!(state.scroll_offset, 0);
-        assert!(
-            !rendered.contains("[scrolled +"),
-            "empty transcript claimed a scrollback position:\n{rendered}"
-        );
-    }
-
-    #[test]
     fn transcript_scroll_preserves_position_when_new_rows_arrive() {
         let mut tracker = TranscriptScrollState::default();
         let mut offset = 0;
@@ -22250,932 +19253,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn transcript_sink_emits_each_stable_entry_once() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.push_system_message("first");
-        let first: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(first, vec!["first", ""]);
-
-        assert!(sink.pending_lines(&state, 80).is_empty());
-
-        state.push_system_message("second");
-        let second: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(second, vec!["second", ""]);
-    }
-
-    #[test]
-    fn transcript_sink_has_no_connection_announcement_to_finalize() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-        state.set_primary_acp_name("Claude Code");
-
-        state.announce_waiting_for_primary();
-        assert!(sink.pending_lines(&state, 80).is_empty());
-
-        state.apply_event(UiEvent::Connected {
-            agent_name: Some("claude-agent-acp".into()),
-            agent_version: Some("1.0".into()),
-            prompt_images_supported: false,
-            session_fork_supported: false,
-            session_load_supported: false,
-            side_session_supported: false,
-            side_session_unsupported_reason: None,
-            steering_supported: false,
-        });
-        assert!(sink.pending_lines(&state, 80).is_empty());
-        assert!(sink.pending_lines(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn transcript_sink_can_resync_after_resize_replay() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.push_system_message("first");
-        state.push_system_message("second");
-        sink.mark_emitted(stable_transcript_entry_count(&state));
-
-        assert!(sink.pending_lines(&state, 80).is_empty());
-
-        state.push_system_message("third");
-        let pending: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(pending, vec!["third", ""]);
-    }
-
-    #[test]
-    fn transcript_sink_separates_sequential_tool_calls_like_full_render() {
-        // Sequential tool calls each get their own trailing blank row, in the
-        // streaming scrollback and the full render alike, so calls never stack
-        // directly on top of each other.
-        fn push_completed_tool_call(state: &mut AppState, id: &str, title: &str) {
-            state.tool_calls.insert(
-                id.to_string(),
-                crate::app::ToolCallView {
-                    title: title.to_string(),
-                    kind: ToolKind::Execute,
-                    status: ToolCallStatus::Completed,
-                    body: Vec::new(),
-                },
-            );
-            state.transcript.push(Entry::ToolCall(id.to_string()));
-        }
-
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-        state.record_user_prompt("go".to_string()); // turn in flight (streaming)
-
-        let mut emitted: Vec<String> = Vec::new();
-
-        // First tool call completes while it is still the last entry: its
-        // content and trailing separator flush right away.
-        push_completed_tool_call(&mut state, "call-1", "first");
-        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
-        assert!(
-            emitted.iter().any(|l| l.contains("first")),
-            "tool output must flush promptly, not wait for the next entry: {emitted:?}"
-        );
-        assert_eq!(
-            emitted.last().map(String::as_str),
-            Some(""),
-            "the trailing separator flushes with the call: {emitted:?}"
-        );
-
-        push_completed_tool_call(&mut state, "call-2", "second");
-        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
-
-        state.set_connection_state(ConnectionState::Ready);
-        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
-
-        // The incremental scrollback must match a single full render.
-        let full: Vec<String> = render_transcript_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(
-            emitted, full,
-            "incremental flush diverged from full render: {emitted:?} vs {full:?}"
-        );
-
-        let first = emitted
-            .iter()
-            .position(|l| l.contains("first"))
-            .expect("first tool row");
-        let second = emitted
-            .iter()
-            .position(|l| l.contains("second"))
-            .expect("second tool row");
-        assert_eq!(
-            second,
-            first + 2,
-            "sequential tool calls must have a blank row between them: {emitted:?}"
-        );
-        assert_eq!(emitted[first + 1], "", "separator row must be blank");
-    }
-
-    #[test]
-    fn inline_resize_reflow_debounces_until_terminal_size_settles() {
-        let mut reflow = InlineResizeReflow::default();
-        let start = Instant::now();
-
-        reflow.note_resize(
-            Size {
-                width: 120,
-                height: 40,
-            },
-            start,
-        );
-        assert!(reflow.is_pending());
-        assert!(reflow.waiting(start + INLINE_RESIZE_REFLOW_DEBOUNCE / 2));
-
-        reflow.note_resize(
-            Size {
-                width: 100,
-                height: 40,
-            },
-            start + INLINE_RESIZE_REFLOW_DEBOUNCE / 2,
-        );
-        assert!(!reflow.is_due(start + INLINE_RESIZE_REFLOW_DEBOUNCE));
-        assert!(reflow.is_due(start + INLINE_RESIZE_REFLOW_DEBOUNCE * 2));
-
-        reflow.clear();
-        assert!(!reflow.is_pending());
-    }
-
-    /// #755 helpers: an inline terminal with committed scrollback blocks, the
-    /// same shape `flush_transcript_lines_to_scrollback` produces.
-    fn inline_test_terminal(width: u16, height: u16, viewport: u16) -> Terminal<TestBackend> {
-        let mut backend = TestBackend::new(width, height);
-        backend
-            .set_cursor_position(Position::new(0, height.saturating_sub(1)))
-            .expect("seed cursor");
-        let mut terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(viewport),
-            },
-        )
-        .expect("inline terminal");
-        terminal
-            .draw(|f| f.render_widget(Paragraph::new("~viewport"), f.area()))
-            .expect("initial draw");
-        terminal
-    }
-
-    fn insert_test_block(
-        terminal: &mut Terminal<TestBackend>,
-        lines: Vec<Line<'static>>,
-        width: u16,
-    ) {
-        let height = Paragraph::new(lines.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(width)
-            .min(u16::MAX as usize) as u16;
-        terminal
-            .insert_before(height, |buf| {
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .render(buf.area, buf);
-            })
-            .expect("insert block");
-    }
-
-    fn insert_committed_test_blocks(terminal: &mut Terminal<TestBackend>) {
-        for block in ["alpha", "beta"] {
-            let lines: Vec<Line<'static>> = (0..8)
-                .map(|i| Line::from(format!("committed {block} row {i}")))
-                .collect();
-            insert_test_block(terminal, lines, 60);
-            terminal
-                .draw(|f| f.render_widget(Paragraph::new("~viewport"), f.area()))
-                .expect("draw");
-        }
-    }
-
-    fn screen_and_scrollback_text(terminal: &Terminal<TestBackend>) -> String {
-        let backend = terminal.backend();
-        let mut rows = buffer_lines(backend.scrollback());
-        rows.extend(buffer_lines(backend.buffer()));
-        rows.join("\n")
-    }
-
-    /// Documents the #755 mechanism this workaround exists for: `insert_before`
-    /// with a stale cached area destroys committed rows. If ratatui ever
-    /// reconciles geometry itself, this starts failing and
-    /// `reconcile_inline_geometry_before_flush` can be removed.
-    #[test]
-    fn insert_before_with_stale_geometry_destroys_committed_rows() {
-        let mut terminal = inline_test_terminal(60, 30, 10);
-        insert_committed_test_blocks(&mut terminal);
-        // The terminal grew, but no crossterm Resize event was processed.
-        terminal.backend_mut().resize(60, 50);
-        let read_block: Vec<Line<'static>> = (0..9)
-            .map(|i| Line::from(format!("read block row {i}")))
-            .collect();
-        insert_test_block(&mut terminal, read_block, 60);
-
-        let text = screen_and_scrollback_text(&terminal);
-        let intact = (0..8).all(|i| {
-            text.contains(&format!("committed alpha row {i}"))
-                && text.contains(&format!("committed beta row {i}"))
-        });
-        assert!(
-            !intact,
-            "insert_before with stale geometry no longer corrupts committed rows; \
-             the reconcile workaround may be removable: {text}"
-        );
-    }
-
-    #[test]
-    fn reconcile_before_flush_preserves_committed_rows_across_unobserved_grow() {
-        let mut terminal = inline_test_terminal(60, 30, 10);
-        insert_committed_test_blocks(&mut terminal);
-        terminal.backend_mut().resize(60, 50);
-
-        // Exit-path flush: no reflow to defer to, proceed once reconciled.
-        let proceed = reconcile_inline_geometry_before_flush(
-            &mut terminal,
-            Size {
-                width: 60,
-                height: 50,
-            },
-            None,
-        )
-        .expect("reconcile");
-        assert!(proceed, "exit flush proceeds at the reconciled geometry");
-
-        let read_block: Vec<Line<'static>> = (0..9)
-            .map(|i| Line::from(format!("read block row {i}")))
-            .collect();
-        insert_test_block(&mut terminal, read_block, 60);
-
-        let text = screen_and_scrollback_text(&terminal);
-        for block in ["alpha", "beta"] {
-            for i in 0..8 {
-                assert!(
-                    text.contains(&format!("committed {block} row {i}")),
-                    "committed {block} row {i} destroyed by post-resize insert: {text}"
-                );
-            }
-        }
-        for i in 0..9 {
-            assert!(
-                text.contains(&format!("read block row {i}")),
-                "read block row {i} missing after post-resize insert: {text}"
-            );
-        }
-    }
-
-    #[test]
-    fn reconcile_before_flush_survives_unobserved_shrink() {
-        let mut terminal = inline_test_terminal(60, 30, 10);
-        insert_committed_test_blocks(&mut terminal);
-        // Without reconciliation this insert positions the cursor below the
-        // shrunken screen and panics in TestBackend (a real terminal smears).
-        terminal.backend_mut().resize(60, 20);
-        let proceed = reconcile_inline_geometry_before_flush(
-            &mut terminal,
-            Size {
-                width: 60,
-                height: 20,
-            },
-            None,
-        )
-        .expect("reconcile");
-        assert!(proceed);
-        let read_block: Vec<Line<'static>> = (0..9)
-            .map(|i| Line::from(format!("read block row {i}")))
-            .collect();
-        insert_test_block(&mut terminal, read_block, 60);
-    }
-
-    #[test]
-    fn reconcile_defers_flush_to_reflow_when_geometry_changed_unobserved() {
-        let mut terminal = inline_test_terminal(60, 30, 10);
-        terminal.backend_mut().resize(80, 30);
-        let mut reflow = InlineResizeReflow::default();
-        let proceed = reconcile_inline_geometry_before_flush(
-            &mut terminal,
-            Size {
-                width: 80,
-                height: 30,
-            },
-            Some(&mut reflow),
-        )
-        .expect("reconcile");
-        assert!(!proceed, "flush must defer to the resize reflow");
-        assert!(
-            reflow.is_pending(),
-            "unobserved resize must schedule the debounced reflow"
-        );
-    }
-
-    #[test]
-    fn reconcile_before_flush_is_a_noop_when_geometry_matches() {
-        let mut terminal = inline_test_terminal(60, 30, 10);
-        let mut reflow = InlineResizeReflow::default();
-        let proceed = reconcile_inline_geometry_before_flush(
-            &mut terminal,
-            Size {
-                width: 60,
-                height: 30,
-            },
-            Some(&mut reflow),
-        )
-        .expect("reconcile");
-        assert!(proceed);
-        assert!(!reflow.is_pending());
-    }
-
-    #[test]
-    fn inline_resize_reflow_records_clamped_inline_height() {
-        let size = Size {
-            width: 80,
-            height: 4,
-        };
-
-        assert_eq!(clamped_inline_height(INLINE_CHAT_HEIGHT, size), 4);
-        assert_eq!(clamped_inline_height(2, size), 2);
-        assert_eq!(clamped_inline_height(0, size), 1);
-    }
-
-    #[test]
-    fn transcript_reader_width_resize_clears_reserved_margin() {
-        let mut state = AppState::new();
-        state.open_transcript_viewer();
-
-        let plan = inline_viewport_resize_plan(
-            &state,
-            Rect::new(0, 1, 80, 22),
-            Size {
-                width: 60,
-                height: 23,
-            },
-            22,
-        )
-        .expect("reader width change needs a viewport repair");
-
-        assert_eq!(plan.height, 22);
-        assert_eq!(plan.origin, Position::new(0, 1));
-        assert!(plan.clear_visible_screen);
-    }
-
-    #[test]
-    fn compact_inline_height_change_keeps_clear_scoped_to_viewport() {
-        let mut state = AppState::new();
-        // Height arithmetic below is exact; keep the spinner tip row out.
-        state.feature_hints_enabled = false;
-        let plan = inline_viewport_resize_plan(
-            &state,
-            Rect::new(0, 17, 80, 7),
-            Size {
-                width: 80,
-                height: 24,
-            },
-            7,
-        )
-        .expect("height change needs a viewport repair");
-
-        assert_eq!(plan.height, INLINE_CHAT_HEIGHT);
-        assert_eq!(plan.origin, Position::new(0, 17));
-        assert!(!plan.clear_visible_screen);
-    }
-
-    #[test]
-    fn inline_resize_reflow_snapshot_replays_streamed_prefix_at_new_width() {
-        let mut state = AppState::new();
-        state.record_user_prompt("hello from the resize test".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("streaming is not stable yet"),
-        )));
-
-        let snapshot = inline_resize_reflow_snapshot(
-            &state,
-            Size {
-                width: 12,
-                height: 4,
-            },
-        )
-        .expect("snapshot");
-
-        assert_eq!(snapshot.actual_height, 4);
-        assert_eq!(snapshot.stable_entries, 1);
-        let replayed: Vec<String> = snapshot.lines.iter().map(line_text).collect();
-        assert!(replayed.join("\n").contains("hello from"));
-    }
-
-    #[test]
-    fn inline_resize_reflow_waits_while_transcript_viewer_is_open() {
-        let mut reflow = InlineResizeReflow::default();
-        let start = Instant::now();
-        reflow.note_resize(
-            Size {
-                width: 120,
-                height: 40,
-            },
-            start,
-        );
-        let due = start + INLINE_RESIZE_REFLOW_DEBOUNCE;
-        let mut state = AppState::new();
-
-        assert!(should_run_inline_resize_reflow(&reflow, &state, due));
-
-        state.open_transcript_viewer();
-        assert!(!should_run_inline_resize_reflow(&reflow, &state, due));
-
-        state.close_transcript_viewer();
-        assert!(should_run_inline_resize_reflow(&reflow, &state, due));
-    }
-
-    #[test]
-    fn transcript_sink_streams_stable_prefix_during_foreground_turn() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("hello".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("world"),
-        )));
-
-        let pending: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(pending, vec!["❯ hello", ""]);
-
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-        let rendered: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(rendered, vec!["● world", ""]);
-        assert!(sink.pending_lines(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn transcript_sink_flushes_visible_streaming_answer_on_exit() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("hello".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("visible final answer"),
-        )));
-
-        let before_exit: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(before_exit, vec!["❯ hello", ""]);
-
-        let on_exit: Vec<String> = sink
-            .pending_lines_for_exit(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(on_exit, vec!["● visible final answer", ""]);
-        assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn transcript_sink_exit_owes_nothing_after_trailing_tool_call() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("run it".to_string());
-        let mut emitted: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        state.tool_calls.insert(
-            "call-1".to_string(),
-            crate::app::ToolCallView {
-                title: "cargo test".to_string(),
-                kind: ToolKind::Execute,
-                status: ToolCallStatus::Completed,
-                body: Vec::new(),
-            },
-        );
-        state.transcript.push(Entry::ToolCall("call-1".to_string()));
-
-        emitted.extend(sink.pending_lines(&state, 80).iter().map(line_text));
-        assert_eq!(
-            emitted.last().map(String::as_str),
-            Some(""),
-            "the trailing separator flushes with the call: {emitted:?}"
-        );
-
-        assert!(sink.pending_lines_for_exit(&state, 80).is_empty());
-
-        let full: Vec<String> = render_transcript_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(emitted, full);
-    }
-
-    #[test]
-    fn transcript_sink_flushes_old_agent_message_while_later_one_streams() {
-        // Do not drain the first turn before beginning the second. The sink
-        // must still flush its completed agent result even though a later agent
-        // entry is the exact one currently receiving chunks.
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("first prompt".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("first result"),
-        )));
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-
-        state.record_user_prompt("second prompt".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("second result"),
-        )));
-
-        let flushed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            flushed,
-            vec![
-                "❯ first prompt",
-                "",
-                "● first result",
-                "",
-                "❯ second prompt",
-                "",
-            ]
-        );
-        assert!(sink.pending_lines(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn transcript_sink_holds_mutable_primary_thought_during_subagent_activity() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("delegate this".to_string());
-        let _ = sink.pending_lines(&state, 80);
-        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
-            subagent_id: 1,
-            resumed: false,
-            model: None,
-            agent: "codex-acp".to_string(),
-            objective: String::new(),
-            label: "subagent".to_string(),
-        }));
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk("I"),
-        )));
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk(" need"),
-        )));
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk(" to inspect this"),
-        )));
-
-        assert!(matches!(
-            state.transcript.as_slice(),
-            [Entry::UserPrompt(_), Entry::System(started), Entry::AgentThought(text)]
-                if started.contains("subagent #1") && text.text == "I need to inspect this"
-        ));
-        // The subagent's one permanent start record is immediately flushable;
-        // nothing else about the subagent ever rewrites the transcript.
-        assert_eq!(stable_transcript_entry_count(&state), 2);
-        let started_flush = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(started_flush.contains("subagent #1"), "{started_flush}");
-
-        let tail = inline_transcript_tail_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert_eq!(tail, vec!["○ thought", "  I need to inspect this", ""]);
-
-        state.apply_event(subagent_session_update(SessionUpdate::AgentThoughtChunk(
-            text_chunk("implementing"),
-        )));
-        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
-            text_chunk("done"),
-        )));
-        assert_eq!(stable_transcript_entry_count(&state), 2);
-
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk(" and report"),
-        )));
-        assert!(matches!(
-            &state.transcript[2],
-            Entry::AgentThought(thought)
-                if thought.text == "I need to inspect this and report" && !thought.completed
-        ));
-
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("Here is the result"),
-        )));
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-        let flushed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            flushed,
-            vec!["○ thought · 1 line", "", "● Here is the result", "",]
-        );
-        let nested =
-            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-        assert!(nested.contains("implementing"), "{nested}");
-        assert!(nested.contains("done"), "{nested}");
-    }
-
-    #[test]
-    fn replayed_and_local_turns_stream_in_order() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        // Session replay uses UserMessageChunk while idle, so it has no local
-        // PromptTurn metadata and must not become an inline flush barrier.
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::UserMessageChunk(
-            text_chunk("replayed prompt"),
-        )));
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("replayed answer"),
-        )));
-        // The replayed answer is still an open message until the load notice
-        // terminates the replay; it must not flush before then.
-        assert_eq!(
-            stable_transcript_entry_count(&state),
-            state.transcript.len() - 1
-        );
-        state.apply_event(UiEvent::Info(
-            crate::event::SESSION_LOADED_NOTICE.to_string(),
-        ));
-        assert_eq!(
-            stable_transcript_entry_count(&state),
-            state.transcript.len()
-        );
-        let replayed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            replayed,
-            vec![
-                "❯ replayed prompt",
-                "",
-                "● replayed answer",
-                "",
-                "session loaded",
-                ""
-            ]
-        );
-
-        state.record_user_prompt("local prompt".to_string());
-        state.tool_calls.insert(
-            "local-tool".to_string(),
-            crate::app::ToolCallView {
-                title: "write src/lib.rs".to_string(),
-                kind: ToolKind::Edit,
-                status: ToolCallStatus::Completed,
-                body: Vec::new(),
-            },
-        );
-        state
-            .transcript
-            .push(Entry::ToolCall("local-tool".to_string()));
-        assert_eq!(stable_transcript_entry_count(&state), 5);
-
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-        let streamed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        let streamed = streamed.join("\n");
-        assert!(streamed.contains("local prompt"), "{streamed}");
-        assert!(streamed.contains("write src/lib.rs"), "{streamed}");
-
-        let snapshot = inline_resize_reflow_snapshot(
-            &state,
-            Size {
-                width: 20,
-                height: 4,
-            },
-        )
-        .expect("snapshot");
-        assert_eq!(snapshot.stable_entries, state.transcript.len());
-        let reflowed = snapshot
-            .lines
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(reflowed.contains("replayed answer"), "{reflowed}");
-        assert!(reflowed.contains("write"), "{reflowed}");
-        assert!(reflowed.contains("src/lib.rs"), "{reflowed}");
-    }
-
-    /// Drive one UI event through the same order the inline main loop uses:
-    /// flush the reveal lanes, apply, re-observe, then commit whatever the
-    /// scrollback sink now considers stable.
-    fn drive_inline_event(
-        state: &mut AppState,
-        reveal: &mut StreamRevealController,
-        sink: &mut TranscriptSink,
-        scrollback: &mut Vec<String>,
-        event: UiEvent,
-    ) {
-        reveal.flush_for_event(state, &event);
-        state.apply_event(event);
-        let _ = reveal.observe(state);
-        scrollback.extend(sink.pending_lines(state, 100).iter().map(line_text));
-    }
-
-    #[test]
-    fn inline_scrollback_keeps_whole_answer_when_the_turn_is_not_marked_streaming() {
-        // Orchestration paths (delegation, review lanes) stream real answers
-        // while the connection stays Ready. The open message used to be
-        // declared stable the moment is_streaming() was false, so scrollback
-        // committed just the first chunk — "● All" — forever (#616).
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-        let mut reveal = StreamRevealController::default();
-        let mut sink = TranscriptSink::default();
-        let mut scrollback = Vec::new();
-
-        for chunk in ["All", " CI checks", " pass on", " the merge commit."] {
-            drive_inline_event(
-                &mut state,
-                &mut reveal,
-                &mut sink,
-                &mut scrollback,
-                UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(text_chunk(chunk))),
-            );
-        }
-        // Scrollback cannot retract: nothing of the still-growing answer may
-        // commit before the terminating event.
-        assert!(
-            scrollback.join("\n").trim().is_empty(),
-            "committed an answer that could still grow: {scrollback:?}"
-        );
-
-        drive_inline_event(
-            &mut state,
-            &mut reveal,
-            &mut sink,
-            &mut scrollback,
-            UiEvent::SessionUpdate(SessionUpdate::ToolCall(ToolCall::new(
-                "call-1",
-                "gh pr merge",
-            ))),
-        );
-
-        let committed = scrollback.join("\n");
-        assert!(
-            committed.contains("All CI checks pass on the merge commit."),
-            "scrollback lost the tail of the answer: {committed:?}"
-        );
-    }
-
-    #[test]
-    fn inline_scrollback_keeps_whole_answer_on_the_normal_streaming_path() {
-        // Guard the ordinary turn: streamed while Streaming, closed by
-        // PromptDone.
-        let mut state = AppState::new();
-        let mut reveal = StreamRevealController::default();
-        let mut sink = TranscriptSink::default();
-        let mut scrollback = Vec::new();
-
-        state.record_user_prompt("merge it".to_string());
-        scrollback.extend(sink.pending_lines(&state, 100).iter().map(line_text));
-
-        for chunk in ["Merged. P", "R #652 is on master."] {
-            drive_inline_event(
-                &mut state,
-                &mut reveal,
-                &mut sink,
-                &mut scrollback,
-                UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(text_chunk(chunk))),
-            );
-        }
-        drive_inline_event(
-            &mut state,
-            &mut reveal,
-            &mut sink,
-            &mut scrollback,
-            UiEvent::PromptDone {
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-            },
-        );
-
-        let committed = scrollback.join("\n");
-        assert!(
-            committed.contains("Merged. PR #652 is on master."),
-            "scrollback lost the tail of the answer: {committed:?}"
-        );
-    }
-
-    #[test]
-    fn inline_scrollback_keeps_whole_answer_for_every_internal_message_kind() {
-        use crate::event::{InternalMessage, InternalMessageKind};
-
-        // Only DiscreteReview re-enters Streaming; every other orchestration
-        // kind leaves the connection Ready while the answer streams. The
-        // whole answer must survive either way.
-        for kind in [
-            InternalMessageKind::Delegation,
-            InternalMessageKind::DiscreteReview,
-            InternalMessageKind::ReviewLane,
-            InternalMessageKind::ReviewProgress,
-            InternalMessageKind::ReviewSynthesis,
-        ] {
-            let mut state = AppState::new();
-            state.set_connection_state(ConnectionState::Ready);
-            let mut reveal = StreamRevealController::default();
-            let mut sink = TranscriptSink::default();
-            let mut scrollback = Vec::new();
-
-            drive_inline_event(
-                &mut state,
-                &mut reveal,
-                &mut sink,
-                &mut scrollback,
-                UiEvent::InternalMessage(InternalMessage {
-                    source: "orchestrator".to_string(),
-                    target: "primary".to_string(),
-                    kind,
-                    text: "orchestration packet".to_string(),
-                    owner_subagent_id: None,
-                }),
-            );
-            for chunk in ["The answer", " streamed in", " several chunks."] {
-                drive_inline_event(
-                    &mut state,
-                    &mut reveal,
-                    &mut sink,
-                    &mut scrollback,
-                    UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(text_chunk(chunk))),
-                );
-            }
-            drive_inline_event(
-                &mut state,
-                &mut reveal,
-                &mut sink,
-                &mut scrollback,
-                UiEvent::SessionUpdate(SessionUpdate::ToolCall(ToolCall::new("call-1", "tool"))),
-            );
-
-            let committed = scrollback.join("\n");
-            assert!(
-                committed.contains("The answer streamed in several chunks."),
-                "scrollback lost the answer tail for {kind:?}: {committed:?}"
-            );
-        }
-    }
-
     /// A running terminal registered against a tool-call entry: exactly the
     /// never-settling shape from #615 (dev server, or an exit status the UI
     /// never received).
@@ -23195,151 +19272,6 @@ mod tests {
             },
         );
         state.transcript.push(Entry::ToolCall(id.to_string()));
-    }
-
-    #[test]
-    fn overflow_valve_commits_pinned_running_terminal_and_frees_the_boundary() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("start the build".to_string());
-        insert_running_terminal_tool_call(&mut state, "stuck-build", "cargo build --watch");
-
-        // The conversation moves on while the terminal never reports an exit.
-        for turn in 0..4 {
-            state.record_user_prompt(format!("follow-up {turn}"));
-            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-                text_chunk(&format!("answer {turn}")),
-            )));
-            state.apply_event(UiEvent::PromptDone {
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-            });
-        }
-
-        // Without the valve the boundary pins at the running terminal.
-        assert_eq!(stable_transcript_entry_count(&state), 1);
-        let held = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!held.contains("answer 3"), "{held}");
-
-        assert!(force_commit_overflowing_tail(&mut state, 80));
-        assert_eq!(
-            stable_transcript_entry_count(&state),
-            state.transcript.len()
-        );
-
-        let flushed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        // The pinned entry commits as a stable reference to /terminals, not a
-        // frozen half-painted live window, and everything behind it flows.
-        assert!(flushed.contains("cargo build --watch"), "{flushed}");
-        assert!(
-            flushed.contains("running · /terminals to view"),
-            "{flushed}"
-        );
-        assert!(!flushed.contains("compiling..."), "{flushed}");
-        assert!(flushed.contains("answer 0"), "{flushed}");
-        assert!(flushed.contains("answer 3"), "{flushed}");
-    }
-
-    #[test]
-    fn overflow_valve_never_commits_the_trailing_entry_that_may_still_grow() {
-        let mut state = AppState::new();
-
-        state.record_user_prompt("think about it".to_string());
-        let long_thought = (0..20)
-            .map(|n| format!("thought line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk(&long_thought),
-        )));
-        assert!(matches!(
-            state.transcript.last(),
-            Some(Entry::AgentThought(thought)) if !thought.completed
-        ));
-
-        // An open thought is the trailing entry and may still grow;
-        // committing it now would truncate it in scrollback forever.
-        assert!(!force_commit_overflowing_tail(&mut state, 80));
-        assert_eq!(state.committed_transcript_entries(), 0);
-
-        // With a pinned terminal and finished turns stacked behind it, the
-        // valve advances past the terminal but still leaves the growing
-        // trailing thought alone.
-        let mut state = AppState::new();
-        state.record_user_prompt("start then think".to_string());
-        insert_running_terminal_tool_call(&mut state, "stuck-server", "npm run dev");
-        for turn in 0..4 {
-            state.record_user_prompt(format!("follow-up {turn}"));
-            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-                text_chunk(&format!("answer {turn}")),
-            )));
-            state.apply_event(UiEvent::PromptDone {
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-            });
-        }
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk(&long_thought),
-        )));
-
-        assert!(force_commit_overflowing_tail(&mut state, 80));
-        assert_eq!(state.committed_transcript_entries(), 2);
-        // Everything settled behind the valve is flushable; only the open
-        // trailing thought stays live.
-        assert_eq!(
-            stable_transcript_entry_count(&state),
-            state.transcript.len() - 1
-        );
-        assert!(matches!(
-            state.transcript.last(),
-            Some(Entry::AgentThought(thought)) if !thought.completed
-        ));
-    }
-
-    #[test]
-    fn tool_call_without_backing_view_does_not_pin_the_boundary() {
-        let mut state = AppState::new();
-        state.record_user_prompt("phantom tool".to_string());
-        state.transcript.push(Entry::ToolCall("ghost".to_string()));
-        state.record_user_prompt("next prompt".to_string());
-
-        // A record-less tool call renders nothing that could still change, so
-        // it must not hold everything after it out of scrollback.
-        assert_eq!(stable_transcript_entry_count(&state), 3);
-    }
-
-    #[test]
-    fn committed_entries_render_complete_text_not_their_pacing_prefix() {
-        let mut state = AppState::new();
-        state.record_user_prompt("stream".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("first line\nsecond line"),
-        )));
-        let entry_index = state.transcript.len() - 1;
-        state.set_stream_visible_bytes(entry_index, "first line\n".len());
-        assert_eq!(
-            state.stream_visible_text(entry_index, "first line\nsecond line"),
-            "first line\n"
-        );
-
-        assert!(state.force_commit_transcript_entries(entry_index + 1));
-        // Scrollback rows are final: a committed entry must flush whole, never
-        // frozen at whatever the reveal pacing happened to show.
-        assert_eq!(
-            state.stream_visible_text(entry_index, "first line\nsecond line"),
-            "first line\nsecond line"
-        );
     }
 
     #[test]
@@ -23447,625 +19379,6 @@ mod tests {
         assert!(markdown.contains("write src/main\\.rs"));
         assert!(markdown.contains("src/lib\\.rs"));
         assert!(markdown.contains("src/main\\.rs"));
-    }
-
-    #[test]
-    fn foreground_handoff_streams_completed_subagent_activity_to_scrollback() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("delegate this".to_string());
-        let initial: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(initial, vec!["❯ delegate this", ""]);
-
-        let bridge = ToolCall::new("bridge-call", "mcp.mj-subagents.create_subagent")
-            .status(ToolCallStatus::InProgress)
-            .raw_input(serde_json::json!({
-                "server": "mj-subagents",
-                "tool": "create_subagent",
-                "arguments": { "prompt": "forge the change" }
-            }));
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::ToolCall(bridge)));
-        state.apply_event(UiEvent::InternalMessage(InternalMessage {
-            source: "primary".to_string(),
-            target: "subagent".to_string(),
-            kind: crate::event::InternalMessageKind::Delegation,
-            text: "forge the change".to_string(),
-            owner_subagent_id: Some(1),
-        }));
-        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
-            subagent_id: 1,
-            resumed: false,
-            model: None,
-            agent: "codex-acp".to_string(),
-            objective: String::new(),
-            label: "subagent".to_string(),
-        }));
-        state.apply_event(subagent_session_update(SessionUpdate::ToolCall(
-            ToolCall::new("nested-call", "completed nested command")
-                .status(ToolCallStatus::Completed),
-        )));
-
-        assert_eq!(
-            state
-                .tool_calls
-                .get("bridge-call")
-                .expect("parent bridge")
-                .status,
-            ToolCallStatus::InProgress
-        );
-        assert_eq!(
-            stable_transcript_entry_count(&state),
-            state.transcript.len()
-        );
-
-        let streamed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(streamed.contains("subagent #1"), "{streamed}");
-        assert!(!streamed.contains("completed nested command"), "{streamed}");
-        assert!(!streamed.contains("mcp.mj-subagents"), "{streamed}");
-        let nested =
-            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-        assert!(nested.contains("delegation brief"), "{nested}");
-        assert!(nested.contains("forge the change"), "{nested}");
-        assert!(nested.contains("completed nested command"), "{nested}");
-        assert!(inline_transcript_tail_lines(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn foreground_delegation_has_a_distinct_handoff_and_live_subagent_activity() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("trace startup".to_string());
-        let _ = sink.pending_lines(&state, 80);
-        state.apply_event(UiEvent::InternalMessage(InternalMessage {
-            source: "primary".to_string(),
-            target: "subagent #1".to_string(),
-            kind: crate::event::InternalMessageKind::Delegation,
-            text: "trace startup".to_string(),
-            owner_subagent_id: Some(1),
-        }));
-        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
-            subagent_id: 1,
-            resumed: false,
-            model: None,
-            agent: "codex-acp".to_string(),
-            objective: String::new(),
-            label: "explorer".to_string(),
-        }));
-        state.apply_event(subagent_session_update(SessionUpdate::AgentThoughtChunk(
-            text_chunk("searching entry points"),
-        )));
-
-        let streamed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(streamed.contains("subagent #1"), "{streamed}");
-        let live = inline_transcript_tail_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!live.contains("searching entry points"), "{live}");
-        let nested =
-            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-        assert!(nested.contains("searching entry points"), "{nested}");
-        assert!(!transcript_export_markdown(&state).contains("delegation"));
-        assert!(
-            transcript_export_markdown_with_nested(&state, true)
-                .contains("primary → subagent #1 delegation")
-        );
-    }
-
-    #[test]
-    fn inline_chat_streams_primary_and_subagent_through_one_transcript_tail() {
-        let mut state = AppState::new();
-        // The buffer scan below counts exact rows; keep the spinner tip out.
-        state.feature_hints_enabled = false;
-        state.agent_label = "gpt-primary".to_string();
-        state.record_user_prompt("delegate this".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk("planning the handoff"),
-        )));
-        let primary_tail = inline_transcript_tail_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            primary_tail,
-            vec!["○ thought", "  planning the handoff", ""]
-        );
-
-        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
-            subagent_id: 1,
-            resumed: false,
-            model: None,
-            agent: "codex-acp".to_string(),
-            objective: String::new(),
-            label: "subagent · gpt-builder".to_string(),
-        }));
-        state.apply_event(subagent_session_update(SessionUpdate::AgentThoughtChunk(
-            text_chunk("working now"),
-        )));
-
-        let live = inline_transcript_tail_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            live,
-            vec![
-                "○ thought",
-                "  planning the handoff",
-                "",
-                "subagent #1 · subagent · gpt-builder · started",
-                ""
-            ]
-        );
-        assert_eq!(
-            desired_inline_height(
-                &state,
-                Size {
-                    width: 80,
-                    height: 40,
-                },
-            ),
-            INLINE_CHAT_HEIGHT,
-            "streamed transcript rows must not resize the inline viewport"
-        );
-
-        state.apply_event(subagent_finished(SubagentOutcome::Completed));
-        assert_eq!(
-            inline_transcript_tail_lines(&state, 80)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>(),
-            vec![
-                "○ thought",
-                "  planning the handoff",
-                "",
-                "subagent #1 · subagent · gpt-builder · started",
-                "",
-                "subagent #1 · subagent · gpt-builder · completed · 0s",
-                ""
-            ]
-        );
-        let nested =
-            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-        assert!(nested.contains("working now"), "{nested}");
-    }
-
-    #[test]
-    fn streamed_wrap_boundaries_keep_inline_geometry_and_input_height_stable() {
-        let mut state = AppState::new();
-        state.record_user_prompt("write a long answer".to_string());
-        let terminal_size = Size {
-            width: 40,
-            height: 30,
-        };
-        let baseline = desired_inline_height(&state, terminal_size);
-        let area = Rect::new(0, 0, terminal_size.width, baseline);
-        let baseline_tail_height = inline_transcript_tail_height(&state, area);
-        let baseline_input_area = inline_chat_layout(&state, area, 0)[7];
-        let mut terminal =
-            Terminal::new(TestBackend::new(terminal_size.width, baseline)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw empty tail");
-        let baseline_header_row = buffer_lines(terminal.backend().buffer())
-            .iter()
-            .position(|line| line.contains(&mjolnir_version_label()))
-            .expect("header row");
-
-        for chunk in [
-            "one two three four five six seven eight nine ten ",
-            "eleven twelve thirteen fourteen fifteen sixteen ",
-            "seventeen eighteen nineteen twenty twenty-one ",
-        ] {
-            state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-                text_chunk(chunk),
-            )));
-            assert_eq!(
-                desired_inline_height(&state, terminal_size),
-                baseline,
-                "crossing a streamed wrap boundary must not resize the viewport"
-            );
-            assert_eq!(
-                inline_transcript_tail_height(&state, area),
-                baseline_tail_height,
-                "streamed rows must not change the space reserved above the header"
-            );
-        }
-
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw streamed tail");
-        let streamed_header_row = buffer_lines(terminal.backend().buffer())
-            .iter()
-            .position(|line| line.contains(&mjolnir_version_label()))
-            .expect("header row");
-        assert_eq!(
-            streamed_header_row, baseline_header_row,
-            "streaming must not move the header inside the fixed viewport"
-        );
-        let streamed_input_area = inline_chat_layout(&state, area, 0)[7];
-        assert_eq!(
-            streamed_input_area, baseline_input_area,
-            "the input panel rendered by the inline layout must not move or resize"
-        );
-        assert_eq!(
-            streamed_input_area.height, MIN_INPUT_HEIGHT,
-            "the compact inline layout must retain the full input allocation"
-        );
-    }
-
-    #[test]
-    fn foreground_handoff_holds_active_subagent_result_and_reattaches_primary() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-        state.record_user_prompt("delegate this".to_string());
-        assert_eq!(
-            sink.pending_lines(&state, 80)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>(),
-            vec!["❯ delegate this", ""]
-        );
-
-        state.apply_event(UiEvent::InternalMessage(InternalMessage {
-            source: "primary".to_string(),
-            target: "subagent".to_string(),
-            kind: crate::event::InternalMessageKind::Delegation,
-            text: "forge it".to_string(),
-            owner_subagent_id: Some(1),
-        }));
-        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
-            subagent_id: 1,
-            resumed: false,
-            model: None,
-            agent: "codex-acp".to_string(),
-            objective: String::new(),
-            label: "subagent".to_string(),
-        }));
-        assert!(state.subagent_active);
-        let handoff = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(handoff.contains("subagent #1"), "{handoff}");
-
-        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
-            text_chunk("first subagent segment"),
-        )));
-        assert!(sink.pending_lines(&state, 80).is_empty());
-
-        let live = inline_transcript_tail_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!live.contains("first subagent segment"), "{live}");
-
-        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
-            text_chunk("subagent final"),
-        )));
-        assert!(sink.pending_lines(&state, 80).is_empty());
-        state.apply_event(subagent_finished(SubagentOutcome::Completed));
-        assert!(!state.subagent_active);
-        let subagent_final = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(subagent_final.contains("completed"), "{subagent_final}");
-        assert!(
-            !subagent_final.contains("subagent final"),
-            "{subagent_final}"
-        );
-        let nested =
-            render_nested_agent_lines(&state, state.nested_agent(1).expect("nested actor"), 80)
-                .iter()
-                .map(line_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-        assert!(nested.contains("first subagent segment"), "{nested}");
-        assert!(nested.contains("subagent final"), "{nested}");
-
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("primary resumed"),
-        )));
-        assert!(sink.pending_lines(&state, 80).is_empty());
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-        let primary_resumed = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            primary_resumed.contains("primary resumed"),
-            "{primary_resumed}"
-        );
-    }
-
-    #[test]
-    fn transcript_sink_keeps_alternating_primary_activity_out_of_subagent_result_fragments() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-        let first = "SUB-FIRST ".repeat(30);
-        let second = "SUB-SECOND ".repeat(30);
-        let full_result = format!("{first}{second}");
-
-        state.record_user_prompt("forge this".to_string());
-        let _ = sink.pending_lines(&state, 20);
-        state.apply_event(UiEvent::Subagent(SubagentEvent::Started {
-            subagent_id: 1,
-            resumed: false,
-            model: None,
-            agent: "codex-acp".to_string(),
-            objective: String::new(),
-            label: "subagent".to_string(),
-        }));
-        // The start record is immutable and flushes at once; everything the
-        // subagent streams afterwards stays held.
-        let started = sink
-            .pending_lines(&state, 20)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(started.contains("subagent #1"), "{started}");
-        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
-            text_chunk(&first),
-        )));
-        assert!(sink.pending_lines(&state, 20).is_empty());
-
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk("waiting for the subagent's first result"),
-        )));
-        assert!(sink.pending_lines(&state, 20).is_empty());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentThoughtChunk(
-            text_chunk("; coordinating the next step"),
-        )));
-        assert!(sink.pending_lines(&state, 20).is_empty());
-
-        state.apply_event(subagent_session_update(SessionUpdate::AgentMessageChunk(
-            text_chunk(&second),
-        )));
-        assert!(sink.pending_lines(&state, 20).is_empty());
-        assert!(matches!(
-            state.transcript.as_slice(),
-            [Entry::UserPrompt(_), Entry::System(_), Entry::AgentThought(thought)]
-                if thought.text
-                        == "waiting for the subagent's first result; coordinating the next step"
-                    && !thought.completed
-        ));
-        assert!(matches!(
-            state
-                .nested_agent(1)
-                .expect("nested actor")
-                .transcript
-                .as_slice(),
-            [Entry::SubagentMessage(result)] if result == &full_result
-        ));
-
-        state.apply_event(subagent_finished(SubagentOutcome::Completed));
-        let subagent = sink
-            .pending_lines(&state, 20)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!subagent.contains("SUB-FIRST"), "{subagent}");
-        assert!(!subagent.contains("SUB-SECOND"), "{subagent}");
-        assert!(!subagent.contains("waiting for the subagent"), "{subagent}");
-
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("primary completed coordination."),
-        )));
-        let primary_thought = sink
-            .pending_lines(&state, 20)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            primary_thought.contains("thought · 1 line"),
-            "{primary_thought}"
-        );
-        assert!(!primary_thought.contains("SUB-FIRST"), "{primary_thought}");
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-        let primary = sink
-            .pending_lines(&state, 20)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(primary.contains("primary completed"), "{primary}");
-        assert!(primary.contains("coordination."), "{primary}");
-        assert!(!primary.contains("SUB-FIRST"), "{primary}");
-        assert!(!primary.contains("SUB-SECOND"), "{primary}");
-    }
-
-    #[test]
-    fn transcript_sink_emits_completed_tool_call_during_streaming_turn() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("run tests".to_string());
-        state.tool_calls.insert(
-            "call-1".to_string(),
-            crate::app::ToolCallView {
-                title: "cargo test".to_string(),
-                kind: ToolKind::Execute,
-                status: ToolCallStatus::InProgress,
-                body: vec![ToolCallOutput::Text("running".to_string())],
-            },
-        );
-        state.transcript.push(Entry::ToolCall("call-1".to_string()));
-
-        let prompt: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(prompt, vec!["❯ run tests", ""]);
-        assert!(sink.pending_lines(&state, 80).is_empty());
-
-        let view = state.tool_calls.get_mut("call-1").expect("tool call");
-        view.status = ToolCallStatus::Completed;
-        view.body = vec![ToolCallOutput::Text("ok".to_string())];
-
-        // The tool content flushes immediately (streaming promptness),
-        // trailing separator included.
-        let rendered: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(rendered, vec!["│ tool exec cargo test", "│   ok", ""]);
-        assert!(sink.pending_lines(&state, 80).is_empty());
-
-        // Nothing further is owed once the turn ends.
-        state.set_connection_state(ConnectionState::Ready);
-        assert!(sink.pending_lines(&state, 80).is_empty());
-    }
-
-    #[test]
-    fn transcript_sink_waits_for_completed_terminal_exit_snapshot() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("run tests".to_string());
-        state.tool_calls.insert(
-            "call-1".to_string(),
-            crate::app::ToolCallView {
-                title: "cargo test".to_string(),
-                kind: ToolKind::Execute,
-                status: ToolCallStatus::Completed,
-                body: vec![ToolCallOutput::Terminal {
-                    terminal_id: "term-1".to_string(),
-                    output: String::new(),
-                    truncated: false,
-                    exit_status: None,
-                }],
-            },
-        );
-        state.transcript.push(Entry::ToolCall("call-1".to_string()));
-
-        let prompt: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(prompt, vec!["❯ run tests", ""]);
-        assert!(
-            sink.pending_lines(&state, 80).is_empty(),
-            "completed terminal tool call must not flush before terminal exit status arrives"
-        );
-
-        state.apply_event(UiEvent::TerminalOutput(TerminalOutputSnapshot {
-            terminal_id: "term-1".to_string(),
-            output: "ok\n".to_string(),
-            truncated: false,
-            exit_status: Some(TerminalExitStatus::new().exit_code(0)),
-        }));
-
-        // Content flushes on the exit snapshot, trailing separator included.
-        let rendered: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(
-            rendered,
-            vec!["│ tool exec cargo test · exit 0", "│   ok", ""]
-        );
-    }
-
-    #[test]
-    fn transcript_sink_does_not_block_after_cancelled_tool_call() {
-        let mut state = AppState::new();
-        let mut sink = TranscriptSink::default();
-
-        state.record_user_prompt("run tests".to_string());
-        state.tool_calls.insert(
-            "call-1".to_string(),
-            crate::app::ToolCallView {
-                title: "cargo test".to_string(),
-                kind: ToolKind::Execute,
-                status: ToolCallStatus::InProgress,
-                body: vec![ToolCallOutput::Text("running".to_string())],
-            },
-        );
-        state.transcript.push(Entry::ToolCall("call-1".to_string()));
-
-        let first_prompt: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(first_prompt, vec!["❯ run tests", ""]);
-
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::Cancelled,
-            usage: None,
-        });
-        let cancelled_tool: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        let cancelled_tool = cancelled_tool.join("\n");
-        assert!(cancelled_tool.contains("tool"), "{cancelled_tool}");
-        assert!(cancelled_tool.contains("[failed]"), "{cancelled_tool}");
-        assert!(cancelled_tool.contains("cargo test"), "{cancelled_tool}");
-        assert!(cancelled_tool.contains("running"), "{cancelled_tool}");
-
-        state.record_user_prompt("next prompt".to_string());
-        let next_prompt: Vec<String> = sink
-            .pending_lines(&state, 80)
-            .iter()
-            .map(line_text)
-            .collect();
-        assert_eq!(next_prompt, vec!["❯ next prompt", ""]);
     }
 
     #[test]
@@ -24334,7 +19647,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
         assert_eq!(state.transcript_panel_area, Some((0, 0, 40, 10)));
 
@@ -24363,49 +19676,6 @@ mod tests {
         assert_eq!(request, TerminalRequest::ToggleTextSelectionMode);
     }
 
-    #[test]
-    fn inline_mode_ignores_mouse_wheel_and_f12_selection_toggle() {
-        let mut state = AppState::new();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        super::handle_crossterm(
-            &mut state,
-            &cmd_tx,
-            mouse(MouseEventKind::ScrollUp),
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.scroll_offset, 0);
-
-        let request =
-            super::handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(12)), UiMode::InlineChat);
-        assert_eq!(request, TerminalRequest::None);
-        assert!(!state.text_selection_mode);
-    }
-
-    #[test]
-    fn inline_mode_does_not_scroll_transcript_with_keyboard_shortcuts() {
-        let mut state = AppState::new();
-        state.runtime_closed = true;
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        super::handle_crossterm(
-            &mut state,
-            &cmd_tx,
-            key(KeyCode::PageUp),
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.scroll_offset, 0);
-
-        state.runtime_closed = false;
-        super::handle_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Up, KeyModifiers::CONTROL),
-            UiMode::InlineChat,
-        );
-        assert_eq!(state.scroll_offset, 0);
-    }
-
     fn workspace_head_diff_event(
         diffs: Vec<crate::event::WorkspaceDiff>,
         total_files: usize,
@@ -24431,7 +19701,6 @@ mod tests {
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('g'), KeyModifiers::CONTROL),
-            UiMode::InlineChat,
         );
         assert!(state.workspace_diff_viewer);
         assert!(state.workspace_diff_loading);
@@ -24441,12 +19710,7 @@ mod tests {
         ));
 
         // A refresh is already in flight; pressing r must not stack another.
-        super::handle_crossterm(
-            &mut state,
-            &cmd_tx,
-            key(KeyCode::Char('r')),
-            UiMode::InlineChat,
-        );
+        super::handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('r')));
         assert!(
             cmd_rx.try_recv().is_err(),
             "a second read while one is in flight is not requested"
@@ -24458,12 +19722,7 @@ mod tests {
         )));
         assert!(!state.workspace_diff_loading);
 
-        super::handle_crossterm(
-            &mut state,
-            &cmd_tx,
-            key(KeyCode::Char('r')),
-            UiMode::InlineChat,
-        );
+        super::handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('r')));
         assert!(state.workspace_diff_loading);
         assert!(matches!(
             cmd_rx.try_recv(),
@@ -24474,7 +19733,6 @@ mod tests {
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('g'), KeyModifiers::CONTROL),
-            UiMode::InlineChat,
         );
         assert!(!state.workspace_diff_viewer);
         assert!(
@@ -24612,73 +19870,6 @@ mod tests {
             state.exit_reason.is_none(),
             "Esc closes the reader before runtime-close quit handling"
         );
-    }
-
-    #[test]
-    fn inline_workspace_diff_viewer_handles_keys_and_ignores_mouse() {
-        let mut state = AppState::new();
-        state.workspace_head_diff = Some(workspace_head_diff_event(
-            vec![
-                crate::event::WorkspaceDiff {
-                    path: "one.rs".into(),
-                    old_text: Some("one\n".into()),
-                    new_text: "ONE\n".into(),
-                },
-                crate::event::WorkspaceDiff {
-                    path: "two.rs".into(),
-                    old_text: Some("two\n".into()),
-                    new_text: "TWO\n".into(),
-                },
-            ],
-            2,
-        ));
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        handle_inline_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Char('g'), KeyModifiers::CONTROL),
-        );
-        assert!(state.workspace_diff_viewer);
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::PageUp));
-        assert_eq!(
-            state.workspace_diff_scroll_offset, 0,
-            "page up clamps at top"
-        );
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
-        assert_eq!(
-            state.workspace_diff_scroll_offset,
-            TRANSCRIPT_SCROLL_PAGE_STEP
-        );
-        handle_inline_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollDown));
-        assert_eq!(
-            state.workspace_diff_scroll_offset,
-            TRANSCRIPT_SCROLL_PAGE_STEP
-        );
-        assert_eq!(
-            state.scroll_offset, 0,
-            "diff mouse input must not mutate transcript state"
-        );
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('n')));
-        assert_eq!(state.workspace_diff_selected_file, 1);
-        assert_eq!(state.workspace_diff_scroll_offset, 0);
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('x')));
-        assert!(state.input.is_empty());
-        assert!(!should_force_inline_repair_for_event(
-            UiMode::InlineChat,
-            &state,
-            &CtEvent::Paste("hidden prompt text".to_string())
-        ));
-        handle_inline_crossterm(
-            &mut state,
-            &cmd_tx,
-            CtEvent::Paste("hidden prompt text".to_string()),
-        );
-        assert!(
-            state.input.is_empty(),
-            "paste must not leak into the prompt"
-        );
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
-        assert!(!state.workspace_diff_viewer);
     }
 
     #[test]
@@ -24851,102 +20042,19 @@ mod tests {
     }
 
     #[test]
-    fn workspace_diff_viewer_uses_full_inline_height_and_fullscreen_transcript_pane() {
+    fn workflow_progress_area_is_reserved_below_the_header() {
         let mut state = AppState::new();
-        state.workspace_head_diff = Some(workspace_head_diff_event(
-            vec![crate::event::WorkspaceDiff {
-                path: "pane.rs".into(),
-                old_text: None,
-                new_text: "pane content\n".into(),
-            }],
-            1,
-        ));
-        state.open_workspace_diff_viewer();
-        // The pull these tests skip has already landed; assert the settled view.
-        state.workspace_diff_loading = false;
-        assert_eq!(
-            desired_inline_height(
-                &state,
-                Size {
-                    width: 100,
-                    height: 40
-                }
-            ),
-            39
-        );
-        let mut inline = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
-        inline
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("inline draw");
-        assert!(
-            buffer_lines(inline.backend().buffer())
-                .join("\n")
-                .contains("pane content")
-        );
-
-        let mut fullscreen = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
-        let mut scroll = TranscriptScrollState::default();
-        fullscreen
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
-            .expect("fullscreen draw");
-        let rendered = buffer_lines(fullscreen.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("pane content") && rendered.contains("Ctrl-G/Esc close"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("mj") || rendered.contains("You"),
-            "fullscreen retains its non-transcript chrome: {rendered}"
-        );
-    }
-
-    #[test]
-    fn both_ui_modes_reserve_the_same_workflow_progress_area_below_the_header() {
-        let mut state = AppState::new();
-        let baseline = desired_inline_height(
-            &state,
-            Size {
-                width: 100,
-                height: 40,
-            },
-        );
         start_workflow(
             &mut state,
             WorkflowId::delegation(3),
             WorkflowKind::Delegation,
             WorkflowPhase::Delegating,
         );
-        assert_eq!(
-            desired_inline_height(
-                &state,
-                Size {
-                    width: 100,
-                    height: 40
-                }
-            ),
-            baseline + 1,
-            "the inline viewport grows by exactly one workflow row"
-        );
-
-        let mut inline = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
-        inline
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("inline draw");
-        assert!(
-            buffer_lines(inline.backend().buffer())
-                .join("\n")
-                .contains("Subagents"),
-            "inline mode must render workflow progress"
-        );
 
         let mut fullscreen = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         let mut scroll = TranscriptScrollState::default();
         fullscreen
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("fullscreen draw");
         let rendered = buffer_lines(fullscreen.backend().buffer());
         let row = rendered
@@ -25145,69 +20253,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_ctrl_t_opens_transcript_reader_instead_of_toggling() {
-        let mut state = AppState::new();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_inline_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
-        );
-
-        assert!(state.transcript_viewer, "inline Ctrl-T opens the reader");
-        assert!(
-            !state.expand_transcript_details,
-            "inline Ctrl-T must not flip the collapse setting"
-        );
-        assert!(state.input.is_empty(), "'t' must not leak into the prompt");
-
-        // While open, Ctrl-T closes the reader again.
-        handle_inline_crossterm(
-            &mut state,
-            &cmd_tx,
-            key_with_modifiers(KeyCode::Char('t'), KeyModifiers::CONTROL),
-        );
-        assert!(!state.transcript_viewer);
-        assert_eq!(state.scroll_offset, 0);
-    }
-
-    #[test]
-    fn transcript_reader_scrolls_with_arrows_and_closes_on_esc() {
-        let mut state = AppState::new();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        state.open_transcript_viewer();
-        assert_eq!(
-            state.scroll_offset,
-            usize::MAX,
-            "reader opens at the bottom"
-        );
-
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Home));
-        assert_eq!(state.scroll_offset, 0);
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
-        assert_eq!(state.scroll_offset, 1);
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::PageDown));
-        assert_eq!(state.scroll_offset, 1 + TRANSCRIPT_SCROLL_PAGE_STEP);
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Up));
-        assert_eq!(state.scroll_offset, TRANSCRIPT_SCROLL_PAGE_STEP);
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::End));
-        assert_eq!(state.scroll_offset, usize::MAX);
-        // Typing while the reader owns the keyboard must not edit the prompt.
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('a')));
-        assert!(state.input.is_empty());
-
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
-        assert!(!state.transcript_viewer);
-        assert_eq!(state.scroll_offset, 0);
-        assert!(
-            terminal_request_forces_inline_repair(&request),
-            "closing the reader must repair the shrunken inline viewport"
-        );
-    }
-
-    #[test]
     fn fullscreen_transcript_search_edits_and_cycles_logical_entry_matches() {
         let mut state = AppState::new();
         state
@@ -25252,33 +20297,6 @@ mod tests {
         assert_eq!(state.transcript_search.as_ref().unwrap().selected, 0);
         handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
         assert!(state.transcript_search.is_none());
-    }
-
-    #[test]
-    fn inline_reader_slash_search_clears_before_reader_closes() {
-        let mut state = AppState::new();
-        state
-            .transcript
-            .push(Entry::AgentMessage("find this answer".to_string()));
-        state.open_transcript_viewer();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char('/')));
-        assert!(state.transcript_search.as_ref().unwrap().editing);
-        for ch in "answer".chars() {
-            handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Char(ch)));
-        }
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
-        assert!(state.transcript_viewer);
-        assert_eq!(transcript_search_matches(&state), vec![0]);
-
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
-        assert!(state.transcript_viewer, "first Esc clears search only");
-        assert!(state.transcript_search.is_none());
-
-        let request = handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Esc));
-        assert!(!state.transcript_viewer);
-        assert!(terminal_request_forces_inline_repair(&request));
     }
 
     #[test]
@@ -25404,50 +20422,6 @@ mod tests {
                 "windowed render differs from the full render at row {top}"
             );
         }
-    }
-
-    #[test]
-    fn transcript_viewer_reuses_its_render_until_the_revision_changes() {
-        let mut state = long_transcript_state();
-        state.transcript_viewer = true;
-        let mut scroll = TranscriptScrollState::default();
-        let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
-        let draw_once = |terminal: &mut Terminal<TestBackend>,
-                         state: &mut AppState,
-                         scroll: &mut TranscriptScrollState| {
-            terminal
-                .draw(|frame| draw(frame, state, scroll, UiMode::InlineChat))
-                .expect("draw");
-            buffer_lines(terminal.backend().buffer()).join("\n")
-        };
-
-        let first = draw_once(&mut terminal, &mut state, &mut scroll);
-        let cached_rows = scroll
-            .viewer_cache
-            .as_ref()
-            .expect("viewer must populate a cache")
-            .line_count;
-
-        // Mutating the transcript without bumping the revision must not be
-        // picked up: that proves the second frame reused the cached render
-        // instead of rebuilding it.
-        state
-            .transcript
-            .push(Entry::AgentMessage("uncached addition".to_string()));
-        assert_eq!(draw_once(&mut terminal, &mut state, &mut scroll), first);
-        assert_eq!(
-            scroll.viewer_cache.as_ref().expect("cache").line_count,
-            cached_rows,
-            "an unchanged revision must not rebuild the cached render"
-        );
-
-        // A real mutation bumps the revision and invalidates the cache.
-        state.record_status_message(StatusKind::Info, "invalidating entry");
-        draw_once(&mut terminal, &mut state, &mut scroll);
-        assert!(
-            scroll.viewer_cache.as_ref().expect("cache").line_count > cached_rows,
-            "a revision bump must rebuild the cached render"
-        );
     }
 
     /// Turns completed through the real prompt lifecycle, so every entry is
@@ -25726,7 +20700,7 @@ mod tests {
         let mut scroll = TranscriptScrollState::default();
         let mut terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
         assert!(
             scroll.prefix.as_ref().is_some_and(|p| p.entries > 0),
@@ -25740,20 +20714,20 @@ mod tests {
             text_chunk("streamed body of the active turn"),
         )));
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
         state.apply_event(UiEvent::PromptDone {
             stop_reason: StopReason::EndTurn,
             usage: None,
         });
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
 
         let mut fresh_scroll = TranscriptScrollState::default();
         let mut fresh_terminal = Terminal::new(TestBackend::new(60, 16)).expect("terminal");
         fresh_terminal
-            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll))
             .expect("draw");
         assert_eq!(
             buffer_lines(terminal.backend().buffer()),
@@ -25785,7 +20759,7 @@ mod tests {
         let mut scroll = TranscriptScrollState::default();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
         state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
             text_chunk("switching to v2"),
@@ -25795,46 +20769,19 @@ mod tests {
             usage: None,
         });
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
 
         let mut fresh_scroll = TranscriptScrollState::default();
         let mut fresh_terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         fresh_terminal
-            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut fresh_scroll))
             .expect("draw");
         assert_eq!(
             buffer_lines(terminal.backend().buffer()),
             buffer_lines(fresh_terminal.backend().buffer()),
             "the completed turn must re-render compacted, not stay frozen in its streaming form"
         );
-    }
-
-    #[test]
-    fn settled_boundary_ignores_force_committed_running_tools() {
-        let mut state = settled_turns_state(1);
-        insert_running_terminal_tool_call(&mut state, "stuck-build", "cargo build --watch");
-        let tool_index = state.transcript.len() - 1;
-        state.record_user_prompt("carry on".to_string());
-        state.apply_event(UiEvent::SessionUpdate(SessionUpdate::AgentMessageChunk(
-            text_chunk("done"),
-        )));
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-
-        // The inline overflow valve committed the running tool to scrollback:
-        // stable by fiat, but its render still resolves once the terminal
-        // exits, so the settled prefix must not freeze it.
-        assert!(state.force_commit_transcript_entries(tool_index + 1));
-        assert!(transcript_entry_is_stable(
-            &state,
-            tool_index,
-            &state.transcript[tool_index]
-        ));
-        let turns = transcript_turns(&state);
-        assert_eq!(settled_entry_boundary_from(&state, &turns, 0), tool_index);
     }
 
     #[test]
@@ -25940,7 +20887,7 @@ mod tests {
         let mut scroll = TranscriptScrollState::default();
 
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
 
         assert!(
@@ -26012,93 +20959,6 @@ mod tests {
         );
 
         assert_eq!(state.transcript_search.as_ref().unwrap().query, "");
-    }
-
-    #[test]
-    fn transcript_reader_scrolls_with_mouse_wheel() {
-        let mut state = AppState::new();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        state.open_transcript_viewer();
-        state.scroll_offset = 10;
-
-        handle_inline_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
-        assert_eq!(state.scroll_offset, 10 - TRANSCRIPT_SCROLL_WHEEL_STEP);
-
-        handle_inline_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollDown));
-        assert_eq!(state.scroll_offset, 10);
-    }
-
-    #[test]
-    fn transcript_reader_mouse_wheel_pauses_for_permission_modal() {
-        let mut state = AppState::new();
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        state.open_transcript_viewer();
-        state.scroll_offset = 10;
-        let pending = permission_pending_with_options("run command", &["allow"], 0);
-        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
-
-        handle_inline_crossterm(&mut state, &cmd_tx, mouse(MouseEventKind::ScrollUp));
-
-        assert_eq!(state.scroll_offset, 10);
-    }
-
-    #[test]
-    fn transcript_reader_renders_collapsed_tool_output_in_full() {
-        let mut state = AppState::new();
-        let long = (1..=20)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.tool_calls.insert(
-            "call-1".to_string(),
-            crate::app::ToolCallView {
-                title: "log".to_string(),
-                kind: ToolKind::Execute,
-                status: ToolCallStatus::Completed,
-                body: vec![ToolCallOutput::Text(long)],
-            },
-        );
-        state.transcript.push(Entry::ToolCall("call-1".to_string()));
-        // The session is still in collapsed mode...
-        assert!(!state.expand_transcript_details);
-        state.open_transcript_viewer();
-
-        let backend = TestBackend::new(100, 40);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        // ...yet the reader shows every line, with no truncation hint.
-        assert!(rendered.contains("line 1"), "rendered:\n{rendered}");
-        assert!(rendered.contains("line 20"), "rendered:\n{rendered}");
-        assert!(
-            !rendered.contains("lines hidden"),
-            "reader must not collapse output, rendered:\n{rendered}"
-        );
-        assert!(rendered.contains("transcript"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Esc"), "rendered:\n{rendered}");
-    }
-
-    #[test]
-    fn transcript_reader_requests_full_inline_height() {
-        let mut state = AppState::new();
-        state.open_transcript_viewer();
-
-        let desired = desired_inline_height(
-            &state,
-            Size {
-                width: 100,
-                height: 40,
-            },
-        );
-        assert_eq!(desired, 39, "reader takes the whole terminal minus one row");
-        assert!(desired > INLINE_EXPANDED_MAX_HEIGHT);
     }
 
     #[test]
@@ -26476,7 +21336,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::FullscreenTui))
+            .draw(|frame| draw_input(frame, frame.area(), &state))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -26497,7 +21357,7 @@ mod tests {
 
         state.text_selection_mode = true;
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::FullscreenTui))
+            .draw(|frame| draw_input(frame, frame.area(), &state))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -26515,7 +21375,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .draw(|frame| draw_input(frame, frame.area(), &state))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer());
@@ -26536,58 +21396,13 @@ mod tests {
     }
 
     #[test]
-    fn inline_input_title_omits_text_selection_shortcut() {
-        let mut state = AppState::new();
-        state.set_connection_state(ConnectionState::Ready);
-        let backend = TestBackend::new(140, 5);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-
-        terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("──────────── (Enter send"),
-            "rendered:\n{rendered}"
-        );
-        assert!(rendered.contains("Ctrl-C quit"), "rendered:\n{rendered}");
-        assert!(rendered.contains("F10 help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Shift-Tab team"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("F12"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("prompt"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("streaming"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
-
-        state.record_user_prompt("hello".to_string());
-        state.apply_event(UiEvent::PromptDone {
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-        });
-        terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("──────────── 0s (Enter send"),
-            "rendered:\n{rendered}"
-        );
-        assert!(!rendered.contains("prompt"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("streaming"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("elapsed"), "rendered:\n{rendered}");
-    }
-
-    #[test]
     fn busy_input_title_uses_activity_ornament_without_status_words() {
         let mut state = AppState::new();
         let backend = TestBackend::new(120, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .draw(|frame| draw_input(frame, frame.area(), &state))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -26602,7 +21417,7 @@ mod tests {
 
         state.record_user_prompt("hello".to_string());
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::InlineChat))
+            .draw(|frame| draw_input(frame, frame.area(), &state))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -26803,77 +21618,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_help_overlay_expands_viewport_and_renders() {
-        let mut state = AppState::new();
-        state.help_overlay = true;
-
-        let desired = desired_inline_height(
-            &state,
-            Size {
-                width: 100,
-                height: 40,
-            },
-        );
-        assert!(
-            desired > INLINE_CHAT_HEIGHT,
-            "help overlay must request enough inline rows to render"
-        );
-
-        let backend = TestBackend::new(100, desired);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("help"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Agent seats"), "rendered:\n{rendered}");
-        assert!(
-            rendered.contains("automatic review"),
-            "rendered:\n{rendered}"
-        );
-    }
-
-    #[test]
-    fn inline_chat_replaces_content_with_permission_view() {
-        let pending =
-            permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
-        let mut state = AppState::new();
-        state.agent_label = "opencode".to_string();
-        state.record_user_prompt("hello".to_string());
-        state.apply_event(UiEvent::PermissionRequest(pending.prompt));
-        let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("permission request"),
-            "rendered:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("run shell command"),
-            "rendered:\n{rendered}"
-        );
-        assert!(rendered.contains("Allow once"), "rendered:\n{rendered}");
-        assert!(
-            !rendered.contains("agent opencode"),
-            "permission view must replace the chat header; rendered:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("prompt ("),
-            "permission view must replace the prompt editor; rendered:\n{rendered}"
-        );
-    }
-
-    #[test]
     fn inline_permission_view_handles_keyboard_selection() {
         let pending =
             permission_pending_with_options("run shell command", &["Allow once", "Reject"], 0);
@@ -26881,7 +21625,7 @@ mod tests {
         state.apply_event(UiEvent::PermissionRequest(pending.prompt));
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Down));
 
         let pending = state.pending_permission().expect("pending permission");
         assert_eq!(pending.selected, 1);
@@ -27141,7 +21885,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
 
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
@@ -28806,7 +23550,7 @@ mod tests {
         ];
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_inline_crossterm(
+        handle_crossterm(
             &mut state,
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
@@ -28841,7 +23585,7 @@ mod tests {
         ];
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
 
         assert!(state.config_picker.is_none());
     }
@@ -29029,46 +23773,6 @@ mod tests {
             usage_quota_label(&state).as_deref(),
             Some("Codex usage unavailable: codex unavailable")
         );
-    }
-
-    #[test]
-    fn inline_config_shortcut_does_not_open_picker() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.session_config_options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "model-1",
-                vec![
-                    SessionConfigSelectOption::new("model-1", "Model 1"),
-                    SessionConfigSelectOption::new("model-2", "Model 2"),
-                ],
-            ),
-            SessionConfigOption::select(
-                "mode",
-                "Mode",
-                "ask",
-                vec![
-                    SessionConfigSelectOption::new("ask", "Ask"),
-                    SessionConfigSelectOption::new("code", "Code"),
-                ],
-            ),
-        ];
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        handle_inline_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
-
-        let backend = TestBackend::new(100, INLINE_CHAT_HEIGHT);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| {
-                draw_inline_chat(frame, &mut state, &mut TranscriptScrollState::default())
-            })
-            .expect("draw");
-
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(!rendered.contains("Mode values"), "rendered:\n{rendered}");
-        assert!(state.config_picker.is_none());
     }
 
     #[test]
@@ -29494,15 +24198,11 @@ mod tests {
 
     #[test]
     fn help_revisits_the_three_role_product_model() {
-        let help = help_modal_lines(
-            UiMode::InlineChat,
-            false,
-            TerminalThemeKind::Adaptive.palette(),
-        )
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
+        let help = help_modal_lines(false, TerminalThemeKind::Adaptive.palette())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
 
         for expected in [
             "owns the request",
@@ -29532,7 +24232,7 @@ mod tests {
     #[test]
     fn help_lines_style_headings_bindings_and_descriptions_separately() {
         let theme = TerminalThemeKind::Adaptive.palette();
-        let lines = help_modal_lines(UiMode::InlineChat, false, theme);
+        let lines = help_modal_lines(false, theme);
 
         let heading = lines
             .iter()
@@ -29922,7 +24622,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(14, 6)).expect("terminal");
         terminal
-            .draw(|frame| draw_input(frame, frame.area(), &state, UiMode::FullscreenTui))
+            .draw(|frame| draw_input(frame, frame.area(), &state))
             .expect("draw");
 
         let rendered = buffer_lines(terminal.backend().buffer());
@@ -30696,7 +25396,6 @@ mod tests {
         ));
 
         let message = notification_message_for_event(
-            UiMode::FullscreenTui,
             &state,
             &UiEvent::PromptDone {
                 stop_reason: StopReason::EndTurn,
@@ -30712,7 +25411,6 @@ mod tests {
         let state = AppState::new();
 
         let message = notification_message_for_event(
-            UiMode::FullscreenTui,
             &state,
             &UiEvent::PromptDone {
                 stop_reason: StopReason::Cancelled,
@@ -30930,23 +25628,21 @@ mod tests {
             "queued prompts must not enter the transcript while pending"
         );
 
-        for render_mode in [UiMode::FullscreenTui, UiMode::InlineChat] {
-            let backend = TestBackend::new(80, 14);
-            let mut terminal = Terminal::new(backend).expect("terminal");
-            let mut scroll = TranscriptScrollState::default();
-            terminal
-                .draw(|frame| draw(frame, &mut state, &mut scroll, render_mode))
-                .expect("draw");
-            let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-            assert!(
-                rendered.contains("queued 1/2: alpha") && rendered.contains("queued 2/2: beta"),
-                "{render_mode:?} must show the queued list above the input:\n{rendered}"
-            );
-            assert!(
-                rendered.contains("Alt-Up / Shift-Left edit last queued prompt"),
-                "{render_mode:?} must show how to edit the newest queued prompt:\n{rendered}"
-            );
-        }
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut scroll = TranscriptScrollState::default();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("queued 1/2: alpha") && rendered.contains("queued 2/2: beta"),
+            "the queued list renders above the input:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Alt-Up / Shift-Left edit last queued prompt"),
+            "the newest queued prompt shows how to edit it:\n{rendered}"
+        );
     }
 
     #[test]
@@ -30982,7 +25678,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut scroll = TranscriptScrollState::default();
         terminal
-            .draw(|frame| draw(frame, &mut state, &mut scroll, UiMode::FullscreenTui))
+            .draw(|frame| draw(frame, &mut state, &mut scroll))
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
@@ -31716,13 +26412,12 @@ mod tests {
         let mut state = AppState::new();
         state.set_connection_state(ConnectionState::Ready);
         assert!(
-            current_feature_tip(&mut state, UiMode::FullscreenTui).is_none(),
+            current_feature_tip(&mut state).is_none(),
             "no tip while idle: the row exists only beside the spinner"
         );
 
         state.set_connection_state(ConnectionState::Streaming);
-        let tip =
-            current_feature_tip(&mut state, UiMode::FullscreenTui).expect("tip while working");
+        let tip = current_feature_tip(&mut state).expect("tip while working");
 
         let backend = TestBackend::new(160, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -31746,7 +26441,7 @@ mod tests {
         let mut state = AppState::new();
         state.feature_hints_enabled = false;
         state.set_connection_state(ConnectionState::Streaming);
-        assert!(current_feature_tip(&mut state, UiMode::FullscreenTui).is_none());
-        assert!(current_feature_tip(&mut state, UiMode::InlineChat).is_none());
+        assert!(current_feature_tip(&mut state).is_none());
+        assert!(current_feature_tip(&mut state).is_none());
     }
 }

@@ -5,15 +5,13 @@
 //! the async `EventStream` holds while it waits for input. With the stream
 //! idle in a blocking poll, every CPR query times out after two seconds and
 //! the reply is only delivered once a real key or mouse event releases the
-//! lock. ratatui queries the cursor position whenever an inline viewport is
-//! created or resized, so resizing the inline viewport (for example when a
-//! permission modal opens) blanked the view until the next input event.
+//! lock, which blanks the view until the next input event.
 //!
 //! The wrapper mirrors ratatui's own `last_known_cursor_pos` bookkeeping:
 //! every cursor movement ratatui performs goes through `set_cursor_position`,
 //! `draw`, or `append_lines`, so the tracked position stays accurate without
 //! asking the terminal. The first `get_cursor_position` on an unseeded
-//! backend still performs one real query (initial inline setup, before the
+//! backend still performs one real query (during terminal setup, before the
 //! event stream contends for the lock); afterwards the answer always comes
 //! from memory.
 
@@ -53,7 +51,8 @@ impl<W: Write> TrackedBackend<W> {
     }
 
     /// Backend seeded with a known cursor position, for callers that just
-    /// moved the cursor themselves (e.g. an inline viewport resize).
+    /// moved the cursor themselves.
+    #[cfg(test)]
     pub fn with_cursor_position(writer: W, position: Position) -> Self {
         Self {
             inner: CrosstermBackend::new(writer),

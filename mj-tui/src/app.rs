@@ -799,9 +799,9 @@ fn review_verdict_record(
     lines
 }
 
-/// Ephemeral search state shared by the fullscreen transcript and the inline
-/// full-history reader. Matches are derived from the canonical transcript so
-/// streaming updates cannot leave a stale list behind.
+/// Ephemeral search state for the transcript pane. Matches are derived from
+/// the canonical transcript so streaming updates cannot leave a stale list
+/// behind.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptSearch {
     pub query: String,
@@ -823,7 +823,6 @@ pub struct FeatureHintCapabilities {
     pub fork: bool,
     pub side: bool,
     pub images: bool,
-    pub fullscreen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,8 +838,6 @@ enum FeatureHintRequirement {
     Fork,
     Side,
     Images,
-    Fullscreen,
-    Inline,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -931,7 +928,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
     },
     FeatureHint {
         text: "With an empty prompt, Ctrl+F searches the transcript; n and N jump between matches.",
-        requirement: FeatureHintRequirement::Fullscreen,
+        requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
         text: "When the agent supports live selectors, /model and /effort change the active session in place without losing the conversation.",
@@ -947,11 +944,7 @@ const FEATURE_HINTS: &[FeatureHint] = &[
     },
     FeatureHint {
         text: "Press Alt+T to expand or collapse the latest visible tool output.",
-        requirement: FeatureHintRequirement::Fullscreen,
-    },
-    FeatureHint {
-        text: "Open the transcript reader with Ctrl+T; / or Ctrl+F searches, n and N jump between matches, and Alt+T toggles the latest tool output.",
-        requirement: FeatureHintRequirement::Inline,
+        requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
         text: "The prompt honors readline keys: Ctrl+A/E jump to line start/end and Ctrl+K/U/W delete.",
@@ -971,10 +964,6 @@ const FEATURE_HINTS: &[FeatureHint] = &[
     },
     FeatureHint {
         text: "Mjolnir synchronizes verified project knowledge locally across Codex and Claude, so switching providers does not erase repository context.",
-        requirement: FeatureHintRequirement::Always,
-    },
-    FeatureHint {
-        text: "Choose Fullscreen under Appearance for the recommended, better-performing TUI; choose Inline when preserving normal terminal scrollback matters more.",
         requirement: FeatureHintRequirement::Always,
     },
 ];
@@ -1533,11 +1522,6 @@ pub struct AppState {
     /// transcript always retains the complete source; this only lets the
     /// terminal renderer hold back incomplete or not-yet-paced source.
     stream_visible_bytes: HashMap<usize, usize>,
-    /// Entries below this index have been irrevocably written to terminal
-    /// scrollback even though their backing state may still change (#615's
-    /// overflow valve). Monotonic: scrollback cannot be retracted, so the
-    /// stability predicate must keep reporting them stable forever.
-    committed_transcript_entries: usize,
     pub input: String,
     /// Cursor position in `input`, counted in Unicode scalar values from
     /// the start of the buffer.
@@ -1598,14 +1582,9 @@ pub struct AppState {
     /// When false, stable long messages and tool-call outputs are compacted in
     /// the transcript. In the fullscreen TUI, Ctrl-T flips this globally.
     pub expand_transcript_details: bool,
-    /// When true (inline mode only), the compact chat view is replaced by a
-    /// full-height, scrollable reader showing the entire transcript with
-    /// messages and tool outputs fully expanded. Inline scrollback is immutable once
-    /// flushed, so this reader is how users re-read earlier output in full.
-    pub transcript_viewer: bool,
     pub transcript_search: Option<TranscriptSearch>,
     /// On-demand roster and transcript reader for nested implementation and
-    /// review actors. It is available in inline and fullscreen modes.
+    /// review actors.
     pub nested_agent_viewer: bool,
     pub nested_agent_selected: Option<u64>,
     pub nested_agent_scroll_offset: usize,
@@ -2392,7 +2371,6 @@ impl AppState {
             workspace_head_diff: None,
             workspace_diff_loading: false,
             stream_visible_bytes: HashMap::new(),
-            committed_transcript_entries: 0,
             input: String::new(),
             input_cursor: 0,
             input_scroll_offset: 0,
@@ -2413,7 +2391,6 @@ impl AppState {
             review_picker: None,
             scroll_offset: 0,
             expand_transcript_details: false,
-            transcript_viewer: false,
             transcript_search: None,
             nested_agent_viewer: false,
             nested_agent_selected: None,
@@ -2968,36 +2945,10 @@ impl AppState {
     }
 
     pub(crate) fn stream_visible_text<'a>(&self, entry_index: usize, text: &'a str) -> &'a str {
-        // A committed entry's scrollback rows are final: render the complete
-        // text, never a pacing prefix that would be truncated forever (#615).
-        if entry_index < self.committed_transcript_entries {
-            return text;
-        }
         self.stream_visible_bytes
             .get(&entry_index)
             .and_then(|bytes| text.get(..*bytes))
             .unwrap_or(text)
-    }
-
-    /// Entries below this boundary were force-committed to scrollback while
-    /// their backing state could still change. Clamped so a stale value can
-    /// never report more entries than the transcript holds.
-    pub(crate) fn committed_transcript_entries(&self) -> usize {
-        self.committed_transcript_entries.min(self.transcript.len())
-    }
-
-    /// Raise the committed boundary (monotonic; clamped to the transcript
-    /// length). Drops live-render prefixes for the newly committed entries so
-    /// they flush with their complete text in the same frame.
-    pub(crate) fn force_commit_transcript_entries(&mut self, count: usize) -> bool {
-        let count = count.min(self.transcript.len());
-        if count <= self.committed_transcript_entries {
-            return false;
-        }
-        self.committed_transcript_entries = count;
-        self.stream_visible_bytes.retain(|&idx, _| idx >= count);
-        self.bump_transcript_revision();
-        true
     }
 
     fn transcript_entry_text(&self, entry_index: usize) -> Option<&str> {
@@ -3075,24 +3026,6 @@ impl AppState {
         self.tool_detail_overrides.get(id).copied()
     }
 
-    /// Open the inline full-transcript reader. The reader starts pinned to
-    /// the newest line (`scroll_offset` is reused as the top-visible line
-    /// index and clamped to the last screen during draw).
-    pub fn open_transcript_viewer(&mut self) {
-        self.close_nested_agent_viewer();
-        self.close_workspace_diff_viewer();
-        self.close_terminals_viewer();
-        self.transcript_viewer = true;
-        self.scroll_offset = usize::MAX;
-    }
-
-    /// Close the inline full-transcript reader and reset its scroll position.
-    pub fn close_transcript_viewer(&mut self) {
-        self.transcript_viewer = false;
-        self.transcript_search = None;
-        self.scroll_offset = 0;
-    }
-
     pub fn open_nested_agent_viewer(&mut self) -> bool {
         // Opening the viewer should land on work the user can act on, not the
         // oldest completed actor retained for session history.
@@ -3100,7 +3033,6 @@ impl AppState {
         let Some(selected) = selected else {
             return false;
         };
-        self.close_transcript_viewer();
         self.close_workspace_diff_viewer();
         self.close_review_issue_viewer();
         self.close_terminals_viewer();
@@ -3254,7 +3186,6 @@ impl AppState {
         if self.terminal_count() == 0 {
             return false;
         }
-        self.close_transcript_viewer();
         self.close_nested_agent_viewer();
         self.close_workspace_diff_viewer();
         self.close_review_issue_viewer();
@@ -3291,7 +3222,6 @@ impl AppState {
 
     pub fn open_review_issue_viewer(&mut self) {
         self.close_nested_agent_viewer();
-        self.close_transcript_viewer();
         self.close_workspace_diff_viewer();
         self.close_terminals_viewer();
         self.review_issue_viewer = true;
@@ -3357,7 +3287,6 @@ impl AppState {
     /// caller is responsible for requesting the refresh this marks pending.
     pub fn open_workspace_diff_viewer(&mut self) {
         self.close_nested_agent_viewer();
-        self.close_transcript_viewer();
         self.close_review_issue_viewer();
         self.close_terminals_viewer();
         self.workspace_diff_viewer = true;
@@ -3700,8 +3629,6 @@ impl AppState {
                 FeatureHintRequirement::Fork => capabilities.fork,
                 FeatureHintRequirement::Side => capabilities.side,
                 FeatureHintRequirement::Images => capabilities.images,
-                FeatureHintRequirement::Fullscreen => capabilities.fullscreen,
-                FeatureHintRequirement::Inline => !capabilities.fullscreen,
             };
             if eligible {
                 self.feature_hint_cursor = (index + 1) % FEATURE_HINTS.len();
@@ -5266,8 +5193,8 @@ impl AppState {
                 activity,
             } => {
                 // Status-row only: no transcript entry, no revision bump. An
-                // in-place transcript rewrite here is what used to corrupt
-                // already-flushed inline scrollback.
+                // in-place transcript rewrite here would invalidate the
+                // settled-prefix render cache on every activity tick.
                 if let Some(state) = self.subagents.get_mut(&subagent_id) {
                     state.activity = activity;
                     state.note_activity_at(Instant::now());
@@ -6891,26 +6818,15 @@ mod tests {
     }
 
     #[test]
-    fn workspace_diff_viewer_open_close_resets_and_excludes_transcript_reader() {
+    fn workspace_diff_viewer_open_close_resets_its_selection_and_scroll() {
         let mut state = AppState::new();
-        state.transcript_viewer = true;
-        state.scroll_offset = 17;
 
         state.open_workspace_diff_viewer();
         assert!(state.workspace_diff_viewer);
-        assert!(!state.transcript_viewer);
-        assert_eq!(state.scroll_offset, 0);
         state.workspace_diff_selected_file = 3;
         state.workspace_diff_scroll_offset = 12;
 
         state.close_workspace_diff_viewer();
-        assert!(!state.workspace_diff_viewer);
-        assert_eq!(state.workspace_diff_selected_file, 0);
-        assert_eq!(state.workspace_diff_scroll_offset, 0);
-
-        state.open_workspace_diff_viewer();
-        state.open_transcript_viewer();
-        assert!(state.transcript_viewer);
         assert!(!state.workspace_diff_viewer);
         assert_eq!(state.workspace_diff_selected_file, 0);
         assert_eq!(state.workspace_diff_scroll_offset, 0);
@@ -11790,7 +11706,6 @@ mod tests {
             fork: true,
             side: true,
             images: true,
-            fullscreen: true,
         }
     }
 
@@ -11806,7 +11721,6 @@ mod tests {
             fork: false,
             side: false,
             images: false,
-            fullscreen: false,
         };
         match requirement {
             FeatureHintRequirement::Always => {}
@@ -11821,8 +11735,6 @@ mod tests {
             FeatureHintRequirement::Fork => caps.fork = enabled,
             FeatureHintRequirement::Side => caps.side = enabled,
             FeatureHintRequirement::Images => caps.images = enabled,
-            FeatureHintRequirement::Fullscreen => caps.fullscreen = enabled,
-            FeatureHintRequirement::Inline => caps.fullscreen = !enabled,
         }
         caps
     }
@@ -11887,12 +11799,6 @@ mod tests {
             ("/fork", FeatureHintRequirement::Fork),
             ("/side", FeatureHintRequirement::Side),
             ("clipboard with Ctrl+V", FeatureHintRequirement::Images),
-            (
-                "With an empty prompt, Ctrl+F",
-                FeatureHintRequirement::Fullscreen,
-            ),
-            ("Press Alt+T", FeatureHintRequirement::Fullscreen),
-            ("Open the transcript reader", FeatureHintRequirement::Inline),
             ("mj app opens", FeatureHintRequirement::Desktop),
         ];
         for (needle, requirement) in expected {
@@ -12018,10 +11924,6 @@ mod tests {
                 "verified project knowledge locally across Codex and Claude",
                 FeatureHintRequirement::Always,
             ),
-            (
-                "Fullscreen under Appearance for the recommended, better-performing TUI",
-                FeatureHintRequirement::Always,
-            ),
         ];
 
         for (needle, requirement) in expected {
@@ -12105,7 +12007,6 @@ mod tests {
                     fork: false,
                     side: false,
                     images: false,
-                    fullscreen: false,
                 },
                 Instant::now(),
             )

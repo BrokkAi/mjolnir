@@ -12,8 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::{
-    AcpServerPolicy, Config, InterfaceMode, ModelsConfig, PermissionPreset, TeamPreset,
-    ThoughtOutput, VoiceAutoSend,
+    AcpServerPolicy, Config, ModelsConfig, PermissionPreset, TeamPreset, ThoughtOutput,
+    VoiceAutoSend,
 };
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
@@ -217,7 +217,7 @@ impl SettingsEditor {
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
             SettingsTab::Input => 1,
-            SettingsTab::Appearance => 6,
+            SettingsTab::Appearance => 5,
         }
     }
 
@@ -331,15 +331,6 @@ impl SettingsEditor {
             }
             SettingsTab::Appearance if self.selected == 4 => {
                 self.config.keep_awake = !self.config.keep_awake;
-            }
-            SettingsTab::Appearance if self.selected == 5 => {
-                let current = InterfaceMode::ALL
-                    .iter()
-                    .position(|mode| *mode == self.config.interface)
-                    .unwrap_or(0);
-                let next =
-                    (current as i32 + delta).rem_euclid(InterfaceMode::ALL.len() as i32) as usize;
-                self.config.interface = InterfaceMode::ALL[next];
             }
             SettingsTab::Input if self.selected == 0 => {
                 let current = VoiceAutoSend::ALL
@@ -1853,24 +1844,6 @@ fn draw_appearance(
                 ),
             ],
         ),
-        (
-            Some(5),
-            vec![
-                selected_line(
-                    editor.selected == 5,
-                    format!("Interface   < {} >", editor.config.interface),
-                    theme,
-                ),
-                Line::styled(
-                    format!("            {}", editor.config.interface.description()),
-                    Style::default().ink(theme.muted),
-                ),
-                Line::styled(
-                    "            Applies when the next session starts; --fullscreen-tui overrides.",
-                    Style::default().ink(theme.muted),
-                ),
-            ],
-        ),
     ];
     let mut lines = Vec::new();
     let mut selected_span = (0, 0);
@@ -3203,24 +3176,14 @@ mod tests {
 
         let unscrolled = render(&editor, SETTINGS_PANEL_MIN_WIDTH, SETTINGS_PANEL_MIN_HEIGHT);
         assert!(unscrolled.contains("Theme"), "rendered:\n{unscrolled}");
-        assert!(!unscrolled.contains("Interface"), "rendered:\n{unscrolled}");
+        assert!(
+            !unscrolled.contains("Keep awake"),
+            "rendered:\n{unscrolled}"
+        );
 
-        editor.selected = 5;
+        editor.selected = 4;
         let scrolled = render(&editor, SETTINGS_PANEL_MIN_WIDTH, SETTINGS_PANEL_MIN_HEIGHT);
-        assert!(scrolled.contains("Interface"), "rendered:\n{scrolled}");
-    }
-
-    #[test]
-    fn appearance_tab_cycles_interface_mode() {
-        let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
-        editor.tab = SettingsTab::Appearance;
-        editor.selected = 5;
-
-        assert_eq!(editor.config.interface, InterfaceMode::Inline);
-        assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
-        assert_eq!(editor.config.interface, InterfaceMode::Fullscreen);
-        assert_eq!(editor.handle_key(KeyCode::Left), SettingsAction::Changed);
-        assert_eq!(editor.config.interface, InterfaceMode::Inline);
+        assert!(scrolled.contains("Keep awake"), "rendered:\n{scrolled}");
     }
 
     #[test]
@@ -3328,8 +3291,6 @@ mod tests {
             "rendered:\n{appearance}"
         );
         assert!(appearance.contains("Keep awake"), "rendered:\n{appearance}");
-        assert!(appearance.contains("Interface"), "rendered:\n{appearance}");
-        assert!(appearance.contains("< inline >"), "rendered:\n{appearance}");
         assert!(
             !appearance.contains("Voice auto-send"),
             "rendered:\n{appearance}"

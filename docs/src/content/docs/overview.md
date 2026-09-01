@@ -55,7 +55,7 @@ be turned off.
 
 ## Good first uses
 
-- Work in one repository from an inline terminal interface.
+- Work in one repository from a full-screen terminal interface.
 - Pair one provider as coder with the other as reviewer so every changed turn
   faces adversarial review.
 - Let the primary agent hand bounded work to several fresh contexts at once.

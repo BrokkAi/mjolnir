@@ -217,7 +217,7 @@ run_case() {
     "$node" -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1])); const launch=(r.launches??[r])[0]; if(r.error || r.unauthorizedRejected!==true || launch.response?.isError) process.exit(1);' "$root/primary-result.json"
     grep -a 'outcome="failed"' "$root/primary.log" >/dev/null
     grep -a 'fixture subagent failure' "$root/primary.log" >/dev/null
-  elif [ "$mode" = inline-stream ]; then
+  elif [ "$mode" = stream ]; then
     grep -a 'Agents · primary' "$root/transcript.log" >/dev/null
     test "$(grep -ac '^session-directive:' "$root/primary.log")" -eq 1
     grep -a "subagent" "$root/transcript.log" >/dev/null
@@ -257,7 +257,7 @@ run_case() {
 
 case ${MJ_E2E_CASE:-both} in
   complete) run_case complete ;;
-  inline-stream) run_case inline-stream ;;
+  stream) run_case stream ;;
   cancel) run_case cancel ;;
   failed) run_case failed ;;
   no-change) run_case no-change ;;
@@ -266,7 +266,7 @@ case ${MJ_E2E_CASE:-both} in
   details) run_case details ;;
   parallel) run_case parallel ;;
   both) run_case complete; run_case terminal-output; run_case cancel ;;
-  subagents) run_case complete; run_case no-change; run_case terminal-output; run_case inline-stream; run_case cancel; run_case failed; run_case review; run_case details; run_case parallel ;;
-  *) echo "MJ_E2E_CASE must be complete, no-change, terminal-output, inline-stream, cancel, failed, review, details, parallel, both, or subagents" >&2; exit 2 ;;
+  subagents) run_case complete; run_case no-change; run_case terminal-output; run_case stream; run_case cancel; run_case failed; run_case review; run_case details; run_case parallel ;;
+  *) echo "MJ_E2E_CASE must be complete, no-change, terminal-output, stream, cancel, failed, review, details, parallel, both, or subagents" >&2; exit 2 ;;
 esac
 echo "deterministic subagent PTY E2E passed"

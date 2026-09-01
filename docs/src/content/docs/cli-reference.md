@@ -16,7 +16,6 @@ description: Common commands, options, slash commands, and terminal controls.
 | `--review-model MODEL[+EFFORT]` | Override the review supervisor model for one headless invocation |
 | `--subagent-model MODEL[+EFFORT]\|disabled` | Override or disable the default subagent model for one headless invocation |
 | `-w, --worktree [NAME]` | Create or reuse a linked worktree |
-| `--fullscreen-tui` | Use the alternate-screen UI instead of inline mode |
 | `--debug-file PATH` | Write Mjolnir diagnostics without corrupting the TUI |
 | `--agent-stderr PATH` | Capture ACP adapter stderr |
 | `--no-update-check` | Skip the startup release check |

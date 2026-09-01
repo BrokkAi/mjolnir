@@ -5537,8 +5537,6 @@ struct MjAppearancePanel {
     /// `feature_hints` so the toggle applies without a reload.
     tips: Vec<String>,
     keep_awake: bool,
-    interface: String,
-    interfaces: Vec<MjInterfaceEntry>,
 }
 
 /// Feature-discovery tips for the web viewer, phrased for browser and phone
@@ -5555,13 +5553,6 @@ const WEB_FEATURE_TIPS: &[&str] = &[
     "Sessions started in the terminal appear here live, and sessions started here are ordinary mj sessions.",
     "Mjolnir synchronizes verified project knowledge locally across Codex and Claude, so switching providers does not erase repository context.",
 ];
-
-#[derive(Debug, Serialize)]
-struct MjInterfaceEntry {
-    value: String,
-    label: String,
-    description: String,
-}
 
 #[derive(Debug, Serialize)]
 struct MjInputPanel {
@@ -5622,7 +5613,6 @@ struct MjConfigApplyRequest {
     thought_output: Option<String>,
     feature_hints: Option<bool>,
     keep_awake: Option<bool>,
-    interface: Option<String>,
     voice_auto_send: Option<String>,
     /// Server id → `auto` | `enabled` | `disabled`.
     server_policies: Option<BTreeMap<String, String>>,
@@ -6033,15 +6023,6 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
         feature_hints: config.feature_hints,
         tips: WEB_FEATURE_TIPS.iter().map(|tip| tip.to_string()).collect(),
         keep_awake: config.keep_awake,
-        interface: config.interface.to_string(),
-        interfaces: config::InterfaceMode::ALL
-            .into_iter()
-            .map(|interface| MjInterfaceEntry {
-                value: interface.as_str().to_string(),
-                label: interface.to_string(),
-                description: interface.description().to_string(),
-            })
-            .collect(),
     };
     let input = MjInputPanel {
         voice_auto_send: config.voice_auto_send.as_str().to_string(),
@@ -6400,11 +6381,6 @@ fn mjconfig_apply_edits(
     }
     if let Some(enabled) = request.keep_awake {
         config.keep_awake = enabled;
-    }
-    if let Some(interface) = request.interface {
-        config.interface = interface
-            .parse()
-            .map_err(|error| bad_request(format!("invalid interface: {error}")))?;
     }
     if let Some(voice_auto_send) = request.voice_auto_send {
         config.voice_auto_send = voice_auto_send
@@ -11336,14 +11312,6 @@ mod tests {
             );
         }
         assert_eq!(snapshot["appearance"]["thought_output"], "default");
-        assert_eq!(snapshot["appearance"]["interface"], "inline");
-        assert_eq!(
-            snapshot["appearance"]["interfaces"]
-                .as_array()
-                .expect("interface choices")
-                .len(),
-            config::InterfaceMode::ALL.len()
-        );
         assert_eq!(
             snapshot["appearance"]["thought_outputs"]
                 .as_array()
@@ -12092,7 +12060,6 @@ mod tests {
                     "thought_output": "full",
                     "feature_hints": false,
                     "keep_awake": false,
-                    "interface": "fullscreen",
                     "voice_auto_send": "four_seconds",
                     "primary_session_defaults": {
                         "codex-acp": { "config:collaboration_mode": "yolo" }
@@ -12141,7 +12108,6 @@ mod tests {
         assert_eq!(snapshot["appearance"]["thought_output"], "full");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
         assert_eq!(snapshot["appearance"]["keep_awake"], false);
-        assert_eq!(snapshot["appearance"]["interface"], "fullscreen");
         assert_eq!(snapshot["input"]["voice_auto_send"], "four_seconds");
         assert_eq!(
             snapshot["agents"]["roles"][1]["permission"]["value"],
@@ -12172,7 +12138,6 @@ mod tests {
         assert_eq!(saved.thought_output, config::ThoughtOutput::Full);
         assert!(!saved.feature_hints);
         assert!(!saved.keep_awake);
-        assert_eq!(saved.interface, config::InterfaceMode::Fullscreen);
         assert_eq!(saved.voice_auto_send, config::VoiceAutoSend::FourSeconds);
         assert_eq!(saved.review.permission, config::PermissionPreset::Manual);
         assert_eq!(saved.subagents.permission, config::PermissionPreset::Yolo);
@@ -13121,7 +13086,6 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         assert!(viewer.contains("mjcfg.edits.max_correction_rounds = next"));
         assert!(viewer.contains("voice_auto_send"));
         assert!(viewer.contains("Terminal theme"));
-        assert!(viewer.contains("Terminal interface"));
         assert!(!viewer.contains("ACP Priority"));
         assert!(!viewer.contains("renderMjPriority"));
     }

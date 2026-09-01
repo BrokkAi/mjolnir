@@ -276,7 +276,7 @@ function startSubagentTurn(prompt) {
   log("prompt-started");
   log(`subagent-prompt:${prompt.slice(0, 200)}`);
   update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "fixture reasoning" } });
-  if (mode === "cancel" || mode === "inline-stream") {
+  if (mode === "cancel" || mode === "stream") {
     fs.writeFileSync(
       path.join(process.env.MJ_E2E_WORKSPACE, "subagent-partial.txt"),
       "partial change by the subagent\n",

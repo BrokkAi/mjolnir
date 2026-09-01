@@ -158,7 +158,7 @@ Claude Code's Auto policy. The **Permissions** setting owns the provider's
 ## Workflow progress
 
 Delegation and review workflows get a dedicated area between the header and the
-input box, in both inline and fullscreen modes:
+input box:
 
 ```text
  ⠹ Subagents [/subagents] · 1m04s · delegating · 3 running · 2 done

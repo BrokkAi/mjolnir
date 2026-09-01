@@ -3,7 +3,7 @@
 set timeout 600
 set stty_init "rows 40 columns 120"
 log_file -noappend $env(MJ_E2E_TRANSCRIPT)
-spawn $env(MJ_E2E_BIN) --no-update-check --fullscreen-tui --debug-file $env(MJ_E2E_DEBUG_LOG) --agent-stderr $env(MJ_E2E_AGENT_STDERR) --cwd $env(MJ_E2E_WORKSPACE)
+spawn $env(MJ_E2E_BIN) --no-update-check --debug-file $env(MJ_E2E_DEBUG_LOG) --agent-stderr $env(MJ_E2E_AGENT_STDERR) --cwd $env(MJ_E2E_WORKSPACE)
 expect_before -re {\x1b\[6n} {
     send -- "\x1b\[1;1R"
     exp_continue

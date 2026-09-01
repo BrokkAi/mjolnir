@@ -90,8 +90,6 @@ boundaries are:
 - Do not write logs to standard error while the TUI owns the terminal. Use
   `--debug-file` or `BROKK_TUI_LOG` for Mjolnir diagnostics and
   `--agent-stderr` or `BROKK_TUI_AGENT_STDERR` for ACP adapter output.
-- Inline mode must remain inline. A cursor-position timeout or redraw problem
-  must not terminate the session or switch the user into the fullscreen TUI.
 - Permission requests must preserve the complete requested content. Long
   commands, descriptions, and option labels must remain reachable while
   wrapping, scrolling, paging, and resizing.
@@ -155,8 +153,7 @@ cargo build --release -p brokk-mj-voice-worker
 ```
 
 UI changes need proportionate manual validation in every affected surface.
-Check inline and fullscreen modes separately; for layout changes, include narrow
-and resized terminals. Also exercise headless output or the remote viewer when
+For layout changes, include narrow and resized terminals. Also exercise headless output or the remote viewer when
 shared rendering, orchestration, permission, or session code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
@@ -218,8 +215,7 @@ pass. Do not report a check as passing based only on an expected outcome.
 
 Reviewers will pay particular attention to:
 
-- Terminal ownership, restoration, inline-mode resilience, and complete
-  permission content.
+- Terminal ownership, restoration, and complete permission content.
 - ACP compatibility and correct separation between Mjolnir-owned and
   adapter-owned state.
 - Agent role attribution, cancellation, and deterministic transcript and

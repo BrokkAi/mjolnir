@@ -161,15 +161,9 @@ pub async fn run(
                     Action::None => {}
                     Action::Cancel => return Ok(Outcome::Cancel),
                     Action::Authenticate(vendor) => {
-                        crate::ui::restore_terminal_for_auth(
-                            terminal,
-                            crate::ui::UiMode::FullscreenTui,
-                        )?;
+                        crate::ui::restore_terminal_for_auth(terminal)?;
                         let login = crate::auth::run_login(vendor).await;
-                        crate::ui::resume_terminal_after_auth(
-                            terminal,
-                            crate::ui::UiMode::FullscreenTui,
-                        )?;
+                        crate::ui::resume_terminal_after_auth(terminal)?;
                         let notice = match login {
                             Ok(outcome) => outcome.into_message(),
                             Err(error) => format!("Sign-in failed: {error:#}"),
@@ -389,28 +383,6 @@ mod tests {
             Some(TeamPreset::Codex)
         );
         assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
-    }
-
-    #[test]
-    fn onboarding_lets_the_user_pick_the_fullscreen_interface() {
-        let mut state = State::new(Kind::Fresh, Config::default(), Some(roster()), None);
-        TeamPreset::Claude.apply(&mut state.editor.config);
-        state.editor.tab = SettingsTab::Appearance;
-        state.editor.selected = 5;
-
-        assert_eq!(state.handle_key(KeyCode::Right), Action::None);
-        assert_eq!(
-            state.editor.config.interface,
-            crate::config::InterfaceMode::Fullscreen
-        );
-        let rendered = render(&state);
-        assert!(rendered.contains("< fullscreen >"), "{rendered}");
-
-        assert_eq!(state.handle_key(KeyCode::Enter), Action::Resolve);
-        assert_eq!(
-            state.visited_config().interface,
-            crate::config::InterfaceMode::Fullscreen
-        );
     }
 
     #[test]

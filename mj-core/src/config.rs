@@ -123,64 +123,6 @@ impl std::str::FromStr for ThoughtOutput {
     }
 }
 
-/// Which terminal chat surface `mj` starts sessions in.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum InterfaceMode {
-    /// Chat inline in the terminal scrollback.
-    #[default]
-    Inline,
-    /// The legacy alternate-screen full-screen chat TUI.
-    Fullscreen,
-}
-
-impl InterfaceMode {
-    pub const ALL: [Self; 2] = [Self::Inline, Self::Fullscreen];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Inline => "inline",
-            Self::Fullscreen => "fullscreen",
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Inline => "chat inline in the terminal scrollback",
-            Self::Fullscreen => "alternate-screen full-screen chat TUI",
-        }
-    }
-
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-impl std::fmt::Display for InterfaceMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for InterfaceMode {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "inline" => Ok(Self::Inline),
-            "fullscreen" => Ok(Self::Fullscreen),
-            _ => Err(format!(
-                "unknown interface {value:?}; expected one of: {}",
-                Self::ALL
-                    .iter()
-                    .map(|mode| mode.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-        }
-    }
-}
-
 /// Whether a completed spoken prompt is submitted after a period of silence.
 ///
 /// This stays opt-in because sending a prompt is materially different from
@@ -302,10 +244,6 @@ pub struct Config {
     /// runs, and while a terminal session has a turn in flight.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub keep_awake: bool,
-    /// Which terminal chat surface new runs start in. The `--fullscreen-tui`
-    /// flag forces the fullscreen TUI for a single run without changing this.
-    #[serde(default, skip_serializing_if = "InterfaceMode::is_default")]
-    pub interface: InterfaceMode,
     /// Optional hands-free submit for voice dictation after detected silence.
     #[serde(default, skip_serializing_if = "VoiceAutoSend::is_default")]
     pub voice_auto_send: VoiceAutoSend,
@@ -354,7 +292,6 @@ impl Default for Config {
             thought_output: ThoughtOutput::default(),
             feature_hints: true,
             keep_awake: true,
-            interface: InterfaceMode::default(),
             voice_auto_send: VoiceAutoSend::default(),
             memory: MemoryConfig::default(),
             team: None,
@@ -1489,7 +1426,6 @@ impl Config {
             thought_output,
             feature_hints,
             keep_awake,
-            interface,
             voice_auto_send,
             memory,
             agent,
@@ -3735,30 +3671,5 @@ mode = "ask"
         let body = std::fs::read_to_string(&path).expect("read");
         assert!(body.contains("keep_awake = false"));
         assert!(!Config::load(&path).expect("load disabled").keep_awake);
-    }
-
-    #[test]
-    fn interface_default_inline_and_fullscreen_roundtrips() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        Config::default().save(&path).expect("save default");
-        let body = std::fs::read_to_string(&path).expect("read");
-        assert!(!body.contains("interface"));
-        assert_eq!(
-            Config::load(&path).expect("load default").interface,
-            InterfaceMode::Inline
-        );
-
-        let config = Config {
-            interface: InterfaceMode::Fullscreen,
-            ..Config::default()
-        };
-        config.save(&path).expect("save fullscreen");
-        let body = std::fs::read_to_string(&path).expect("read");
-        assert!(body.contains("interface = \"fullscreen\""));
-        assert_eq!(
-            Config::load(&path).expect("load fullscreen").interface,
-            InterfaceMode::Fullscreen
-        );
     }
 }

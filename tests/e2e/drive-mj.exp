@@ -4,7 +4,6 @@ set timeout 90
 set stty_init "rows 40 columns 120"
 set mode $env(MJ_E2E_MODE)
 set transcript $env(MJ_E2E_TRANSCRIPT)
-set inline_mode [expr {$mode eq "inline-stream" || $mode eq "details" || $mode eq "parallel"}]
 log_file -noappend $transcript
 
 proc send_ctrl_c {} {
@@ -47,17 +46,8 @@ proc quit_mj {} {
 }
 
 set command [list $env(MJ_E2E_BIN) --no-update-check --debug-file $env(MJ_E2E_DEBUG_LOG) --agent-stderr $env(MJ_E2E_AGENT_STDERR)]
-if {!$inline_mode} {
-    lappend command --fullscreen-tui
-}
 lappend command --cwd $env(MJ_E2E_WORKSPACE)
 spawn {*}$command
-if {$inline_mode} {
-    expect_before -re {\x1b\[6n} {
-        send -- "\x1b\[1;1R"
-        exp_continue
-    }
-}
 
 # The roster banner is the only textual startup signal; there is no
 # "connected" message anymore. A prompt sent while the session is still
@@ -80,7 +70,7 @@ if {$mode eq "parallel"} {
         -re {PRIMARY.*RECEIVED} { after 1500; send_ctrl_c }
         timeout { exit 39 }
     }
-} elseif {$mode eq "inline-stream"} {
+} elseif {$mode eq "stream"} {
     expect {
         -re {fixture reasoning} {
             # No ordering check against MJ_E2E_PRIMARY_RESULT here: with the

@@ -4973,27 +4973,6 @@
         awakeRow.appendChild(mjDetail("prevent sleep while the server runs or a turn is in flight"));
         mjconfigBodyEl.appendChild(awakeRow);
 
-        const interfaceRow = mjRow("Terminal interface");
-        const interfaceMode = mjEditedValue("interface", panel.interface);
-        interfaceRow.appendChild(
-          mjCombo(
-            panel.interfaces.map((entry) => ({
-              value: entry.value,
-              label: entry.label,
-              description: entry.description,
-            })),
-            interfaceMode,
-            (next) => {
-              mjcfg.edits.interface = next;
-              renderMjConfig();
-            },
-          ),
-        );
-        const selectedInterface = panel.interfaces.find((entry) => entry.value === interfaceMode);
-        if (selectedInterface) {
-          interfaceRow.appendChild(mjDetail(`${selectedInterface.description}; applies when the next terminal session starts`));
-        }
-        mjconfigBodyEl.appendChild(interfaceRow);
       }
 
       function renderMjInput() {

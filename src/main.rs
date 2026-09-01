@@ -60,7 +60,7 @@ use crate::config::{Config, SelectedAgent, history_path, transcript_export_dir};
 use crate::event::{LoadSessionResult, UiCommand, UiEvent};
 use crate::palette::TerminalThemeKindExt;
 use crate::session::SessionEntryJson;
-use crate::ui::{HeaderLabels, UiMode};
+use crate::ui::HeaderLabels;
 use crate::worktree::CreatedWorktree;
 
 #[derive(Debug, Parser)]
@@ -137,10 +137,6 @@ struct Cli {
         value_name = "PATH"
     )]
     additional_directories: Vec<PathBuf>,
-
-    /// Use the legacy alternate-screen full-screen chat TUI.
-    #[arg(long)]
-    fullscreen_tui: bool,
 
     /// Resume an existing ACP session in headless mode instead of
     /// opening a new one.
@@ -460,10 +456,6 @@ struct ResumeArgs {
     /// Capture the agent subprocess's stderr to this file.
     #[arg(long, env = "BROKK_TUI_AGENT_STDERR")]
     agent_stderr: Option<PathBuf>,
-
-    /// Use the legacy alternate-screen full-screen chat TUI.
-    #[arg(long)]
-    fullscreen_tui: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -511,30 +503,6 @@ impl From<HeadlessPermissionMode> for config::PermissionPreset {
             HeadlessPermissionMode::Yolo => Self::Yolo,
         }
     }
-}
-
-fn ui_mode(fullscreen_tui: bool) -> UiMode {
-    if fullscreen_tui {
-        UiMode::FullscreenTui
-    } else {
-        UiMode::InlineChat
-    }
-}
-
-/// The chat surface for this run: the configured interface preference, with
-/// the `--fullscreen-tui` flag as a one-run fullscreen override.
-fn effective_ui_mode(cli_fullscreen_tui: bool, cfg: &Config) -> UiMode {
-    ui_mode(cli_fullscreen_tui || cfg.interface == config::InterfaceMode::Fullscreen)
-}
-
-/// Best-effort match for the mode the terminal was left in after a session:
-/// sessions adopt a changed interface preference on /new, so the freshest
-/// config is the closest stand-in for the session that just ended.
-fn post_session_ui_mode(cli_fullscreen_tui: bool) -> UiMode {
-    effective_ui_mode(
-        cli_fullscreen_tui,
-        &Config::load(&config::default_config_path()).unwrap_or_default(),
-    )
 }
 
 fn should_run_startup_update_check(cli: &Cli) -> bool {
@@ -628,7 +596,6 @@ async fn main() -> Result<()> {
     if std::env::var_os("MJ_TERMINATION_PTY_INTEGRATION").is_some() {
         return termination_pty_integration_helper(termination).await;
     }
-    let fullscreen_tui = cli.fullscreen_tui;
 
     if should_run_startup_update_check(&cli)
         && let Err(e) = self_update::check_prompt_and_restart_if_accepted().await
@@ -683,8 +650,7 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
             },
-            Commands::Resume(mut args) => {
-                args.fullscreen_tui |= fullscreen_tui;
+            Commands::Resume(args) => {
                 run_resume(
                     args,
                     fs_max_text_bytes,
@@ -776,19 +742,16 @@ async fn main() -> Result<()> {
         worktree_label.clone(),
         None,
         None,
-        fullscreen_tui,
     )
     .await;
 
-    let mode = post_session_ui_mode(fullscreen_tui);
-    let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
+    let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
 
     // Print resume hint so the user can come back to this session.
     match &result {
         Ok(Some(session_id)) => {
             if worktree_kept {
                 print_resume_hint(
-                    mode,
                     session_id,
                     worktree_label.as_deref(),
                     workspace_roots.additional_directories(),
@@ -831,35 +794,22 @@ async fn termination_pty_integration_helper(termination: termination::Coordinato
 }
 
 /// Print a hint showing how to resume the session.
-fn print_resume_hint(
-    mode: UiMode,
-    session_id: &str,
-    worktree_label: Option<&str>,
-    additional_roots: &[PathBuf],
-) {
+fn print_resume_hint(session_id: &str, worktree_label: Option<&str>, additional_roots: &[PathBuf]) {
     println!(
         "{}",
-        resume_hint_output(mode, session_id, worktree_label, additional_roots)
+        resume_hint_output(session_id, worktree_label, additional_roots)
     );
 }
 
-/// Build the post-session resume hint text.
-///
-/// Inline mode leaves the cursor on the host shell's prompt row after teardown,
-/// so a bare `println!` writes the hint onto that row where the shell overwrites
-/// it when it repaints its prompt — the same collision `handle_worktree_after_tui`
-/// avoids for worktree output. Leading with a newline moves off the prompt row
-/// first. Fullscreen restores via the primary buffer, so its output already
-/// lands on a fresh line and needs no lead.
+/// Build the post-session resume hint text. Fullscreen restores via the
+/// primary buffer, so its output already lands on a fresh line.
 fn resume_hint_output(
-    mode: UiMode,
     session_id: &str,
     worktree_label: Option<&str>,
     additional_roots: &[PathBuf],
 ) -> String {
-    let lead = if mode == UiMode::InlineChat { "\n" } else { "" };
     format!(
-        "{lead}To resume: {}",
+        "To resume: {}",
         resume_hint_command(session_id, worktree_label, additional_roots)
     )
 }
@@ -1140,7 +1090,6 @@ async fn run_resume(
     let worktree_label = worktree_label(worktree.as_ref());
     let project_label = project_label(&cwd);
     let cfg = Config::load(&config::default_config_path())?;
-    let mode = effective_ui_mode(args.fullscreen_tui, &cfg);
     let mut resume_roster = if args.list {
         roster::resolve(&cfg, &cwd).await?
     } else {
@@ -1222,7 +1171,7 @@ async fn run_resume(
             }
         }
         if worktree.as_ref().is_some_and(|w| w.was_created) {
-            let _ = handle_worktree_after_tui(worktree.as_ref(), None);
+            let _ = handle_worktree_after_tui(worktree.as_ref());
         }
         return Ok(());
     }
@@ -1264,17 +1213,14 @@ async fn run_resume(
                 title,
             }),
             Some(agent),
-            args.fullscreen_tui,
         )
         .await;
-        let mode = post_session_ui_mode(args.fullscreen_tui);
-        let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
+        let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
         // Show resume hint for the session we just ran
         if let Ok(Some(resumed_id)) = &result
             && worktree_kept
         {
             print_resume_hint(
-                mode,
                 resumed_id,
                 worktree_label.as_deref(),
                 workspace_roots.additional_directories(),
@@ -1293,7 +1239,7 @@ async fn run_resume(
             list_agent_sessions(&resume_roster, &cwd, args.agent_stderr.as_deref()).await;
         if sessions.is_empty() {
             eprintln!("No sessions available.");
-            let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
+            let _ = handle_worktree_after_tui(worktree.as_ref());
             return Ok(());
         }
 
@@ -1310,7 +1256,7 @@ async fn run_resume(
         match outcome {
             session::ResumeOutcome::Cancelled => {
                 eprintln!("Cancelled.");
-                let _ = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
+                let _ = handle_worktree_after_tui(worktree.as_ref());
                 return Ok(());
             }
             session::ResumeOutcome::DeleteRequested(entry) => {
@@ -1358,17 +1304,14 @@ async fn run_resume(
                         title: session_title,
                     }),
                     Some(agent),
-                    args.fullscreen_tui,
                 )
                 .await;
-                let mode = post_session_ui_mode(args.fullscreen_tui);
-                let worktree_kept = handle_worktree_after_tui(worktree.as_ref(), Some(mode));
+                let worktree_kept = handle_worktree_after_tui(worktree.as_ref());
                 // Show resume hint for the session we just ran
                 if let Ok(Some(resumed_id)) = &result
                     && worktree_kept
                 {
                     print_resume_hint(
-                        mode,
                         resumed_id,
                         worktree_label.as_deref(),
                         workspace_roots.additional_directories(),
@@ -1452,23 +1395,10 @@ fn project_label(cwd: &std::path::Path) -> String {
     mj_core::paths::display_path_with_tilde(cwd)
 }
 
-fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>, mode: Option<UiMode>) -> bool {
+fn handle_worktree_after_tui(worktree: Option<&CreatedWorktree>) -> bool {
     let Some(w) = worktree else {
         return true;
     };
-
-    if mode == Some(UiMode::InlineChat) {
-        // Inline mode restores the cursor to the host prompt row. Move to a
-        // fresh line before printing post-session worktree messages so they do
-        // not end up appended to the shell prompt.
-        let stdout = std::io::stdout();
-        let mut output = stdout.lock();
-        if let Err(e) = writeln!(output) {
-            tracing::warn!("worktree cleanup spacing failed: {e}");
-        } else if let Err(e) = output.flush() {
-            tracing::warn!("worktree cleanup spacing flush failed: {e}");
-        }
-    }
 
     // Remind the user where the worktree lives so they don't lose track
     // of their work — the alt-screen has just been torn down, so writes
@@ -1825,7 +1755,6 @@ async fn run_app(
     worktree_label: Option<String>,
     resume_target: Option<ResumeTarget>,
     initial_agent: Option<SelectedAgent>,
-    fullscreen_tui: bool,
 ) -> Result<Option<String>> {
     let termination = runtime_options.termination.clone();
     let config_path = config::default_config_path();
@@ -1883,7 +1812,6 @@ async fn run_app(
     let mut primary_agent = selected_agent_for_role(&roster.primary);
     // Computed after onboarding so a freshly picked interface preference
     // shapes the very first session.
-    let mut mode = effective_ui_mode(fullscreen_tui, &cfg);
 
     // Consume resume_session and any pinned resume launch on the first
     // iteration only. Fresh sessions always use the resolved primary agent.
@@ -1929,7 +1857,6 @@ async fn run_app(
             resume.as_ref().map(|target| target.session_id.clone()),
             primary_session_handoff,
             session_import_source.is_some(),
-            mode,
             cfg.theme,
             cfg.spinner,
             session_boundary,
@@ -1954,7 +1881,6 @@ async fn run_app(
                 }
                 roster = resolved;
                 primary_agent = selected_agent_for_role(&roster.primary);
-                mode = effective_ui_mode(fullscreen_tui, &cfg);
                 initial_agent = Some(primary_agent.clone());
                 pending_new_session_boundary = show_new_session_boundary;
                 if session_result.reason == UiExitReason::ClearSession {
@@ -1975,7 +1901,6 @@ async fn run_app(
                 let new_primary = resolved.primary.clone();
                 roster = resolved;
                 primary_agent = selected_agent_for_role(&roster.primary);
-                mode = effective_ui_mode(fullscreen_tui, &cfg);
                 initial_agent = Some(primary_agent.clone());
                 pending_primary_session_handoff = pick_handoff_detail(
                     session_result.primary_session_handoff,
@@ -2406,10 +2331,10 @@ async fn run_session_picker_once(
 }
 
 async fn settle_after_fullscreen_picker_restore() {
-    // Let the terminal finish leaving the alternate screen before the inline
-    // viewport asks for a cursor position. Without this, some terminals answer
-    // the CPR query late enough that crossterm times out and leaks the response
-    // back to the shell prompt.
+    // Let the terminal finish leaving the alternate screen before the next
+    // terminal setup asks for a cursor position. Without this, some terminals
+    // answer the CPR query late enough that crossterm times out and leaks the
+    // response back to the shell prompt.
     tokio::time::sleep(Duration::from_millis(75)).await;
 }
 
@@ -2469,7 +2394,6 @@ async fn run_session(
     resume_session: Option<String>,
     mut primary_session_handoff: Option<String>,
     import_resumed_session: bool,
-    mode: UiMode,
     mut theme_kind: theme::TerminalThemeKind,
     mut spinner_style: spinner::SpinnerStyle,
     mut session_boundary: Option<String>,
@@ -2479,7 +2403,7 @@ async fn run_session(
     subagents_config: config::SubagentsConfig,
     termination: CancellationToken,
 ) -> Result<RunSessionResult> {
-    let mut terminal = SessionTerminal::fresh(mode)?;
+    let mut terminal = SessionTerminal::fresh()?;
     let session_tag = format!(
         "{}-{}",
         std::process::id(),
@@ -3203,7 +3127,6 @@ async fn run_session(
                     transcript_export_dir: export_dir.as_deref(),
                     config_path: Some(&config_path),
                 },
-                mode,
                 theme_kind,
                 spinner_style,
                 thought_output: ui_config.thought_output,
@@ -3261,10 +3184,10 @@ async fn run_session(
 
         // Only the session picker (LoadSession) needs the active session UI
         // torn down before it draws. Every other outcome — quit, /new, /clear,
-        // or an error — keeps the session UI on screen (the inline prompt, or
-        // the fullscreen alt-screen) while the runtime shuts down below; the
-        // terminal is restored just before we return, so the user never watches
-        // a cleared viewport or a bare primary buffer during teardown.
+        // or an error — keeps the session UI on the alternate screen while the
+        // runtime shuts down below; the terminal is restored just before we
+        // return, so the user never watches a cleared viewport or a bare
+        // primary buffer during teardown.
         let result = match ui_result {
             Ok(result) if result.reason == UiExitReason::LoadSession => result,
             other => break other.map(Into::into),
@@ -3344,7 +3267,7 @@ async fn run_session(
                 }
                 // A fresh terminal starts unrestored, so the exit path will
                 // restore it again — no manual bookkeeping needed.
-                terminal = match SessionTerminal::fresh(mode) {
+                terminal = match SessionTerminal::fresh() {
                     Ok(terminal) => terminal,
                     Err(e) => {
                         let _ = cmd_tx.send(UiCommand::Shutdown);
@@ -3556,20 +3479,12 @@ fn isolated_subagent_roles(
     Ok((roles, guard))
 }
 
-fn setup_session_terminal(mode: UiMode) -> Result<mj_tui::Terminal> {
-    match mode {
-        UiMode::InlineChat => {
-            ui::setup_inline_chat_terminal(ui::INLINE_CHAT_HEIGHT).context("setup terminal")
-        }
-        UiMode::FullscreenTui => ui::setup_fullscreen_terminal().context("setup terminal"),
-    }
+fn setup_session_terminal() -> Result<mj_tui::Terminal> {
+    ui::setup_fullscreen_terminal().context("setup terminal")
 }
 
-fn restore_session_terminal(terminal: &mut mj_tui::Terminal, mode: UiMode) -> Result<()> {
-    match mode {
-        UiMode::InlineChat => ui::restore_inline_chat_terminal(terminal),
-        UiMode::FullscreenTui => ui::restore_fullscreen_terminal(terminal),
-    }
+fn restore_session_terminal(terminal: &mut mj_tui::Terminal) -> Result<()> {
+    ui::restore_fullscreen_terminal(terminal)
 }
 
 type Terminal = mj_tui::Terminal;
@@ -3631,13 +3546,11 @@ impl<T, R: TerminalRestorer<T>> Drop for TerminalOwner<T, R> {
     }
 }
 
-struct SessionRestore {
-    mode: UiMode,
-}
+struct SessionRestore;
 
 impl TerminalRestorer<Terminal> for SessionRestore {
     fn restore(&mut self, terminal: &mut Terminal) -> Result<()> {
-        restore_session_terminal(terminal, self.mode)
+        restore_session_terminal(terminal)
     }
 }
 
@@ -3649,17 +3562,17 @@ impl TerminalRestorer<Terminal> for FullscreenRestore {
     }
 }
 
-/// The session terminal owns its UI mode and therefore its entire restoration
-/// context.  This makes restoration an invariant of terminal ownership rather
-/// than a responsibility of every `run_session` exit path.
+/// The session terminal owns its entire restoration context. This makes
+/// restoration an invariant of terminal ownership rather than a
+/// responsibility of every `run_session` exit path.
 struct SessionTerminal {
     owner: TerminalOwner<Terminal, SessionRestore>,
 }
 
 impl SessionTerminal {
-    fn fresh(mode: UiMode) -> Result<Self> {
+    fn fresh() -> Result<Self> {
         Ok(Self {
-            owner: TerminalOwner::new(setup_session_terminal(mode)?, SessionRestore { mode }),
+            owner: TerminalOwner::new(setup_session_terminal()?, SessionRestore),
         })
     }
 
@@ -4315,33 +4228,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_worktree_cleanup_output_starts_on_fresh_line() {
-        let mut output = Vec::new();
-        write!(&mut output, "shell$ ").expect("seed prompt");
-
-        if Some(UiMode::InlineChat) == Some(UiMode::InlineChat) {
-            writeln!(&mut output).expect("spacing newline");
-            output.flush().expect("spacing flush");
-        }
-        writeln!(
-            &mut output,
-            "Worktree: /tmp/project/.mjolnir/worktrees/pale-tide"
-        )
-        .expect("worktree line");
-        write!(&mut output, "Remove worktree 'pale-tide'? [y/N] ").expect("prompt");
-
-        let rendered = String::from_utf8(output).expect("utf8");
-        assert!(
-            rendered.starts_with("shell$ \nWorktree: /tmp/project/.mjolnir/worktrees/pale-tide\n"),
-            "inline cleanup output should begin on a fresh line: {rendered:?}"
-        );
-        assert!(
-            rendered.contains("\nRemove worktree 'pale-tide'? [y/N] "),
-            "cleanup prompt should not share the shell prompt line: {rendered:?}"
-        );
-    }
-
-    #[test]
     fn session_result_updates_supervisor_theme_before_next_action() {
         let mut cfg = Config::default();
         let result = RunSessionResult {
@@ -4670,20 +4556,6 @@ mod tests {
             );
             assert_eq!(config::PermissionPreset::from(input), expected_config);
         }
-
-        assert_eq!(ui_mode(false), UiMode::InlineChat);
-        assert_eq!(ui_mode(true), UiMode::FullscreenTui);
-    }
-
-    #[test]
-    fn configured_interface_drives_the_ui_mode_with_a_cli_override() {
-        let mut cfg = Config::default();
-        assert_eq!(effective_ui_mode(false, &cfg), UiMode::InlineChat);
-        assert_eq!(effective_ui_mode(true, &cfg), UiMode::FullscreenTui);
-
-        cfg.interface = config::InterfaceMode::Fullscreen;
-        assert_eq!(effective_ui_mode(false, &cfg), UiMode::FullscreenTui);
-        assert_eq!(effective_ui_mode(true, &cfg), UiMode::FullscreenTui);
     }
 
     #[test]
@@ -4693,24 +4565,6 @@ mod tests {
 
         let cli = try_parse_hermetic(&["mj", "-w", "named-tree"]).expect("parse");
         assert_eq!(cli.worktree.as_deref(), Some("named-tree"));
-    }
-
-    #[test]
-    fn parse_accepts_fullscreen_tui_flags() {
-        let cli = try_parse_hermetic(&["mj", "--fullscreen-tui"]).expect("parse");
-        assert!(cli.fullscreen_tui);
-
-        let cli = try_parse_hermetic(&["mj", "resume", "sess-123", "--fullscreen-tui"])
-            .expect("parse resume");
-        if let Some(Commands::Resume(args)) = cli.command {
-            assert!(args.fullscreen_tui);
-        } else {
-            panic!("expected Resume subcommand");
-        }
-
-        let cli = try_parse_hermetic(&["mj", "--fullscreen-tui", "resume", "sess-123"])
-            .expect("parse top-level resume");
-        assert!(cli.fullscreen_tui);
     }
 
     /// Parse argv with every env-backed default detached. Tests must use this
@@ -4834,7 +4688,6 @@ mod tests {
         assert!(help.contains("[aliases: --log-file]"));
         assert!(help.contains("--fs-max-text-bytes <FS_MAX_TEXT_BYTES>"));
         assert!(help.contains("-w, --worktree [<WORKTREE>]"));
-        assert!(help.contains("--fullscreen-tui"));
         assert!(!help.contains("--resume-session"));
         assert!(help.contains("[possible values: manual, auto, yolo]"));
         assert!(!help.contains("acceptEdits"));
@@ -5336,7 +5189,7 @@ mod tests {
             prepare_worktree_for_arg(cwd.clone(), None).expect("plain cwd"),
             (cwd, None)
         );
-        assert!(handle_worktree_after_tui(None, Some(UiMode::InlineChat)));
+        assert!(handle_worktree_after_tui(None));
 
         let worktree = CreatedWorktree {
             project_root: PathBuf::from("/tmp/project"),
@@ -5369,15 +5222,11 @@ mod tests {
     }
 
     #[test]
-    fn resume_hint_leads_with_newline_in_inline_mode_only() {
-        // Inline teardown leaves the cursor on the host shell's prompt row, so
-        // the hint must start on a fresh line to survive the shell repaint.
-        let inline = resume_hint_output(UiMode::InlineChat, "sess-123", None, &[]);
-        assert_eq!(inline, "\nTo resume: mj resume sess-123");
-
-        // Fullscreen restores via the primary buffer and needs no lead.
-        let fullscreen = resume_hint_output(UiMode::FullscreenTui, "sess-123", None, &[]);
-        assert_eq!(fullscreen, "To resume: mj resume sess-123");
+    fn resume_hint_needs_no_lead_after_fullscreen_teardown() {
+        // Fullscreen restores via the primary buffer, so the hint already
+        // lands on a fresh line.
+        let hint = resume_hint_output("sess-123", None, &[]);
+        assert_eq!(hint, "To resume: mj resume sess-123");
     }
 
     #[test]
