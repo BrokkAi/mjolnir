@@ -3957,15 +3957,17 @@ impl AppState {
 
     /// Open the value picker for one config option. Returns `true` if it
     /// became visible.
-    /// Live session config options the F1-F8 shortcut row can edit, paired
-    /// with their indices into `session_config_options`. Only select-style
-    /// options with at least one advertised value can open a picker.
+    /// Generic live session config options the F1-F8 shortcut row can edit,
+    /// paired with their indices into `session_config_options`. Model and
+    /// reasoning effort have dedicated `/model` and `/effort` pickers.
     pub fn selectable_config_options(&self) -> Vec<(usize, &SessionConfigOption)> {
         self.session_config_options
             .iter()
             .enumerate()
             .filter(|(_, option)| {
-                config_option_choices(option).is_some_and(|choices| !choices.is_empty())
+                !matches!(option.category, Some(SessionConfigOptionCategory::Model))
+                    && !mj_core::settings::session_option_controls_reasoning_effort(option)
+                    && config_option_choices(option).is_some_and(|choices| !choices.is_empty())
             })
             .collect()
     }
@@ -9041,6 +9043,39 @@ mod tests {
         assert_eq!(s.session_config_options.len(), 1);
         assert_eq!(s.current_mode.as_deref(), Some("medium"));
         assert_eq!(s.primary_reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn session_shortcuts_exclude_model_and_reasoning_effort() {
+        let mut s = AppState::new();
+        s.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![SessionConfigSelectOption::new("model-1", "Model 1")],
+            )
+            .category(Some(SessionConfigOptionCategory::Model)),
+            SessionConfigOption::select(
+                crate::acp::REASONING_EFFORT_CONFIG_ID,
+                "Reasoning effort",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            )
+            // Codex ACP historically categorized this as a model option.
+            .category(Some(SessionConfigOptionCategory::Model)),
+            SessionConfigOption::select(
+                "service_tier",
+                "Service tier",
+                "priority",
+                vec![SessionConfigSelectOption::new("priority", "Priority")],
+            ),
+        ];
+
+        let shortcuts = s.selectable_config_options();
+        assert_eq!(shortcuts.len(), 1);
+        assert_eq!(shortcuts[0].0, 2);
+        assert_eq!(shortcuts[0].1.id.to_string(), "service_tier");
     }
 
     #[test]

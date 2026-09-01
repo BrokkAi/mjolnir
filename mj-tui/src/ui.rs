@@ -17657,14 +17657,14 @@ mod tests {
         ];
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
 
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(1)));
         assert_eq!(
             state
                 .config_picker
                 .as_ref()
                 .map(|picker| picker.selected_option),
             Some(1),
-            "F2 opens the second advertised option"
+            "F1 opens the first generic option"
         );
 
         state.config_picker_move(1);
@@ -17717,11 +17717,8 @@ mod tests {
             .draw(|frame| draw_config_shortcuts_row(frame, frame.area(), &state))
             .expect("draw");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("[F1 Model: Model 1]"),
-            "rendered:\n{rendered}"
-        );
-        assert!(rendered.contains("[F2 Mode: Ask]"), "rendered:\n{rendered}");
+        assert!(rendered.contains("[F1 Mode: Ask]"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Model"), "rendered:\n{rendered}");
 
         // A closed runtime can no longer apply an edit, so the row leaves.
         state.runtime_closed = true;
