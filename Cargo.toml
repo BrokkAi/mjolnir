@@ -22,7 +22,7 @@ default-members = [".", "mj-core", "mj-agents", "mj-tui", "mj-remote"]
 # Single source of truth for the release version; workspace crates inherit it, so
 # they cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
-version = "1.16.0"
+version = "1.17.0"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-3.0-only"
@@ -35,12 +35,12 @@ categories = ["development-tools", "command-line-utilities"]
 # published path dependencies to carry a registry version, but release bumps
 # should still change that version in one manifest rather than in every crate.
 [workspace.dependencies]
-mj-core = { package = "brokk-mj-core", path = "mj-core", version = "1.16.0" }
-mj-agents = { package = "brokk-mj-agents", path = "mj-agents", version = "1.16.0" }
-mj-anvil = { package = "brokk-mj-anvil", path = "mj-anvil", version = "1.16.0" }
-mj-tui = { package = "brokk-mj-tui", path = "mj-tui", version = "1.16.0" }
-mj-remote = { package = "brokk-mj-remote", path = "mj-remote", version = "1.16.0" }
-mj-desktop = { package = "brokk-mj-desktop", path = "mj-desktop", version = "1.16.0" }
+mj-core = { package = "brokk-mj-core", path = "mj-core", version = "1.17.0" }
+mj-agents = { package = "brokk-mj-agents", path = "mj-agents", version = "1.17.0" }
+mj-anvil = { package = "brokk-mj-anvil", path = "mj-anvil", version = "1.17.0" }
+mj-tui = { package = "brokk-mj-tui", path = "mj-tui", version = "1.17.0" }
+mj-remote = { package = "brokk-mj-remote", path = "mj-remote", version = "1.17.0" }
+mj-desktop = { package = "brokk-mj-desktop", path = "mj-desktop", version = "1.17.0" }
 
 [[bin]]
 name = "mj"
