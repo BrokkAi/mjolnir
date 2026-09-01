@@ -22,10 +22,13 @@ pub fn is_configurable_acp_server(id: &str) -> bool {
 }
 
 /// Top-level `/mjconfig` panels shared by every interactive frontend.
+///
+/// The primary agent has no panel: its live model and reasoning effort are
+/// driven by the `/model` and `/effort` commands and the session-config
+/// shortcut row instead of saved `/mjconfig` defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     Team,
-    Agents,
     Reviewer,
     Subagents,
     AcpServers,
@@ -34,9 +37,8 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Team,
-        Self::Agents,
         Self::Reviewer,
         Self::Subagents,
         Self::AcpServers,
@@ -47,7 +49,6 @@ impl SettingsTab {
     pub const fn id(self) -> &'static str {
         match self {
             Self::Team => "team",
-            Self::Agents => "agents",
             Self::Reviewer => "reviewer",
             Self::Subagents => "subagents",
             Self::AcpServers => "servers",
@@ -59,7 +60,6 @@ impl SettingsTab {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Team => "Team",
-            Self::Agents => "Agent",
             Self::Reviewer => "Reviewer",
             Self::Subagents => "Subagents",
             Self::AcpServers => "ACP Servers",
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn catalog_includes_the_input_panel() {
-        assert_eq!(SettingsTab::ALL[5], SettingsTab::Input);
+        assert_eq!(SettingsTab::ALL[4], SettingsTab::Input);
         assert_eq!(SettingsTab::Input.id(), "input");
         assert_eq!(SettingsTab::Input.label(), "Input");
     }

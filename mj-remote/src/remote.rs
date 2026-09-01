@@ -5247,9 +5247,6 @@ struct MjConfigSnapshot {
     team: MjTeamPanel,
     agents: MjAgentsPanel,
     acp_servers: MjServersPanel,
-    /// Session options for the primary seat's bound ACP source, mirroring the
-    /// TUI's role-scoped Agent panel rows. `None` when no source has options.
-    primary_options: Option<MjSessionOptionsGroup>,
     /// Session options for the reviewer seat's bound ACP source.
     review_options: Option<MjSessionOptionsGroup>,
     /// Session options for the subagent seat, mirroring the Subagents panel.
@@ -5559,7 +5556,6 @@ struct MjLoginStatus {
 struct MjConfigApplyRequest {
     /// One of the four supported coder/reviewer team ids.
     team: Option<String>,
-    primary_model: Option<String>,
     review_model: Option<String>,
     subagents_model: Option<String>,
     review_permission: Option<String>,
@@ -5585,10 +5581,6 @@ struct MjConfigApplyRequest {
     voice_auto_send: Option<String>,
     /// Server id → `auto` | `enabled` | `disabled`.
     server_policies: Option<BTreeMap<String, String>>,
-    /// Server id → option key → value written to the primary seat's
-    /// role-scoped defaults (`agent.session_defaults`), like the TUI's
-    /// Agent panel.
-    primary_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
     /// Server id → option key → value for the reviewer seat
     /// (`review.session_defaults`).
     review_session_defaults: Option<BTreeMap<String, BTreeMap<String, String>>>,
@@ -5945,10 +5937,6 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             .find(|group| group.server_id == source)
             .cloned()
     };
-    let primary_options = selected_options(
-        crate::settings::SessionDefaultsSeat::Primary,
-        &primary_option_sources,
-    );
     let review_options = selected_options(
         crate::settings::SessionDefaultsSeat::Review,
         &review_option_sources,
@@ -6105,7 +6093,6 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
             auto_failover: config.subagents.auto_failover,
         },
         acp_servers: MjServersPanel { accounts, servers },
-        primary_options,
         review_options,
         subagent_options,
         session_options,
@@ -6272,9 +6259,6 @@ fn mjconfig_apply_edits(
             .ok_or_else(|| bad_request(format!("unknown team: {team}")))?;
         preset.apply(config);
     }
-    if let Some(model) = request.primary_model {
-        config.agent.model = model;
-    }
     if let Some(model) = request.review_model {
         config.review.model = model;
     }
@@ -6377,10 +6361,6 @@ fn mjconfig_apply_edits(
     // probed models and session options.
     let effective_inventory = roster::rediscover_inventory(config, inventory);
     for (defaults, seat) in [
-        (
-            request.primary_session_defaults,
-            crate::settings::SessionDefaultsSeat::Primary,
-        ),
         (
             request.review_session_defaults,
             crate::settings::SessionDefaultsSeat::Review,
@@ -11308,10 +11288,6 @@ mod tests {
         );
 
         assert!(
-            snapshot.get("primary_options").is_some(),
-            "primary_options key present"
-        );
-        assert!(
             snapshot.get("review_options").is_some(),
             "review_options key present"
         );
@@ -11557,7 +11533,7 @@ mod tests {
         // priority source advertising options — the server we seeded. The
         // delegated Codex permission control owns `mode`, so it cannot become
         // a competing reviewer/subagent session-default override.
-        for seat in ["primary_options", "review_options", "subagent_options"] {
+        for seat in ["review_options", "subagent_options"] {
             let group = &snapshot[seat];
             assert_eq!(group["server_id"], server_id.as_str(), "{seat} server");
             let options = group["options"].as_array().expect("options");
@@ -11574,10 +11550,29 @@ mod tests {
                     .iter()
                     .filter(|option| option["key"] == "config:mode")
                     .count(),
-                usize::from(seat == "primary_options"),
+                0,
                 "{seat} mode visibility"
             );
         }
+        // The primary seat's option catalog is the only place `mode` may
+        // surface: the primary seat has no delegated permission control.
+        let primary_groups = snapshot["session_options"]["primary"]
+            .as_array()
+            .expect("primary session-option catalog");
+        let primary_group = primary_groups
+            .iter()
+            .find(|group| group["server_id"] == server_id.as_str())
+            .expect("primary catalog group for the seeded server");
+        assert_eq!(
+            primary_group["options"]
+                .as_array()
+                .expect("primary options")
+                .iter()
+                .filter(|option| option["key"] == "config:mode")
+                .count(),
+            1,
+            "config:mode appears only for the primary seat"
+        );
     }
 
     #[tokio::test]
@@ -11706,7 +11701,7 @@ mod tests {
                     && group["options"][0]["key"] == "config:claude_thinking_budget"
             }));
         }
-        for current in ["primary_options", "review_options", "subagent_options"] {
+        for current in ["review_options", "subagent_options"] {
             assert_eq!(snapshot[current]["server_id"], "claude-acp", "{current}");
         }
     }
@@ -11865,8 +11860,8 @@ mod tests {
                 "POST",
                 Some(token),
                 Some(serde_json::json!({
-                    "primary_model": "claude-provider-model",
-                    "primary_session_defaults": {
+                    "review_model": "claude-provider-model",
+                    "review_session_defaults": {
                         "claude-acp": { "config:thinking": "medium" },
                         "codex-acp": { "config:reasoning_effort": "high" }
                     }
@@ -11877,14 +11872,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
-        assert_eq!(saved.agent.model, "claude-provider-model");
-        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(saved.review.model, "claude-provider-model");
+        assert_eq!(saved.review.reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(
-            saved.agent.session_defaults["claude-acp"]["config:thinking"],
+            saved.review.session_defaults["claude-acp"]["config:thinking"],
             "medium"
         );
         assert_eq!(
-            saved.agent.session_defaults["codex-acp"]["config:reasoning_effort"],
+            saved.review.session_defaults["codex-acp"]["config:reasoning_effort"],
             "high"
         );
     }
@@ -11924,8 +11919,8 @@ mod tests {
             // The default priority would resolve codex-acp; the live session
             // the panel was rendered against runs on claude-acp.
             discovery.active_models = Some(config::ModelsConfig {
-                primary: "auto".to_string(),
-                primary_source: Some("claude-acp".to_string()),
+                review: "auto".to_string(),
+                review_source: Some("claude-acp".to_string()),
                 ..config::ModelsConfig::default()
             });
         }
@@ -11937,7 +11932,7 @@ mod tests {
                 "POST",
                 Some(token),
                 Some(serde_json::json!({
-                    "primary_session_defaults": {
+                    "review_session_defaults": {
                         "claude-acp": { "config:thinking": "medium" },
                         "codex-acp": { "config:thinking": "high" }
                     }
@@ -11948,9 +11943,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
-        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(saved.review.reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(
-            saved.agent.session_defaults["codex-acp"]["config:thinking"],
+            saved.review.session_defaults["codex-acp"]["config:thinking"],
             "high"
         );
     }
@@ -11977,7 +11972,7 @@ mod tests {
                 "POST",
                 Some(token),
                 Some(serde_json::json!({
-                    "primary_session_defaults": {
+                    "review_session_defaults": {
                         "codex-acp": { "config:reasoning_effort": "high" }
                     }
                 })),
@@ -11987,7 +11982,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
-        assert_eq!(saved.agent.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(saved.review.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[tokio::test]
@@ -12013,7 +12008,6 @@ mod tests {
                 Some(token),
                 Some(serde_json::json!({
                     "team": "claude_codex",
-                    "primary_model": "gpt-5-6-terra",
                     "review_permission": "manual",
                     "subagents_permission": "yolo",
                     "discrete_review": false,
@@ -12030,9 +12024,6 @@ mod tests {
                     "feature_hints": false,
                     "keep_awake": false,
                     "voice_auto_send": "four_seconds",
-                    "primary_session_defaults": {
-                        "codex-acp": { "config:collaboration_mode": "yolo" }
-                    },
                     "review_session_defaults": {
                         "codex-acp": { "config:reasoning_effort": "high" }
                     },
@@ -12045,14 +12036,9 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         let snapshot = json_body(response).await;
-        assert_eq!(snapshot["agents"]["roles"][0]["model"], "gpt-5-6-terra");
         assert_eq!(
             snapshot["agents"]["roles"][0]["active_model"],
             "active-primary-model"
-        );
-        assert_eq!(
-            snapshot["agents"]["roles"][0]["model_warning"],
-            "not reported this session"
         );
         assert_eq!(snapshot["agents"]["discrete_review"], false);
         assert_eq!(snapshot["agents"]["mcp_discrete_review"], true);
@@ -12089,7 +12075,6 @@ mod tests {
         assert_eq!(snapshot["team"]["selected"], "claude_codex");
 
         let saved = config::Config::load(&config_path).expect("reload saved config");
-        assert_eq!(saved.agent.model, "gpt-5-6-terra");
         assert!(!saved.agent.discrete_review);
         assert!(saved.agent.mcp_discrete_review);
         assert!(!saved.agent.bifrost_analysis);
@@ -12110,15 +12095,6 @@ mod tests {
         assert_eq!(saved.voice_auto_send, config::VoiceAutoSend::FourSeconds);
         assert_eq!(saved.review.permission, config::PermissionPreset::Manual);
         assert_eq!(saved.subagents.permission, config::PermissionPreset::Yolo);
-        assert_eq!(
-            saved
-                .agent
-                .session_defaults
-                .get("codex-acp")
-                .and_then(|entry| entry.get("config:collaboration_mode"))
-                .map(String::as_str),
-            Some("yolo")
-        );
         assert_eq!(
             saved
                 .review
@@ -12177,6 +12153,13 @@ mod tests {
     #[tokio::test]
     async fn mjconfig_apply_flips_stranded_models_to_auto_with_notice() {
         let runtime = test_mjconfig_runtime();
+        let config_path = runtime.config_path.clone();
+        // The primary model is no longer settable over the apply wire; seed
+        // the saved config with the codex-routed pin instead.
+        let mut config = config::Config::default();
+        config::TeamPreset::Codex.apply(&mut config);
+        config.agent.model = "model-a".to_string();
+        config.save(&config_path).expect("seed config");
         runtime.discovery.lock().expect("discovery lock").choices = vec![roster::ModelChoice {
             model: "model-a".to_string(),
             pass_at_1: 0.5,
@@ -12189,14 +12172,13 @@ mod tests {
         let token = "mjconfig-token";
         let app = mjconfig_test_router(runtime, token);
 
-        // Pin the primary to the codex-routed model, then disable codex in the
-        // same save: the seat flips back to auto and the notice says why.
+        // The primary is pinned to the codex-routed model; disabling codex in
+        // the save flips the seat back to auto and the notice says why.
         let response = app
             .oneshot(mjconfig_request(
                 "POST",
                 Some(token),
                 Some(serde_json::json!({
-                    "primary_model": "model-a",
                     "server_policies": { "codex-acp": "disabled" }
                 })),
             ))
@@ -13008,13 +12990,12 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         let viewer = include_str!("remote_viewer.html");
         assert!(viewer.contains("mjcfg.snapshot?.tabs || []"));
         assert!(viewer.contains("case \"input\":"));
-        assert!(viewer.contains("snapshot.primary_options"));
+        assert!(!viewer.contains("snapshot.primary_options"));
         assert!(viewer.contains("snapshot.review_options"));
         assert!(viewer.contains("snapshot.subagent_options"));
         assert!(viewer.contains("snapshot?.session_options?.[seat]"));
         assert!(viewer.contains("choice.model === model)?.source"));
         assert!(viewer.contains("review_session_defaults"));
-        assert!(viewer.contains("active: ${activeLabel}"));
         assert!(viewer.contains("value !== role.active_model"));
         assert!(viewer.contains("role.model_warning"));
         assert!(viewer.contains("is unavailable on ${group.server_id}"));
@@ -13029,7 +13010,10 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         assert!(viewer.contains("snapshot.probing"));
         assert!(viewer.contains("previous.discovery_revision"));
         assert!(viewer.contains("Discovering ACP session options"));
-        assert!(viewer.contains("openMjConfig(\"agents\")"));
+        // The composer's session-config button opens the Team tab now that
+        // the Agent panel is gone from the shared catalog.
+        assert!(!viewer.contains("openMjConfig(\"agents\")"));
+        assert!(viewer.contains("openMjConfig(\"team\")"));
         assert!(viewer.contains("function renderMjTeam()"));
         // Re-choosing the persisted team unstages the destructive re-apply.
         assert!(viewer.contains("delete mjcfg.edits.team;"));
@@ -13115,7 +13099,6 @@ const role = {{
   ],
 }};
 for (const [field, seat] of [
-  ["primary_model", "primary"],
   ["review_model", "review"],
   ["subagents_model", "subagents"],
 ]) {{

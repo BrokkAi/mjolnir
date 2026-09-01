@@ -2455,7 +2455,6 @@ impl AppState {
             initial_config: config.clone(),
             editor: SettingsEditor::new(config, self.model_choices.clone(), notice)
                 .with_active_models(self.active_models.clone())
-                .with_active_session_config(self.session_config_options.clone())
                 .with_inventory(self.acp_inventory.clone()),
             orig_theme: self.theme_kind,
             orig_spinner: self.spinner_style,
@@ -3983,6 +3982,19 @@ impl AppState {
 
     /// Open the value picker for one config option. Returns `true` if it
     /// became visible.
+    /// Live session config options the F1-F8 shortcut row can edit, paired
+    /// with their indices into `session_config_options`. Only select-style
+    /// options with at least one advertised value can open a picker.
+    pub fn selectable_config_options(&self) -> Vec<(usize, &SessionConfigOption)> {
+        self.session_config_options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| {
+                config_option_choices(option).is_some_and(|choices| !choices.is_empty())
+            })
+            .collect()
+    }
+
     pub fn open_config_value_picker(&mut self, option_index: usize) -> bool {
         if self.runtime_closed {
             return false;

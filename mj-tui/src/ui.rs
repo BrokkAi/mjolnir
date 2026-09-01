@@ -2286,6 +2286,15 @@ fn handle_crossterm(
         return handle_config_picker_key(state, cmd_tx, key.modifiers, key.code);
     }
 
+    // F1-F8 jump straight into the live session config options mirrored in
+    // the shortcut row under the quota numbers.
+    if key.modifiers.is_empty()
+        && let KeyCode::F(n @ 1..=8) = key.code
+    {
+        open_config_shortcut_picker(state, usize::from(n) - 1);
+        return TerminalRequest::None;
+    }
+
     let search_was_active = state.transcript_search.is_some();
     if handle_active_transcript_search_key(state, key.modifiers, key.code) {
         return TerminalRequest::None;
@@ -4700,6 +4709,29 @@ fn open_live_session_config_picker(state: &mut AppState, command: &str) {
     }
 }
 
+/// One of the F1-F8 session-config shortcuts: open the value picker for the
+/// option the shortcut row shows at that position. Unassigned shortcuts are
+/// ignored so stray function keys never disturb the prompt.
+fn open_config_shortcut_picker(state: &mut AppState, shortcut_index: usize) {
+    if state.runtime_closed {
+        return;
+    }
+    if state.session_id.is_none() {
+        state.announce_waiting_for_primary();
+        return;
+    }
+    let Some((option_index, option_name)) = state
+        .selectable_config_options()
+        .get(shortcut_index)
+        .map(|(option_index, option)| (*option_index, option.name.clone()))
+    else {
+        return;
+    };
+    if state.open_config_value_picker(option_index) {
+        state.status_line = Some(StatusMessage::info(format!("editing {option_name}")));
+    }
+}
+
 fn discrete_review_command_arguments(text: &str) -> Option<&str> {
     ["/discrete-review", "/adversarial-review"]
         .into_iter()
@@ -6671,6 +6703,7 @@ fn draw(
     ensure_transcript_search_matches(state);
 
     let usage_quota_rows = usage_quota_row_count(state, f.area().width) as u16;
+    let config_shortcut_rows = config_shortcuts_row_count(state, f.area().width);
 
     // Dynamic input height: borders (2) + chip rows + text lines, clamped.
     let chip_rows = attachment_count(state);
@@ -6694,6 +6727,7 @@ fn draw(
             Constraint::Length(input_height),
             Constraint::Length(1),
             Constraint::Length(usage_quota_rows),
+            Constraint::Length(config_shortcut_rows),
         ])
         .split(f.area());
 
@@ -6734,6 +6768,7 @@ fn draw(
     draw_input(f, chunks[6], state);
     draw_status_line(f, chunks[7], state);
     draw_usage_quota_row(f, chunks[8], state);
+    draw_config_shortcuts_row(f, chunks[9], state);
 
     // Autocomplete sits above the input box (so it doesn't collide with
     // the cursor) and is rendered last among the input-area widgets so
@@ -12481,6 +12516,46 @@ fn usage_quota_row_count(state: &AppState, width: u16) -> usize {
     attributed_usage_quota_items(state).map_or(1, |quota_items| quota_items.len())
 }
 
+/// How many function keys the session-config shortcut row assigns. F9-F12
+/// stay on their existing bindings, so the row claims only F1-F8.
+const CONFIG_SHORTCUT_COUNT: usize = 8;
+
+/// One line of `[F1 Name: value]` chips mirroring the live session's config
+/// options below the quota numbers, so current values stay visible and one
+/// keypress away. Options past the shortcut budget still show their value.
+fn draw_config_shortcuts_row(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let options = state.selectable_config_options();
+    if options.is_empty() {
+        return;
+    }
+    let chips = options
+        .iter()
+        .enumerate()
+        .map(|(slot, (_, option))| {
+            let current = crate::app::config_option_current_value_label(option);
+            if slot < CONFIG_SHORTCUT_COUNT {
+                format!("[F{} {}: {current}]", slot + 1, option.name)
+            } else {
+                format!("[{}: {current}]", option.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let paragraph = Paragraph::new(truncate_text_to_width(chips, area.width))
+        .style(Style::default().ink(state.theme.primary));
+    f.render_widget(paragraph, area);
+}
+
+fn config_shortcuts_row_count(state: &AppState, width: u16) -> u16 {
+    if width == 0 || state.runtime_closed || state.selectable_config_options().is_empty() {
+        return 0;
+    }
+    1
+}
+
 fn usage_quota_label(state: &AppState) -> Option<String> {
     if let Some(quota_items) = attributed_usage_quota_items(state) {
         return Some(
@@ -13547,8 +13622,13 @@ fn help_modal_lines(voice_input_supported: bool, theme: TerminalTheme) -> Vec<Li
         help_blank_line(),
         help_section_line("Config", theme),
         help_binding_line(
-            "/mjconfig → Team/Agent/Reviewer/Subagents",
+            "/mjconfig → Team/Reviewer/Subagents",
             "choose the team or edit role-scoped session defaults",
+            theme,
+        ),
+        help_binding_line(
+            "F1-F8",
+            "change the live session config options shown under the quota row",
             theme,
         ),
         help_blank_line(),
@@ -17511,6 +17591,156 @@ mod tests {
     }
 
     #[test]
+    fn f_keys_open_the_shortcut_row_session_config_pickers() {
+        let mut state = ready_state_with_session();
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        state.session_config_targets = vec![
+            SessionConfigTarget::ConfigOption {
+                config_id: "model".into(),
+            },
+            SessionConfigTarget::ConfigOption {
+                config_id: "mode".into(),
+            },
+        ];
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
+        assert_eq!(
+            state
+                .config_picker
+                .as_ref()
+                .map(|picker| picker.selected_option),
+            Some(1),
+            "F2 opens the second advertised option"
+        );
+
+        state.config_picker_move(1);
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::Enter));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(UiCommand::SetSessionConfigOption {
+                target: SessionConfigTarget::ConfigOption { config_id },
+                value,
+            }) if config_id.to_string() == "mode" && value.to_string() == "code"
+        ));
+
+        // A function key past the advertised options stays inert.
+        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(5)));
+        assert!(state.config_picker.is_none());
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn config_shortcuts_row_shows_fkey_chips_for_the_live_session() {
+        let mut state = ready_state_with_session();
+        assert_eq!(config_shortcuts_row_count(&state, 80), 0);
+
+        state.session_config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "model-1",
+                vec![
+                    SessionConfigSelectOption::new("model-1", "Model 1"),
+                    SessionConfigSelectOption::new("model-2", "Model 2"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "ask",
+                vec![
+                    SessionConfigSelectOption::new("ask", "Ask"),
+                    SessionConfigSelectOption::new("code", "Code"),
+                ],
+            ),
+        ];
+        assert_eq!(config_shortcuts_row_count(&state, 80), 1);
+
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| draw_config_shortcuts_row(frame, frame.area(), &state))
+            .expect("draw");
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("[F1 Model: Model 1]"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("[F2 Mode: Ask]"),
+            "rendered:\n{rendered}"
+        );
+
+        // A closed runtime can no longer apply an edit, so the row leaves.
+        state.runtime_closed = true;
+        assert_eq!(config_shortcuts_row_count(&state, 80), 0);
+    }
+
+    #[test]
+    fn config_shortcuts_row_sits_directly_below_the_quota_row() {
+        let mut state = ready_state_with_session();
+        state.set_claude_usage(ClaudeUsageStatus::Available(ClaudeUsageReport {
+            five_hour: Some(crate::claude_usage::ClaudeUsageWindow {
+                remaining_percent: 88,
+                reset_context: None,
+            }),
+            week: Some(crate::claude_usage::ClaudeUsageWindow {
+                remaining_percent: 63,
+                reset_context: None,
+            }),
+        }));
+        state.session_config_options = vec![SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "ask",
+            vec![
+                SessionConfigSelectOption::new("ask", "Ask"),
+                SessionConfigSelectOption::new("code", "Code"),
+            ],
+        )];
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut transcript_scroll = TranscriptScrollState::default();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut transcript_scroll))
+            .expect("draw");
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let quota = lines
+            .iter()
+            .position(|line| line.contains("Claude usage: 5H 88% left"))
+            .unwrap_or_else(|| panic!("quota row missing:\n{}", lines.join("\n")));
+        assert!(
+            lines[quota + 1].contains("[F1 Mode: Ask]"),
+            "shortcut row must sit below the quota row:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
     fn slash_effort_uses_the_adapter_reasoning_effort_selector() {
         let mut state = ready_state_with_session();
         state.session_config_options = vec![
@@ -18788,7 +19018,10 @@ mod tests {
 
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("mj config"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Agent"), "rendered:\n{rendered}");
+        assert!(
+            !rendered.contains(" Agent "),
+            "the primary agent panel is retired:\n{rendered}"
+        );
         assert!(rendered.contains("Reviewer"), "rendered:\n{rendered}");
         assert!(rendered.contains("Subagents"), "rendered:\n{rendered}");
         assert!(rendered.contains("Team"), "rendered:\n{rendered}");
@@ -23494,37 +23727,6 @@ mod tests {
     }
 
     #[test]
-    fn function_key_no_longer_opens_config_value_picker() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.session_config_options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "model-1",
-                vec![
-                    SessionConfigSelectOption::new("model-1", "Model 1"),
-                    SessionConfigSelectOption::new("model-2", "Model 2"),
-                ],
-            ),
-            SessionConfigOption::select(
-                "mode",
-                "Mode",
-                "ask",
-                vec![
-                    SessionConfigSelectOption::new("ask", "Ask"),
-                    SessionConfigSelectOption::new("code", "Code"),
-                ],
-            ),
-        ];
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
-
-        assert!(state.config_picker.is_none());
-    }
-
-    #[test]
     fn inline_ctrl_digit_no_longer_opens_config_value_picker() {
         let mut state = AppState::new();
         state.session_id = Some("session-1".to_string());
@@ -23555,37 +23757,6 @@ mod tests {
             &cmd_tx,
             key_with_modifiers(KeyCode::Char('2'), KeyModifiers::CONTROL),
         );
-
-        assert!(state.config_picker.is_none());
-    }
-
-    #[test]
-    fn inline_function_key_no_longer_opens_config_value_picker() {
-        let mut state = AppState::new();
-        state.session_id = Some("session-1".to_string());
-        state.session_config_options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "model-1",
-                vec![
-                    SessionConfigSelectOption::new("model-1", "Model 1"),
-                    SessionConfigSelectOption::new("model-2", "Model 2"),
-                ],
-            ),
-            SessionConfigOption::select(
-                "mode",
-                "Mode",
-                "ask",
-                vec![
-                    SessionConfigSelectOption::new("ask", "Ask"),
-                    SessionConfigSelectOption::new("code", "Code"),
-                ],
-            ),
-        ];
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-
-        handle_crossterm(&mut state, &cmd_tx, key(KeyCode::F(2)));
 
         assert!(state.config_picker.is_none());
     }

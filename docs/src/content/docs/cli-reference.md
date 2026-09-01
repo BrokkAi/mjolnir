@@ -45,7 +45,7 @@ Web](/remote/) for behavioral boundaries.
 
 | Command | Purpose |
 | --- | --- |
-| `/mjconfig` | Configure agents, ACP servers, and appearance |
+| `/mjconfig` | Configure the team, reviewer, subagents, ACP servers, and appearance |
 | `/diff` | Show workspace changes against `HEAD` |
 | `/agents` | Show the active model selections and per-seat usage |
 | `/discrete-review` | Choose a target for the configured discrete-review tier |
@@ -67,8 +67,11 @@ installed version.
 - Up/Down navigate autocomplete and permission choices.
 - PageUp/PageDown scroll the transcript.
 - Shift+Tab (or Ctrl+Tab in terminals that can send it) switches between the
-  four Codex and Claude coder/reviewer teams. Models and reasoning effort are
-  configured per seat in `/mjconfig`.
+  four Codex and Claude coder/reviewer teams. Reviewer and subagent models and
+  reasoning effort are configured per seat in `/mjconfig`; the primary session
+  uses `/model` and `/effort`.
+- F1–F8 open the live session config options listed in the shortcut row under
+  the quota numbers.
 - Typing `@` opens workspace file autocomplete; the chosen file is attached to
   the prompt as an ACP resource link.
 - Alt+Up (or Shift+Left) pulls the newest queued prompt back into the composer

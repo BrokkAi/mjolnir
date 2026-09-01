@@ -285,7 +285,6 @@ mod tests {
         for expected in [
             "Set up Mjolnir Teams",
             "Team",
-            "Agent",
             "Reviewer",
             "Subagents",
             "ACP Servers",
@@ -331,7 +330,7 @@ mod tests {
             Some(TeamPreset::Claude)
         );
         assert_eq!(state.handle_key(KeyCode::Tab), Action::None);
-        assert_eq!(state.editor.tab, SettingsTab::Agents);
+        assert_eq!(state.editor.tab, SettingsTab::Reviewer);
     }
 
     #[test]

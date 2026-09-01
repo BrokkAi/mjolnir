@@ -43,7 +43,6 @@ pub enum SettingsAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsRow {
-    PrimaryModel,
     ReviewModel,
     ReviewPermissions,
     SubagentModel,
@@ -72,7 +71,6 @@ pub struct SettingsEditor {
     pub notice: Option<String>,
     choices: Vec<ModelChoice>,
     active_models: Option<ModelsConfig>,
-    active_session_config: Vec<SessionConfigOption>,
     inventory: AcpInventory,
     bifrost_versions: Vec<String>,
     bifrost_versions_loading: bool,
@@ -98,7 +96,6 @@ impl SettingsEditor {
             notice,
             choices,
             active_models: None,
-            active_session_config: Vec::new(),
             inventory,
             bifrost_versions: Vec::new(),
             bifrost_versions_loading: false,
@@ -117,11 +114,6 @@ impl SettingsEditor {
 
     pub fn with_active_models(mut self, active_models: ModelsConfig) -> Self {
         self.active_models = Some(active_models);
-        self
-    }
-
-    pub fn with_active_session_config(mut self, options: Vec<SessionConfigOption>) -> Self {
-        self.active_session_config = options;
         self
     }
 
@@ -147,12 +139,9 @@ impl SettingsEditor {
     /// Replace the model and ACP catalog without discarding staged settings.
     /// Keep the same logical row selected when session options change.
     pub fn update_catalog(&mut self, choices: Vec<ModelChoice>, inventory: AcpInventory) {
-        let selected_row = matches!(
-            self.tab,
-            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents
-        )
-        .then(|| self.settings_rows(self.tab).get(self.selected).copied())
-        .flatten();
+        let selected_row = matches!(self.tab, SettingsTab::Reviewer | SettingsTab::Subagents)
+            .then(|| self.settings_rows(self.tab).get(self.selected).copied())
+            .flatten();
         self.choices = choices;
         if !inventory.servers.is_empty() {
             self.inventory = inventory;
@@ -212,9 +201,7 @@ impl SettingsEditor {
     fn row_count(&self) -> usize {
         match self.tab {
             SettingsTab::Team => 1,
-            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents => {
-                self.settings_rows(self.tab).len()
-            }
+            SettingsTab::Reviewer | SettingsTab::Subagents => self.settings_rows(self.tab).len(),
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
             SettingsTab::Input => 1,
             SettingsTab::Appearance => 5,
@@ -229,15 +216,11 @@ impl SettingsEditor {
     }
 
     fn change_selected(&mut self, delta: i32) -> SettingsAction {
-        if matches!(
-            self.tab,
-            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents
-        ) {
+        if matches!(self.tab, SettingsTab::Reviewer | SettingsTab::Subagents) {
             let Some(row) = self.settings_rows(self.tab).get(self.selected).copied() else {
                 return SettingsAction::None;
             };
             match row {
-                SettingsRow::PrimaryModel => self.cycle_model(0, delta),
                 SettingsRow::ReviewModel => self.cycle_model(1, delta),
                 SettingsRow::SubagentModel => self.cycle_model(2, delta),
                 SettingsRow::ReviewPermissions => {
@@ -348,10 +331,7 @@ impl SettingsEditor {
     }
 
     fn toggle_selected(&mut self) -> SettingsAction {
-        if matches!(
-            self.tab,
-            SettingsTab::Agents | SettingsTab::Reviewer | SettingsTab::Subagents
-        ) {
+        if matches!(self.tab, SettingsTab::Reviewer | SettingsTab::Subagents) {
             let Some(row) = self.settings_rows(self.tab).get(self.selected).copied() else {
                 return SettingsAction::None;
             };
@@ -410,19 +390,6 @@ impl SettingsEditor {
 
     fn settings_rows(&self, tab: SettingsTab) -> Vec<SettingsRow> {
         match tab {
-            SettingsTab::Agents => {
-                let mut rows = vec![SettingsRow::PrimaryModel];
-                rows.extend(
-                    self.session_option_rows(SessionDefaultsSeat::Primary)
-                        .into_iter()
-                        .map(|(server_index, option_index)| SettingsRow::SessionOption {
-                            seat: SessionDefaultsSeat::Primary,
-                            server_index,
-                            option_index,
-                        }),
-                );
-                rows
-            }
             SettingsTab::Reviewer => {
                 let mut rows = vec![SettingsRow::ReviewModel, SettingsRow::ReviewPermissions];
                 rows.extend(
@@ -582,18 +549,6 @@ impl SettingsEditor {
             }
         }
         true
-    }
-
-    fn active_primary_session_value(&self, option: &SessionConfigOption) -> Option<String> {
-        let selected_source = self.selected_session_source(SessionDefaultsSeat::Primary)?;
-        let active_source = self.active_models.as_ref()?.primary_source.as_deref()?;
-        if selected_source != active_source {
-            return None;
-        }
-        self.active_session_config
-            .iter()
-            .find(|active| active.id == option.id)
-            .map(session_option_current_value)
     }
 
     fn cycle_model(&mut self, role: usize, delta: i32) {
@@ -874,7 +829,6 @@ pub fn draw_settings_panel(
     draw_tabs(frame, rows[0], editor, theme);
     match editor.tab {
         SettingsTab::Team => draw_team(frame, rows[1], editor, theme),
-        SettingsTab::Agents => draw_agents(frame, rows[1], editor, theme),
         SettingsTab::Reviewer => draw_reviewer(frame, rows[1], editor, theme),
         SettingsTab::Subagents => draw_subagents(frame, rows[1], editor, theme),
         SettingsTab::AcpServers => draw_servers(frame, rows[1], editor, theme),
@@ -1129,86 +1083,6 @@ fn cycle_permission_preset(permission: &mut PermissionPreset, delta: i32) {
     *permission = PermissionPreset::ALL[next];
 }
 
-fn draw_agents(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    editor: &SettingsEditor,
-    theme: TerminalTheme,
-) {
-    let rows = editor.settings_rows(SettingsTab::Agents);
-    let source = editor.selected_session_source(SessionDefaultsSeat::Primary);
-    let has_options = rows
-        .iter()
-        .any(|row| matches!(row, SettingsRow::SessionOption { .. }));
-    let mut lines = Vec::new();
-    let mut selected_line_index = 0;
-    for (row_index, row) in rows.into_iter().enumerate() {
-        if row_index == 1 && has_options {
-            lines.push(Line::raw(""));
-            lines.push(session_options_heading(editor, source.as_deref(), theme));
-        }
-        let selected = editor.selected == row_index;
-        if selected {
-            selected_line_index = lines.len();
-        }
-        match row {
-            SettingsRow::PrimaryModel => {
-                let model = &editor.config.agent.model;
-                lines.extend(model_lines(
-                    selected,
-                    "Primary model",
-                    model,
-                    0,
-                    editor,
-                    theme,
-                ));
-            }
-            SettingsRow::SessionOption {
-                server_index,
-                option_index,
-                ..
-            } => {
-                let server = &editor.inventory.servers[server_index];
-                let option = &server.session_config[option_index];
-                let saved =
-                    editor.saved_session_value(SessionDefaultsSeat::Primary, &server.id, option);
-                let (saved_label, compatible) = session_option_value_label(option, &saved);
-                let active = editor
-                    .active_primary_session_value(option)
-                    .map(|value| session_option_value_label(option, &value).0)
-                    .filter(|active| active != &saved_label)
-                    .map(|active| format!("active: {active}"));
-                lines.push(selected_line_with_detail(
-                    selected,
-                    format!("{} < {saved_label} >", option.name),
-                    active,
-                    theme,
-                ));
-                if !compatible {
-                    lines.push(Line::styled(
-                        format!("  unavailable on {}", server.id),
-                        Style::default().ink(theme.error),
-                    ));
-                }
-            }
-            SettingsRow::ReviewModel
-            | SettingsRow::ReviewPermissions
-            | SettingsRow::SubagentModel
-            | SettingsRow::SubagentPermissions
-            | SettingsRow::DiscreteReview
-            | SettingsRow::McpDiscreteReview
-            | SettingsRow::BifrostAnalysis
-            | SettingsRow::BifrostVersion
-            | SettingsRow::ReviewTier
-            | SettingsRow::CorrectionThreshold
-            | SettingsRow::MaxCorrectionRounds
-            | SettingsRow::MaxParallelSubagents
-            | SettingsRow::AutomaticQuotaFailover => {}
-        }
-    }
-    draw_scrolling_settings_lines(frame, area, lines, selected_line_index);
-}
-
 fn draw_reviewer(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -1438,8 +1312,7 @@ fn draw_reviewer(
                     ));
                 }
             }
-            SettingsRow::PrimaryModel
-            | SettingsRow::SubagentModel
+            SettingsRow::SubagentModel
             | SettingsRow::SubagentPermissions
             | SettingsRow::MaxParallelSubagents
             | SettingsRow::AutomaticQuotaFailover => {}
@@ -1539,8 +1412,7 @@ fn draw_subagents(
                 ),
                 theme,
             )),
-            SettingsRow::PrimaryModel
-            | SettingsRow::ReviewModel
+            SettingsRow::ReviewModel
             | SettingsRow::ReviewPermissions
             | SettingsRow::DiscreteReview
             | SettingsRow::McpDiscreteReview
@@ -2204,7 +2076,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_panel_saves_primary_option_without_overwriting_live_route_cache() {
+    fn reviewer_panel_saves_seat_option_without_overwriting_live_route_cache() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -2234,14 +2106,12 @@ mod tests {
             .entry("model-a".to_string())
             .or_default()
             .insert("config:service_tier".to_string(), "default".to_string());
-        editor.config.agent.acp_source = Some(server_id.clone());
-        editor.tab = SettingsTab::Agents;
-        editor.selected = 1;
+        editor.config.review.acp_source = Some(server_id.clone());
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = 2;
 
         assert_eq!(
-            editor
-                .session_option_rows(SessionDefaultsSeat::Primary)
-                .len(),
+            editor.session_option_rows(SessionDefaultsSeat::Review).len(),
             1
         );
         assert_eq!(
@@ -2250,7 +2120,7 @@ mod tests {
         );
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(
-            editor.config.agent.session_defaults[&server_id]["config:service_tier"],
+            editor.config.review.session_defaults[&server_id]["config:service_tier"],
             "priority"
         );
         assert!(
@@ -2292,27 +2162,8 @@ mod tests {
         let server_id = server.id.clone();
         server.launch.kind = crate::roster::AdapterKind::Codex;
         server.session_config = vec![model, thought, permission, reasoning, fast, service];
-        editor.config.agent.acp_source = Some(server_id.clone());
         editor.config.review.acp_source = Some(server_id.clone());
         editor.config.subagents.acp_source = Some(server_id.clone());
-        editor.tab = SettingsTab::Agents;
-
-        assert_eq!(
-            editor
-                .session_option_rows(SessionDefaultsSeat::Primary)
-                .len(),
-            5,
-            "the dedicated model row owns the advertised model option"
-        );
-        for selected in 1..=5 {
-            editor.selected = selected;
-            assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
-        }
-        assert_eq!(editor.config.agent.session_defaults[&server_id].len(), 5);
-        assert_eq!(
-            editor.config.agent.reasoning_effort.as_deref(),
-            Some("value")
-        );
 
         editor.tab = SettingsTab::Reviewer;
         assert_eq!(
@@ -2357,7 +2208,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_and_subagent_panels_use_their_selected_adapters_options() {
+    fn reviewer_and_subagent_panels_use_their_selected_adapters_options() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -2365,11 +2216,11 @@ mod tests {
         );
         editor.inventory.servers.truncate(1);
         ensure_two_inventory_servers(&mut editor);
-        let primary_index = 0;
+        let review_index = 0;
         let subagent_index = 1;
-        let primary_id = editor.inventory.servers[primary_index].id.clone();
+        let review_id = editor.inventory.servers[review_index].id.clone();
         let subagent_id = editor.inventory.servers[subagent_index].id.clone();
-        editor.inventory.servers[primary_index].session_config = vec![SessionConfigOption::select(
+        editor.inventory.servers[review_index].session_config = vec![SessionConfigOption::select(
             "service_tier",
             "Service tier",
             "default",
@@ -2382,12 +2233,12 @@ mod tests {
                 "ask",
                 vec![SessionConfigSelectOption::new("ask", "Ask")],
             )];
-        editor.config.agent.acp_source = Some(primary_id);
+        editor.config.review.acp_source = Some(review_id);
         editor.config.subagents.acp_source = Some(subagent_id);
 
         assert_eq!(
-            editor.session_option_rows(SessionDefaultsSeat::Primary),
-            vec![(primary_index, 0)]
+            editor.session_option_rows(SessionDefaultsSeat::Review),
+            vec![(review_index, 0)]
         );
         assert_eq!(
             editor.session_option_rows(SessionDefaultsSeat::Subagents),
@@ -2532,37 +2383,37 @@ mod tests {
             .expect("visible ACP server");
         let server_id = server.id.clone();
         server.session_config = vec![SessionConfigOption::select(
-            "mode",
-            "Mode",
+            "service_tier",
+            "Service tier",
             "ask",
             vec![
                 SessionConfigSelectOption::new("ask", "Ask"),
                 SessionConfigSelectOption::new("code", "Code"),
             ],
         )];
-        editor.config.agent.acp_source = Some(server_id.clone());
+        editor.config.review.acp_source = Some(server_id.clone());
         editor
             .config
             .session_config
             .entry(server_id.clone())
             .or_default()
             .defaults
-            .insert("config:mode".to_string(), "code".to_string());
+            .insert("config:service_tier".to_string(), "code".to_string());
         let option = &editor.inventory.servers[0].session_config[0];
         assert_eq!(
-            editor.saved_session_value(SessionDefaultsSeat::Primary, &server_id, option),
+            editor.saved_session_value(SessionDefaultsSeat::Review, &server_id, option),
             "code"
         );
 
-        editor.tab = SettingsTab::Agents;
-        editor.selected = 1;
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = 2;
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(
-            editor.config.agent.session_defaults[&server_id]["config:mode"],
+            editor.config.review.session_defaults[&server_id]["config:service_tier"],
             "ask"
         );
         assert_eq!(
-            editor.config.session_config[&server_id].defaults["config:mode"],
+            editor.config.session_config[&server_id].defaults["config:service_tier"],
             "code"
         );
     }
@@ -2581,39 +2432,39 @@ mod tests {
             .expect("visible ACP server");
         let server_id = server.id.clone();
         server.session_config = vec![SessionConfigOption::select(
-            "mode",
-            "Mode",
+            "service_tier",
+            "Service tier",
             "ask",
             vec![
                 SessionConfigSelectOption::new("ask", "Ask"),
                 SessionConfigSelectOption::new("code", "Code"),
             ],
         )];
-        editor.config.agent.acp_source = Some(server_id.clone());
+        editor.config.review.acp_source = Some(server_id.clone());
         editor
             .config
-            .agent
+            .review
             .session_defaults
             .entry(server_id.clone())
             .or_default()
-            .insert("config:mode".to_string(), "removed".to_string());
+            .insert("config:service_tier".to_string(), "removed".to_string());
         let option = &editor.inventory.servers[0].session_config[0];
 
         assert_eq!(
             session_option_value_label(option, "removed"),
             ("removed (unavailable)".to_string(), false)
         );
-        editor.tab = SettingsTab::Agents;
-        editor.selected = 1;
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = 2;
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert_eq!(
-            editor.config.agent.session_defaults[&server_id]["config:mode"],
+            editor.config.review.session_defaults[&server_id]["config:service_tier"],
             "ask"
         );
     }
 
     #[test]
-    fn agent_panel_scrolls_dynamic_options_into_view_at_narrow_width() {
+    fn reviewer_panel_scrolls_dynamic_options_into_view_at_narrow_width() {
         let mut editor = SettingsEditor::new(
             crate::roster::config_with_a_visible_builtin(),
             Vec::new(),
@@ -2638,9 +2489,9 @@ mod tests {
                 )
             })
             .collect();
-        editor.config.agent.acp_source = Some(server_id);
-        editor.tab = SettingsTab::Agents;
-        editor.selected = 12;
+        editor.config.review.acp_source = Some(server_id);
+        editor.tab = SettingsTab::Reviewer;
+        editor.selected = 13;
         let backend = ratatui::backend::TestBackend::new(48, 14);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
 
@@ -3211,10 +3062,6 @@ mod tests {
         for preset in TeamPreset::ALL {
             assert!(team.contains(preset.label()), "rendered:\n{team}");
         }
-
-        editor.tab = SettingsTab::Agents;
-        let agents = render(&editor, 100, 30);
-        assert!(agents.contains("Primary model"), "rendered:\n{agents}");
 
         editor.tab = SettingsTab::Reviewer;
         let reviewer = render(&editor, 100, 30);
