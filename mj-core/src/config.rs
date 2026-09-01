@@ -1664,7 +1664,8 @@ fn migrate_v5(body: &str) -> Result<Config> {
     Ok(config)
 }
 
-/// V6 predates the optional Bifrost pin. Absence keeps following `latest`.
+/// V6 predates the optional Bifrost pin. Absence resolves to the pinned
+/// default at launch.
 fn migrate_v6(body: &str) -> Result<Config> {
     let mut config: Config = toml::from_str(body).context("parse v6 config")?;
     config.version = CONFIG_VERSION;

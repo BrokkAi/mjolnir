@@ -67,10 +67,10 @@ provider, so the model challenging the change is not the model that made it.
 
 Discrete review is toggled on the Reviewer tab of `/mjconfig`. The same tab
 chooses the **Bifrost version** and **review tier**. Bifrost defaults to a
-known-good version pinned by the mj release, never a moving tag; the picker
-also offers `latest` and the five newest stable versions as exact pins. These
-settings are read when a review dispatches, so a change applies to the next
-reviewed turn.
+known-good version pinned by the mj release; the picker also offers the five
+newest stable versions as exact pins, and `latest` as an explicit opt-in to
+npm's moving tag. These settings are read when a review dispatches, so a change
+applies to the next reviewed turn.
 
 The **Bifrost diff analysis** switch on that tab controls the one-shot
 `analyze_diff` preprocessing step. Turning it off keeps discrete review enabled

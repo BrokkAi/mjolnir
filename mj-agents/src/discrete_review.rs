@@ -274,7 +274,8 @@ pub struct FanoutConfig {
     pub bifrost_analysis: bool,
     /// Provider-native policy applied to reviewer and supervisor sessions.
     pub permission: PermissionPreset,
-    /// Exact Bifrost npm version, or `None` to follow npm's `latest` tag.
+    /// Exact Bifrost npm version, `"latest"` to follow npm's moving tag, or
+    /// `None` for [`mj_core::bifrost::DEFAULT_PINNED_VERSION`].
     pub bifrost_version: Option<String>,
     /// Shared with the subagent pool so a lane's status row cannot land on the
     /// same id as a running subagent's. Lanes are *not* pool members: they keep
