@@ -11021,7 +11021,7 @@ mod tests {
         );
         assert_eq!(
             s.available_commands[5].description,
-            "configure the team, agents, ACP servers, and appearance"
+            "configure the team, reviewer, subagents, ACP servers, and appearance"
         );
         assert_eq!(
             s.available_commands[10].description,

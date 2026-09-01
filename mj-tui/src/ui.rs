@@ -17688,10 +17688,7 @@ mod tests {
             rendered.contains("[F1 Model: Model 1]"),
             "rendered:\n{rendered}"
         );
-        assert!(
-            rendered.contains("[F2 Mode: Ask]"),
-            "rendered:\n{rendered}"
-        );
+        assert!(rendered.contains("[F2 Mode: Ask]"), "rendered:\n{rendered}");
 
         // A closed runtime can no longer apply an edit, so the row leaves.
         state.runtime_closed = true;

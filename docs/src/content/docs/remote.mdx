@@ -265,14 +265,16 @@ retained transcript data.
 
 ## Configuration from the browser
 
-`/mjconfig` opens the same configuration editor the terminal uses: team, agent,
+`/mjconfig` opens the same configuration editor the terminal uses: team,
 reviewer, subagent, and ACP-server settings, plus the session options the
 connected adapter exposes. Changes apply to sessions started afterwards, not to
-the turn already running.
+the turn already running. The primary session's model and reasoning effort are
+changed with `/model` and `/effort` instead, which apply to the live session
+without a restart.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotSessionConfig.src} aria-label="Open the full-size screenshot: the configuration editor">
-    <Image src={shotSessionConfig} alt="The Mjolnir Web configuration editor showing Team, Agent, Reviewer, Subagents, ACP servers, and Appearance sections, with Codex session options for mode, collaboration mode, reasoning effort, and fast mode." />
+    <Image src={shotSessionConfig} alt="The Mjolnir Web configuration editor showing Team, Reviewer, Subagents, ACP servers, Input, and Appearance sections, with Codex session options for mode, collaboration mode, reasoning effort, and fast mode." />
   </a>
   <figcaption>The configuration editor in the browser, with the connected adapter’s own session options underneath Mjolnir’s.</figcaption>
 </figure>

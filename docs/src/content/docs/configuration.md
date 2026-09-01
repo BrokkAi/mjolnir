@@ -264,14 +264,14 @@ line beside the working spinner while a turn is in flight, in both the TUI and
 the web viewer; disable them under **Appearance** or set
 `feature_hints = false` in the top level of the config file.
 
-The **Agent**, **Reviewer**, and **Subagents** tabs list the selectable session
-options advertised by that role's selected ACP source. Each role stores its
-defaults separately. Compatible primary changes are also sent to the running
-primary session when `/mjconfig` is saved; the UI calls out the active value
-when it differs from the selected default. Team, reviewer, and subagent changes
-apply only to sessions started later, never to ones that are already running. A
-saved value that a newly selected adapter no longer advertises stays intact and
-is shown as unavailable until you select a compatible value.
+The **Reviewer** and **Subagents** tabs list the selectable session options
+advertised by that role's selected ACP source. Each role stores its defaults
+separately. The primary agent has no tab: its live session is driven by
+`/model`, `/effort`, and the F1–F8 session-config shortcut row instead of
+saved `/mjconfig` defaults. Team, reviewer, and subagent changes apply only to
+sessions started later, never to ones that are already running. A saved value
+that a newly selected adapter no longer advertises stays intact and is shown
+as unavailable until you select a compatible value.
 
 The same role-scoped defaults can be written directly in TOML:
 

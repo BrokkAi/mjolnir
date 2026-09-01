@@ -2111,7 +2111,9 @@ mod tests {
         editor.selected = 2;
 
         assert_eq!(
-            editor.session_option_rows(SessionDefaultsSeat::Review).len(),
+            editor
+                .session_option_rows(SessionDefaultsSeat::Review)
+                .len(),
             1
         );
         assert_eq!(

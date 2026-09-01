@@ -11892,10 +11892,14 @@ mod tests {
 
         let runtime = test_mjconfig_runtime();
         let config_path = runtime.config_path.clone();
-        // Team-less auto seat: no source pin survives a load, so the seat's
-        // provider comes from the live session, not the priority fallback.
-        let mut config = roster::config_with_a_visible_builtin();
-        config.set_acp_server_policy("claude-acp", config::AcpServerPolicy::Enabled);
+        // A saved or adopted team re-pins every seat's ACP source on load, and
+        // a reviewer pin would decide the seat's provider before the live
+        // session is consulted. Disabling both builtins keeps team adoption
+        // off entirely, so the reviewer's provider genuinely resolves from
+        // the live session, not the priority fallback.
+        let mut config = config::Config::default();
+        config.set_acp_server_policy("codex-acp", config::AcpServerPolicy::Disabled);
+        config.set_acp_server_policy("claude-acp", config::AcpServerPolicy::Disabled);
         config.save(&config_path).expect("seed config");
 
         let mut inventory = roster::discover_inventory(&config);
