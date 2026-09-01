@@ -276,8 +276,8 @@ pub enum PaneLayout {
     #[default]
     Expanded,
     /// Targets and Quota collapsed to one summary row each, and the session
-    /// list reduced to the fixed grid unless the terminal is taller than it
-    /// is wide.
+    /// list reduced to the fixed grid unless the terminal has more rows than
+    /// half its columns.
     Collapsed,
 }
 
@@ -557,11 +557,14 @@ impl DashboardState {
     }
 
     /// Whether the collapsed dial draws the session list as the fixed grid.
-    /// A portrait terminal (more rows than columns) keeps the list instead,
-    /// because it has rows to spare and columns to lack.
+    /// A tall terminal (more rows than half its columns) keeps the list
+    /// instead, because it has rows to spare and columns to lack.
     #[must_use]
     pub fn sessions_compact(&self) -> bool {
-        self.layout.support_collapsed() && self.frame_size.is_none_or(|(cols, rows)| rows <= cols)
+        self.layout.support_collapsed()
+            && self
+                .frame_size
+                .is_none_or(|(cols, rows)| u32::from(rows) * 2 <= u32::from(cols))
     }
 
     /// Whether a modal dialog or wizard owns the keyboard.

@@ -2996,7 +2996,7 @@ mod tests {
             .expect("the session")
             .target_template_id = "extremely-long-target-identifier".into();
 
-        let rows = grid_content_rows(&mut dashboard, 44, 44);
+        let rows = grid_content_rows(&mut dashboard, 44, 22);
         assert!(
             rows.iter().any(|line| line.contains('…')),
             "the target should ellipsize: {rows:?}"

@@ -182,8 +182,8 @@ with the mouse wheel or `PageUp`/`PageDown` from wherever you are.
 conversation. Collapsed, Targets and Quota become one summary row each — host
 names with CPU load, EC2 fleets with how many machines they are running,
 profile names with weekly quota remaining — and the session list shrinks to a
-fixed grid, one line per session, unless your terminal is taller than it is
-wide, in which case the list stays a list.
+fixed grid, one line per session, unless your terminal has more rows than
+half its columns, in which case the list stays a list.
 
 `Ctrl+G` always leaves the keyboard in Prompt: asking for room around the
 conversation and asking to work in it are the same gesture.
