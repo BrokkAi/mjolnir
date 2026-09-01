@@ -3359,6 +3359,7 @@ impl AppState {
 
     pub fn primary_runtime_stall_at(&self, now: Instant) -> Option<RuntimeStall> {
         if self.connection_state != ConnectionState::Streaming
+            || self.primary_is_parked_for_review()
             || self.has_pending_permission()
             || self.has_pending_elicitation()
         {
@@ -5471,6 +5472,29 @@ impl AppState {
         })
     }
 
+    /// Discrete review keeps the primary turn logically streaming while nested
+    /// runtimes work. Only a running correction expects primary activity.
+    fn primary_is_parked_for_review(&self) -> bool {
+        let mut active_review = false;
+        for workflow in self.visible_workflows() {
+            if workflow.kind != crate::workflow::WorkflowKind::Review || workflow.outcome.is_some()
+            {
+                continue;
+            }
+            active_review = true;
+            if workflow.actors.values().any(|actor| {
+                actor.role == crate::workflow::WorkflowActorRole::PrimaryCorrection
+                    && matches!(
+                        actor.lifecycle,
+                        crate::workflow::WorkflowActorLifecycle::Running
+                    )
+            }) {
+                return false;
+            }
+        }
+        active_review
+    }
+
     pub fn begin_review_cancel(&mut self) -> bool {
         if self.review_cancel_requested || !self.has_active_review_workflow() {
             return false;
@@ -6389,6 +6413,67 @@ mod tests {
         assert!(state.primary_runtime_stall_at(Instant::now()).is_none());
         state.set_runtime_stall_minutes(0);
         state.primary_last_activity_at = Some(now - Duration::from_secs(600));
+        assert!(state.primary_runtime_stall_at(now).is_none());
+    }
+
+    #[test]
+    fn primary_runtime_stall_ignores_review_owned_work_but_tracks_primary_correction() {
+        use crate::workflow::{
+            WorkflowActorId, WorkflowActorRole, WorkflowId, WorkflowKind, WorkflowPhase,
+            WorkflowStage, WorkflowTransition,
+        };
+
+        let mut state = AppState::new();
+        state.set_runtime_stall_minutes(1);
+        state.set_primary_acp_name("claude-acp".to_string());
+        state.record_user_prompt("implement the change".to_string());
+        let now = Instant::now();
+        state.primary_last_activity_at = Some(now - Duration::from_secs(61));
+        assert!(state.primary_runtime_stall_at(now).is_some());
+
+        let workflow_id = WorkflowId::review(1);
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::Started {
+                kind: WorkflowKind::Review,
+                stage: WorkflowStage::new(0, WorkflowPhase::SpecialistReview),
+            },
+        );
+        assert!(
+            state.primary_runtime_stall_at(now).is_none(),
+            "reviewer activity makes primary silence expected"
+        );
+
+        let correction_id = WorkflowActorId::Named("primary-correction-1".to_string());
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::PhaseChanged {
+                stage: WorkflowStage::new(0, WorkflowPhase::Correction),
+            },
+        );
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::ActorStarted {
+                actor_id: correction_id.clone(),
+                role: WorkflowActorRole::PrimaryCorrection,
+            },
+        );
+        assert!(
+            state.primary_runtime_stall_at(now).is_some(),
+            "a running primary correction must still report a real stall"
+        );
+
+        apply_workflow(
+            &mut state,
+            workflow_id,
+            WorkflowTransition::ActorFinished {
+                actor_id: correction_id,
+                outcome: SubagentOutcome::Completed,
+            },
+        );
         assert!(state.primary_runtime_stall_at(now).is_none());
     }
 
