@@ -90,7 +90,7 @@ configures the default backing for `create_subagent`; set `model = "disabled"`
 | `review.reasoning_effort` | Optional per-seat ACP reasoning effort |
 | `review.permission` | Provider-native permissions for review sessions: `manual`, `auto` (default), or `yolo` |
 | `review.session_defaults` | Per-ACP saved session-option defaults for new review sessions, except Mode, which `review.permission` controls |
-| `review.bifrost_version` | Optional exact Bifrost npm version. Omit it (the default) to follow the `latest` tag. `/mjconfig` offers `latest` and the five newest stable releases. |
+| `review.bifrost_version` | Optional exact Bifrost npm version. Omit it (the default) to use the known-good version pinned by this mj release. `/mjconfig` offers that pin, `latest`, and the five newest stable releases. |
 | `subagents.model` | Default subagent model, `auto`, or `disabled` |
 | `subagents.acp_priority` | Independent ACP source preference for the default worker model |
 | `subagents.reasoning_effort` | Optional per-seat ACP reasoning effort |
