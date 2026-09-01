@@ -4214,7 +4214,7 @@ mod tests {
     }
 
     #[test]
-fn session_result_updates_supervisor_spinner_before_next_action() {
+    fn session_result_updates_supervisor_spinner_before_next_action() {
         let mut cfg = Config::default();
         let result = RunSessionResult {
             reason: UiExitReason::ClearSession,
