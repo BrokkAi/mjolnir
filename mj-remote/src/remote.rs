@@ -17864,7 +17864,10 @@ for (const [field, seat] of [
             .expect("snapshot");
         assert_eq!(snapshot.session_config.len(), 2);
         assert_eq!(snapshot.session_config[0].target_kind, "config_option");
-        assert_eq!(snapshot.session_config[0].config_id.as_deref(), Some("model"));
+        assert_eq!(
+            snapshot.session_config[0].config_id.as_deref(),
+            Some("model")
+        );
         assert_eq!(snapshot.session_config[0].current_value, "gpt-5");
         assert_eq!(snapshot.session_config[0].choices.len(), 1);
         assert_eq!(snapshot.session_config[0].choices[0].value, "gpt-5");
@@ -17877,7 +17880,10 @@ for (const [field, seat] of [
             snapshot.session_config[1].config_id.as_deref(),
             Some(acp::REASONING_EFFORT_CONFIG_ID)
         );
-        assert_eq!(snapshot.session_config[1].category.as_deref(), Some("model"));
+        assert_eq!(
+            snapshot.session_config[1].category.as_deref(),
+            Some("model")
+        );
         assert_eq!(snapshot.session_config[1].current_value, "xhigh");
         assert_eq!(snapshot.session_config[1].choices.len(), 1);
         assert_eq!(snapshot.session_config[1].choices[0].value, "xhigh");

@@ -174,7 +174,9 @@ pub fn shared_command(name: &str) -> Option<&'static SharedCommand> {
 
 /// Look up a TUI-only command spec by name.
 pub fn tui_only_command(name: &str) -> Option<&'static SurfaceCommand> {
-    TUI_ONLY_COMMANDS.iter().find(|command| command.name == name)
+    TUI_ONLY_COMMANDS
+        .iter()
+        .find(|command| command.name == name)
 }
 
 /// Names the TUI owns: shared and TUI-only commands plus the retired
