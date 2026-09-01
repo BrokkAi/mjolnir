@@ -16,7 +16,7 @@ as advanced routes for specialists, comparison, or replacement.
 
 | Mjolnir owns | ACP adapters and provider agents own |
 | --- | --- |
-| Inline and fullscreen terminal UI | Provider authentication and model APIs |
+| The fullscreen terminal UI | Provider authentication and model APIs |
 | User input, session controls, and permission presentation | Provider-specific tools and session behavior |
 | Model selection, subagent lifecycle, and review timing | Model reasoning and generated content |
 | Mjolnir-hosted filesystem, terminal, and subagent MCP tools | Any adapter-hosted tools and their policies |

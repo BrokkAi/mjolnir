@@ -6528,16 +6528,35 @@ fn handle_review_picker_key(
     }
 }
 
+/// Terminal modes a session runs in. Split out of `setup_fullscreen_terminal`
+/// so tests can assert the sequence the real setup path emits rather than
+/// restating it: the alternate screen in particular has no other automated
+/// guard, because every rendering test drives a `TestBackend` that never sees
+/// these escapes.
+fn enter_fullscreen_modes<W: Write>(writer: &mut W) -> io::Result<()> {
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+}
+
+/// The exact inverse of `enter_fullscreen_modes`, in teardown order.
+fn leave_fullscreen_modes<W: Write>(writer: &mut W) -> io::Result<()> {
+    execute!(
+        writer,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )
+}
+
 pub fn setup_fullscreen_terminal() -> Result<Terminal<TrackedBackend<Stdout>>> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
 
-    if let Err(error) = execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    ) {
+    if let Err(error) = enter_fullscreen_modes(&mut stdout) {
         rollback_fullscreen_terminal_setup(&mut stdout);
         return Err(error).context("enter alt screen");
     }
@@ -6555,12 +6574,7 @@ pub fn setup_fullscreen_terminal() -> Result<Terminal<TrackedBackend<Stdout>>> {
 }
 
 fn rollback_fullscreen_terminal_setup(stdout: &mut Stdout) {
-    let _ = execute!(
-        stdout,
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-        DisableBracketedPaste
-    );
+    let _ = leave_fullscreen_modes(stdout);
     let _ = disable_raw_mode();
 }
 
@@ -6568,12 +6582,7 @@ pub fn restore_fullscreen_terminal(terminal: &mut Terminal<TrackedBackend<Stdout
     // Attempt every cleanup operation before returning the first error.  A
     // partial failure must not strand the alternate screen or hidden cursor.
     let raw_mode = disable_raw_mode();
-    let screen = execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-        DisableBracketedPaste
-    );
+    let screen = leave_fullscreen_modes(terminal.backend_mut());
     let cursor = terminal.show_cursor();
     raw_mode?;
     screen?;
@@ -6602,12 +6611,7 @@ pub(crate) fn resume_terminal_after_auth(
     terminal: &mut Terminal<TrackedBackend<Stdout>>,
 ) -> Result<()> {
     enable_raw_mode().context("enable raw mode after sign-in")?;
-    let modes = execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    );
+    let modes = enter_fullscreen_modes(terminal.backend_mut());
     if let Err(error) = modes {
         let _ = disable_raw_mode();
         return Err(error).context("restore terminal modes after sign-in");
@@ -15000,6 +15004,53 @@ mod tests {
     }
 
     use ratatui::widgets::Widget;
+
+    /// The session must own the alternate screen: without it every frame is
+    /// painted into the user's primary buffer and their scrollback is
+    /// destroyed. `TestBackend` never sees terminal-mode escapes, so this is
+    /// the only guard that a refactor cannot silently drop.
+    ///
+    /// Asserted on non-Windows only: crossterm may route these commands
+    /// through WinAPI instead of ANSI when the process has no console, which
+    /// would make the emitted bytes environment-dependent.
+    #[cfg(not(windows))]
+    #[test]
+    fn fullscreen_setup_enters_the_alternate_screen_and_teardown_leaves_it() {
+        const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
+        const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
+        const ENABLE_BRACKETED_PASTE: &str = "\x1b[?2004h";
+        const DISABLE_BRACKETED_PASTE: &str = "\x1b[?2004l";
+
+        let mut entered = Vec::new();
+        super::enter_fullscreen_modes(&mut entered).expect("enter modes");
+        let entered = String::from_utf8(entered).expect("utf8");
+        assert!(
+            entered.contains(ENTER_ALT_SCREEN),
+            "setup must enter the alternate screen: {entered:?}"
+        );
+        assert!(
+            entered.contains(ENABLE_BRACKETED_PASTE),
+            "setup must enable bracketed paste: {entered:?}"
+        );
+
+        let mut left = Vec::new();
+        super::leave_fullscreen_modes(&mut left).expect("leave modes");
+        let left = String::from_utf8(left).expect("utf8");
+        assert!(
+            left.contains(LEAVE_ALT_SCREEN),
+            "teardown must leave the alternate screen: {left:?}"
+        );
+        assert!(
+            left.contains(DISABLE_BRACKETED_PASTE),
+            "teardown must disable bracketed paste: {left:?}"
+        );
+
+        // Teardown must undo the alternate screen, not re-enter it.
+        assert!(
+            !left.contains(ENTER_ALT_SCREEN),
+            "teardown re-entered: {left:?}"
+        );
+    }
 
     fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
         (0..buffer.area().height)
