@@ -1413,52 +1413,71 @@ pub(crate) fn minimized_targets_line(dashboard: &DashboardState, width: u16) -> 
     summary_row("Targets", &readings, width)
 }
 
-/// One row summarising every profile's weekly quota, for the collapsed Quota
-/// pane.
+/// One row summarising every profile's quota, for the collapsed Quota pane.
 ///
-/// The figure is the percentage *remaining*, which is the number the full
-/// pane's bar prints beside itself: an exhausted profile reads 0% in both. Its
-/// colour comes from that same headroom, so the two panes agree about when a
-/// profile is in trouble.
+/// The figures are percentages *remaining*, which is the number the full
+/// pane's bar prints beside itself: an exhausted profile reads 0% in both. A
+/// profile with weekly headroom to spare reads its weekly figure alone
+/// (`claude 100%`); once the weekly window has been dipped into and a
+/// five-hour window is reported too, both appear as `weekly%/5h%` (`claude
+/// 96%/40%`), because a full week is no comfort while the next five hours are
+/// spent. The colour follows the tighter of the two figures, so the two panes
+/// agree about when a profile is in trouble.
+///
+/// Usage-priced profiles are left out of the row entirely: they bill per token
+/// and have no window to summarise, so a placeholder would only spend width.
 pub(crate) fn minimized_quota_line(dashboard: &DashboardState, width: u16) -> Line<'static> {
     let readings = dashboard
         .config
         .profiles
         .iter()
-        .map(|(id, profile)| {
-            if profile.kind == HarnessKind::Deepseek {
-                // Usage-priced, so there is no subscription window to fill.
-                return SummaryReading {
-                    name: id.clone(),
-                    value: "api".into(),
-                    color: None,
-                };
+        .filter_map(|(id, profile)| {
+            let quota = dashboard.quotas.get(id);
+            // The report says for itself that it is usage-priced. Before the
+            // first refresh there is no report to ask, so the profile's kind
+            // stands in until one arrives.
+            let usage_priced = match quota {
+                Some(quota) => quota.is_usage_priced(),
+                None => profile.kind == HarnessKind::Deepseek,
+            };
+            if usage_priced {
+                return None;
             }
             if dashboard.quota_refreshing.contains(id) {
-                return SummaryReading {
+                return Some(SummaryReading {
                     name: id.clone(),
                     value: "refreshing…".into(),
                     color: None,
-                };
+                });
             }
-            let remaining = dashboard
-                .quotas
-                .get(id)
-                .filter(|quota| quota.error.is_none())
+            let quota = quota.filter(|quota| quota.error.is_none());
+            let Some(weekly) = quota
                 .and_then(ProfileQuota::weekly_window)
-                .and_then(quota_remaining_percent);
-            match remaining {
-                Some(remaining) => SummaryReading {
-                    name: id.clone(),
-                    value: format!("{remaining}%"),
-                    color: Some(headroom_color(remaining)),
-                },
-                None => SummaryReading {
+                .and_then(quota_remaining_percent)
+            else {
+                return Some(SummaryReading {
                     name: id.clone(),
                     value: "unavailable".into(),
                     color: None,
-                },
-            }
+                });
+            };
+            // An untouched weekly window says everything there is to say; the
+            // five-hour figure only matters once the week is being spent.
+            let five_hour = quota
+                .filter(|_| weekly < 100)
+                .and_then(ProfileQuota::five_hour_window)
+                .and_then(quota_remaining_percent);
+            let value = match five_hour {
+                Some(five_hour) => format!("{weekly}%/{five_hour}%"),
+                None => format!("{weekly}%"),
+            };
+            Some(SummaryReading {
+                name: id.clone(),
+                value,
+                color: Some(headroom_color(
+                    five_hour.map_or(weekly, |five_hour| weekly.min(five_hour)),
+                )),
+            })
         })
         .collect::<Vec<_>>();
     summary_row("Quota", &readings, width)
@@ -2784,6 +2803,49 @@ mod tests {
         }
     }
 
+    /// A profile quota reporting both windows, the way the subscription
+    /// harnesses do.
+    fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> ProfileQuota {
+        let mut quota = weekly_quota(profile_id, weekly);
+        quota.windows.push(QuotaWindow {
+            label: "5h".into(),
+            remaining_percent: Some(five_hour),
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: None,
+        });
+        quota
+    }
+
+    /// What a usage-priced harness reports: no window at all, and the API
+    /// label in place of one.
+    fn api_quota(profile_id: &str) -> ProfileQuota {
+        ProfileQuota {
+            profile_id: profile_id.into(),
+            harness: HarnessKind::Deepseek,
+            windows: Vec::new(),
+            extra: Some(hel::hel_quota::API_LABEL.into()),
+            error: None,
+            refreshed_at_epoch_seconds: now_seconds(),
+        }
+    }
+
+    /// Adds a usage-priced profile to the dashboard's configuration, since the
+    /// shared fixture only carries subscription profiles.
+    fn add_deepseek_profile(dashboard: &mut DashboardState) {
+        dashboard.config.profiles.insert(
+            "deepseek".into(),
+            hel::hel_config::HarnessProfile {
+                context_window_bytes: None,
+                kind: HarnessKind::Deepseek,
+                home: std::path::PathBuf::from("/profiles/deepseek"),
+                executable: None,
+                environment: BTreeMap::new(),
+            },
+        );
+    }
+
     fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
@@ -3537,6 +3599,90 @@ mod tests {
         // colour.
         assert_eq!(colour_of(targets_row, "Targets"), Color::Reset);
         assert_eq!(colour_of(targets_row, "morannon"), Color::Reset);
+    }
+
+    /// A usage-priced profile has no window to summarise, so it is left out of
+    /// the collapsed row rather than spending width on a placeholder - both
+    /// once its own report says it is API-priced and before that report has
+    /// arrived.
+    #[test]
+    fn a_usage_priced_profile_is_absent_from_the_collapsed_row() {
+        let mut dashboard = dashboard_with_session(running_session());
+        add_deepseek_profile(&mut dashboard);
+        dashboard.cycle_pane_layout();
+
+        let row = |dashboard: &mut DashboardState| {
+            drawn(dashboard, 160, 44)
+                .into_iter()
+                .find(|line| line.contains("─ Quota ──"))
+                .expect("the collapsed Quota row")
+        };
+
+        // Before any refresh, the profile's kind is the only signal there is.
+        let before = row(&mut dashboard);
+        assert!(!before.contains("deepseek"), "{before:?}");
+
+        // And once the report arrives, the report itself says so.
+        dashboard.apply_quota(api_quota("deepseek"));
+        let after = row(&mut dashboard);
+        assert!(!after.contains("deepseek"), "{after:?}");
+        assert!(!after.contains("api"), "{after:?}");
+        // The subscription profiles still read normally.
+        assert!(after.contains("claude-1"), "{after:?}");
+    }
+
+    /// A week with headroom left is no comfort while the next five hours are
+    /// spent, so a profile that has dipped into its week reports both figures.
+    /// An untouched week says everything there is to say on its own, and a
+    /// profile with no five-hour window has nothing more to add.
+    #[test]
+    fn the_collapsed_row_pairs_the_weekly_and_five_hour_figures() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.apply_quota(weekly_and_five_hour_quota("claude-1", 96, 40));
+        dashboard.apply_quota(weekly_and_five_hour_quota("codex-1", 100, 40));
+        dashboard.apply_quota(weekly_quota("codex-2", 63));
+        dashboard.cycle_pane_layout();
+
+        let quota = drawn(&mut dashboard, 160, 44)
+            .into_iter()
+            .find(|line| line.contains("─ Quota ──"))
+            .expect("the collapsed Quota row");
+        assert!(quota.contains("claude-1 96%/40%"), "{quota:?}");
+        assert!(quota.contains("codex-1 100%,"), "{quota:?}");
+        assert!(!quota.contains("100%/"), "{quota:?}");
+        assert!(quota.contains("codex-2 63%"), "{quota:?}");
+        assert!(!quota.contains("63%/"), "{quota:?}");
+    }
+
+    /// The reading's colour has to describe the window that is actually
+    /// running out: a profile with most of its week left but no five-hour
+    /// headroom is in trouble now.
+    #[test]
+    fn the_paired_reading_takes_the_colour_of_the_tighter_window() {
+        let mut dashboard = dashboard_with_session(running_session());
+        // Plenty of week, almost no five hours.
+        dashboard.apply_quota(weekly_and_five_hour_quota("claude-1", 96, 5));
+        // Almost no week, plenty of five hours.
+        dashboard.apply_quota(weekly_and_five_hour_quota("codex-1", 8, 90));
+        dashboard.cycle_pane_layout();
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw the collapsed panes");
+        let buffer = terminal.backend().buffer();
+        let lines = buffer_lines(buffer);
+        let row = lines
+            .iter()
+            .position(|line| line.contains("─ Quota ──"))
+            .expect("the collapsed Quota row");
+        let colour_of = |needle: &str| {
+            let column = cell_column(&lines[row], needle);
+            buffer[(column, row as u16)].fg
+        };
+
+        assert_eq!(colour_of("96%/5%"), Color::Red);
+        assert_eq!(colour_of("8%/90%"), Color::Red);
     }
 
     /// A collapsed pane is one row by definition, so more hosts than fit have

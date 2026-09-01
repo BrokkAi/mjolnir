@@ -70,6 +70,13 @@ impl ProfileQuota {
             .find(|window| is_short_quota_window(&window.label))
     }
 
+    /// Whether the report says the profile is usage-priced: an API-billed
+    /// harness has no subscription window to fill, so it reports the API label
+    /// in place of one rather than inventing a percentage.
+    pub fn is_usage_priced(&self) -> bool {
+        self.error.is_none() && self.windows.is_empty() && self.extra.as_deref() == Some(API_LABEL)
+    }
+
     pub fn five_hour_projects_exhaustion(&self) -> bool {
         self.five_hour_window().is_some_and(|window| {
             projects_exhaustion_before_reset(window, self.refreshed_at_epoch_seconds)
