@@ -16,7 +16,6 @@ use ratatui::style::Color;
 use crate::ink::Ink;
 use crate::spinner::{SCAN_RED_LEVELS, SpinnerInk};
 use crate::terminal_palette::{self, DefaultColors, StdoutColorLevel};
-use crate::theme::TerminalThemeKind;
 
 /// Hues the diff fills blend toward. These are never rendered directly — only
 /// as a low-alpha composite over the terminal's background — so they are picked
@@ -35,7 +34,6 @@ const SELECTION_ALPHA: f32 = 0.28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalTheme {
-    pub kind: TerminalThemeKind,
     pub text: Ink,
     pub muted: Ink,
     pub subtle: Ink,
@@ -61,8 +59,7 @@ pub struct TerminalTheme {
     pub diff_context: Ink,
     /// Row and changed-token background fills for diff rendering. `None` falls
     /// back to foreground-only styling, which happens whenever the terminal
-    /// declined to report its background, cannot render more than 16 colors, or
-    /// the user pinned [`TerminalThemeKind::Ansi`].
+    /// declined to report its background or cannot render more than 16 colors.
     pub diff_added_bg: Option<Color>,
     pub diff_removed_bg: Option<Color>,
     pub diff_added_emph_bg: Option<Color>,
@@ -71,20 +68,11 @@ pub struct TerminalTheme {
     scan_red: [Ink; SCAN_RED_LEVELS],
 }
 
-pub trait TerminalThemeKindExt {
-    fn palette(self) -> TerminalTheme;
-    fn palette_with(
-        self,
-        terminal: Option<DefaultColors>,
-        level: StdoutColorLevel,
-    ) -> TerminalTheme;
-}
-
-impl TerminalThemeKindExt for TerminalThemeKind {
-    /// The palette for this mode, using whatever the startup probe learned
-    /// about the terminal.
-    fn palette(self) -> TerminalTheme {
-        self.palette_with(
+impl TerminalTheme {
+    /// The palette, using whatever the startup probe learned about the
+    /// terminal.
+    pub fn current() -> TerminalTheme {
+        Self::with_colors(
             terminal_palette::default_colors(),
             terminal_palette::stdout_color_level(),
         )
@@ -92,17 +80,7 @@ impl TerminalThemeKindExt for TerminalThemeKind {
 
     /// The palette for explicitly supplied terminal colors and color level, so
     /// the adaptation can be tested without a real terminal.
-    fn palette_with(
-        self,
-        terminal: Option<DefaultColors>,
-        level: StdoutColorLevel,
-    ) -> TerminalTheme {
-        // Strict ANSI mode refuses every derived fill, so it behaves as though
-        // the terminal never answered the color queries.
-        let measured = match self {
-            Self::Adaptive => terminal,
-            Self::Ansi => None,
-        };
+    pub fn with_colors(measured: Option<DefaultColors>, level: StdoutColorLevel) -> TerminalTheme {
         let tint = |hue: (u8, u8, u8), alpha: f32| -> Option<Color> {
             let bg = measured?.bg;
             terminal_palette::best_color_for_level(terminal_palette::blend(hue, bg, alpha), level)
@@ -110,7 +88,6 @@ impl TerminalThemeKindExt for TerminalThemeKind {
         let scan_red = scan_red_ramp(measured, level);
 
         TerminalTheme {
-            kind: self,
             // Hierarchy lives on the modifier axis: same color, less intensity.
             // This is what removes the need for per-background palettes.
             text: Ink::terminal(),
@@ -250,7 +227,7 @@ mod tests {
     });
 
     fn adaptive(terminal: Option<DefaultColors>) -> TerminalTheme {
-        TerminalThemeKind::Adaptive.palette_with(terminal, StdoutColorLevel::TrueColor)
+        TerminalTheme::with_colors(terminal, StdoutColorLevel::TrueColor)
     }
 
     #[test]
@@ -260,13 +237,6 @@ mod tests {
         for bg in [DARK, LIGHT, None] {
             assert_eq!(adaptive(bg).text.explicit_color(), None);
         }
-        assert_eq!(
-            TerminalThemeKind::Ansi
-                .palette_with(DARK, StdoutColorLevel::TrueColor)
-                .text
-                .explicit_color(),
-            None
-        );
     }
 
     #[test]
@@ -288,42 +258,40 @@ mod tests {
     fn accent_roles_stay_within_the_ansi_sixteen() {
         // RGB foregrounds are what break on unfamiliar terminal themes, so no
         // role may introduce one regardless of the terminal's capabilities.
-        for kind in TerminalThemeKind::ALL {
-            let theme = kind.palette_with(DARK, StdoutColorLevel::TrueColor);
-            for role in [
-                theme.primary,
-                theme.secondary,
-                theme.accent,
-                theme.success,
-                theme.warning,
-                theme.error,
-                theme.user,
-                theme.agent,
-                theme.tool,
-                theme.code,
-                theme.terminal,
-                theme.permission,
-                theme.diff_added,
-                theme.diff_removed,
-            ] {
-                let Some(color) = role.explicit_color() else {
-                    continue;
-                };
-                assert!(
-                    matches!(
-                        color,
-                        Color::Black
-                            | Color::Red
-                            | Color::Green
-                            | Color::Yellow
-                            | Color::Blue
-                            | Color::Magenta
-                            | Color::Cyan
-                            | Color::White
-                    ),
-                    "{kind} uses off-palette foreground {color:?}"
-                );
-            }
+        let theme = adaptive(DARK);
+        for role in [
+            theme.primary,
+            theme.secondary,
+            theme.accent,
+            theme.success,
+            theme.warning,
+            theme.error,
+            theme.user,
+            theme.agent,
+            theme.tool,
+            theme.code,
+            theme.terminal,
+            theme.permission,
+            theme.diff_added,
+            theme.diff_removed,
+        ] {
+            let Some(color) = role.explicit_color() else {
+                continue;
+            };
+            assert!(
+                matches!(
+                    color,
+                    Color::Black
+                        | Color::Red
+                        | Color::Green
+                        | Color::Yellow
+                        | Color::Blue
+                        | Color::Magenta
+                        | Color::Cyan
+                        | Color::White
+                ),
+                "off-palette foreground {color:?}"
+            );
         }
     }
 
@@ -365,68 +333,56 @@ mod tests {
 
     #[test]
     fn diff_fills_are_dropped_on_sixteen_color_terminals() {
-        let theme = TerminalThemeKind::Adaptive.palette_with(DARK, StdoutColorLevel::Ansi16);
+        let theme = TerminalTheme::with_colors(DARK, StdoutColorLevel::Ansi16);
         assert_eq!(theme.diff_added_bg, None);
         assert_eq!(theme.diff_removed_bg, None);
-    }
-
-    #[test]
-    fn strict_ansi_mode_refuses_derived_fills_even_when_measurable() {
-        let theme = TerminalThemeKind::Ansi.palette_with(DARK, StdoutColorLevel::TrueColor);
-        assert_eq!(theme.diff_added_bg, None);
-        assert_eq!(theme.diff_removed_bg, None);
-        assert_eq!(theme.selection_bg, Ink::ansi(Color::Cyan));
     }
 
     #[test]
     fn spinner_faint_is_distinguishable_from_body_text() {
         // Faint is the resting rail; if it matched body text the idle ornament
         // would read as loud and every gradient would invert.
-        for kind in TerminalThemeKind::ALL {
-            for bg in [DARK, LIGHT, None] {
-                let palette = kind.palette_with(bg, StdoutColorLevel::TrueColor);
-                assert_ne!(
-                    palette.spinner_ink(SpinnerInk::Faint),
-                    palette.text,
-                    "{kind} faint ink is indistinguishable from body text"
-                );
-            }
+        for bg in [DARK, LIGHT, None] {
+            let palette = adaptive(bg);
+            assert_ne!(
+                palette.spinner_ink(SpinnerInk::Faint),
+                palette.text,
+                "faint ink is indistinguishable from body text"
+            );
         }
     }
 
     #[test]
     fn semantic_spinner_inks_are_drawn_from_the_active_palette() {
-        for kind in TerminalThemeKind::ALL {
-            let palette = kind.palette_with(DARK, StdoutColorLevel::TrueColor);
-            let declared = [
-                palette.subtle,
-                palette.primary,
-                palette.secondary,
-                palette.accent,
-                palette.success,
-                palette.warning,
-                palette.error,
-            ];
-            for ink in [
-                SpinnerInk::Faint,
-                SpinnerInk::Cool,
-                SpinnerInk::Bright,
-                SpinnerInk::Vivid,
-                SpinnerInk::Calm,
-                SpinnerInk::Warm,
-                SpinnerInk::Hot,
-            ] {
-                assert!(
-                    declared.contains(&palette.spinner_ink(ink)),
-                    "{kind} resolves {ink:?} to an off-palette ink"
-                );
-            }
+        let palette = adaptive(DARK);
+        let declared = [
+            palette.subtle,
+            palette.primary,
+            palette.secondary,
+            palette.accent,
+            palette.success,
+            palette.warning,
+            palette.error,
+        ];
+        for ink in [
+            SpinnerInk::Faint,
+            SpinnerInk::Cool,
+            SpinnerInk::Bright,
+            SpinnerInk::Vivid,
+            SpinnerInk::Calm,
+            SpinnerInk::Warm,
+            SpinnerInk::Hot,
+        ] {
+            assert!(
+                declared.contains(&palette.spinner_ink(ink)),
+                "{ink:?} resolves to an off-palette ink"
+            );
         }
     }
 
     #[test]
     fn adaptive_scan_ramp_has_a_distinct_color_for_every_level() {
-        let palette = TerminalThemeKind::Adaptive.palette_with(DARK, StdoutColorLevel::TrueColor);
+        let palette = adaptive(DARK);
         let colors: Vec<(u8, u8, u8)> = (0..SCAN_RED_LEVELS)
             .map(|level| {
                 match palette
@@ -453,8 +409,8 @@ mod tests {
     }
 
     #[test]
-    fn ansi_scan_ramp_stays_within_the_terminal_red_slots() {
-        let palette = TerminalThemeKind::Ansi.palette_with(DARK, StdoutColorLevel::TrueColor);
+    fn scan_ramp_falls_back_to_the_terminal_red_slots_when_unmeasured() {
+        let palette = adaptive(None);
         for level in 0..SCAN_RED_LEVELS {
             assert!(matches!(
                 palette

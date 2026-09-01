@@ -65,8 +65,6 @@ use crate::event::{
 use crate::ink::{Ink, InkStyle};
 use crate::notifications::TerminalNotificationBackend;
 use crate::palette::TerminalTheme;
-#[cfg(test)]
-use crate::palette::TerminalThemeKindExt;
 use crate::settings::{SettingsAction, draw_settings_panel};
 use crate::speech::{
     DictationFinish, DictationResult, dictation_error_message, run_dictation, voice_input_supported,
@@ -74,7 +72,6 @@ use crate::speech::{
 use crate::spinner::SpinnerStyle;
 use crate::term::TrackedBackend;
 use crate::text::truncate_text_to_width;
-use crate::theme::TerminalThemeKind;
 use crate::version::mjolnir_version_label;
 
 const TRANSCRIPT_SCROLL_PAGE_STEP: usize = 5;
@@ -990,7 +987,6 @@ pub struct UiPersistencePaths<'a> {
 #[derive(Clone)]
 pub struct UiRunOptions<'a> {
     pub persistence: UiPersistencePaths<'a>,
-    pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub thought_output: config::ThoughtOutput,
     pub voice_auto_send: config::VoiceAutoSend,
@@ -1024,7 +1020,6 @@ pub struct UiRunResult {
     pub reason: UiExitReason,
     pub session_id: Option<String>,
     pub session_title: Option<String>,
-    pub theme_kind: TerminalThemeKind,
     pub spinner_style: SpinnerStyle,
     pub primary_session_handoff: Option<String>,
     pub primary_session_handoff_condensed: Option<String>,
@@ -1037,7 +1032,6 @@ struct UiInitialState {
     history: Vec<String>,
     transcript_export_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
-    theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
     thought_output: config::ThoughtOutput,
     voice_auto_send: config::VoiceAutoSend,
@@ -1067,7 +1061,6 @@ struct UiLoopOutcome {
     reason: UiExitReason,
     session_id: Option<String>,
     session_title: Option<String>,
-    theme_kind: TerminalThemeKind,
     spinner_style: SpinnerStyle,
     history: Vec<String>,
     primary_session_handoff: Option<String>,
@@ -1107,7 +1100,6 @@ pub async fn run(
         reason,
         session_id,
         session_title,
-        theme_kind,
         spinner_style,
         history,
         primary_session_handoff,
@@ -1126,7 +1118,6 @@ pub async fn run(
                 .transcript_export_dir
                 .map(Path::to_path_buf),
             config_path: options.persistence.config_path.map(Path::to_path_buf),
-            theme_kind: options.theme_kind,
             spinner_style: options.spinner_style,
             thought_output: options.thought_output,
             voice_auto_send: options.voice_auto_send,
@@ -1161,7 +1152,6 @@ pub async fn run(
         reason,
         session_id,
         session_title,
-        theme_kind,
         spinner_style,
         primary_session_handoff,
         primary_session_handoff_condensed,
@@ -1403,7 +1393,6 @@ async fn ui_loop(
     state.primary_route_reasoning_effort = initial.primary_reasoning_effort.clone();
     state.primary_reasoning_effort = initial.primary_reasoning_effort;
     state.transcript_export_dir = initial.transcript_export_dir;
-    state.set_theme(initial.theme_kind);
     state.set_spinner_style(initial.spinner_style);
     state.set_thought_output(initial.thought_output);
     state.voice_auto_send = initial.voice_auto_send;
@@ -1807,7 +1796,6 @@ async fn ui_loop(
                 reason,
                 session_id: outcome_state.session_id.clone(),
                 session_title: outcome_state.session_title.clone(),
-                theme_kind: state.theme_kind,
                 spinner_style: state.spinner_style,
                 history: outcome_state.prompt_history(),
                 primary_session_handoff: is_handoff
@@ -1841,7 +1829,6 @@ async fn ui_loop(
         reason: UiExitReason::Quit,
         session_id: None,
         session_title: None,
-        theme_kind: state.theme_kind,
         spinner_style: state.spinner_style,
         history: state.prompt_history(),
         primary_session_handoff: None,
@@ -4974,7 +4961,6 @@ fn persist_mjconfig_selection(
     initial_config: config::Config,
     mut config: config::Config,
 ) {
-    let theme = config.theme;
     let style = config.spinner;
     let review_changed = review_policy_changed(state, &config);
     // A policy edit in this save may have disabled the only route of a pinned
@@ -5020,7 +5006,7 @@ fn persist_mjconfig_selection(
                     "config saved; reviewer and subagent configuration is updating now".to_string()
                 } else {
                     format!(
-                        "config saved — theme {theme}, spinner {style}; saved session settings apply to the active primary when supported, while ACP routing changes apply on /new or /clear"
+                        "config saved — spinner {style}; saved session settings apply to the active primary when supported, while ACP routing changes apply on /new or /clear"
                     )
                 };
                 for notice in &reroute_notices {
@@ -5042,7 +5028,7 @@ fn persist_mjconfig_selection(
             ),
         }
     } else {
-        state.record_status_message(StatusKind::Info, format!("theme {theme}, spinner {style}"));
+        state.record_status_message(StatusKind::Info, format!("spinner {style}"));
     }
 }
 
@@ -5076,7 +5062,6 @@ fn adopt_live_config(
     state.max_correction_rounds = config.agent.max_correction_rounds;
     state.feature_hints_enabled = config.feature_hints;
     state.keep_awake.set_enabled(config.keep_awake);
-    state.set_theme(config.theme);
     state.set_spinner_style(config.spinner);
     state.set_thought_output(config.thought_output);
     state.voice_auto_send = config.voice_auto_send;
@@ -14875,7 +14860,7 @@ mod tests {
     /// palette with every blended fill dropped. Tests that care about diff row
     /// backgrounds have to opt into a measured terminal explicitly.
     fn measured_theme() -> TerminalTheme {
-        TerminalThemeKind::Adaptive.palette_with(
+        TerminalTheme::with_colors(
             Some(crate::terminal_palette::DefaultColors {
                 fg: (204, 204, 204),
                 bg: (24, 24, 24),
@@ -15205,20 +15190,17 @@ mod tests {
                 state.theme.accent.style(),
             ]
         );
-        for theme in TerminalThemeKind::ALL {
-            state.set_theme(theme);
-            let styles: Vec<_> = status_line(&state, 200)
-                .spans
-                .iter()
-                .filter(|span| span.content.trim() != "·")
-                .map(|span| span.style)
-                .collect();
-            for (index, style) in styles.iter().enumerate() {
-                assert!(
-                    !styles[..index].contains(style),
-                    "duplicate status-line style {style:?} in {theme:?}"
-                );
-            }
+        let styles: Vec<_> = status_line(&state, 200)
+            .spans
+            .iter()
+            .filter(|span| span.content.trim() != "·")
+            .map(|span| span.style)
+            .collect();
+        for (index, style) in styles.iter().enumerate() {
+            assert!(
+                !styles[..index].contains(style),
+                "duplicate status-line style {style:?}"
+            );
         }
     }
 
@@ -15599,13 +15581,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_elicitation_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_elicitation_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -15654,13 +15630,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_elicitation_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_elicitation_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -15741,13 +15711,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_elicitation_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_elicitation_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -17881,12 +17845,9 @@ mod tests {
         editor.selected = crate::settings::SERVER_ROW_OFFSET;
         handle_mjconfig_menu_key(&mut state, &cmd_tx, KeyModifiers::NONE, KeyCode::Char(' '));
 
-        // Appearance tab: preview theme, spinner, and thought output live.
+        // Appearance tab: preview spinner and thought output live.
         state.mjconfig_menu.as_mut().expect("menu").editor.tab =
             crate::settings::SettingsTab::Appearance;
-        state.mjconfig_menu_key(KeyCode::Right);
-        let previewed_theme = state.theme_kind;
-        state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
         let previewed = state.spinner_style;
         state.mjconfig_menu_key(KeyCode::Down);
@@ -17920,7 +17881,6 @@ mod tests {
         assert!(state.mjconfig_menu.is_none(), "menu closes on accept");
         let saved = config::Config::load(&path).expect("load saved config");
         assert_eq!(saved.spinner, previewed);
-        assert_eq!(saved.theme, previewed_theme);
         assert_eq!(saved.thought_output, previewed_thought_output);
         assert_eq!(
             saved.acp.policy("codex-acp"),
@@ -18764,7 +18724,6 @@ mod tests {
     #[test]
     fn mjconfig_menu_cancel_reverts_live_preview() {
         let mut state = AppState::new();
-        let orig_theme = state.theme_kind;
         let orig_spinner = state.spinner_style;
         let orig_thought_output = state.thought_output;
         state.open_mjconfig_menu();
@@ -18776,15 +18735,12 @@ mod tests {
         state.mjconfig_menu_key(KeyCode::Right);
         state.mjconfig_menu_key(KeyCode::Down);
         state.mjconfig_menu_key(KeyCode::Right);
-        state.mjconfig_menu_key(KeyCode::Down);
-        state.mjconfig_menu_key(KeyCode::Right);
-        assert!(state.theme_kind != orig_theme || state.spinner_style != orig_spinner);
+        assert_ne!(state.spinner_style, orig_spinner);
         assert_ne!(state.thought_output, orig_thought_output);
 
         handle_mjconfig_menu_key(&mut state, &cmd_tx, KeyModifiers::NONE, KeyCode::Esc);
 
         assert!(state.mjconfig_menu.is_none(), "menu closes on cancel");
-        assert_eq!(state.theme_kind, orig_theme, "theme reverted");
         assert_eq!(state.spinner_style, orig_spinner, "spinner reverted");
         assert_eq!(
             state.thought_output, orig_thought_output,
@@ -18804,7 +18760,7 @@ mod tests {
         state.open_mjconfig_menu();
         assert!(state.has_pending_permission());
         assert!(state.mjconfig_menu.is_some());
-        let theme_before = state.theme_kind;
+        let spinner_before = state.spinner_style;
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
 
         handle_crossterm(
@@ -18819,7 +18775,7 @@ mod tests {
             "Down should move the permission selection"
         );
         assert_eq!(
-            state.theme_kind, theme_before,
+            state.spinner_style, spinner_before,
             "menu must not consume keys while a permission prompt is up"
         );
         assert!(state.mjconfig_menu.is_some(), "menu stays open underneath");
@@ -20962,7 +20918,7 @@ mod tests {
         let ranges = line_search_match_ranges("vorher Äpfel danach", "äPFEL");
         assert_eq!(&"vorher Äpfel danach"[ranges[0].clone()], "Äpfel");
 
-        let theme = TerminalThemeKind::Adaptive.palette();
+        let theme = TerminalTheme::current();
         let highlighted = highlight_search_matches(
             Line::from("vorher Äpfel danach".to_string()),
             "äPFEL",
@@ -21713,13 +21669,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_permission_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_permission_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -21772,13 +21722,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_permission_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_permission_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -21809,13 +21753,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_permission_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_permission_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -21872,13 +21810,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_permission_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_permission_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -21907,13 +21839,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_permission_modal(
-                    frame,
-                    frame.area(),
-                    &pending,
-                    1,
-                    TerminalThemeKind::default().palette(),
-                )
+                draw_permission_modal(frame, frame.area(), &pending, 1, TerminalTheme::current())
             })
             .expect("draw");
 
@@ -22268,7 +22194,7 @@ mod tests {
     }
 
     fn command_spans(command: &str) -> Vec<(String, Style)> {
-        let theme = TerminalThemeKind::Adaptive.palette();
+        let theme = TerminalTheme::current();
         highlight_command(command, theme)
             .into_iter()
             .map(|span| (span.content.into_owned(), span.style))
@@ -22285,7 +22211,7 @@ mod tests {
 
     #[test]
     fn execute_tool_headers_restore_command_syntax_colors() {
-        let theme = TerminalThemeKind::Adaptive.palette();
+        let theme = TerminalTheme::current();
         let spans = command_spans("FOO=bar cargo test --all | grep failed");
         assert_eq!(
             spans
@@ -22931,7 +22857,7 @@ mod tests {
 
     #[test]
     fn tool_output_semantic_colors_ignore_incidental_failure_words() {
-        let theme = TerminalThemeKind::Adaptive.palette();
+        let theme = TerminalTheme::current();
         for line in [
             "0 errors",
             "Permission denied inside a deliberate check",
@@ -23358,7 +23284,7 @@ mod tests {
             "abcdefghijklmnopqrstuvwxyz",
             12,
             None,
-            TerminalThemeKind::default().palette(),
+            TerminalTheme::current(),
         );
         let rendered: Vec<String> = out.iter().map(line_text).collect();
 
@@ -24237,7 +24163,7 @@ mod tests {
 
     #[test]
     fn android_help_hides_voice_shortcut() {
-        let help = general_help_lines(false, TerminalThemeKind::Adaptive.palette())
+        let help = general_help_lines(false, TerminalTheme::current())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -24249,7 +24175,7 @@ mod tests {
 
     #[test]
     fn help_revisits_the_three_role_product_model() {
-        let help = help_modal_lines(false, TerminalThemeKind::Adaptive.palette())
+        let help = help_modal_lines(false, TerminalTheme::current())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -24268,7 +24194,7 @@ mod tests {
 
     #[test]
     fn help_advertises_live_model_and_effort_controls() {
-        let help = general_help_lines(false, TerminalThemeKind::Adaptive.palette())
+        let help = general_help_lines(false, TerminalTheme::current())
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -24282,7 +24208,7 @@ mod tests {
 
     #[test]
     fn help_lines_style_headings_bindings_and_descriptions_separately() {
-        let theme = TerminalThemeKind::Adaptive.palette();
+        let theme = TerminalTheme::current();
         let lines = help_modal_lines(false, theme);
 
         let heading = lines

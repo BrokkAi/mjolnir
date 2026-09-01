@@ -38,7 +38,6 @@ mod spinner;
 mod subagent;
 mod terminal_palette;
 mod termination;
-mod theme;
 mod ui;
 mod workspace_snapshot;
 mod worktree;
@@ -58,7 +57,6 @@ use tokio_util::sync::CancellationToken;
 use crate::app::UiExitReason;
 use crate::config::{Config, SelectedAgent, history_path, transcript_export_dir};
 use crate::event::{LoadSessionResult, UiCommand, UiEvent};
-use crate::palette::TerminalThemeKindExt;
 use crate::session::SessionEntryJson;
 use crate::ui::HeaderLabels;
 use crate::worktree::CreatedWorktree;
@@ -1247,9 +1245,7 @@ async fn run_resume(
             sessions,
             true,
             notice.take(),
-            Config::load(&config::default_config_path())
-                .map(|cfg| cfg.theme.palette())
-                .unwrap_or_else(|_| theme::TerminalThemeKind::default().palette()),
+            palette::TerminalTheme::current(),
             termination.clone(),
         )
         .await?;
@@ -1618,7 +1614,6 @@ struct RunSessionResult {
     reason: UiExitReason,
     session_id: Option<String>,
     session_title: Option<String>,
-    theme_kind: theme::TerminalThemeKind,
     spinner_style: spinner::SpinnerStyle,
     primary_session_handoff: Option<String>,
     primary_session_handoff_condensed: Option<String>,
@@ -1674,7 +1669,6 @@ impl From<ui::UiRunResult> for RunSessionResult {
             reason: result.reason,
             session_id: result.session_id,
             session_title: result.session_title,
-            theme_kind: result.theme_kind,
             spinner_style: result.spinner_style,
             primary_session_handoff: result.primary_session_handoff,
             primary_session_handoff_condensed: result.primary_session_handoff_condensed,
@@ -1683,7 +1677,6 @@ impl From<ui::UiRunResult> for RunSessionResult {
 }
 
 fn apply_session_result_to_config(cfg: &mut Config, result: &RunSessionResult) {
-    cfg.theme = result.theme_kind;
     cfg.spinner = result.spinner_style;
 }
 
@@ -1857,7 +1850,6 @@ async fn run_app(
             resume.as_ref().map(|target| target.session_id.clone()),
             primary_session_handoff,
             session_import_source.is_some(),
-            cfg.theme,
             cfg.spinner,
             session_boundary,
             session_roster,
@@ -1984,7 +1976,7 @@ async fn run_app(
                     runtime_options.agent_stderr.as_deref(),
                     session_result.session_id,
                     session_result.session_title,
-                    cfg.theme.palette(),
+                    palette::TerminalTheme::current(),
                     termination.clone(),
                 )
                 .await?
@@ -2394,7 +2386,6 @@ async fn run_session(
     resume_session: Option<String>,
     mut primary_session_handoff: Option<String>,
     import_resumed_session: bool,
-    mut theme_kind: theme::TerminalThemeKind,
     mut spinner_style: spinner::SpinnerStyle,
     mut session_boundary: Option<String>,
     roster: roster::Roster,
@@ -3127,7 +3118,6 @@ async fn run_session(
                     transcript_export_dir: export_dir.as_deref(),
                     config_path: Some(&config_path),
                 },
-                theme_kind,
                 spinner_style,
                 thought_output: ui_config.thought_output,
                 voice_auto_send: ui_config.voice_auto_send,
@@ -3175,10 +3165,9 @@ async fn run_session(
         )
         .await;
 
-        // Adopt any theme/spinner the user changed during the session so the
-        // picker and any follow-on session inherit them.
+        // Adopt any spinner the user changed during the session so the
+        // picker and any follow-on session inherit it.
         if let Ok(result) = ui_result.as_ref() {
-            theme_kind = result.theme_kind;
             spinner_style = result.spinner_style;
         }
 
@@ -3206,7 +3195,7 @@ async fn run_session(
             runtime_options.agent_stderr.as_deref(),
             current_session_id.clone(),
             current_session_title.clone(),
-            theme_kind.palette(),
+            palette::TerminalTheme::current(),
             termination.clone(),
         )
         .await
@@ -3227,7 +3216,6 @@ async fn run_session(
                 reason: UiExitReason::Quit,
                 session_id: current_session_id,
                 session_title: current_session_title,
-                theme_kind,
                 spinner_style,
                 primary_session_handoff: None,
                 primary_session_handoff_condensed: None,
@@ -3243,7 +3231,6 @@ async fn run_session(
                 reason: UiExitReason::SwitchSession,
                 session_id: Some(target_session_id),
                 session_title: target_title,
-                theme_kind,
                 spinner_style,
                 primary_session_handoff: None,
                 primary_session_handoff_condensed: None,
@@ -3283,7 +3270,6 @@ async fn run_session(
                     reason: UiExitReason::SwitchSession,
                     session_id: Some(target_session_id),
                     session_title: target_title,
-                    theme_kind,
                     spinner_style,
                     primary_session_handoff: None,
                     primary_session_handoff_condensed: None,
@@ -4228,13 +4214,12 @@ mod tests {
     }
 
     #[test]
-    fn session_result_updates_supervisor_theme_before_next_action() {
+fn session_result_updates_supervisor_spinner_before_next_action() {
         let mut cfg = Config::default();
         let result = RunSessionResult {
             reason: UiExitReason::ClearSession,
             session_id: Some("session-1".to_string()),
             session_title: Some("Current".to_string()),
-            theme_kind: theme::TerminalThemeKind::Ansi,
             spinner_style: spinner::SpinnerStyle::Bars,
             primary_session_handoff: None,
             primary_session_handoff_condensed: None,
@@ -4242,7 +4227,6 @@ mod tests {
 
         apply_session_result_to_config(&mut cfg, &result);
 
-        assert_eq!(cfg.theme, theme::TerminalThemeKind::Ansi);
         assert_eq!(cfg.spinner, spinner::SpinnerStyle::Bars);
     }
 
@@ -4252,7 +4236,6 @@ mod tests {
             reason: UiExitReason::SwitchSession,
             session_id: Some("session-2".to_string()),
             session_title: Some("Selected".to_string()),
-            theme_kind: theme::TerminalThemeKind::Adaptive,
             spinner_style: spinner::SpinnerStyle::Globe,
             primary_session_handoff: None,
             primary_session_handoff_condensed: None,
@@ -4261,7 +4244,6 @@ mod tests {
         assert_eq!(result.reason, UiExitReason::SwitchSession);
         assert_eq!(result.session_id.as_deref(), Some("session-2"));
         assert_eq!(result.session_title.as_deref(), Some("Selected"));
-        assert_eq!(result.theme_kind, theme::TerminalThemeKind::Adaptive);
         assert_eq!(result.spinner_style, spinner::SpinnerStyle::Globe);
     }
 

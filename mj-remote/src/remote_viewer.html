@@ -4922,24 +4922,6 @@
         }
         mjconfigBodyEl.appendChild(themeRow);
 
-        const terminalThemeRow = mjRow("Terminal theme");
-        const terminalTheme = mjEditedValue("theme", panel.theme);
-        terminalThemeRow.appendChild(
-          mjCombo(
-            panel.themes.map((value) => ({
-              value,
-              label: value.charAt(0).toUpperCase() + value.slice(1),
-            })),
-            terminalTheme,
-            (next) => {
-              mjcfg.edits.theme = next;
-              renderMjConfig();
-            },
-          ),
-        );
-        terminalThemeRow.appendChild(mjDetail("applies to terminal sessions"));
-        mjconfigBodyEl.appendChild(terminalThemeRow);
-
         const spinnerRow = mjRow("Spinner");
         const currentSpinner = mjEditedValue("spinner", panel.spinner);
         spinnerRow.appendChild(

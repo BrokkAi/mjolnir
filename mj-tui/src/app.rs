@@ -31,12 +31,10 @@ use crate::event::{
 use mj_core::builtin_commands;
 
 use crate::palette::TerminalTheme;
-use crate::palette::TerminalThemeKindExt;
 use crate::session_state::SessionState;
 use crate::settings::{SettingsAction, SettingsEditor};
 use crate::spinner::SpinnerStyle;
 use crate::text::first_line;
-use crate::theme::TerminalThemeKind;
 
 /// Maximum width of the queued-prompt preview shown above the input.
 /// Beyond this we truncate with an ellipsis.
@@ -714,10 +712,6 @@ const FEATURE_HINTS: &[FeatureHint] = &[
         requirement: FeatureHintRequirement::Always,
     },
     FeatureHint {
-        text: "If a terminal or multiplexer reports colors unreliably, choose the strict 16-color ANSI theme under Appearance in /mjconfig.",
-        requirement: FeatureHintRequirement::Always,
-    },
-    FeatureHint {
         text: "Send another instruction while an agent is working; Mjolnir queues it and can steer supported agents into the active turn.",
         requirement: FeatureHintRequirement::Always,
     },
@@ -1276,7 +1270,6 @@ fn number_field(
 pub struct MjConfigMenu {
     pub editor: SettingsEditor,
     initial_config: crate::config::Config,
-    orig_theme: TerminalThemeKind,
     orig_spinner: SpinnerStyle,
     orig_thought_output: crate::config::ThoughtOutput,
 }
@@ -1294,10 +1287,9 @@ pub struct TranscriptSelection {
 
 #[derive(Debug)]
 pub struct AppState {
-    pub theme_kind: TerminalThemeKind,
     pub theme: TerminalTheme,
-    /// Client-side prompt-activity spinner style. Purely cosmetic; persisted
-    /// in config like [`theme_kind`](Self::theme_kind).
+    /// Client-side prompt-activity spinner style. Purely cosmetic and
+    /// persisted in config.
     pub spinner_style: SpinnerStyle,
     /// Amount of agent thought text shown in the normal transcript.
     pub thought_output: crate::config::ThoughtOutput,
@@ -2180,10 +2172,8 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         let now = Instant::now();
-        let theme_kind = TerminalThemeKind::default();
         Self {
-            theme_kind,
-            theme: theme_kind.palette(),
+            theme: TerminalTheme::current(),
             spinner_style: SpinnerStyle::default(),
             thought_output: crate::config::ThoughtOutput::default(),
             voice_auto_send: crate::config::VoiceAutoSend::default(),
@@ -2308,7 +2298,6 @@ impl AppState {
         let mut side = Self::new();
         side.is_side = true;
         side.side_initial_question = question;
-        side.theme_kind = self.theme_kind;
         side.theme = self.theme;
         side.spinner_style = self.spinner_style;
         side.thought_output = self.thought_output;
@@ -2356,15 +2345,6 @@ impl AppState {
 
     pub(crate) fn set_claude_usage(&mut self, status: ClaudeUsageStatus) {
         self.claude_usage = Some(status);
-    }
-
-    pub fn set_theme(&mut self, theme_kind: TerminalThemeKind) {
-        if self.theme_kind != theme_kind {
-            self.bump_transcript_revision();
-            self.bump_settled_render_epoch();
-        }
-        self.theme_kind = theme_kind;
-        self.theme = theme_kind.palette();
     }
 
     pub fn set_spinner_style(&mut self, spinner_style: SpinnerStyle) {
@@ -2447,7 +2427,6 @@ impl AppState {
             .and_then(|path| crate::config::Config::load(path).ok())
             .unwrap_or_default();
         config.apply_default_team();
-        config.theme = self.theme_kind;
         config.spinner = self.spinner_style;
         config.thought_output = self.thought_output;
         let notice = config.newer_build_notice();
@@ -2457,7 +2436,6 @@ impl AppState {
                 .with_active_models(self.active_models.clone())
                 .with_active_session_config(self.session_config_options.clone())
                 .with_inventory(self.acp_inventory.clone()),
-            orig_theme: self.theme_kind,
             orig_spinner: self.spinner_style,
             orig_thought_output: self.thought_output,
         });
@@ -2469,10 +2447,8 @@ impl AppState {
             return SettingsAction::None;
         };
         let action = menu.editor.handle_key(code);
-        let theme = menu.editor.config.theme;
         let spinner = menu.editor.config.spinner;
         let thought_output = menu.editor.config.thought_output;
-        self.set_theme(theme);
         self.set_spinner_style(spinner);
         self.set_thought_output(thought_output);
         action
@@ -2511,11 +2487,10 @@ impl AppState {
             .map(|menu| (menu.initial_config, menu.editor.config))
     }
 
-    /// Close the menu and restore the theme and spinner that were active when
-    /// it opened, discarding the live preview.
+    /// Close the menu and restore the spinner that was active when it opened,
+    /// discarding the live preview.
     pub fn mjconfig_menu_cancel(&mut self) {
         if let Some(menu) = self.mjconfig_menu.take() {
-            self.set_theme(menu.orig_theme);
             self.set_spinner_style(menu.orig_spinner);
             self.set_thought_output(menu.orig_thought_output);
         }
@@ -11786,7 +11761,7 @@ mod tests {
 
     #[test]
     fn feature_hints_include_spinner_and_ansi_appearance_configuration() {
-        let spinner = FEATURE_HINTS
+        FEATURE_HINTS
             .iter()
             .find(|hint| {
                 hint.requirement == FeatureHintRequirement::Always
@@ -11794,20 +11769,6 @@ mod tests {
                     && hint.text.contains("/mjconfig")
             })
             .expect("spinner appearance hint");
-        let ansi = FEATURE_HINTS
-            .iter()
-            .find(|hint| {
-                hint.requirement == FeatureHintRequirement::Always
-                    && hint.text.contains("strict 16-color ANSI theme")
-                    && hint.text.contains("terminal or multiplexer")
-                    && hint.text.contains("/mjconfig")
-            })
-            .expect("ANSI appearance hint");
-
-        assert_ne!(
-            spinner.text, ansi.text,
-            "spinner and ANSI tips must remain separate"
-        );
     }
 
     #[test]

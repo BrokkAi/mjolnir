@@ -36,7 +36,6 @@ pub mod side;
 pub mod spinner;
 pub mod subscription;
 pub mod terminal_output;
-pub mod theme;
 pub mod token_gate;
 pub mod trajectory;
 pub mod usage_fact;

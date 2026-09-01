@@ -5494,8 +5494,6 @@ struct MjSessionOptionChoice {
 
 #[derive(Debug, Serialize)]
 struct MjAppearancePanel {
-    theme: String,
-    themes: Vec<String>,
     spinner: String,
     spinners: Vec<MjSpinnerEntry>,
     thought_output: String,
@@ -5577,7 +5575,6 @@ struct MjConfigApplyRequest {
     bifrost_version: Option<String>,
     max_parallel: Option<usize>,
     auto_failover: Option<bool>,
-    theme: Option<String>,
     spinner: Option<String>,
     thought_output: Option<String>,
     feature_hints: Option<bool>,
@@ -5964,11 +5961,6 @@ fn mjconfig_snapshot_response(state: &ServerState, notice: Option<String>) -> Mj
     };
 
     let appearance = MjAppearancePanel {
-        theme: config.theme.to_string(),
-        themes: mj_core::theme::TerminalThemeKind::ALL
-            .into_iter()
-            .map(|kind| kind.to_string())
-            .collect(),
         spinner: config.spinner.to_string(),
         spinners: mj_core::spinner::SpinnerStyle::ALL
             .into_iter()
@@ -6329,11 +6321,6 @@ fn mjconfig_apply_edits(
     }
     if let Some(enabled) = request.auto_failover {
         config.subagents.auto_failover = enabled;
-    }
-    if let Some(theme) = request.theme {
-        config.theme = theme
-            .parse()
-            .map_err(|_| bad_request(format!("unknown theme: {theme}")))?;
     }
     if let Some(spinner) = request.spinner {
         config.spinner = spinner
@@ -11266,8 +11253,6 @@ mod tests {
         assert_eq!(accounts[1]["login_modes"][0]["id"], "subscription");
         assert_eq!(accounts[1]["login_modes"][1]["id"], "console");
 
-        let themes = snapshot["appearance"]["themes"].as_array().expect("themes");
-        assert_eq!(themes.len(), mj_core::theme::TerminalThemeKind::ALL.len());
         let spinners = snapshot["appearance"]["spinners"]
             .as_array()
             .expect("spinners");
@@ -12024,7 +12009,6 @@ mod tests {
                     "max_correction_rounds": "2",
                     "bifrost_version": "0.9.9",
                     "max_parallel": 4,
-                    "theme": "ansi",
                     "spinner": "wave",
                     "thought_output": "full",
                     "feature_hints": false,
@@ -12072,7 +12056,6 @@ mod tests {
             "p3"
         );
         assert_eq!(snapshot["agents"]["max_parallel"], 4);
-        assert_eq!(snapshot["appearance"]["theme"], "ansi");
         assert_eq!(snapshot["appearance"]["spinner"], "wave");
         assert_eq!(snapshot["appearance"]["thought_output"], "full");
         assert_eq!(snapshot["appearance"]["feature_hints"], false);
@@ -12102,7 +12085,6 @@ mod tests {
         assert_eq!(saved.agent.max_correction_rounds, Some(2));
         assert_eq!(saved.review.bifrost_version.as_deref(), Some("0.9.9"));
         assert_eq!(saved.subagents.max_parallel, 4);
-        assert_eq!(saved.theme, mj_core::theme::TerminalThemeKind::Ansi);
         assert_eq!(saved.spinner, mj_core::spinner::SpinnerStyle::Wave);
         assert_eq!(saved.thought_output, config::ThoughtOutput::Full);
         assert!(!saved.feature_hints);
@@ -12261,7 +12243,6 @@ mod tests {
         let app = mjconfig_test_router(test_mjconfig_runtime(), token);
         let cases = [
             serde_json::json!({ "max_parallel": 40 }),
-            serde_json::json!({ "theme": "solarized" }),
             serde_json::json!({ "spinner": "cube" }),
             serde_json::json!({ "thought_output": "summary" }),
             serde_json::json!({ "review_tier": "thorough" }),
@@ -13054,7 +13035,7 @@ if (permissionsEl.children.length !== 0 || permissionCards.size !== 0) {
         assert!(viewer.contains("Post-correction verification"));
         assert!(viewer.contains("mjcfg.edits.max_correction_rounds = next"));
         assert!(viewer.contains("voice_auto_send"));
-        assert!(viewer.contains("Terminal theme"));
+        assert!(!viewer.contains("Terminal theme"));
         assert!(!viewer.contains("ACP Priority"));
         assert!(!viewer.contains("renderMjPriority"));
     }

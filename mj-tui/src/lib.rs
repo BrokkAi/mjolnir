@@ -19,7 +19,6 @@ pub mod term;
 pub mod terminal_palette;
 pub mod termination;
 pub mod text;
-pub mod theme;
 pub mod ui;
 
 pub mod acp {

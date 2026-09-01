@@ -1,8 +1,8 @@
 //! Prompt-activity spinner styles.
 //!
-//! A spinner style is a purely client-side visual preference, mirroring
-//! [`crate::theme::TerminalThemeKind`]: it is persisted in `config.toml`,
-//! chosen on first run, and changeable via the `/mjconfig` menu.
+//! A spinner style is a purely client-side visual preference: it is persisted
+//! in `config.toml`, chosen on first run, and changeable via the `/mjconfig`
+//! menu.
 //!
 //! Every style renders to frames of exactly [`SPINNER_WIDTH`] display columns
 //! (including its idle frame) so the prompt title never reflows when a turn
@@ -43,8 +43,8 @@ const SCAN_FRAME_INTERVAL_MS: u128 = 90;
 
 /// Color slot for one spinner cell, resolved against the active palette by
 /// [`crate::palette::TerminalTheme::spinner_ink`]. Styles emit slots rather
-/// than colors so one frame set serves both the truecolor and the 16-color
-/// ANSI themes.
+/// than colors so one frame set serves truecolor and 16-color terminals
+/// alike.
 ///
 /// The first four are a cold-to-hot energy ramp used by the motion styles.
 /// `Calm`, `Warm`, and `Hot` form the metered ramp used by `Bars`; `Red` carries

@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::spinner::SpinnerStyle;
-use crate::theme::TerminalThemeKind;
 
 pub const DISABLED_MODEL: &str = "disabled";
 pub const CONFIG_VERSION: u32 = 7;
@@ -230,8 +229,6 @@ pub struct Config {
     pub newer_config_version: Option<u32>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub onboarding_version: u32,
-    #[serde(default, skip_serializing_if = "TerminalThemeKind::is_default")]
-    pub theme: TerminalThemeKind,
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     pub spinner: SpinnerStyle,
     /// Amount of thought text shown in terminal and web transcripts.
@@ -287,7 +284,6 @@ impl Default for Config {
             version: CONFIG_VERSION,
             newer_config_version: None,
             onboarding_version: 0,
-            theme: TerminalThemeKind::default(),
             spinner: SpinnerStyle::default(),
             thought_output: ThoughtOutput::default(),
             feature_hints: true,
@@ -1421,7 +1417,6 @@ impl Config {
         }
         recover!(
             onboarding_version,
-            theme,
             spinner,
             thought_output,
             feature_hints,
@@ -2017,7 +2012,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nope.toml");
         let cfg = Config::load(&path).expect("load");
-        assert_eq!(cfg.theme, TerminalThemeKind::Adaptive);
         assert_eq!(cfg.model_names(), ModelsConfig::default());
         assert!(cfg.agent.discrete_review);
         assert!(!cfg.agent.mcp_discrete_review);
@@ -2506,7 +2500,6 @@ kimi = "disabled"
 
         let config = Config::load(&path).expect("migrate v5");
         assert_eq!(config.version, CONFIG_VERSION);
-        assert_eq!(config.theme, TerminalThemeKind::Ansi);
         assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
 
         config.save(&path).expect("save migrated config");
@@ -2726,7 +2719,6 @@ kimi = "disabled"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let cfg = Config {
-            theme: TerminalThemeKind::Ansi,
             agent: AgentConfig {
                 model: "gpt-5-6-sol".to_string(),
                 acp_source: None,
@@ -2750,7 +2742,6 @@ kimi = "disabled"
         };
         cfg.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
-        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert_eq!(loaded.agent.model, "gpt-5-6-sol");
         assert!(!loaded.agent.discrete_review);
         assert!(loaded.agent.mcp_discrete_review);
@@ -2892,10 +2883,7 @@ kimi = "disabled"
     fn save_creates_parent_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("deep").join("config.toml");
-        let cfg = Config {
-            theme: TerminalThemeKind::Adaptive,
-            ..Config::default()
-        };
+        let cfg = Config::default();
         cfg.save(&path).expect("save");
         assert!(path.exists());
     }
@@ -3040,10 +3028,7 @@ kimi = "disabled"
     fn accepted_session_config_is_route_isolated_and_merge_safe() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        let mut cfg = Config {
-            theme: TerminalThemeKind::Ansi,
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
         cfg.agent.discrete_review = false;
         cfg.save(&path).expect("save initial config");
 
@@ -3065,7 +3050,6 @@ kimi = "disabled"
         .expect("persist model b");
 
         let loaded = Config::load(&path).expect("load merged config");
-        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
         assert!(!loaded.agent.discrete_review);
         assert_eq!(
             loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
@@ -3098,12 +3082,12 @@ kimi = "disabled"
             "priority".to_string(),
         )
         .expect("persist accepted route");
-        editor_snapshot.theme = TerminalThemeKind::Ansi;
+        editor_snapshot.feature_hints = false;
         save_user_config_preserving_session_routes(&path, &mut editor_snapshot)
             .expect("save settings");
 
         let loaded = Config::load(&path).expect("load merged config");
-        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
+        assert!(!loaded.feature_hints);
         assert_eq!(
             loaded.session_config["codex-acp"].models["model-a"]["config:service_tier"],
             "priority"
@@ -3272,10 +3256,9 @@ acp_source = "codex-acp"
         let path = dir.path().join("config.toml");
         // A future build reshaped `[agent] model` into a table, which breaks
         // whole-document deserialization for this build. Only that section
-        // may fall back; the team and appearance still show.
+        // may fall back; the team still shows.
         let body = format!(
-            "version = {}\ntheme = \"ansi\"\nteam = \"codex\"\n\n[agent]\nmodel = {{ id = \
-             \"future\" }}\n",
+            "version = {}\nteam = \"codex\"\n\n[agent]\nmodel = {{ id = \"future\" }}\n",
             CONFIG_VERSION + 1
         );
         std::fs::write(&path, &body).expect("write");
@@ -3284,7 +3267,6 @@ acp_source = "codex-acp"
 
         assert_eq!(config.team.as_deref(), Some("codex"));
         assert_eq!(TeamPreset::from_config(&config), Some(TeamPreset::Codex));
-        assert_eq!(config.theme, TerminalThemeKind::Ansi);
         // The broken section fell back to its default model; the team still
         // routes it.
         assert_eq!(config.agent.model, "auto");
@@ -3515,10 +3497,6 @@ mode = "ask"
             body.contains(&format!("version = {CONFIG_VERSION}")),
             "config: {body:?}"
         );
-        assert!(
-            !body.contains("theme"),
-            "default theme should not be serialized: {body:?}"
-        );
     }
 
     #[test]
@@ -3547,23 +3525,20 @@ mode = "ask"
     }
 
     #[test]
-    fn theme_config_defaulting_and_roundtrip() {
+    fn legacy_theme_key_is_ignored() {
+        // Configs written before the theme setting was removed still name it;
+        // refusing them would turn a cosmetic removal into a failure to start.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "").expect("write");
-        let cfg = Config::load(&path).expect("load default");
-        assert_eq!(cfg.theme, TerminalThemeKind::Adaptive);
+        std::fs::write(&path, "theme = \"dark\"\n").expect("write");
+        let cfg = Config::load(&path).expect("load config with legacy theme key");
 
-        let cfg = Config {
-            theme: TerminalThemeKind::Ansi,
-            ..Config::default()
-        };
         cfg.save(&path).expect("save");
         let body = std::fs::read_to_string(&path).expect("read");
-        assert!(body.contains("theme = \"ansi\""));
-
-        let loaded = Config::load(&path).expect("load saved");
-        assert_eq!(loaded.theme, TerminalThemeKind::Ansi);
+        assert!(
+            !body.contains("theme"),
+            "saved config kept the key: {body:?}"
+        );
     }
 
     #[test]

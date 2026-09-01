@@ -17,10 +17,8 @@ use crate::config::{
 };
 use crate::ink::InkStyle;
 use crate::palette::TerminalTheme;
-use crate::palette::TerminalThemeKindExt;
 use crate::roster::{AcpInventory, ModelChoice};
 use crate::spinner::SpinnerStyle;
-use crate::theme::TerminalThemeKind;
 pub(crate) use mj_core::settings::{
     SessionDefaultsSeat, SettingsTab, session_option_controls_reasoning_effort,
     session_option_is_editable,
@@ -217,7 +215,7 @@ impl SettingsEditor {
             }
             SettingsTab::AcpServers => self.configurable_servers().count() + SERVER_ROW_OFFSET,
             SettingsTab::Input => 1,
-            SettingsTab::Appearance => 5,
+            SettingsTab::Appearance => 4,
         }
     }
 
@@ -300,15 +298,6 @@ impl SettingsEditor {
                 self.refresh_inventory();
             }
             SettingsTab::Appearance if self.selected == 0 => {
-                let current = TerminalThemeKind::ALL
-                    .iter()
-                    .position(|kind| *kind == self.config.theme)
-                    .unwrap_or(0);
-                let next = (current as i32 + delta).rem_euclid(TerminalThemeKind::ALL.len() as i32)
-                    as usize;
-                self.config.theme = TerminalThemeKind::ALL[next];
-            }
-            SettingsTab::Appearance if self.selected == 1 => {
                 let current = SpinnerStyle::ALL
                     .iter()
                     .position(|style| *style == self.config.spinner)
@@ -317,7 +306,7 @@ impl SettingsEditor {
                     (current as i32 + delta).rem_euclid(SpinnerStyle::ALL.len() as i32) as usize;
                 self.config.spinner = SpinnerStyle::ALL[next];
             }
-            SettingsTab::Appearance if self.selected == 2 => {
+            SettingsTab::Appearance if self.selected == 1 => {
                 let current = ThoughtOutput::ALL
                     .iter()
                     .position(|output| *output == self.config.thought_output)
@@ -326,10 +315,10 @@ impl SettingsEditor {
                     (current as i32 + delta).rem_euclid(ThoughtOutput::ALL.len() as i32) as usize;
                 self.config.thought_output = ThoughtOutput::ALL[next];
             }
-            SettingsTab::Appearance if self.selected == 3 => {
+            SettingsTab::Appearance if self.selected == 2 => {
                 self.config.feature_hints = !self.config.feature_hints;
             }
-            SettingsTab::Appearance if self.selected == 4 => {
+            SettingsTab::Appearance if self.selected == 3 => {
                 self.config.keep_awake = !self.config.keep_awake;
             }
             SettingsTab::Input if self.selected == 0 => {
@@ -852,7 +841,7 @@ pub fn draw_settings_panel(
     if area.width < SETTINGS_PANEL_MIN_WIDTH || area.height < SETTINGS_PANEL_MIN_HEIGHT {
         return;
     }
-    let theme = editor.config.theme.palette();
+    let theme = TerminalTheme::current();
     let rect = crate::term::centered_rect(area, 90, 24);
     frame.render_widget(Clear, rect);
     let block = Block::default()
@@ -1762,40 +1751,23 @@ fn draw_appearance(
                     "Appearance changes preview immediately.",
                     Style::default().ink(theme.muted),
                 ),
+                Line::styled(terminal_report(), Style::default().ink(theme.muted)),
                 Line::raw(""),
             ],
         ),
         (
             Some(0),
-            vec![
-                selected_line(
-                    editor.selected == 0,
-                    format!("Theme       < {} >", editor.config.theme),
-                    theme,
-                ),
-                Line::styled(
-                    format!("            {}", editor.config.theme.description()),
-                    Style::default().ink(theme.muted),
-                ),
-                Line::styled(
-                    format!("            {}", terminal_report()),
-                    Style::default().ink(theme.muted),
-                ),
-            ],
-        ),
-        (
-            Some(1),
             vec![spinner_preview_line(
-                editor.selected == 1,
+                editor.selected == 0,
                 editor.config.spinner,
                 theme,
             )],
         ),
         (
-            Some(2),
+            Some(1),
             vec![
                 selected_line(
-                    editor.selected == 2,
+                    editor.selected == 1,
                     format!("Thought output < {} >", editor.config.thought_output),
                     theme,
                 ),
@@ -1809,9 +1781,9 @@ fn draw_appearance(
             ],
         ),
         (
-            Some(3),
+            Some(2),
             vec![selected_line(
-                editor.selected == 3,
+                editor.selected == 2,
                 format!(
                     "Feature tips < {} >",
                     if editor.config.feature_hints {
@@ -1824,10 +1796,10 @@ fn draw_appearance(
             )],
         ),
         (
-            Some(4),
+            Some(3),
             vec![
                 selected_line(
-                    editor.selected == 4,
+                    editor.selected == 3,
                     format!(
                         "Keep awake  < {} >",
                         if editor.config.keep_awake {
@@ -3136,7 +3108,7 @@ mod tests {
     fn appearance_tab_toggles_feature_hints() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Appearance;
-        editor.selected = 3;
+        editor.selected = 2;
 
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert!(!editor.config.feature_hints);
@@ -3148,7 +3120,7 @@ mod tests {
     fn appearance_tab_cycles_thought_output() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Appearance;
-        editor.selected = 2;
+        editor.selected = 1;
 
         assert_eq!(editor.config.thought_output, ThoughtOutput::Default);
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
@@ -3161,7 +3133,7 @@ mod tests {
     fn appearance_tab_toggles_keep_awake() {
         let mut editor = SettingsEditor::new(Config::default(), Vec::new(), None);
         editor.tab = SettingsTab::Appearance;
-        editor.selected = 4;
+        editor.selected = 3;
 
         assert_eq!(editor.handle_key(KeyCode::Right), SettingsAction::Changed);
         assert!(!editor.config.keep_awake);
@@ -3175,13 +3147,13 @@ mod tests {
         editor.tab = SettingsTab::Appearance;
 
         let unscrolled = render(&editor, SETTINGS_PANEL_MIN_WIDTH, SETTINGS_PANEL_MIN_HEIGHT);
-        assert!(unscrolled.contains("Theme"), "rendered:\n{unscrolled}");
+        assert!(unscrolled.contains("Spinner"), "rendered:\n{unscrolled}");
         assert!(
             !unscrolled.contains("Keep awake"),
             "rendered:\n{unscrolled}"
         );
 
-        editor.selected = 4;
+        editor.selected = 3;
         let scrolled = render(&editor, SETTINGS_PANEL_MIN_WIDTH, SETTINGS_PANEL_MIN_HEIGHT);
         assert!(scrolled.contains("Keep awake"), "rendered:\n{scrolled}");
     }
@@ -3280,7 +3252,6 @@ mod tests {
 
         editor.tab = SettingsTab::Appearance;
         let appearance = render(&editor, 100, 30);
-        assert!(appearance.contains("Theme"), "rendered:\n{appearance}");
         assert!(appearance.contains("Spinner"), "rendered:\n{appearance}");
         assert!(
             appearance.contains("Thought output"),
