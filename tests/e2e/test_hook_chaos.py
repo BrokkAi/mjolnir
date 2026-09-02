@@ -206,6 +206,15 @@ def run_hook(lab: Lab, hook: str) -> None:
 
         thread = threading.Thread(target=rename, name="rename-target")
         thread.start()
+        marker = lab.hooks / f"{hook}.reached"
+        deadline = time.monotonic() + TIMEOUT
+        while time.monotonic() < deadline and not marker.exists():
+            if not thread.is_alive():
+                thread.join()
+                raise ScenarioFailure(
+                    f"rename request completed before reaching its durability hook: {outcome!r}"
+                )
+            time.sleep(0.02)
         crash_and_restart_daemon(lab, hook, port, 1)
         thread.join(timeout=5)
         if thread.is_alive():

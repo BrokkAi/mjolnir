@@ -63,17 +63,14 @@ def wait_marker_or_exit(marker: pathlib.Path, browser: subprocess.Popen[bytes]) 
 # partially redrawn frame can show two panes bordered alike for one frame,
 # whereas the footer is one line that is always rewritten whole.
 PANE_RING = ("Sessions", "Prompt", "Targets", "Quota")
-SESSIONS_FOCUSED = "Enter open \u00b7 n new \u00b7 s resume \u00b7 e edit"
+SESSIONS_FOCUSED = "Enter open \u2502 Alt-N new \u00b7 Alt-S resume \u00b7 Alt-A read"
 
 
 def focus_sessions(client) -> None:
     """Put the keyboard on the Sessions pane and prove it landed there.
 
-    Every pane key is a plain letter, so pressing `e` before focus has actually
-    moved types the letter into the composer instead of opening the session
-    editor. Which pane starts with the keyboard depends on the surface's state,
-    so walk the ring and read the footer rather than assuming one keystroke is
-    enough.
+    Which pane starts with the keyboard depends on the surface's state, so walk
+    the ring and read the footer rather than assuming one keystroke is enough.
     """
     for _ in range(len(PANE_RING) * 2):
         if SESSIONS_FOCUSED in client.text():
@@ -91,11 +88,9 @@ def focus_sessions(client) -> None:
 
 def stop_from_dashboard(client) -> None:
     focus_sessions(client)
-    client.send(b"e")
-    client.wait_for("Edit session")
-    # Edit session offers Rename, Stop, Cancel for a session with no container,
-    # so one step right of the default reaches Stop.
-    client.send(b"\x1b[C\r")
+    client.send(b"\x1bOQ")
+    client.wait_for("type to filter \u00b7 Up/Down")
+    client.send(b"stop\r")
     client.wait_for("Stop session?")
     client.send(b"\r")
     # A stop needs the daemon's session manager to have adopted the session,

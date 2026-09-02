@@ -216,7 +216,7 @@ class PtyClient:
 
     def quit(self) -> float:
         started = time.monotonic()
-        self.send(b"\x11")
+        self.send(b"\x1bq")
         try:
             self.process.wait(timeout=2)
         except subprocess.TimeoutExpired as error:
@@ -577,7 +577,7 @@ kind = "local-bare"
     def daemon_request(self, action: dict[str, object], request_id: int = 99) -> object:
         metadata = json.loads((self.data / "daemon.json").read_text())
         envelope = {
-            "protocol_version": 4,
+            "protocol_version": metadata["protocol_version"],
             "request_id": request_id,
             "token": metadata["token"],
             "action": action,
