@@ -42,7 +42,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
     dashboard_worker_targets, dashboard_worker_targets_excluding, interrupted_close_session_ids,
-    reserve_recovery_or_cancel, spawn_interrupted_close_recovery,
+    reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
 pub(crate) const PROTOCOL_VERSION: u32 = 6;
@@ -777,6 +777,18 @@ impl RuntimeState {
 
     pub(crate) fn revisions(&self) -> tokio::sync::watch::Receiver<u64> {
         self.revisions.subscribe()
+    }
+
+    /// Read the config the daemon serves right now. A task on a schedule reads
+    /// it again on every tick, so a reload reaches it without a restart.
+    pub(crate) fn with_config<T>(&self, read: impl FnOnce(&HelConfig) -> T) -> T {
+        read(
+            &self
+                .controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .config,
+        )
     }
 
     fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
@@ -2677,6 +2689,13 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
         cancellation.clone(),
         state.clone(),
     );
+    let image_refresh = spawn_image_refresher(
+        {
+            let state = state.clone();
+            move || state.with_config(mj_controller::hel_controller::image_refresh_plan)
+        },
+        cancellation.clone(),
+    );
     let exit_when_idle = hel::hel_config::env_override_os("DAEMON_EXIT_WHEN_IDLE").is_some();
     let mut idle_tick = tokio::time::interval(Duration::from_millis(100));
     idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2840,6 +2859,11 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
         &mut outcome,
         "join controller target refresher",
         target_refresh.await.map_err(anyhow::Error::new),
+    );
+    record_daemon_cleanup(
+        &mut outcome,
+        "join container image refresher",
+        image_refresh.await.map_err(anyhow::Error::new),
     );
     if let Some(phone_task) = phone_task {
         record_daemon_cleanup(

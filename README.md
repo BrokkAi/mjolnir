@@ -295,8 +295,9 @@ destination = "myapp"
 [targets.podman]
 kind = "local-podman"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
-# Optional: auto (default), always, newer, missing, or never. Auto refreshes
-# remote latest tags, keeps versioned tags cached, and pins digest references.
+# Optional: auto (default), always, newer, missing, or never. Auto launches from
+# the cached image; the daemon refreshes remote latest tags hourly in the
+# background. Versioned tags stay cached and digest references stay pinned.
 # pull_policy = "auto"
 
 # Docker uses the same fields:

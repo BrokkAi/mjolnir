@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail, ensure};
 use hel::hel_config::{AwsAddressSource, HelConfig, ProjectBundle, TargetTemplate, data_dir};
 use hel::hel_state::{SessionRecord, SessionResourceAllocation, TargetLocator, allocation_cpus};
 use hel::hel_targets::{
-    self, AwsTemplate, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate,
-    ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
+    self, AwsTemplate, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost,
+    ImageRefresh, ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
 };
 
 use super::{Controller, backend_ssh, execute_checked, ssh_args_with_identity, ssh_command_spec};
@@ -468,6 +468,44 @@ pub(super) fn backend_target(
             }
         }
     })
+}
+
+/// Every container image a background refresh keeps current, once per
+/// (host, image, platform).
+///
+/// Targets the host can already satisfy are left out: digest pins, versioned
+/// tags, and the explicit `missing` and `never` policies. Apple's `container`
+/// engine is left out too; it still refreshes its image during provisioning.
+/// Several targets often share one image on one host, and that needs one pull.
+pub fn image_refresh_plan(config: &HelConfig) -> Vec<ImageRefresh> {
+    let mut plan: Vec<ImageRefresh> = Vec::new();
+    for target in config.targets.values() {
+        let (host, container) = match target {
+            TargetTemplate::LocalPodman { container } => (ImageHost::LocalPodman, container),
+            TargetTemplate::LocalDocker { container } => (ImageHost::LocalDocker, container),
+            TargetTemplate::SshPodman { ssh, container } => {
+                (ImageHost::SshPodman(backend_ssh(ssh)), container)
+            }
+            TargetTemplate::LocalBare
+            | TargetTemplate::AppleContainer { .. }
+            | TargetTemplate::AwsEc2 { .. }
+            | TargetTemplate::SshBare { .. } => continue,
+        };
+        // Commands are decided by the host, the image, and the platform alone,
+        // so equal refreshes are exactly the duplicates worth collapsing.
+        let Some(refresh) = hel_targets::image_refresh(
+            host,
+            &container.image,
+            container.platform.as_deref(),
+            container.pull_policy,
+        ) else {
+            continue;
+        };
+        if !plan.contains(&refresh) {
+            plan.push(refresh);
+        }
+    }
+    plan
 }
 
 pub(crate) fn controller_github_token() -> Option<String> {
@@ -1232,6 +1270,137 @@ mod tests {
             Some("https://github.com/example/app.git")
         );
     }
+    fn container_target(
+        image: &str,
+        pull_policy: hel::hel_config::ImagePullPolicy,
+    ) -> ConfigContainer {
+        ConfigContainer {
+            image: image.into(),
+            pull_policy,
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_image_refresh_plan_covers_every_image_a_launch_no_longer_pulls() {
+        use hel::hel_config::ImagePullPolicy;
+
+        let mut config = HelConfig::default();
+        config.targets.insert(
+            "podman".into(),
+            TargetTemplate::LocalPodman {
+                container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+            },
+        );
+        // The same image on the same host, named by a second target.
+        config.targets.insert(
+            "podman-again".into(),
+            TargetTemplate::LocalPodman {
+                container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+            },
+        );
+        config.targets.insert(
+            "ssh".into(),
+            TargetTemplate::SshPodman {
+                ssh: SshConnection {
+                    host: "builder.example.test".into(),
+                    user: Some("dev".into()),
+                    identity_file: Some(PathBuf::from("/home/dev/.ssh/builder")),
+                    extra_args: Vec::new(),
+                },
+                container: ConfigContainer {
+                    platform: Some("linux/amd64".into()),
+                    ..container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto)
+                },
+            },
+        );
+        config.targets.insert(
+            "docker".into(),
+            TargetTemplate::LocalDocker {
+                container: container_target("ghcr.io/example/dev:1.2.3", ImagePullPolicy::Newer),
+            },
+        );
+        config.targets.insert(
+            "pinned".into(),
+            TargetTemplate::LocalPodman {
+                container: container_target(
+                    "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ImagePullPolicy::Auto,
+                ),
+            },
+        );
+        // Apple's engine still refreshes its image during provisioning.
+        config.targets.insert(
+            "apple".into(),
+            TargetTemplate::AppleContainer {
+                container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+            },
+        );
+
+        let plan = image_refresh_plan(&config);
+        assert_eq!(
+            plan.len(),
+            3,
+            "expected one refresh per host and image: {plan:?}"
+        );
+
+        let local = plan
+            .iter()
+            .find(|refresh| refresh.host == ImageHost::LocalPodman)
+            .expect("the auto latest target is refreshed");
+        assert_eq!(local.pull.program, "podman");
+        assert_eq!(local.pull.args, ["pull", "ghcr.io/example/dev:latest"]);
+        assert_eq!(local.prune.args, ["image", "prune", "-f"]);
+        assert_eq!(
+            local.image_id.args,
+            [
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}",
+                "ghcr.io/example/dev:latest"
+            ]
+        );
+
+        let docker = plan
+            .iter()
+            .find(|refresh| refresh.host == ImageHost::LocalDocker)
+            .expect("the explicit newer policy is refreshed too");
+        assert_eq!(docker.pull.program, "docker");
+        assert_eq!(docker.pull.args, ["pull", "ghcr.io/example/dev:1.2.3"]);
+        assert_eq!(docker.prune.args, ["image", "prune", "-f"]);
+
+        let ssh = plan
+            .iter()
+            .find(|refresh| matches!(refresh.host, ImageHost::SshPodman(_)))
+            .expect("the SSH host is refreshed over its own connection");
+        assert_eq!(ssh.pull.program, "ssh");
+        // The identity file and destination come from the same builder
+        // provisioning uses.
+        assert!(ssh.pull.args.contains(&"/home/dev/.ssh/builder".to_owned()));
+        assert!(
+            ssh.pull
+                .args
+                .contains(&"dev@builder.example.test".to_owned())
+        );
+        assert_eq!(
+            ssh.pull.args.last().map(String::as_str),
+            Some("'podman' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
+        );
+        assert_eq!(
+            ssh.prune.args.last().map(String::as_str),
+            Some("'podman' 'image' 'prune' '-f'")
+        );
+
+        assert!(
+            !plan.iter().any(|refresh| refresh.image.contains("sha256:")),
+            "a digest-pinned image was refreshed: {plan:?}"
+        );
+    }
+
     #[test]
     fn aws_resource_options_follow_the_launch_template_family() {
         let mut config = HelConfig::default();

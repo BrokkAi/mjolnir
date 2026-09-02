@@ -27,12 +27,14 @@ For each session Mjolnir starts one detached, labeled container, uses `docker ex
 and `docker cp` for the worker and its files, and removes that exact container
 only after checkpointing succeeds.
 
-The default `pull_policy = "auto"` uses Docker's digest-aware pull behavior for
-remote `:latest` images and uses the local cache for versioned tags, local
-names, and digest-pinned references. Docker has no `--pull=newer` spelling, so
-Mjolnir maps both `newer` and `always` to `docker run --pull=always`: Docker checks
-the registry manifest digest and reuses unchanged layers. `missing` and `never`
-map directly to Docker's matching run policies.
+The default `pull_policy = "auto"` launches with `docker run --pull=missing`, so
+a session starts from the cached image. The daemon keeps remote `:latest` images
+current instead: once an hour it runs `docker pull` and then
+`docker image prune -f` for every such image. Versioned tags, local names, and
+digest-pinned references stay cached. Docker has no `--pull=newer` spelling, so
+Mjolnir maps an explicit `newer` and `always` to `docker run --pull=always`:
+Docker checks the registry manifest digest and reuses unchanged layers.
+`missing` and `never` map directly to Docker's matching run policies.
 
 ## Writable attached directories
 

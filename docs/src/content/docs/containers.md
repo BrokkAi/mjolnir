@@ -102,12 +102,17 @@ auto-installs Git, GitHub CLI, and Node the first time a session needs them.
 But that installation runs inside every new container, which slows down the
 start of each session. The default agent-dev image avoids that cost.
 
-Container targets default to `pull_policy = "auto"`. Remote images tagged
-`:latest` are checked for a changed registry digest before each new session;
-versioned tags remain cached, digest references stay pinned, and
-`localhost/...` images remain local. Set `pull_policy` beside `image` to
-`always`, `newer`, `missing`, or `never` when a target needs an explicit
-policy. Existing running containers are never replaced in place.
+Container targets default to `pull_policy = "auto"`. A launch never waits on a
+registry under that default: it starts from the image the host already has, and
+pulls only when the host has no copy at all. The Mjolnir daemon keeps remote
+`:latest` images current on its own, an hour at a time, and removes the dangling
+images each pull leaves behind. Versioned tags remain cached, digest references
+stay pinned, and `localhost/...` images remain local.
+
+Set `pull_policy` beside `image` to `always`, `newer`, `missing`, or `never`
+when a target needs an explicit policy. An explicit `always` or `newer` still
+pulls during the launch itself, and the daemon refreshes it in the background
+too. Existing running containers are never replaced in place.
 
 ## Git clone cache
 

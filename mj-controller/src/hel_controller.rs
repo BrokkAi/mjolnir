@@ -53,6 +53,7 @@ use hel::hel_targets::{
 };
 
 pub(crate) use backend::controller_github_token;
+pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
 use provisioning::apply_failed_new_session_rollback;
 
