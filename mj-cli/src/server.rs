@@ -2239,6 +2239,25 @@ fn viewer_snapshot(
                 }
             };
             session.config_options = viewer_config_options(state);
+            // The same three states the terminal's expanded row shows, from
+            // the same helper, so the phone never disagrees with it.
+            let turn_started_at = state
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.started_at_ms)
+                .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms))
+                .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok());
+            session.activity = hel::usage_format::format_activity_columns(
+                now,
+                turn_started_at,
+                state
+                    .last_acp_activity_at_ms
+                    .and_then(|value| u64::try_from(value).ok()),
+                &hel::usage_format::SessionActivity::of(state),
+            )
+            .join("  ")
+            .trim()
+            .to_owned();
         }
         session.plan_mode_active = facts
             .as_ref()
@@ -2403,6 +2422,7 @@ mod tests {
             last_acp_activity_at_ms: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
+            background_commands: Vec::new(),
         };
 
         // A session whose agent has not answered `initialize` has advertised
@@ -2470,6 +2490,7 @@ mod tests {
             last_acp_activity_at_ms: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
+            background_commands: Vec::new(),
         };
         let operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
         let snapshot = viewer_snapshot(

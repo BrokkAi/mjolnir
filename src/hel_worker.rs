@@ -29,11 +29,12 @@ pub use protocol::{
 #[cfg(unix)]
 pub(crate) use snapshot::truncate_start_with_marker;
 pub use snapshot::{
-    ActiveAgentTerminal, ActiveRelayPrompt, ActiveUserShell, ClaimedRelayCommand,
-    ClaimedSteeringPrompt, HarnessTurn, QueuedRelayPrompt, RELAY_EVENT_FORMAT_V1,
-    RELAY_EVENT_FORMAT_V2, RelayCommand, RelayCommandKind, RelayCommandOutcome, RelayCursor,
-    RelayEvent, RelayExecutionState, RelayObservation, RelayOperationalState, UserShellResult,
-    UserShellStatus, relay_event_digest, validate_relay_event, validate_relay_event_self,
+    ActiveAgentTerminal, ActiveRelayPrompt, ActiveUserShell, BackgroundCommand,
+    ClaimedRelayCommand, ClaimedSteeringPrompt, HarnessTurn, QueuedRelayPrompt,
+    RELAY_EVENT_FORMAT_V1, RELAY_EVENT_FORMAT_V2, RelayCommand, RelayCommandKind,
+    RelayCommandOutcome, RelayCursor, RelayEvent, RelayExecutionState, RelayObservation,
+    RelayOperationalState, UserShellResult, UserShellStatus, relay_event_digest,
+    validate_relay_event, validate_relay_event_self,
 };
 pub use types::{
     ActivePrompt, Attachment, QueuedPrompt, SequencedEvent, WorkerEvent, WorkerPhase,
@@ -79,6 +80,21 @@ pub enum HarnessTurnPolicy {
     ClaudeAdapter,
 }
 
+/// Where this relay learns about commands the agent left running.
+///
+/// Claude and Kimi run their shells through Hel's terminals, which are live
+/// processes the relay already tracks. Codex runs them itself and only reports
+/// them as tool cards, so for Codex the evidence is a card whose result
+/// carries no exit code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BackgroundWorkPolicy {
+    /// Live terminals Hel spawned for the agent.
+    #[default]
+    HostedTerminals,
+    /// `exec_command` cards whose result has no exit code.
+    CodexExecCards,
+}
+
 /// `_meta` key the Claude adapter puts on the `usage_update` that settles a
 /// turn. Its value is an object with a `kind` naming the origin.
 const CLAUDE_ORIGIN_META_KEY: &str = "_claude/origin";
@@ -112,6 +128,18 @@ fn is_agent_output(update: &SessionUpdate) -> bool {
             | SessionUpdate::ToolCallUpdate(_)
             | SessionUpdate::Plan(_)
     )
+}
+
+/// The command an exec card ran, from its raw input. Codex sends either a
+/// string or the argv it executed.
+fn exec_card_command(raw_input: Option<&serde_json::Value>) -> Option<String> {
+    let command = raw_input?.get("command")?;
+    if let Some(text) = command.as_str() {
+        return Some(text.to_owned());
+    }
+    let argv = command.as_array()?;
+    let words: Vec<&str> = argv.iter().filter_map(serde_json::Value::as_str).collect();
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -257,6 +285,12 @@ pub struct DurableRelay {
     /// Whether agent output arriving with no prompt in flight opens a turn.
     /// The runtime sets this from the configured harness right after `open`.
     harness_turns: HarnessTurnPolicy,
+    /// Where commands the agent left running are read from.
+    background_work: BackgroundWorkPolicy,
+    /// Commands a Codex exec card reported without an exit code, keyed by the
+    /// tool call id so a later card for the same call clears it. In memory,
+    /// like the terminals: it describes processes that are alive now.
+    background_exec_cards: BTreeMap<String, BackgroundCommand>,
     /// ACP terminals are connection-owned and disappear when that connection
     /// is torn down, so they belong in memory rather than the durable relay
     /// snapshot or transcript journal.
@@ -410,6 +444,8 @@ impl DurableRelay {
             journal_generation: 0,
             acp_activity: AcpActivityClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
+            background_work: BackgroundWorkPolicy::default(),
+            background_exec_cards: BTreeMap::new(),
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
             #[cfg(test)]
@@ -488,12 +524,52 @@ impl DurableRelay {
         let mut state = self.snapshot.operational_state();
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
+        state.background_commands = self.background_commands();
         state
     }
 
     /// Choose whether agent output with no prompt in flight opens a turn.
     pub fn set_harness_turn_policy(&mut self, policy: HarnessTurnPolicy) {
         self.harness_turns = policy;
+    }
+
+    /// Choose where commands the agent left running are read from.
+    pub fn set_background_work_policy(&mut self, policy: BackgroundWorkPolicy) {
+        self.background_work = policy;
+    }
+
+    /// Commands the agent left running with nothing waiting on them, oldest
+    /// first.
+    ///
+    /// A hosted terminal only counts while nothing of ours is in flight: until
+    /// then it is the turn's own work, not something left behind. A Codex exec
+    /// card counts from the moment its result arrives without an exit code,
+    /// because Codex starts these during a turn and never mentions them again.
+    fn background_commands(&self) -> Vec<BackgroundCommand> {
+        let mut commands: Vec<BackgroundCommand> = match self.background_work {
+            BackgroundWorkPolicy::HostedTerminals => {
+                if self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some() {
+                    Vec::new()
+                } else {
+                    self.active_agent_terminals
+                        .values()
+                        .map(|terminal| BackgroundCommand {
+                            started_at_ms: terminal.started_at_ms,
+                            command: terminal.command.clone(),
+                        })
+                        .collect()
+                }
+            }
+            BackgroundWorkPolicy::CodexExecCards => {
+                self.background_exec_cards.values().cloned().collect()
+            }
+        };
+        commands.sort_by(|left, right| {
+            left.started_at_ms
+                .cmp(&right.started_at_ms)
+                .then_with(|| left.command.cmp(&right.command))
+        });
+        commands
     }
 
     pub fn agent_terminal_started(&mut self, terminal: ActiveAgentTerminal) {
@@ -512,6 +588,9 @@ impl DurableRelay {
     pub fn clear_agent_terminals(&mut self) {
         self.active_agent_terminals.clear();
         self.closed_agent_terminals.clear();
+        // The harness that owned those processes is gone, and so is whatever
+        // it left running: a restart cannot poll a process it no longer has.
+        self.background_exec_cards.clear();
     }
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {
@@ -1538,6 +1617,16 @@ impl DurableRelay {
     }
 
     pub fn record_observation(&mut self, observation: RelayObservation) -> Result<u64> {
+        // A restart or a close ends the harness process that owned whatever it
+        // had left running, so nothing it reported is still alive.
+        if matches!(
+            observation,
+            RelayObservation::SessionRestarted
+                | RelayObservation::Closing
+                | RelayObservation::Closed
+        ) {
+            self.background_exec_cards.clear();
+        }
         self.append_relay_event(None, observation)
     }
 
@@ -1567,6 +1656,9 @@ impl DurableRelay {
             )?;
         }
         let settles = claude.then(|| claude_turn_origin(&update)).flatten();
+        if self.background_work == BackgroundWorkPolicy::CodexExecCards {
+            self.track_codex_exec_card(&update);
+        }
         let ordinal = self.record_observation(RelayObservation::SessionUpdate {
             update: Box::new(update),
         })?;
@@ -1575,9 +1667,73 @@ impl DurableRelay {
         if let Some(origin) = settles
             && self.snapshot.harness_turn.is_some()
         {
-            self.append_relay_event(None, RelayObservation::HarnessTurnSettled { origin })?;
+            self.append_relay_event(
+                None,
+                RelayObservation::HarnessTurnSettled {
+                    origin,
+                    // The projection cannot see `active_prompt`, so the event
+                    // has to carry whether a prompt of ours is still running.
+                    prompt_in_flight: self.snapshot.active_prompt.is_some(),
+                },
+            )?;
         }
         Ok(ordinal)
+    }
+
+    /// Follow a Codex `exec_command` card: a result with no exit code is a
+    /// process Codex left running, and the next card for the same call reports
+    /// the exit that ends it.
+    ///
+    /// Codex runs its own shells and never asks Hel for a terminal, so a card
+    /// is the only evidence there is. The card shape is the one described in
+    /// `.agents/docs/claude-autonomous-turns.md`: an execute card whose
+    /// `rawOutput` object carries `exit_code`, null while the process runs.
+    fn track_codex_exec_card(&mut self, update: &SessionUpdate) {
+        let (tool_call_id, kind, status, raw_input, raw_output) = match update {
+            SessionUpdate::ToolCall(call) => (
+                call.tool_call_id.0.as_ref(),
+                Some(call.kind),
+                Some(call.status),
+                call.raw_input.as_ref(),
+                call.raw_output.as_ref(),
+            ),
+            SessionUpdate::ToolCallUpdate(call) => (
+                call.tool_call_id.0.as_ref(),
+                call.fields.kind,
+                call.fields.status,
+                call.fields.raw_input.as_ref(),
+                call.fields.raw_output.as_ref(),
+            ),
+            _ => return,
+        };
+        // A card with no result says nothing about a process: an execute card
+        // is in flight until Codex reports its output.
+        let Some(raw_output) = raw_output else {
+            return;
+        };
+        if kind.is_some_and(|kind| kind != agent_client_protocol::schema::v1::ToolKind::Execute) {
+            return;
+        }
+        if status.is_some_and(|status| {
+            status == agent_client_protocol::schema::v1::ToolCallStatus::Failed
+        }) {
+            self.background_exec_cards.remove(tool_call_id);
+            return;
+        }
+        if raw_output
+            .get("exit_code")
+            .is_some_and(|code| !code.is_null())
+        {
+            self.background_exec_cards.remove(tool_call_id);
+            return;
+        }
+        let command = exec_card_command(raw_input).unwrap_or_else(|| tool_call_id.to_owned());
+        self.background_exec_cards
+            .entry(tool_call_id.to_owned())
+            .or_insert(BackgroundCommand {
+                started_at_ms: epoch_millis(),
+                command,
+            });
     }
 
     /// Whether this update reveals the harness working with nothing of Hel's
@@ -3491,7 +3647,7 @@ mod tests {
         );
         assert!(matches!(
             observations(&relay).last(),
-            Some(RelayObservation::HarnessTurnSettled { origin })
+            Some(RelayObservation::HarnessTurnSettled { origin, .. })
                 if origin.as_deref() == Some("task-notification")
         ));
     }
@@ -3600,6 +3756,113 @@ mod tests {
         let state = relay.operational_state();
         assert!(state.harness_turn.is_none());
         assert_eq!(state.execution, RelayExecutionState::Idle);
+    }
+
+    /// A Codex `exec_command` card. The adapter reports the result under
+    /// `rawOutput`, with `exit_code` null while the process is still running.
+    fn exec_card(
+        tool_call_id: &'static str,
+        command: &[&str],
+        exit_code: Option<i64>,
+    ) -> SessionUpdate {
+        let mut call = agent_client_protocol::schema::v1::ToolCall::new(tool_call_id, "shell");
+        call.kind = agent_client_protocol::schema::v1::ToolKind::Execute;
+        call.status = agent_client_protocol::schema::v1::ToolCallStatus::Completed;
+        call.raw_input = Some(serde_json::json!({ "command": command }));
+        call.raw_output = Some(serde_json::json!({
+            "output": "",
+            "exit_code": exit_code,
+        }));
+        SessionUpdate::ToolCall(call)
+    }
+
+    #[test]
+    fn a_terminal_the_agent_left_running_is_background_work_once_the_turn_ends() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.record_session_update(tool_call_update()).unwrap();
+        relay.agent_terminal_started(ActiveAgentTerminal {
+            terminal_id: "terminal-1".into(),
+            command: "cargo test".into(),
+            started_at_ms: 4_000,
+        });
+
+        assert!(
+            relay.operational_state().background_commands.is_empty(),
+            "a terminal is the turn's own work while that turn is still open"
+        );
+
+        relay
+            .record_session_update(settling_usage_update("task-notification"))
+            .unwrap();
+
+        assert_eq!(
+            relay.operational_state().background_commands,
+            vec![BackgroundCommand {
+                started_at_ms: 4_000,
+                command: "cargo test".into(),
+            }],
+            "the command outlived the turn that started it"
+        );
+
+        relay.agent_terminal_closed("terminal-1");
+        assert!(
+            relay.operational_state().background_commands.is_empty(),
+            "the process exited, so there is nothing left running"
+        );
+    }
+
+    #[test]
+    fn a_codex_exec_card_without_an_exit_code_is_background_work_until_one_arrives() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+
+        relay
+            .record_session_update(exec_card("call-1", &["bash", "-lc", "sleep 600"], None))
+            .unwrap();
+
+        let commands = relay.operational_state().background_commands;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, "bash -lc sleep 600");
+        assert!(commands[0].started_at_ms > 0);
+
+        // A card that does report an exit code says the process is done, even
+        // when it is the first card for that call.
+        relay
+            .record_session_update(exec_card("call-2", &["ls"], Some(0)))
+            .unwrap();
+        assert_eq!(
+            relay.operational_state().background_commands.len(),
+            1,
+            "a finished command is not background work"
+        );
+
+        // Codex polls the process it left running; the poll carries the exit.
+        relay
+            .record_session_update(exec_card("call-1", &["bash", "-lc", "sleep 600"], Some(0)))
+            .unwrap();
+        assert!(relay.operational_state().background_commands.is_empty());
+    }
+
+    #[test]
+    fn a_restart_forgets_the_commands_the_previous_harness_left_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+        relay
+            .record_session_update(exec_card("call-1", &["sleep", "600"], None))
+            .unwrap();
+        assert_eq!(relay.operational_state().background_commands.len(), 1);
+
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+
+        assert!(
+            relay.operational_state().background_commands.is_empty(),
+            "the harness that owned those processes is gone"
+        );
     }
 
     #[test]

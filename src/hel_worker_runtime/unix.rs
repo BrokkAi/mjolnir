@@ -112,6 +112,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         HarnessKind::Claude => crate::hel_worker::HarnessTurnPolicy::ClaudeAdapter,
         _ => crate::hel_worker::HarnessTurnPolicy::Disabled,
     });
+    // Codex runs its own shells instead of asking Hel for a terminal, so the
+    // only evidence of a command it left running is a card with no exit code.
+    durable_relay.set_background_work_policy(match config.harness {
+        HarnessKind::Codex => crate::hel_worker::BackgroundWorkPolicy::CodexExecCards,
+        _ => crate::hel_worker::BackgroundWorkPolicy::HostedTerminals,
+    });
     let resume_session = select_resume_session(&config, &durable_relay);
     let project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
     if resume_session.is_none()

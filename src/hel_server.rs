@@ -304,6 +304,7 @@ impl ViewerSnapshot {
                     project_key: project_key(&session.project_source(config).key),
                     lifecycle,
                     latest_event_ordinal: 0,
+                    activity: String::new(),
                     operation: None,
                     chat_phase: ViewerChatPhase::default(),
                     config_options: Vec::new(),
@@ -462,6 +463,10 @@ pub struct ViewerSession {
     pub operation: Option<ViewerOperation>,
     #[serde(default)]
     pub chat_phase: ViewerChatPhase,
+    /// What this session is doing, in the words the dashboard row uses:
+    /// `Turn 43m36s  Step 12s`, `BG 43m36s`, or `[idle]`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub activity: String,
     /// The settings the harness advertised, with the values it accepts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_options: Vec<ViewerConfigOption>,

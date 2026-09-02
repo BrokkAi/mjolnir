@@ -154,13 +154,29 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
 
     assert_eq!(
         transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Turn 03:22:33  Step 00:00:00  kimi "
+        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi "
     );
 
     chat.render_mode = TranscriptRenderMode::Raw;
     assert_eq!(
         transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Turn 03:22:33  Step 00:00:00  kimi · raw source "
+        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi · raw source "
+    );
+
+    // An idle session that left a command running names it in the same place
+    // the turn clock goes.
+    chat.render_mode = TranscriptRenderMode::Rich;
+    chat.turn_started_at_epoch_seconds = None;
+    chat.set_session_activity(crate::usage_format::SessionActivity {
+        harness_turn_started_at_ms: None,
+        background_commands: vec![crate::hel_worker::BackgroundCommand {
+            started_at_ms: 17_384_000,
+            command: "cargo test".into(),
+        }],
+    });
+    assert_eq!(
+        transcript_title(&chat, 20_000),
+        " precision-3260/bifrost-fuzz    BG 43m36s  kimi "
     );
 }
 

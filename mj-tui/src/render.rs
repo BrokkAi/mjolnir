@@ -425,10 +425,12 @@ impl SessionRowFacts<'_> {
     }
 
     fn clock(&self) -> String {
-        hel::usage_format::format_turn_clock(
+        let activity = self.detail.map(|detail| &detail.activity);
+        hel::usage_format::format_activity_clock(
             self.now_epoch_seconds,
             self.detail
                 .and_then(|detail| detail.current_turn_started_at),
+            activity.unwrap_or(&*EMPTY_ACTIVITY),
         )
     }
 
@@ -840,13 +842,13 @@ fn session_top_line(
         let (label, started_at) = operation_status(operation);
         Some(vec![format!(
             "{label} {}",
-            format_elapsed(now_epoch_seconds.saturating_sub(started_at))
+            hel::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
         )])
     } else if session.state == SessionState::Provisioning {
         let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
         Some(vec![format!(
             "Launch {}",
-            format_elapsed(now_epoch_seconds.saturating_sub(started_at))
+            hel::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
         )])
     } else {
         None
@@ -884,41 +886,45 @@ fn session_top_line(
 
 const DASHBOARD_CLOCK_WIDTH: usize = 6;
 
-fn compact_dashboard_clock(elapsed_seconds: u64) -> String {
-    let minutes = elapsed_seconds / 60;
-    if minutes > 99 {
-        format!("{minutes}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{:02}s", elapsed_seconds % 60)
-    } else {
-        format!("{}s", elapsed_seconds % 60)
-    }
-}
+/// A session the dashboard has heard nothing operational about yet.
+static EMPTY_ACTIVITY: std::sync::LazyLock<hel::usage_format::SessionActivity> =
+    std::sync::LazyLock::new(hel::usage_format::SessionActivity::default);
 
+/// The two column heads an expanded row puts in front of the agent's last
+/// lines: the turn and its step while a turn runs, the background work the
+/// agent left behind while it is idle, and otherwise the time it last spoke.
 fn dashboard_agent_prefixes(now_epoch_seconds: u64, detail: Option<&SessionDetail>) -> [String; 2] {
-    let Some(turn_started) = detail.and_then(|detail| detail.current_turn_started_at) else {
+    let last_spoke = || {
         let time = detail
             .and_then(|detail| detail.last_activity_at_ms)
             .and_then(|value| i64::try_from(value).ok())
             .and_then(|value| hel::hel_chat::format_event_time(Some(value)))
             .unwrap_or_default();
-        return ["Agent:".into(), format!("{time:<6}")];
+        format!("{time:<6}")
     };
-    let step_started = detail
-        .and_then(|detail| detail.last_acp_activity_at_ms)
-        .map(|value| value / 1_000)
-        .unwrap_or(turn_started)
-        .max(turn_started);
-    [
-        format!(
-            "Turn {:>DASHBOARD_CLOCK_WIDTH$}",
-            compact_dashboard_clock(now_epoch_seconds.saturating_sub(turn_started))
-        ),
-        format!(
-            "Step {:>DASHBOARD_CLOCK_WIDTH$}",
-            compact_dashboard_clock(now_epoch_seconds.saturating_sub(step_started))
-        ),
-    ]
+    let columns = hel::usage_format::format_activity_columns(
+        now_epoch_seconds,
+        detail.and_then(|detail| detail.current_turn_started_at),
+        detail.and_then(|detail| detail.last_acp_activity_at_ms),
+        detail.map_or(&*EMPTY_ACTIVITY, |detail| &detail.activity),
+    );
+    match columns.as_slice() {
+        [turn, step] => [pad_dashboard_column(turn), pad_dashboard_column(step)],
+        // Background work takes the turn column and leaves the step column to
+        // the time the agent last spoke; `[idle]` says nothing worth a column.
+        [background] if background.trim() != "[idle]" => {
+            [pad_dashboard_column(background), last_spoke()]
+        }
+        _ => ["Agent:".into(), last_spoke()],
+    }
+}
+
+/// Right-align one clock column's value so the clocks line up between rows.
+fn pad_dashboard_column(column: &str) -> String {
+    match column.rsplit_once(' ') {
+        Some((label, clock)) => format!("{label} {clock:>DASHBOARD_CLOCK_WIDTH$}"),
+        None => column.to_owned(),
+    }
 }
 
 fn session_target_label(
@@ -1010,15 +1016,6 @@ fn prefixed_summary_line(
     }
 }
 
-fn format_elapsed(elapsed: u64) -> String {
-    format!(
-        "{:02}:{:02}:{:02}",
-        elapsed / 3_600,
-        (elapsed % 3_600) / 60,
-        elapsed % 60
-    )
-}
-
 pub(crate) fn render_session_scrollbar(
     frame: &mut Frame,
     area: Rect,
@@ -1061,9 +1058,10 @@ fn session_values(
         let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
         format!("Launch {}s", now_epoch_seconds.saturating_sub(started_at))
     } else {
-        hel::usage_format::format_turn_clock(
+        hel::usage_format::format_activity_clock(
             now_epoch_seconds,
             detail.and_then(|detail| detail.current_turn_started_at),
+            detail.map_or(&*EMPTY_ACTIVITY, |detail| &detail.activity),
         )
     };
     // An in-flight resume already told the controller its destination; show
@@ -2157,8 +2155,6 @@ mod tests {
             dashboard_agent_prefixes(1_330, Some(&detail)),
             ["Turn  5m30s", "Step    33s"]
         );
-        assert_eq!(compact_dashboard_clock(99 * 60 + 59), "99m59s");
-        assert_eq!(compact_dashboard_clock(100 * 60 + 59), "100m");
 
         let idle = SessionDetail {
             last_activity_at_ms: Some(1_297_000),
@@ -2168,6 +2164,24 @@ mod tests {
         assert_eq!(
             dashboard_agent_prefixes(1_330, Some(&idle)),
             ["Agent:".to_owned(), format!("{activity_time:<6}")]
+        );
+
+        // An idle agent with a command still running says so in the turn
+        // column and keeps the time it last spoke beside it.
+        let background = SessionDetail {
+            last_activity_at_ms: Some(1_297_000),
+            activity: hel::usage_format::SessionActivity {
+                harness_turn_started_at_ms: None,
+                background_commands: vec![hel::hel_worker::BackgroundCommand {
+                    started_at_ms: 1_000_000,
+                    command: "cargo test".into(),
+                }],
+            },
+            ..SessionDetail::default()
+        };
+        assert_eq!(
+            dashboard_agent_prefixes(1_330, Some(&background)),
+            ["  BG  5m30s".to_owned(), format!("{activity_time:<6}")]
         );
     }
 
@@ -2852,6 +2866,45 @@ mod tests {
             .draw(|frame| render(frame, dashboard))
             .expect("draw the combined surface");
         buffer_lines(terminal.backend().buffer())
+    }
+
+    /// An agent that is idle but left a command running says so, in the wide
+    /// rows and in the minimized grid, from the one fact the daemon forwards.
+    #[test]
+    fn background_work_reaches_both_session_row_forms() {
+        let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
+        let activity = hel::usage_format::SessionActivity {
+            harness_turn_started_at_ms: None,
+            background_commands: vec![hel::hel_worker::BackgroundCommand {
+                started_at_ms,
+                command: "cargo test".into(),
+            }],
+        };
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(
+            drawn(&mut dashboard, 120, 44)
+                .iter()
+                .any(|line| line.contains("Agent:")),
+            "an idle session with nothing running shows when it last spoke"
+        );
+
+        dashboard.set_session_activity("session-1", activity.clone());
+        let expanded = drawn(&mut dashboard, 120, 44);
+        assert!(
+            expanded.iter().any(|line| line.contains("  BG 43m3")),
+            "the expanded row: {expanded:?}"
+        );
+
+        let mut grid = dashboard_with_session(running_session());
+        grid.set_session_activity("session-1", activity);
+        grid.cycle_pane_layout();
+        let cells = drawn(&mut grid, 120, 44);
+        assert!(
+            cells.iter().any(|line| line.contains("[BG 43m3")),
+            "the grid cell: {cells:?}"
+        );
     }
 
     /// Every expanded session is the same height, so the layout can be

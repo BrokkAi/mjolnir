@@ -203,6 +203,18 @@ pub struct ActiveAgentTerminal {
     pub started_at_ms: i64,
 }
 
+/// A command the agent left running with nothing waiting on it.
+///
+/// Two harnesses produce these differently - Hel-hosted terminals that outlive
+/// their tool card, and Codex exec cards whose result carries no exit code -
+/// so the relay reduces both to this one shape and every surface renders it
+/// the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundCommand {
+    pub started_at_ms: i64,
+    pub command: String,
+}
+
 /// A turn the harness started on its own, with no prompt in flight.
 ///
 /// Claude Code re-invokes itself when a background task it started finishes.
@@ -366,6 +378,11 @@ pub struct RelayOperationalState {
     /// it against the cursor it captured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_harness_turn_started_ordinal: Option<u64>,
+    /// Commands the agent left running while nothing waits on them, oldest
+    /// first. Live operational state, like `active_agent_terminals`: it is
+    /// derived from what the relay can see now, not from the journal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_commands: Vec<BackgroundCommand>,
 }
 
 /// On-disk record format for a relay event.
@@ -510,6 +527,11 @@ pub enum RelayObservation {
     /// adapter's reported origin kind, kept for diagnostics.
     HarnessTurnSettled {
         origin: Option<String>,
+        /// Whether a prompt of ours was still running when the turn settled.
+        /// The relay keeps `Running` for it; the projection cannot see
+        /// `active_prompt`, so the event carries the answer.
+        #[serde(default)]
+        prompt_in_flight: bool,
     },
     Closing,
     Closed,
@@ -717,6 +739,9 @@ impl RelaySnapshot {
                 started_at_ms: turn.started_at_ms,
             }),
             last_harness_turn_started_ordinal: self.last_harness_turn_started_ordinal,
+            // Filled in by `DurableRelay::operational_state`, which is the
+            // only place that can see live processes.
+            background_commands: Vec::new(),
         }
     }
 
@@ -1885,6 +1910,7 @@ mod tests {
             RelayObservation::HarnessTurnStarted { started_at_ms: 7 },
             RelayObservation::HarnessTurnSettled {
                 origin: Some("task-notification".into()),
+                prompt_in_flight: false,
             },
             RelayObservation::SessionRestarted,
         ] {

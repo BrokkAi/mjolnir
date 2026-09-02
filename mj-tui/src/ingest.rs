@@ -49,6 +49,9 @@ pub(crate) struct SessionDetail {
     pub(crate) last_agent_message_follows_last_user: bool,
     pub(crate) latest_agent_activity_after_last_user: Option<Arc<str>>,
     pub(crate) last_acp_activity_at_ms: Option<u64>,
+    /// What the session is doing beyond its turn clock: the turn the harness
+    /// started on its own, and the commands the agent left running.
+    pub(crate) activity: hel::usage_format::SessionActivity,
     /// Latest agent-content ordinals retained so a state-only read-cursor
     /// update can recompute unread agent messages exactly.
     pub(crate) agent_message_latest_content_ordinals: Vec<u64>,
@@ -853,6 +856,19 @@ impl DashboardState {
             .entry(session_id.to_owned())
             .or_default()
             .last_acp_activity_at_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
+    }
+
+    /// Record what a session is doing beyond its turn clock, so a row can say
+    /// that an idle agent still has a command of its own running.
+    pub fn set_session_activity(
+        &mut self,
+        session_id: &str,
+        activity: hel::usage_format::SessionActivity,
+    ) {
+        self.session_details
+            .entry(session_id.to_owned())
+            .or_default()
+            .activity = activity;
     }
 
     /// Record whether the controller can currently reach a session's relay

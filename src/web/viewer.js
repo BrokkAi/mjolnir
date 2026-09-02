@@ -357,6 +357,7 @@ function sessionCard(session) {
   }
   const queued = (session.queued_prompts || []).length;
   if (queued) status.append(el('span', 'pill', `${queued} queued`));
+  if (session.activity) status.append(el('span', 'pill', session.activity));
   card.append(status);
 
   if (session.operation) {

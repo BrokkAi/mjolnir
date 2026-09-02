@@ -1691,7 +1691,7 @@ fn sliced_row_text(line: &Line<'static>, width: u16, first: u16, last: u16) -> S
 
 const TERMINAL_COMMAND_PREVIEW_CHARACTERS: usize = 160;
 
-fn compact_terminal_command(command: &str) -> String {
+pub(super) fn compact_terminal_command(command: &str) -> String {
     let command = sanitize_terminal_text(command)
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1990,6 +1990,7 @@ fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> String {
             now_epoch_seconds,
             chat.turn_started_at_epoch_seconds,
             chat.last_acp_activity_at_ms,
+            chat.session_activity(),
             &chat.header_profile,
         )
     };

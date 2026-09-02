@@ -826,9 +826,17 @@ fn project_observation(
                 started_at_ms: *started_at_ms,
             });
         }
-        RelayObservation::HarnessTurnSettled { .. } => {
-            close_streams(index, mutation, event.recorded_at_ms);
-            mutation.execution = Some(MaterializedExecutionState::Idle);
+        RelayObservation::HarnessTurnSettled {
+            prompt_in_flight, ..
+        } => {
+            // A prompt dispatched mid-turn is still running when the turn the
+            // harness started on its own settles. The relay keeps the session
+            // Running for it, and so does this: the prompt's own result closes
+            // the streams and stops the clock.
+            if !prompt_in_flight {
+                close_streams(index, mutation, event.recorded_at_ms);
+                mutation.execution = Some(MaterializedExecutionState::Idle);
+            }
         }
         // Keyed on the command rather than the event ordinal, and skipped once
         // the line exists: a relay that re-records the same notice after a
@@ -1938,6 +1946,7 @@ mod tests {
             &mut session,
             RelayObservation::HarnessTurnSettled {
                 origin: Some("task-notification".into()),
+                prompt_in_flight: false,
             },
         );
 
@@ -1958,6 +1967,74 @@ mod tests {
             crate::hel_state::ProjectionWindow::of(&session).latest_turn_start_position,
             Some(1)
         );
+    }
+
+    #[test]
+    fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnStarted {
+                started_at_ms: 4_200,
+            },
+        );
+        // A prompt typed mid-turn dispatches at once, so it is still running
+        // when the harness reaches the boundary of the turn it started.
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: "prompt-1".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                },
+                created_at_ms: 10,
+            },
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandStarted {
+                command_id: "prompt-1".into(),
+                started_at_ms: 20,
+            },
+        );
+        apply_observation(&mut session, agent_chunk("still writing", "answer-1"));
+
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnSettled {
+                origin: Some("task-notification".into()),
+                prompt_in_flight: true,
+            },
+        );
+
+        assert!(
+            matches!(
+                session.execution,
+                MaterializedExecutionState::Running { .. }
+            ),
+            "the prompt is still running, so the session is not idle"
+        );
+        assert!(
+            session.transcript.iter().any(
+                |item| matches!(&item.body, TranscriptBody::Agent { streaming, .. } if *streaming)
+            ),
+            "the prompt's own answer keeps streaming into its item"
+        );
+
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandCompleted {
+                command_id: "prompt-1".into(),
+                outcome: RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                },
+            },
+        );
+
+        assert_eq!(session.execution, MaterializedExecutionState::Idle);
+        assert!(!session.transcript.iter().any(
+            |item| matches!(&item.body, TranscriptBody::Agent { streaming, .. } if *streaming)
+        ));
     }
 
     #[test]

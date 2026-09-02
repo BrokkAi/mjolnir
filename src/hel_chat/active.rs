@@ -337,6 +337,9 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         );
         state.set_last_acp_activity(snapshot.operational.last_acp_activity_at_ms);
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
+        state.set_session_activity(crate::usage_format::SessionActivity::of(
+            &snapshot.operational,
+        ));
     }
     if let Some(error) = view.error {
         match error {
@@ -497,6 +500,9 @@ impl ActiveChat {
                 );
                 state.set_last_acp_activity(snapshot.operational.last_acp_activity_at_ms);
                 state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
+                state.set_session_activity(crate::usage_format::SessionActivity::of(
+                    &snapshot.operational,
+                ));
             }
             let pending = PendingPrefix::of(materialized, state.unconverted_prefix());
             (state, pending)
@@ -2339,6 +2345,27 @@ fn centered(area: ratatui::layout::Rect, width: u16, height: u16) -> ratatui::la
     )
 }
 
+/// What the agent left running, named for the composer title. One command is
+/// worth naming; several are worth counting, with the clock on the oldest.
+fn background_work_label(chat: &ChatState) -> Option<String> {
+    let commands = &chat.session_activity().background_commands;
+    let oldest = commands
+        .iter()
+        .min_by_key(|command| command.started_at_ms)?;
+    let elapsed = crate::usage_format::format_clock(
+        crate::clock::epoch_seconds()
+            .saturating_sub(u64::try_from(oldest.started_at_ms / 1_000).unwrap_or_default()),
+    );
+    Some(if commands.len() == 1 {
+        format!(
+            "Background: {} ({elapsed})",
+            super::transcript::compact_terminal_command(&oldest.command)
+        )
+    } else {
+        format!("Background: {} commands, oldest {elapsed}", commands.len())
+    })
+}
+
 fn prompt_title(chat: &ChatState, queued: usize) -> String {
     let mut parts = [chat.current_model(), chat.current_effort()]
         .into_iter()
@@ -2352,7 +2379,12 @@ fn prompt_title(chat: &ChatState, queued: usize) -> String {
         parts.push("Prompt — PLAN MODE".into());
     } else {
         match chat.phase {
-            WorkerPhase::Idle => parts.push("Prompt".into()),
+            // An idle session can still have work of its own running: a
+            // command the agent backgrounded outlives the turn that started
+            // it, and the composer names it rather than reading "Prompt".
+            WorkerPhase::Idle => {
+                parts.push(background_work_label(chat).unwrap_or_else(|| "Prompt".into()))
+            }
             WorkerPhase::Running if chat.pursuing_goal() => parts.push("Pursuing goal".into()),
             WorkerPhase::Running => parts.push("Running".into()),
             WorkerPhase::Closing => parts.push("Closing".into()),
@@ -2469,6 +2501,7 @@ mod tests {
                     last_acp_activity_at_ms: None,
                     harness_turn: None,
                     last_harness_turn_started_ordinal: None,
+                    background_commands: Vec::new(),
                 },
             }),
             connected: true,
@@ -3248,6 +3281,52 @@ mod tests {
 
         chat.set_prompt_in_flight(true);
         assert!(prompt_title(&chat, 0).contains("Esc cancels"));
+    }
+
+    /// While the agent is idle, the composer names what it left running
+    /// instead of reading "Prompt": one command by name, several by count.
+    #[test]
+    fn composer_title_names_the_work_the_agent_left_running() {
+        let started_at_ms =
+            i64::try_from(crate::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        assert!(prompt_title(&chat, 0).contains("Prompt"));
+
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            harness_turn_started_at_ms: None,
+            background_commands: vec![crate::hel_worker::BackgroundCommand {
+                started_at_ms,
+                command: "cargo   test".into(),
+            }],
+        });
+        assert!(
+            prompt_title(&chat, 0).contains("Background: cargo test (43m36s)"),
+            "{}",
+            prompt_title(&chat, 0)
+        );
+
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            harness_turn_started_at_ms: None,
+            background_commands: vec![
+                crate::hel_worker::BackgroundCommand {
+                    started_at_ms,
+                    command: "cargo test".into(),
+                },
+                crate::hel_worker::BackgroundCommand {
+                    started_at_ms: started_at_ms + 1_000,
+                    command: "npm run build".into(),
+                },
+            ],
+        });
+        assert!(
+            prompt_title(&chat, 0).contains("Background: 2 commands, oldest 43m36s"),
+            "{}",
+            prompt_title(&chat, 0)
+        );
+
+        // A running turn is named as a turn, whatever it left behind.
+        chat.phase = WorkerPhase::Running;
+        assert!(prompt_title(&chat, 0).contains("Running"));
     }
 
     #[test]

@@ -410,6 +410,9 @@ pub struct ChatState {
     /// turn the harness started on its own, which the relay refuses to cancel,
     /// so cancellation and the composer's cancel hint key on this instead.
     prompt_in_flight: bool,
+    /// What the session is doing beyond `phase`: the turn the harness started
+    /// on its own, and the commands the agent left running.
+    session_activity: crate::usage_format::SessionActivity,
     last_acp_activity_at_ms: Option<u64>,
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
@@ -493,6 +496,7 @@ impl ChatState {
             header_profile: String::new(),
             turn_started_at_epoch_seconds: None,
             prompt_in_flight: snapshot.active_prompt.is_some(),
+            session_activity: crate::usage_format::SessionActivity::default(),
             last_acp_activity_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
             frame_surfaces_exclusive: false,
@@ -906,6 +910,17 @@ impl ChatState {
     #[must_use]
     pub(super) fn prompt_in_flight(&self) -> bool {
         self.prompt_in_flight
+    }
+
+    /// Records what the session is doing beyond its phase, so the pane title
+    /// and the composer can name background work.
+    pub(super) fn set_session_activity(&mut self, activity: crate::usage_format::SessionActivity) {
+        self.session_activity = activity;
+    }
+
+    #[must_use]
+    pub(super) fn session_activity(&self) -> &crate::usage_format::SessionActivity {
+        &self.session_activity
     }
 
     fn set_last_acp_activity(&mut self, timestamp_ms: Option<i64>) {

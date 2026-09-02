@@ -95,6 +95,40 @@ session was running.
   on `active_prompt`, not on execution state, so a prompt typed mid-cycle
   dispatches at once and the adapter queues it.
 
+## Background work the agent leaves running
+
+`RelayOperationalState.background_commands` reports commands the agent started
+and then stopped waiting on, oldest first. Two harness families produce that
+evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
+(set beside the harness-turn policy in `src/hel_worker_runtime/unix.rs`):
+
+- `HostedTerminals` (Claude, Kimi, and every harness that is not Codex). Hel
+  spawned the process, so `active_agent_terminals` is exact: an entry leaves the
+  list the moment the child exits. A terminal only counts as background work
+  while no prompt and no harness turn is open; until then it is the turn's own
+  work.
+- `CodexExecCards` (Codex). codex-acp runs its own shells and never calls
+  `terminal/create`, so the only evidence is the tool card. An `exec_command`
+  card carries its result under `rawOutput`, with `exit_code` parsed from
+  Codex's structured result. A card whose `rawOutput` has no exit code (null or
+  absent) is a process Codex's unified exec left running; the relay tracks it by
+  tool call id and clears it when a later card for the same call reports an exit
+  code, when the harness restarts, and when the session closes.
+
+**The Codex card shape is unvalidated.** It is implemented from the description
+above, not from a recorded session. Before trusting it, run one live Codex
+session: ask it to start a long command and yield, confirm the `exec_command`
+card's `rawOutput.exit_code` is null, check that the row reads `BG`, then ask it
+to poll the process and confirm the row clears on the card that reports the
+exit. Adjust `DurableRelay::track_codex_exec_card` if the shape differs. If
+Codex's five-minute reap of unpolled processes is confirmed, entries should also
+age out at that bound.
+
+Every surface renders the same three states from one pair of helpers in
+`src/usage_format.rs`: `format_activity_columns` for wide rows, the chat pane
+title and the phone, and `format_activity_clock` for the minimized grid.
+Running clocks read `43m36s`, not `00:43:36` (`format_clock`).
+
 ## Known limitations
 
 - **A stray chunk with no marker leaves the session Running.** An agent chunk

@@ -2127,6 +2127,7 @@ mod tests {
                 last_acp_activity_at_ms: None,
                 harness_turn: None,
                 last_harness_turn_started_ordinal: None,
+                background_commands: Vec::new(),
             },
         }
     }
