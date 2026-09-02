@@ -4,11 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hel::hel_chat::{
-    Notices, TranscriptSnapshot, materialized_content_text, materialized_tool_diffstats,
-};
 use hel::hel_config::HelConfig;
-use hel::hel_quota::ProfileQuota;
 use hel::hel_state::{
     HelState, MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary,
     SessionRecord, SessionResourceAllocation, SessionState, TranscriptBody, TranscriptItem,
@@ -17,6 +13,9 @@ use hel::hel_state::{
 use hel::hel_targets::{
     DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage, SessionResourceUsage,
 };
+use hel::hel_transcript::{materialized_content_text, materialized_tool_diffstats};
+use mj_chat::hel_chat::{Notices, TranscriptSnapshot};
+use mj_controller::hel_quota::ProfileQuota;
 
 use crate::wizards::clamp_resources;
 use crate::{DashboardState, Mode, SessionOperationKind, nth_key};
@@ -51,7 +50,7 @@ pub(crate) struct SessionDetail {
     pub(crate) last_acp_activity_at_ms: Option<u64>,
     /// What the session is doing beyond its turn clock: the turn the harness
     /// started on its own, and the commands the agent left running.
-    pub(crate) activity: hel::usage_format::SessionActivity,
+    pub(crate) activity: mj_chat::usage_format::SessionActivity,
     /// Latest agent-content ordinals retained so a state-only read-cursor
     /// update can recompute unread agent messages exactly.
     pub(crate) agent_message_latest_content_ordinals: Vec<u64>,
@@ -129,7 +128,7 @@ fn last_agent_message_in(
             let TranscriptBody::Agent { chunks, .. } = &item.body else {
                 return None;
             };
-            let text = hel::hel_chat::materialized_chunks_text(chunks);
+            let text = hel::hel_transcript::materialized_chunks_text(chunks);
             (!text.trim().is_empty()).then(|| (start + offset, Arc::from(text)))
         })
 }
@@ -160,7 +159,9 @@ pub(crate) fn last_agent_message(
 
 fn agent_activity_text(item: &TranscriptItem) -> Option<Arc<str>> {
     let text = match &item.body {
-        TranscriptBody::Thought { chunks, .. } => hel::hel_chat::materialized_chunks_text(chunks),
+        TranscriptBody::Thought { chunks, .. } => {
+            hel::hel_transcript::materialized_chunks_text(chunks)
+        }
         TranscriptBody::Tool { call, .. } => call
             .get("title")
             .and_then(serde_json::Value::as_str)
@@ -863,7 +864,7 @@ impl DashboardState {
     pub fn set_session_activity(
         &mut self,
         session_id: &str,
-        activity: hel::usage_format::SessionActivity,
+        activity: mj_chat::usage_format::SessionActivity,
     ) {
         self.session_details
             .entry(session_id.to_owned())
@@ -948,12 +949,12 @@ mod tests {
 
     use ratatui::style::{Color, Modifier, Style};
 
-    use hel::hel_chat::Notices;
     use hel::hel_state::{
         HelState, MaterializedExecutionState, MaterializedSession, SessionState, TranscriptBody,
         TranscriptItem,
     };
     use hel::hel_targets::ProvisionStage;
+    use mj_chat::hel_chat::Notices;
 
     use super::*;
     use crate::test_support::*;

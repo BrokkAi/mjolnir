@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use hel::hel_selection::FrameSurfaces;
+use mj_chat::hel_selection::FrameSurfaces;
 
 use crate::actions::{Availability, COMMANDS, SCOPE_ORDER};
 use crate::widgets::centered_modal;

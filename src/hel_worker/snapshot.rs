@@ -385,6 +385,29 @@ pub struct RelayOperationalState {
     pub background_commands: Vec<BackgroundCommand>,
 }
 
+impl RelayOperationalState {
+    /// Whether nothing the worker owns would be destroyed by killing it now.
+    ///
+    /// Stopping a worker tears down the ACP bridge with it, so any operation
+    /// that replaces a worker in place has to wait for this. Every way the
+    /// session can still be holding work is listed here, and each is a
+    /// separate fact: the agent can be mid-turn, the harness can have started
+    /// a turn of its own, a terminal or a command it launched can still be
+    /// running, a prompt can be queued behind the current one, a user shell
+    /// can be open, and a checkpoint barrier can be waiting to capture.
+    #[must_use]
+    pub fn is_quiet(&self) -> bool {
+        self.execution == RelayExecutionState::Idle
+            && self.active_prompt.is_none()
+            && self.harness_turn.is_none()
+            && self.queued_prompts.is_empty()
+            && self.active_user_shells.is_empty()
+            && self.active_agent_terminals.is_empty()
+            && self.background_commands.is_empty()
+            && self.checkpoint_barrier.is_none()
+    }
+}
+
 /// On-disk record format for a relay event.
 /// - `1` (chained): folds `previous_digest` into the digest, forming a hash
 ///   chain. This is the legacy format; a record with no `format` key on disk is
@@ -856,7 +879,7 @@ fn truncate_with_marker(text: &mut String, keep: usize) {
 /// The Unix worker is the only production caller; the helper stays compiled
 /// on Windows so its unit test still builds under `cargo test --no-run`.
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) fn truncate_start_with_marker(text: &mut String, keep: usize) -> bool {
+pub fn truncate_start_with_marker(text: &mut String, keep: usize) -> bool {
     if text.len() <= keep {
         return false;
     }
@@ -1744,6 +1767,88 @@ mod tests {
         DurableRelay, RELAY_COMMAND_BYTE_BUDGET, RELAY_EVENT_BYTE_BUDGET, RELAY_STATE_BYTE_BUDGET,
         RelayErrorCode, RelayProtocolError, RelayRequest, RelayResponseBody,
     };
+
+    /// Every way a session can still be holding work, each on its own, plus
+    /// the one state in which replacing its worker destroys nothing.
+    #[test]
+    fn a_session_is_quiet_only_when_nothing_it_owns_is_in_flight() {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let quiet = relay.operational_state();
+        assert!(quiet.is_quiet(), "a fresh relay owns nothing: {quiet:?}");
+
+        type MakeBusy = fn(&mut RelayOperationalState);
+        let busy: Vec<(&str, MakeBusy)> = vec![
+            (
+                "a prompt is running",
+                (|state| state.execution = RelayExecutionState::Running),
+            ),
+            (
+                "a prompt is in flight",
+                (|state| {
+                    state.active_prompt = Some(ActiveRelayPrompt {
+                        command_id: "prompt-1".into(),
+                        created_at_ms: 1,
+                        started_at_ms: 2,
+                    });
+                }),
+            ),
+            (
+                "the harness started a turn of its own",
+                (|state| {
+                    state.harness_turn = Some(HarnessTurn { started_at_ms: 1 });
+                }),
+            ),
+            (
+                "a prompt is queued behind the current one",
+                (|state| {
+                    state.queued_prompts = vec![QueuedRelayPrompt {
+                        command_id: "prompt-2".into(),
+                        created_at_ms: 1,
+                    }];
+                }),
+            ),
+            (
+                "a user shell is open",
+                (|state| {
+                    state.active_user_shells = vec![ActiveUserShell {
+                        command_id: "shell-1".into(),
+                        command: "top".into(),
+                        created_at_ms: 1,
+                        started_at_ms: Some(1),
+                    }];
+                }),
+            ),
+            (
+                "an agent terminal is live",
+                (|state| {
+                    state.active_agent_terminals = vec![ActiveAgentTerminal {
+                        terminal_id: "term-1".into(),
+                        command: "sleep 600".into(),
+                        started_at_ms: 1,
+                    }];
+                }),
+            ),
+            (
+                "the agent left a command running",
+                (|state| {
+                    state.background_commands = vec![BackgroundCommand {
+                        started_at_ms: 1,
+                        command: "sleep 600".into(),
+                    }];
+                }),
+            ),
+            (
+                "a checkpoint barrier is waiting",
+                (|state| state.checkpoint_barrier = Some("checkpoint-1".into())),
+            ),
+        ];
+        for (reason, make_busy) in busy {
+            let mut state = quiet.clone();
+            make_busy(&mut state);
+            assert!(!state.is_quiet(), "{reason}");
+        }
+    }
 
     #[test]
     fn relay_operational_state_tracks_mutable_acp_options_and_commands() {

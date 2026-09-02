@@ -219,6 +219,21 @@ impl ExecutionEnforcement {
     }
 }
 
+/// The file inside a harness home that proves the harness is logged in.
+///
+/// Setup, quota checks, credential sync, and the target-side worker all read
+/// the same path, so it is decided here beside [`HarnessKind`] rather than in
+/// any one of them.
+pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf {
+    home.join(match kind {
+        HarnessKind::Codex => "auth.json",
+        HarnessKind::Claude => ".credentials.json",
+        HarnessKind::Kimi => "credentials/kimi-code.json",
+        HarnessKind::Grok => "auth.json",
+        HarnessKind::Deepseek => ".credentials.yaml",
+    })
+}
+
 impl HarnessKind {
     pub const ALL: [Self; 5] = [
         Self::Codex,
@@ -1211,7 +1226,7 @@ fn is_github_source(source: &str) -> bool {
 }
 
 /// Replace `path` without exposing a partially-written configuration/state file.
-pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
+pub fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
     atomic_write_with_parent(path, body, ParentDirectory::Create)
 }
 
@@ -1220,7 +1235,7 @@ pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
 /// Worker state lives inside a directory that session teardown deletes out
 /// from under the running daemon. Recreating it here would resurrect a closed
 /// session's relay state, so a vanished parent must be an error instead.
-pub(crate) fn atomic_write_existing(path: &Path, body: &[u8]) -> Result<()> {
+pub fn atomic_write_existing(path: &Path, body: &[u8]) -> Result<()> {
     atomic_write_with_parent(path, body, ParentDirectory::Require)
 }
 

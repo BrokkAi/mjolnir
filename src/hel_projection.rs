@@ -6,13 +6,15 @@ use std::sync::Arc;
 use agent_client_protocol::schema::{
     MaybeUndefined,
     v1::{
-        ContentBlock, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+        ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+        SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
         ToolCallUpdateFields,
     },
 };
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::hel_archive::{
     CanonicalExecutionState, CanonicalQueuedCommandKind, CanonicalQueuedPrompt,
@@ -27,8 +29,10 @@ use crate::hel_state::{
     TerminalOutputRecord, TranscriptBody, TranscriptItem, config_command_text,
     normalize_session_title, provisional_session_title,
 };
+use crate::hel_transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus};
 use crate::hel_worker::{
-    RelayCommand, RelayCommandKind, RelayEvent, RelayObservation, validate_relay_event,
+    RELAY_EVENT_GENESIS_DIGEST, RelayCommand, RelayCommandKind, RelayEvent, RelayObservation,
+    SequencedEvent, WorkerEvent, WorkerPhase, validate_relay_event,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +45,7 @@ pub struct ProjectedRelayEvent {
 /// while catch-up avoids rediscovering keyed items and open streams with a
 /// full transcript walk for every event.
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectionIndex {
+pub struct ProjectionIndex {
     transcript: HashMap<String, Arc<TranscriptItem>>,
     transcript_positions: HashMap<String, usize>,
     open_agent_streams: BTreeSet<(u64, String)>,
@@ -50,7 +54,7 @@ pub(crate) struct ProjectionIndex {
 }
 
 impl ProjectionIndex {
-    pub(crate) fn new(current: &MaterializedSession) -> Self {
+    pub fn new(current: &MaterializedSession) -> Self {
         let mut index = Self {
             transcript: HashMap::with_capacity(current.transcript.len()),
             transcript_positions: HashMap::with_capacity(current.transcript.len()),
@@ -189,7 +193,7 @@ pub fn project_relay_event(
     project_relay_event_indexed(current, &index, event)
 }
 
-pub(crate) fn project_relay_event_indexed(
+pub fn project_relay_event_indexed(
     current: &MaterializedSession,
     index: &ProjectionIndex,
     event: &RelayEvent,
@@ -220,7 +224,7 @@ pub fn apply_committed_projection_event(
     apply_committed_projection_event_inner(current, event, mutation, None)
 }
 
-pub(crate) fn apply_committed_projection_event_indexed(
+pub fn apply_committed_projection_event_indexed(
     current: &mut MaterializedSession,
     index: &mut ProjectionIndex,
     event: &RelayEvent,
@@ -441,7 +445,7 @@ fn project_observation(
                     .map(serde_json::to_value)
                     .collect::<serde_json::Result<Vec<_>>>()?;
                 if current.session_title.is_none() {
-                    let prompt_text = crate::hel_chat::materialized_content_text(&content);
+                    let prompt_text = crate::hel_transcript::materialized_content_text(&content);
                     if let Some(title) = current
                         .resolved_title()
                         .or_else(|| provisional_session_title(&prompt_text))
@@ -1620,6 +1624,266 @@ fn materialized_terminal_output(record: &CanonicalTerminalOutput) -> TerminalOut
     }
 }
 
+/// Convert a transcript projection into the controller's canonical logical
+/// session. The chat view and the native importers both build [`ChatEntry`]
+/// values first and land here; live relay sessions are projected directly
+/// from relay events instead.
+pub fn materialized_session_from_entries(
+    session_id: &str,
+    entries: &[ChatEntry],
+    latest_seq: u64,
+    phase: WorkerPhase,
+    configuration: BTreeMap<String, serde_json::Value>,
+    queued_prompts: Vec<MaterializedQueuedPrompt>,
+    pending_elicitations: Vec<crate::hel_elicitation::ElicitationRequest>,
+) -> MaterializedSession {
+    let mut stable_ids = BTreeSet::new();
+    let transcript = entries
+        .iter()
+        .filter(|entry| entry.start_seq > 0)
+        .map(|entry| {
+            let base_id = match entry.role {
+                ChatRole::User => format!("user:{}", entry.start_seq),
+                ChatRole::Agent => entry.message_id.as_ref().map_or_else(
+                    || format!("agent:{}", entry.start_seq),
+                    |id| format!("agent:{id}"),
+                ),
+                ChatRole::Thought => entry.message_id.as_ref().map_or_else(
+                    || format!("thought:{}", entry.start_seq),
+                    |id| format!("thought:{id}"),
+                ),
+                ChatRole::Tool => entry.tool_call_id.as_ref().map_or_else(
+                    || format!("tool:{}", entry.start_seq),
+                    |id| format!("tool:{id}"),
+                ),
+                ChatRole::Plan => format!("plan:{}", entry.start_seq),
+                ChatRole::PlanProposal => format!("plan-proposal:{}", entry.start_seq),
+                ChatRole::System => format!("system:{}", entry.start_seq),
+            };
+            let stable_id = if stable_ids.insert(base_id.clone()) {
+                base_id
+            } else {
+                format!("{base_id}:{}", entry.start_seq)
+            };
+            let body = match entry.role {
+                ChatRole::User => TranscriptBody::User {
+                    content: vec![serde_json::json!({
+                        "type": "text",
+                        "text": entry.text,
+                    })],
+                },
+                ChatRole::Agent | ChatRole::Thought => {
+                    let mut chunk =
+                        ContentChunk::new(ContentBlock::Text(TextContent::new(entry.text.clone())));
+                    if let Some(message_id) = &entry.message_id {
+                        chunk = chunk.message_id(message_id.as_str());
+                    }
+                    let chunks = vec![
+                        serde_json::to_value(chunk)
+                            .expect("ACP content chunk serialization cannot fail"),
+                    ];
+                    if entry.role == ChatRole::Agent {
+                        TranscriptBody::Agent {
+                            chunks,
+                            streaming: false,
+                        }
+                    } else {
+                        TranscriptBody::Thought {
+                            chunks,
+                            streaming: false,
+                        }
+                    }
+                }
+                ChatRole::Tool => {
+                    let call_id = entry
+                        .tool_call_id
+                        .clone()
+                        .unwrap_or_else(|| stable_id.clone());
+                    let content = entry
+                        .tool_content
+                        .iter()
+                        .cloned()
+                        .map(|text| {
+                            ToolCallContent::from(ContentBlock::Text(TextContent::new(text)))
+                        })
+                        .collect();
+                    let mut call = ToolCall::new(call_id, entry.text.clone())
+                        .status(match entry.tool_status.unwrap_or(ToolStatus::Pending) {
+                            ToolStatus::Pending => ToolCallStatus::Pending,
+                            ToolStatus::Running => ToolCallStatus::InProgress,
+                            ToolStatus::Completed => ToolCallStatus::Completed,
+                            ToolStatus::Failed => ToolCallStatus::Failed,
+                        })
+                        .content(content);
+                    if !entry.tool_diffstats.is_empty() || !entry.tool_locations.is_empty() {
+                        call = call.raw_output(serde_json::json!({
+                            "legacyDiffstats": entry.tool_diffstats,
+                            "legacyLocations": entry.tool_locations,
+                        }));
+                    }
+                    TranscriptBody::Tool {
+                        call: serde_json::to_value(call)
+                            .expect("ACP tool call serialization cannot fail"),
+                        terminal_outputs: Vec::new(),
+                        terminal_refs: Vec::new(),
+                    }
+                }
+                ChatRole::Plan => TranscriptBody::Plan {
+                    plan: serde_json::to_value(Plan::new(
+                        entry
+                            .plan
+                            .iter()
+                            .map(|line| {
+                                PlanEntry::new(
+                                    line.text.clone(),
+                                    PlanEntryPriority::Medium,
+                                    match line.status {
+                                        PlanStatus::Pending => PlanEntryStatus::Pending,
+                                        PlanStatus::Running => PlanEntryStatus::InProgress,
+                                        PlanStatus::Completed => PlanEntryStatus::Completed,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    ))
+                    .expect("ACP plan serialization cannot fail"),
+                },
+                ChatRole::PlanProposal => TranscriptBody::PlanProposal {
+                    proposal_id: format!("legacy:{}", entry.start_seq),
+                    plan: entry.text.clone(),
+                },
+                ChatRole::System => TranscriptBody::System {
+                    text: entry.text.clone(),
+                },
+            };
+            let timestamp = entry.recorded_at_ms.unwrap_or_default();
+            Arc::new(TranscriptItem {
+                stable_id,
+                position: entry.start_seq,
+                latest_content_event_ordinal: (entry.role == ChatRole::Agent).then_some(entry.seq),
+                created_at_ms: timestamp,
+                last_changed_at_ms: timestamp,
+                body,
+            })
+        })
+        .collect::<Vec<_>>();
+    let started_at_ms = entries
+        .iter()
+        .rev()
+        .find(|entry| entry.role == ChatRole::User)
+        .and_then(|entry| entry.recorded_at_ms)
+        .unwrap_or_default();
+    let applied_event_digest = if latest_seq == 0 {
+        RELAY_EVENT_GENESIS_DIGEST.to_owned()
+    } else {
+        let mut digest = Sha256::new();
+        digest.update(b"hel-imported-transcript-frontier-v1\0");
+        digest.update(session_id.as_bytes());
+        digest.update(latest_seq.to_le_bytes());
+        format!("{:x}", digest.finalize())
+    };
+    MaterializedSession {
+        session_id: session_id.to_owned(),
+        applied_event_ordinal: latest_seq,
+        applied_event_digest,
+        last_activity_at_ms: entries
+            .iter()
+            .filter_map(|entry| entry.recorded_at_ms)
+            .max(),
+        execution: match phase {
+            WorkerPhase::Idle => MaterializedExecutionState::Idle,
+            WorkerPhase::Running => MaterializedExecutionState::Running { started_at_ms },
+            WorkerPhase::Closing => MaterializedExecutionState::Closing,
+            WorkerPhase::Closed => MaterializedExecutionState::Closed,
+        },
+        session_title: None,
+        configuration,
+        transcript,
+        queued_prompts,
+        pending_elicitations,
+    }
+}
+
+/// Project the relay events a native importer synthesized into the canonical
+/// logical session it archives. Importers replay a harness transcript as
+/// prompts, turn boundaries, and agent or thought text; the entry building
+/// itself is [`crate::hel_transcript`]'s, so an imported transcript reads
+/// exactly as the same events would in the chat view.
+pub fn imported_materialized_session(
+    session_id: &str,
+    events: &[SequencedEvent],
+) -> MaterializedSession {
+    let mut entries = Vec::new();
+    let mut phase = WorkerPhase::Idle;
+    let mut latest_seq = 0;
+    for event in events {
+        if event.seq <= latest_seq {
+            continue;
+        }
+        apply_imported_event(&mut entries, &mut phase, event);
+        latest_seq = event.seq;
+    }
+    materialized_session_from_entries(
+        session_id,
+        &entries,
+        latest_seq,
+        phase,
+        BTreeMap::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+/// The transcript and lifecycle effect of one imported relay event. The chat
+/// view applies the same effect alongside its own view state.
+fn apply_imported_event(
+    entries: &mut Vec<ChatEntry>,
+    phase: &mut WorkerPhase,
+    event: &SequencedEvent,
+) {
+    match &event.event {
+        WorkerEvent::PromptAccepted { text, .. } => {
+            *phase = WorkerPhase::Running;
+            entries.push(
+                ChatEntry::plain(event.seq, ChatRole::User, text)
+                    .with_recorded_at(event.recorded_at_ms),
+            );
+        }
+        WorkerEvent::QueuedPromptPromoted { prompt, .. } => {
+            *phase = WorkerPhase::Running;
+            entries.push(
+                ChatEntry::plain(event.seq, ChatRole::User, &prompt.text)
+                    .with_recorded_at(event.recorded_at_ms),
+            );
+        }
+        WorkerEvent::TurnCompleted => *phase = WorkerPhase::Idle,
+        WorkerEvent::Cancelled => *phase = WorkerPhase::Running,
+        WorkerEvent::Closing => *phase = WorkerPhase::Closing,
+        WorkerEvent::Closed => *phase = WorkerPhase::Closed,
+        WorkerEvent::Adapter { payload, .. } => {
+            let runtime =
+                match serde_json::from_value::<crate::hel_acp::RuntimeEvent>(payload.clone()) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::warn!(
+                            seq = event.seq,
+                            %error,
+                            "ignoring malformed persisted runtime event"
+                        );
+                        return;
+                    }
+                };
+            crate::hel_transcript::apply_runtime_event_to_entries(
+                entries,
+                event.seq,
+                event.recorded_at_ms,
+                runtime,
+            );
+        }
+        _ => {}
+    }
+}
+
 pub fn canonical_session_from_materialized(
     materialized: &MaterializedSession,
 ) -> Result<CanonicalSessionSnapshot> {
@@ -2375,7 +2639,7 @@ mod tests {
         assert!(matches!(
             &session.transcript[0].body,
             TranscriptBody::Agent { chunks, .. }
-                if crate::hel_chat::materialized_chunks_text(chunks) == "hello"
+                if crate::hel_transcript::materialized_chunks_text(chunks) == "hello"
         ));
         assert_eq!(session.transcript[0].position, 1);
         assert_eq!(session.transcript[0].latest_content_event_ordinal, Some(2));
@@ -2417,7 +2681,7 @@ mod tests {
             &item.body,
             TranscriptBody::Agent { chunks, streaming }
                 if !*streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks) == "trailing"
+                    && crate::hel_transcript::materialized_chunks_text(chunks) == "trailing"
         ));
     }
 
@@ -2470,7 +2734,7 @@ mod tests {
         assert!(matches!(
             &item.body,
             TranscriptBody::Agent { chunks, streaming }
-                if *streaming && crate::hel_chat::materialized_chunks_text(chunks) == "live"
+                if *streaming && crate::hel_transcript::materialized_chunks_text(chunks) == "live"
         ));
     }
 
@@ -2487,7 +2751,7 @@ mod tests {
             &item.body,
             TranscriptBody::Agent { chunks, streaming }
                 if !*streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks)
+                    && crate::hel_transcript::materialized_chunks_text(chunks)
                         == "Grok streams one word at a time"
         ));
     }
@@ -2505,7 +2769,7 @@ mod tests {
             &item.body,
             TranscriptBody::Thought { chunks, streaming }
                 if !*streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks)
+                    && crate::hel_transcript::materialized_chunks_text(chunks)
                         == "thinking in small pieces"
         ));
     }
@@ -2524,13 +2788,13 @@ mod tests {
             &session.transcript[0].body,
             TranscriptBody::Thought { chunks, streaming }
                 if !*streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks) == "pondering the goal"
+                    && crate::hel_transcript::materialized_chunks_text(chunks) == "pondering the goal"
         ));
         assert!(matches!(
             &session.transcript[1].body,
             TranscriptBody::Agent { chunks, streaming }
                 if !*streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks) == "here's the plan"
+                    && crate::hel_transcript::materialized_chunks_text(chunks) == "here's the plan"
         ));
     }
 
@@ -2560,13 +2824,13 @@ mod tests {
             &agent_items[0].body,
             TranscriptBody::Agent { chunks, streaming }
                 if !*streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks) == "checking the repo"
+                    && crate::hel_transcript::materialized_chunks_text(chunks) == "checking the repo"
         ));
         assert!(matches!(
             &agent_items[1].body,
             TranscriptBody::Agent { chunks, streaming }
                 if !*streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks) == "found it"
+                    && crate::hel_transcript::materialized_chunks_text(chunks) == "found it"
         ));
         assert!(
             session
@@ -2590,7 +2854,7 @@ mod tests {
             &item.body,
             TranscriptBody::Agent { chunks, streaming }
                 if *streaming
-                    && crate::hel_chat::materialized_chunks_text(chunks) == "live streaming text"
+                    && crate::hel_transcript::materialized_chunks_text(chunks) == "live streaming text"
         ));
     }
 
@@ -3472,7 +3736,7 @@ mod tests {
             }
         );
         assert_eq!(
-            crate::hel_chat::materialized_content_text(&session.queued_prompts[0].content),
+            crate::hel_transcript::materialized_content_text(&session.queued_prompts[0].content),
             "/model sonnet"
         );
 
@@ -3863,7 +4127,7 @@ mod tests {
         let TranscriptBody::Agent { chunks, .. } = &item.body else {
             panic!("expected an agent message, got {:?}", item.body);
         };
-        crate::hel_chat::materialized_chunks_text(chunks)
+        crate::hel_transcript::materialized_chunks_text(chunks)
     }
 
     #[test]

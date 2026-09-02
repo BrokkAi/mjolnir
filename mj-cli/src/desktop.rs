@@ -4,8 +4,10 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
-use hel::hel_desktop::{DesktopLaunch, sibling_executable};
-use hel::hel_server::{cookie_key_path, load_or_create_cookie_key, mint_desktop_session_cookie};
+use mj_controller::hel_desktop::{DesktopLaunch, sibling_executable};
+use mj_controller::hel_server::{
+    cookie_key_path, load_or_create_cookie_key, mint_desktop_session_cookie,
+};
 
 use crate::daemon::{self, WebViewerStatus};
 

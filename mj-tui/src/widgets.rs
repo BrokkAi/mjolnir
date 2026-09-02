@@ -1,6 +1,6 @@
 //! Small drawing primitives shared by the dashboard, dialogs, and wizards.
 
-use hel::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
+use mj_chat::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

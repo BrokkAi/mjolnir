@@ -431,7 +431,7 @@ fn spawn_shell(_line: &str, _spawn: &TerminalSpawn) -> Result<tokio::process::Ch
 
 #[cfg(unix)]
 fn kill_process_group(pid: i32) {
-    crate::hel_worker_runtime::terminate_process_group(pid, libc::SIGKILL);
+    crate::hel_subprocess::terminate_process_group(pid, libc::SIGKILL);
 }
 
 #[cfg(not(unix))]

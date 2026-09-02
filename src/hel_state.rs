@@ -174,7 +174,9 @@ impl MaterializedSession {
                     let TranscriptBody::User { content } = &item.body else {
                         return None;
                     };
-                    provisional_session_title(&crate::hel_chat::materialized_content_text(content))
+                    provisional_session_title(&crate::hel_transcript::materialized_content_text(
+                        content,
+                    ))
                 })
             })
             .or_else(|| {
@@ -182,9 +184,9 @@ impl MaterializedSession {
                     .iter()
                     .filter(|prompt| prompt.kind.is_prompt())
                     .find_map(|prompt| {
-                        provisional_session_title(&crate::hel_chat::materialized_content_text(
-                            &prompt.content,
-                        ))
+                        provisional_session_title(
+                            &crate::hel_transcript::materialized_content_text(&prompt.content),
+                        )
                     })
             })
     }
@@ -271,6 +273,11 @@ pub struct ManagedSessionSnapshot {
     /// credential reconciliation. This is intentionally ephemeral: it avoids
     /// retaining raw replay pages or rescanning projected history.
     pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
+    /// Content address of the executable the connected worker is running, as
+    /// it reported in hello. `None` when the connection did not come from a
+    /// live worker or the worker predates the field; either way the worker is
+    /// not known to be the build this controller would install.
+    pub worker_build: Option<String>,
 }
 
 /// What a projection's transcript window leaves out.
@@ -306,7 +313,9 @@ impl ProjectionWindow {
                 let TranscriptBody::User { content } = &item.body else {
                     return None;
                 };
-                provisional_session_title(&crate::hel_chat::materialized_content_text(content))
+                provisional_session_title(&crate::hel_transcript::materialized_content_text(
+                    content,
+                ))
             }),
             latest_turn_start_position: session
                 .transcript
@@ -336,9 +345,9 @@ impl ManagedSessionSnapshot {
                     .iter()
                     .filter(|prompt| prompt.kind.is_prompt())
                     .find_map(|prompt| {
-                        provisional_session_title(&crate::hel_chat::materialized_content_text(
-                            &prompt.content,
-                        ))
+                        provisional_session_title(
+                            &crate::hel_transcript::materialized_content_text(&prompt.content),
+                        )
                     })
             })
     }
@@ -397,9 +406,8 @@ pub fn latest_completed_turn_ordinal(session: &MaterializedSession) -> Option<u6
 /// or not queued observations have been read yet.
 #[derive(Clone)]
 pub struct RecoveryObserver {
-    pub(crate) observations: mpsc::UnboundedSender<RecoveryObservation>,
-    pub(crate) busy: watch::Receiver<BTreeSet<String>>,
-    pub(crate) gate: Arc<RecoveryGate>,
+    pub observations: mpsc::UnboundedSender<RecoveryObservation>,
+    pub gate: Arc<RecoveryGate>,
 }
 
 /// A per-session reservation held by a foreground lifecycle operation. The
@@ -415,9 +423,25 @@ impl Drop for RecoveryReservation {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct RecoveryGate {
+/// The one slot per session that background work has to hold.
+///
+/// It is shared rather than per-coordinator: a recovery copy and a worker
+/// upgrade both act on a session's live worker, so only one of them may run at
+/// a time, and a foreground lifecycle operation preempts whichever it is.
+pub struct RecoveryGate {
     state: Mutex<RecoveryGateState>,
+    /// Which sessions are busy, for waiters. Published from inside the gate so
+    /// every holder updates it, whatever started the work.
+    busy: watch::Sender<BTreeSet<String>>,
+}
+
+impl Default for RecoveryGate {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            busy: watch::channel(BTreeSet::new()).0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -429,7 +453,7 @@ struct RecoveryGateState {
 }
 
 impl RecoveryGate {
-    pub(crate) fn reserve(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
+    pub fn reserve(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         *state.reservations.entry(session_id.to_owned()).or_default() += 1;
         RecoveryReservation {
@@ -449,24 +473,42 @@ impl RecoveryGate {
         }
     }
 
-    /// Claims the session for a copy and returns the cancel flag that copy
-    /// must watch, or `None` when a copy or a reservation already holds it.
-    pub(crate) fn try_start(&self, session_id: &str) -> Option<Arc<AtomicBool>> {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.busy.contains_key(session_id) || state.reservations.contains_key(session_id) {
-            return None;
-        }
-        let cancelled = Arc::new(AtomicBool::new(false));
-        state.busy.insert(session_id.to_owned(), cancelled.clone());
+    /// Claims the session for background work and returns the cancel flag that
+    /// work must watch, or `None` when other work or a reservation already
+    /// holds it.
+    pub fn try_start(&self, session_id: &str) -> Option<Arc<AtomicBool>> {
+        let cancelled = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.busy.contains_key(session_id) || state.reservations.contains_key(session_id) {
+                return None;
+            }
+            let cancelled = Arc::new(AtomicBool::new(false));
+            state.busy.insert(session_id.to_owned(), cancelled.clone());
+            cancelled
+        };
+        self.publish_busy();
         Some(cancelled)
     }
 
-    pub(crate) fn finish(&self, session_id: &str) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.busy.remove(session_id);
+    pub fn finish(&self, session_id: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .busy
+            .remove(session_id);
+        self.publish_busy();
     }
 
-    pub(crate) fn is_busy(&self, session_id: &str) -> bool {
+    fn publish_busy(&self) {
+        let busy = self.busy_sessions();
+        self.busy.send_replace(busy);
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<BTreeSet<String>> {
+        self.busy.subscribe()
+    }
+
+    pub fn is_busy(&self, session_id: &str) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -475,7 +517,7 @@ impl RecoveryGate {
     }
 
     /// Asks the in-flight copy for this session, if any, to stop.
-    pub(crate) fn cancel_busy(&self, session_id: &str) {
+    pub fn cancel_busy(&self, session_id: &str) {
         if let Some(cancelled) = self
             .state
             .lock()
@@ -487,8 +529,8 @@ impl RecoveryGate {
         }
     }
 
-    /// Asks every in-flight copy to stop, used when the coordinator shuts down.
-    pub(crate) fn cancel_all(&self) {
+    /// Asks every in-flight copy to stop, used when a coordinator shuts down.
+    pub fn cancel_all(&self) {
         for cancelled in self
             .state
             .lock()
@@ -500,7 +542,7 @@ impl RecoveryGate {
         }
     }
 
-    pub(crate) fn busy_sessions(&self) -> BTreeSet<String> {
+    pub fn busy_sessions(&self) -> BTreeSet<String> {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -546,7 +588,7 @@ impl RecoveryObserver {
     }
 
     pub async fn wait_idle(&self, session_id: &str) {
-        let mut busy = self.busy.clone();
+        let mut busy = self.gate.subscribe();
         while self.is_busy(session_id) {
             if busy.changed().await.is_err() {
                 break;
@@ -1441,6 +1483,7 @@ mod tests {
         ManagedSessionSnapshot {
             materialized: session,
             window,
+            worker_build: None,
             operational: serde_json::from_value(serde_json::json!({
                 "session_id": "session-1",
                 "execution": "idle",

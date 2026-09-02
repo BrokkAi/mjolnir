@@ -9,19 +9,21 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessProfile, PhoneConfig};
-use hel::hel_controller::{Controller, SessionLaunchOptions};
-use hel::hel_quota::ProfileQuota;
-use hel::hel_server::{
+use hel::hel_state::{HelState, SessionRecord};
+use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor};
+use hel::hel_worker::RelayCommand;
+use hel::hel_workspace::WorkspaceRecord;
+use mj_controller::hel_controller::{Controller, SessionLaunchOptions};
+use mj_controller::hel_quota::ProfileQuota;
+use mj_controller::hel_server::{
     ActionOutcome, ControllerAction, ControllerRequest, ReadReceiptRequest, ResumeQueueDisposition,
     ServerOptions, ViewerQueuedPrompt, ViewerQuota, ViewerSnapshot, ViewerUserShell,
 };
-use hel::hel_session_manager::{SessionManagerChannels, SessionManagerControl, new_command_id};
-use hel::hel_state::{HelState, SessionRecord};
-use hel::hel_tailscale::TailscaleTls;
-use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor};
-use hel::hel_worker::RelayCommand;
-use hel::hel_worker_client::CredentialSyncCoordinator;
-use hel::hel_workspace::WorkspaceRecord;
+use mj_controller::hel_session_manager::{
+    SessionManagerChannels, SessionManagerControl, new_command_id,
+};
+use mj_controller::hel_tailscale::TailscaleTls;
+use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 
 use crate::daemon::{ResumeSessionRequest, RuntimeState, WebViewerStatus};
 use crate::pollers::{
@@ -90,7 +92,7 @@ async fn resolve_server_args(
 
     let tls_root = hel::hel_config::data_dir().join("viewer");
     let prepared = run_tailscale_blocking(termination.clone(), move |executor| {
-        hel::hel_tailscale::prepare_tailscale_tls(&tls_root, executor)
+        mj_controller::hel_tailscale::prepare_tailscale_tls(&tls_root, executor)
     })
     .await;
     match prepared {
@@ -517,7 +519,7 @@ pub(crate) async fn run_server(
     let mut credential_sync_signals = CredentialSyncSignalTracker::default();
     let mut credential_sync_notices = CredentialSyncNotices::default();
     // Captured before `options` is moved into the server.
-    let options_session_ttl = hel::hel_server::default_session_ttl();
+    let options_session_ttl = mj_controller::hel_server::default_session_ttl();
     let mut options = ServerOptions::new(
         bind,
         snapshot_rx,
@@ -531,8 +533,8 @@ pub(crate) async fn run_server(
     // Session cookies are stateless, so a per-process key would sign every
     // phone out on every restart. Delete the key file to sign them out on
     // purpose.
-    let cookie_key_path = hel::hel_server::cookie_key_path();
-    options.set_cookie_key(hel::hel_server::load_or_create_cookie_key(
+    let cookie_key_path = mj_controller::hel_server::cookie_key_path();
+    options.set_cookie_key(mj_controller::hel_server::load_or_create_cookie_key(
         &cookie_key_path,
     )?)?;
     let renewal_cancellation = termination.child_token();
@@ -572,7 +574,7 @@ pub(crate) async fn run_server(
         fallback_reason,
     });
 
-    let serve = hel::hel_server::run_server(options);
+    let serve = mj_controller::hel_server::run_server(options);
     let control = async {
         let mut credential_tick = tokio::time::interval(Duration::from_millis(250));
         // Stored viewer state expires with the authentication that created it.
@@ -733,7 +735,7 @@ pub(crate) async fn run_server(
                         );
                         conversations.insert(
                             update.session_id.clone(),
-                            hel::hel_chat::TranscriptSnapshot::from_materialized(
+                            mj_chat::hel_chat::TranscriptSnapshot::from_materialized(
                                 &snapshot.materialized,
                             )
                             .browser_transcript(None),
@@ -823,7 +825,7 @@ pub(crate) async fn run_server(
                             .map(|session| session.bundle_id.clone())
                     };
                     match stored {
-                        hel::hel_server::ClientStateRequest::Read { client_id, session_id, reply } => {
+                        mj_controller::hel_server::ClientStateRequest::Read { client_id, session_id, reply } => {
                             let workspace = workspace_of(&session_id);
                             tokio::spawn(async move {
                                 let answer = tokio::task::spawn_blocking(move || {
@@ -831,7 +833,7 @@ pub(crate) async fn run_server(
                                     let state = hel::hel_database::client_session_state(
                                         &client_id, &workspace, &session_id,
                                     )?;
-                                    anyhow::Ok(hel::hel_server::ViewerClientState {
+                                    anyhow::Ok(mj_controller::hel_server::ViewerClientState {
                                         draft: state.draft,
                                         through_event_ordinal: state.through_event_ordinal,
                                     })
@@ -840,7 +842,7 @@ pub(crate) async fn run_server(
                                 reply.send(flatten_stored(answer)).ok();
                             });
                         }
-                        hel::hel_server::ClientStateRequest::SaveDraft { client_id, session_id, draft, reply } => {
+                        mj_controller::hel_server::ClientStateRequest::SaveDraft { client_id, session_id, draft, reply } => {
                             let workspace = workspace_of(&session_id);
                             tokio::spawn(async move {
                                 let answer = tokio::task::spawn_blocking(move || {
@@ -853,7 +855,7 @@ pub(crate) async fn run_server(
                                 reply.send(flatten_stored(answer)).ok();
                             });
                         }
-                        hel::hel_server::ClientStateRequest::MarkWorkspaceRead { client_id, workspace_id, reply } => {
+                        mj_controller::hel_server::ClientStateRequest::MarkWorkspaceRead { client_id, workspace_id, reply } => {
                             let sessions = controller
                                 .state
                                 .sessions
@@ -878,7 +880,7 @@ pub(crate) async fn run_server(
                                 reply.send(flatten_stored(answer)).ok();
                             });
                         }
-                        hel::hel_server::ClientStateRequest::History { session_id, query, scope, reply } => {
+                        mj_controller::hel_server::ClientStateRequest::History { session_id, query, scope, reply } => {
                             let bundle = bundle_of(&session_id);
                             tokio::spawn(async move {
                                 let answer = tokio::task::spawn_blocking(move || {
@@ -893,9 +895,9 @@ pub(crate) async fn run_server(
                                         &bundle,
                                         scope,
                                         &query,
-                                        hel::hel_server::MAX_HISTORY_MATCHES,
+                                        mj_controller::hel_server::MAX_HISTORY_MATCHES,
                                     )?;
-                                    anyhow::Ok(hel::hel_server::ViewerPromptHistory {
+                                    anyhow::Ok(mj_controller::hel_server::ViewerPromptHistory {
                                         entries: found
                                             .entries
                                             .into_iter()
@@ -911,7 +913,7 @@ pub(crate) async fn run_server(
                     }
                 }
                 preflight = preflight_rx.recv() => {
-                    let Some(hel::hel_server::PreflightRequest { bundle_id, reply }) = preflight else {
+                    let Some(mj_controller::hel_server::PreflightRequest { bundle_id, reply }) = preflight else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
                         break;
                     };
@@ -926,7 +928,7 @@ pub(crate) async fn run_server(
                                 .into_iter()
                                 .map(|repository| dirty_repository_label(&repository.path))
                                 .collect();
-                            anyhow::Ok(hel::hel_server::PreflightNew {
+                            anyhow::Ok(mj_controller::hel_server::PreflightNew {
                                 dirty_repositories: dirty,
                             })
                         })
@@ -1694,7 +1696,7 @@ async fn apply_phone_action(
             session_id,
             resolution,
         } => {
-            let resolution = hel::hel_server::resolution_from_name(&resolution)
+            let resolution = mj_controller::hel_server::resolution_from_name(&resolution)
                 .context("a review is resolved by forward, dismiss, or cancel")?;
             services
                 .daemon_runtime
@@ -1777,7 +1779,8 @@ async fn apply_phone_action(
 /// controller's durable state. They arrive from relay snapshots rather than
 /// from disk, so they travel together instead of as separate arguments.
 struct PhoneSessionViews<'a> {
-    conversations: &'a std::collections::BTreeMap<String, hel::hel_chat::BrowserTranscript>,
+    conversations:
+        &'a std::collections::BTreeMap<String, mj_controller::hel_server::BrowserTranscript>,
     queued_prompts: &'a std::collections::BTreeMap<String, Vec<hel::hel_worker::QueuedPrompt>>,
     active_user_shells:
         &'a std::collections::BTreeMap<String, Vec<hel::hel_worker::ActiveUserShell>>,
@@ -1790,12 +1793,13 @@ struct PhoneSessionViews<'a> {
     /// durable record, which knows only what was configured.
     operational: &'a std::collections::BTreeMap<String, hel::hel_worker::RelayOperationalState>,
     /// Lifecycle operations running now, keyed by session.
-    operations: &'a std::collections::BTreeMap<String, hel::hel_server::ViewerOperation>,
+    operations: &'a std::collections::BTreeMap<String, mj_controller::hel_server::ViewerOperation>,
     /// The most recent capacity reading per probe target.
-    capacity: &'a [hel::hel_server::ViewerTargetCapacity],
+    capacity: &'a [mj_controller::hel_server::ViewerTargetCapacity],
     /// Reviews the daemon is running, keyed by session. The phone renders the
     /// same review the terminal does, from the same host.
-    reviews: &'a std::collections::BTreeMap<String, hel::hel_review::host::RuntimeReviewView>,
+    reviews:
+        &'a std::collections::BTreeMap<String, mj_controller::hel_review_host::RuntimeReviewView>,
 }
 
 /// What the phone server remembers about one probe target between readings.
@@ -1844,7 +1848,7 @@ fn publish_capacity_targets(
 /// Project the capacity readings for the phone.
 fn viewer_capacity(
     state: &std::collections::BTreeMap<String, PhoneCapacity>,
-) -> Vec<hel::hel_server::ViewerTargetCapacity> {
+) -> Vec<mj_controller::hel_server::ViewerTargetCapacity> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1853,7 +1857,7 @@ fn viewer_capacity(
         .values()
         .map(|entry| {
             let usage = entry.usage.as_ref();
-            hel::hel_server::ViewerTargetCapacity {
+            mj_controller::hel_server::ViewerTargetCapacity {
                 id: entry.target.id.clone(),
                 label: entry.target.host.clone(),
                 target_ids: entry.target.target_ids.clone(),
@@ -1883,10 +1887,10 @@ fn viewer_capacity(
 /// Turn one lifecycle operation into the projection a phone follows.
 fn viewer_operation(
     view: &crate::daemon::RuntimeLifecycleView,
-) -> hel::hel_server::ViewerOperation {
-    use hel::hel_server::{ViewerOperationKind, ViewerOperationStage};
+) -> mj_controller::hel_server::ViewerOperation {
+    use mj_controller::hel_server::{ViewerOperationKind, ViewerOperationStage};
 
-    hel::hel_server::ViewerOperation {
+    mj_controller::hel_server::ViewerOperation {
         // The session owns at most one operation at a time, so its id is a
         // stable name for the operation without inventing a second counter.
         id: view.session_id.clone(),
@@ -1921,12 +1925,12 @@ fn viewer_operation(
 /// whether the session manager is driving this session, what the agent said it
 /// supports, and whether a lifecycle operation already owns it.
 fn session_capabilities(
-    session: &hel::hel_server::ViewerSession,
+    session: &mj_controller::hel_server::ViewerSession,
     operational: Option<&hel::hel_worker::RelayOperationalState>,
-    operation: Option<&hel::hel_server::ViewerOperation>,
+    operation: Option<&mj_controller::hel_server::ViewerOperation>,
     facts: Option<&hel::hel_acp::AcpSessionFacts>,
-) -> hel::hel_server::ViewerSessionCapabilities {
-    use hel::hel_server::ViewerLifecycleCategory;
+) -> mj_controller::hel_server::ViewerSessionCapabilities {
+    use mj_controller::hel_server::ViewerLifecycleCategory;
 
     let live = session.lifecycle == ViewerLifecycleCategory::Live;
     // A session the manager is not driving cannot be talked to, whatever its
@@ -1935,7 +1939,7 @@ fn session_capabilities(
     let busy = operation.is_some();
     let idle = operational
         .is_some_and(|state| state.execution == hel::hel_worker::RelayExecutionState::Idle);
-    hel::hel_server::ViewerSessionCapabilities {
+    mj_controller::hel_server::ViewerSessionCapabilities {
         open: session.conversation_available,
         prompt: live && attached,
         run_shell: live && attached,
@@ -1958,8 +1962,8 @@ fn session_capabilities(
 /// The settings this agent advertised, with the values it accepts.
 fn viewer_config_options(
     operational: &hel::hel_worker::RelayOperationalState,
-) -> Vec<hel::hel_server::ViewerConfigOption> {
-    use hel::hel_server::{ViewerConfigChoice, ViewerConfigOption};
+) -> Vec<mj_controller::hel_server::ViewerConfigOption> {
+    use mj_controller::hel_server::{ViewerConfigChoice, ViewerConfigOption};
 
     ["model", "effort"]
         .into_iter()
@@ -1989,7 +1993,7 @@ fn viewer_config_options(
 /// attached image as the image block the prompt path already carries.
 fn phone_prompt_blocks(
     text: String,
-    images: Vec<hel::hel_server::ViewerPromptImage>,
+    images: Vec<mj_controller::hel_server::ViewerPromptImage>,
 ) -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
     use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
 
@@ -2011,19 +2015,20 @@ fn phone_prompt_blocks(
 /// published: the browser used to keep its own copy, which is how `/review`
 /// was missing from the phone while the terminal had it.
 fn phone_commands(
-    session: &hel::hel_server::ViewerSession,
+    session: &mj_controller::hel_server::ViewerSession,
     operational: Option<&hel::hel_worker::RelayOperationalState>,
-) -> Vec<hel::hel_server::ViewerMjCommand> {
+) -> Vec<mj_controller::hel_server::ViewerMjCommand> {
     use agent_client_protocol::schema::v1::AvailableCommandInput;
-    use hel::hel_server::ViewerCommandSource;
+    use mj_controller::hel_server::ViewerCommandSource;
 
-    let command =
-        |name: &str, description: &str, argument: Option<&str>| hel::hel_server::ViewerMjCommand {
+    let command = |name: &str, description: &str, argument: Option<&str>| {
+        mj_controller::hel_server::ViewerMjCommand {
             name: name.to_owned(),
             description: description.to_owned(),
             source: ViewerCommandSource::Mj,
             argument: argument.map(str::to_owned),
-        };
+        }
+    };
     let mut commands = vec![
         command("help", "show available Mjolnir and agent commands", None),
         command(
@@ -2099,7 +2104,7 @@ fn phone_commands(
             }
             _ => None,
         });
-        commands.push(hel::hel_server::ViewerMjCommand {
+        commands.push(mj_controller::hel_server::ViewerMjCommand {
             name: name.to_owned(),
             description: advertised.description.trim().to_owned(),
             source: ViewerCommandSource::Agent,
@@ -2112,7 +2117,7 @@ fn phone_commands(
 /// The open reviews, keyed by session, for one snapshot.
 fn review_views(
     daemon_runtime: &Arc<RuntimeState>,
-) -> std::collections::BTreeMap<String, hel::hel_review::host::RuntimeReviewView> {
+) -> std::collections::BTreeMap<String, mj_controller::hel_review_host::RuntimeReviewView> {
     daemon_runtime
         .review_host()
         .views()
@@ -2143,7 +2148,7 @@ fn viewer_snapshot(
         ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision);
     snapshot.workspaces = workspaces
         .iter()
-        .map(|workspace| hel::hel_server::ViewerWorkspace {
+        .map(|workspace| mj_controller::hel_server::ViewerWorkspace {
             id: workspace.id.clone(),
             name: workspace.name.clone(),
         })
@@ -2161,7 +2166,7 @@ fn viewer_snapshot(
             windows: quota
                 .windows
                 .iter()
-                .map(|window| hel::hel_server::ViewerQuotaWindow {
+                .map(|window| mj_controller::hel_server::ViewerQuotaWindow {
                     label: window.label.clone(),
                     // The controller reports headroom; a bar fills as a limit
                     // is consumed, so the phone is given the complement.
@@ -2169,7 +2174,7 @@ fn viewer_snapshot(
                         .remaining_percent
                         .map(|left| 100_u8.saturating_sub(left)),
                     resets_at: window.resets.clone(),
-                    projects_exhaustion_before_reset: hel::hel_quota::projects_exhaustion(
+                    projects_exhaustion_before_reset: mj_controller::hel_quota::projects_exhaustion(
                         window,
                         quota.refreshed_at_epoch_seconds,
                     ),
@@ -2231,16 +2236,16 @@ fn viewer_snapshot(
             session.latest_event_ordinal = state.latest_ordinal;
             session.chat_phase = match state.execution {
                 hel::hel_worker::RelayExecutionState::Idle => {
-                    hel::hel_server::ViewerChatPhase::Idle
+                    mj_controller::hel_server::ViewerChatPhase::Idle
                 }
                 hel::hel_worker::RelayExecutionState::Running => {
-                    hel::hel_server::ViewerChatPhase::Running
+                    mj_controller::hel_server::ViewerChatPhase::Running
                 }
                 hel::hel_worker::RelayExecutionState::Closing => {
-                    hel::hel_server::ViewerChatPhase::Closing
+                    mj_controller::hel_server::ViewerChatPhase::Closing
                 }
                 hel::hel_worker::RelayExecutionState::Closed => {
-                    hel::hel_server::ViewerChatPhase::Closed
+                    mj_controller::hel_server::ViewerChatPhase::Closed
                 }
             };
             session.config_options = viewer_config_options(state);
@@ -2252,13 +2257,13 @@ fn viewer_snapshot(
                 .map(|prompt| prompt.started_at_ms)
                 .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms))
                 .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok());
-            session.activity = hel::usage_format::format_activity_columns(
+            session.activity = mj_chat::usage_format::format_activity_columns(
                 now,
                 turn_started_at,
                 state
                     .last_acp_activity_at_ms
                     .and_then(|value| u64::try_from(value).ok()),
-                &hel::usage_format::SessionActivity::of(state),
+                &mj_chat::usage_format::SessionActivity::of(state),
             )
             .join("  ")
             .trim()
@@ -2270,7 +2275,7 @@ fn viewer_snapshot(
             .map(hel::hel_acp::AcpSessionFacts::plan_mode_active);
         session.turn_review = reviews
             .get(&session.id)
-            .map(hel::hel_server::ViewerTurnReview::from_runtime);
+            .map(mj_controller::hel_server::ViewerTurnReview::from_runtime);
         session.capabilities =
             session_capabilities(session, live, operations.get(&session.id), facts.as_ref());
         session.available_commands = phone_commands(session, live);
@@ -2368,7 +2373,7 @@ mod tests {
     fn a_phone_prompt_becomes_its_text_then_its_images() {
         use agent_client_protocol::schema::v1::ContentBlock;
 
-        let image = |data: &str| hel::hel_server::ViewerPromptImage {
+        let image = |data: &str| mj_controller::hel_server::ViewerPromptImage {
             data_base64: data.into(),
             mime_type: "image/png".into(),
             width: 32,
@@ -2449,8 +2454,8 @@ mod tests {
             AvailableCommand, AvailableCommandInput, SessionMode, SessionModeState,
             UnstructuredCommandInput,
         };
-        use hel::hel_server::ViewerCommandSource;
         use hel::hel_worker::{RelayExecutionState, RelayOperationalState};
+        use mj_controller::hel_server::ViewerCommandSource;
 
         let mut controller = controller_with_profiles(&["claude"]);
         let mut record = phone_session("session-1", 0);

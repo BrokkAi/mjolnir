@@ -13,13 +13,13 @@ use sha2::{Digest, Sha256};
 use hel::hel_config::{
     HelConfig, TargetTemplate, container_size_host, is_bare_project_target, mount_history_host,
 };
-use hel::hel_selection::FrameSurfaces;
 use hel::hel_state::{
     HelState, SessionRecord, SessionResourceAllocation, SessionState, allocation_cpus,
     allocation_memory,
 };
 use hel::hel_targets::{AdditionalMount, default_mount_destination, path_completion};
-use hel::hel_text_input::TextInput;
+use mj_chat::hel_selection::FrameSurfaces;
+use mj_chat::hel_text_input::TextInput;
 
 use crate::widgets::{action_buttons, centered_modal, format_resource_bytes};
 use crate::{DashboardAction, DashboardState, Mode, cycle_control, move_index, nth_key};
@@ -1146,8 +1146,11 @@ pub(crate) fn render_resume_wizard(
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
         let reused_project_directory = session
             .filter(|session| {
-                hel::hel_controller::resume_compatibility(session, &dashboard.config, &target_id)
-                    == Ok(hel::hel_controller::ResumePlan::InPlace)
+                mj_controller::hel_controller::resume_compatibility(
+                    session,
+                    &dashboard.config,
+                    &target_id,
+                ) == Ok(mj_controller::hel_controller::ResumePlan::InPlace)
             })
             .and_then(|session| session.project_directory.as_deref())
             .map(|directory| directory.display().to_string());

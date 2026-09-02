@@ -55,22 +55,27 @@ jobs:
 
     - name: Check crate package contents and build
       run: |
-        diff -u LICENSE voice-worker/LICENSE
-        cargo package --locked --allow-dirty --list -p brokk-mj-core > /tmp/mj-core-package-files.txt
-        cargo package --locked --allow-dirty --list -p brokk-mj-voice-worker > /tmp/voice-worker-package-files.txt
-        grep -Fx LICENSE /tmp/mj-core-package-files.txt
-        grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/mj-core-package-files.txt
-        grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/mj-core-package-files.txt
-        grep -Fx LICENSE /tmp/voice-worker-package-files.txt
-        diff -u LICENSE mj-tui/LICENSE
-        diff -u LICENSE mj-cli/LICENSE
-        diff -u LICENSE mj-desktop/LICENSE
-        cargo package --locked --allow-dirty --list -p brokk-mj-tui > /tmp/mj-tui-package-files.txt
-        cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/mj-cli-package-files.txt
-        cargo package --locked --allow-dirty --list -p brokk-mj-desktop > /tmp/mj-desktop-package-files.txt
-        grep -Fx LICENSE /tmp/mj-tui-package-files.txt
-        grep -Fx LICENSE /tmp/mj-cli-package-files.txt
-        grep -Fx LICENSE /tmp/mj-desktop-package-files.txt
+        set -euo pipefail
+        # Every published crate outside the repository root keeps its own copy
+        # of the licence text, because `cargo package` only collects files from
+        # the crate's own directory.
+        for directory in voice-worker mj-worker mj-controller mj-chat mj-tui mj-cli mj-desktop; do
+          diff -u LICENSE "$directory/LICENSE"
+        done
+        # Assemble the file list for each published crate and confirm the
+        # licence text ships with it. `--list` does not build, so a crate whose
+        # path dependencies are not on the registry yet still works here.
+        for package in brokk-mj-core brokk-mj-voice-worker brokk-mj-worker \
+          brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mjolnir \
+          brokk-mj-desktop; do
+          cargo package --locked --allow-dirty --list -p "$package" > "/tmp/$package-package-files.txt"
+          grep -Fx LICENSE "/tmp/$package-package-files.txt"
+        done
+        # The root crate also carries the generated third-party notices.
+        grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/brokk-mj-core-package-files.txt
+        grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/brokk-mj-core-package-files.txt
+        # Only the foundation can be verified by extraction before a release:
+        # every other crate depends on an unpublished path dependency.
         cargo package --locked -p brokk-mj-core
 
   mjolnir:

@@ -273,13 +273,18 @@ fn clear_database_writer(id: u64) {
 ///
 /// The returned owner has to be held for the rest of the test: dropping it
 /// stops the writer, and the next write fails with the message above.
-#[cfg(test)]
+///
+/// This fixture is compiled unconditionally and hidden from the documentation
+/// because the controller crate's tests need it and a `#[cfg(test)]` item is
+/// invisible to another crate. It is a thin wrapper over
+/// [`start_database_writer`], so nothing test-only leaks into the library.
+#[doc(hidden)]
 #[must_use = "the writer stops when this owner is dropped"]
-pub(crate) fn install_isolated_test_writer() -> DatabaseWriterOwner {
+pub fn install_isolated_test_writer() -> DatabaseWriterOwner {
     start_database_writer().expect("install the writer for an isolated test child")
 }
 
-pub(crate) fn start_database_writer() -> Result<DatabaseWriterOwner> {
+pub fn start_database_writer() -> Result<DatabaseWriterOwner> {
     start_database_writer_at(&database_path(), true)
 }
 
@@ -1740,7 +1745,7 @@ fn delete_session_from(path: &Path, session_id: &str) -> Result<()> {
 /// they reached for was this, because it was public and its name did not say
 /// otherwise. The remaining caller owns a live projection and genuinely needs
 /// all of it.
-pub(crate) fn load_materialized_session(session_id: &str) -> Result<Option<MaterializedSession>> {
+pub fn load_materialized_session(session_id: &str) -> Result<Option<MaterializedSession>> {
     load_materialized_session_from(&database_path(), session_id)
 }
 
@@ -1906,7 +1911,7 @@ fn materialized_user_message(
         let TranscriptBody::User { content } = body else {
             continue;
         };
-        let text = crate::hel_chat::materialized_content_text(&content);
+        let text = crate::hel_transcript::materialized_content_text(&content);
         if !text.trim().is_empty() {
             return Ok(Some((position, text)));
         }
@@ -1985,7 +1990,7 @@ fn last_materialized_agent_message(
     let TranscriptBody::Agent { chunks, .. } = body else {
         return Ok(None);
     };
-    let text = crate::hel_chat::materialized_chunks_text(&chunks);
+    let text = crate::hel_transcript::materialized_chunks_text(&chunks);
     Ok((!text.trim().is_empty()).then_some((position, text)))
 }
 

@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
-use hel::hel_controller::{Controller, ResumeRepositorySourceReceipt};
-use hel::hel_setup::SetupOutcome;
 use hel::hel_targets::CancellableProcessExecutor;
 use hel_tui::WebViewerAccess;
 use hel_tui::{DashboardAction, SessionOperationKind};
+use mj_controller::hel_controller::{Controller, ResumeRepositorySourceReceipt};
+use mj_controller::hel_setup::SetupOutcome;
 
 use crate::daemon;
 use crate::dashboard::io::{

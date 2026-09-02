@@ -65,6 +65,14 @@ jobs:
           platforms: ${{ matrix.platform }}
           pull: true
           provenance: false
+          # Reuse the previous build's layers from the registry so a commit that
+          # changes one step, or only metadata, publishes an image that shares
+          # every unchanged layer. Hosts then download only what changed. The
+          # weekly run bypasses the cache on purpose: its job is to refresh the
+          # base and apt layers.
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache-${{ matrix.arch }},mode=max
           labels: |
             org.opencontainers.image.title=Mjolnir agent development environment
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

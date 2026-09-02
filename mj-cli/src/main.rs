@@ -33,13 +33,13 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use hel::hel_config::{HelConfig, config_path};
-use hel::hel_controller::Controller;
-use hel::hel_setup::{SetupOutcome, run_setup_dialog};
 #[cfg(test)]
 use hel::hel_targets::ProcessExecutor;
-use hel::hel_worker_runtime::{
-    AcpSupervisorSpec, WorkerLaunchConfig, lead_process_group, proxy, run_acp_supervisor,
-    run_daemon,
+use hel::hel_worker_launch::WorkerLaunchConfig;
+use mj_controller::hel_controller::Controller;
+use mj_controller::hel_setup::{SetupOutcome, run_setup_dialog};
+use mj_worker::hel_worker_runtime::{
+    AcpSupervisorSpec, lead_process_group, proxy, run_acp_supervisor, run_daemon,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -451,15 +451,17 @@ async fn run_command(
             }
             WorkerCommand::MemoryMcp { root } => hel::hel_project_memory::run_mcp_stdio(&root),
             WorkerCommand::ReviewMcp { socket } => hel::hel_review::mcp::run_mcp_stdio(&socket),
-            WorkerCommand::GitBridge { root } => hel::hel_git_proxy::run_worker_bridge(&root).await,
+            WorkerCommand::GitBridge { root } => {
+                mj_controller::hel_git_proxy::run_worker_bridge(&root).await
+            }
             WorkerCommand::GitProxy {
                 root,
                 repository,
                 service,
-            } => hel::hel_git_proxy::run_worker_proxy(&root, &repository, &service).await,
+            } => mj_controller::hel_git_proxy::run_worker_proxy(&root, &repository, &service).await,
         }
         .map(|()| DashboardExit::Normal),
-        Some(Command::Broker(args)) => hel::hel_git_proxy::run_broker(&args.spec)
+        Some(Command::Broker(args)) => mj_controller::hel_git_proxy::run_broker(&args.spec)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
@@ -705,7 +707,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     if args.setup_token {
         return store_claude_setup_token(&profile_id, profile).await;
     }
-    let marker = hel::hel_setup::harness_authentication_marker(profile.kind, &profile.home);
+    let marker = hel::hel_config::harness_authentication_marker(profile.kind, &profile.home);
     let (before, _) = hel::hel_credentials::read_credential_file(profile.kind, &marker)?;
     let (program, arguments) = hel::hel_credentials::login_command(profile);
 
@@ -949,10 +951,13 @@ fn setup(args: SetupArgs) -> Result<()> {
     match args.command {
         Some(SetupCommand::Instructions { platform }) => {
             let platform = match platform {
-                SetupPlatform::Linux => hel::hel_doctor::InstructionsPlatform::Linux,
-                SetupPlatform::Macos => hel::hel_doctor::InstructionsPlatform::Macos,
+                SetupPlatform::Linux => mj_controller::hel_doctor::InstructionsPlatform::Linux,
+                SetupPlatform::Macos => mj_controller::hel_doctor::InstructionsPlatform::Macos,
             };
-            print!("{}", hel::hel_doctor::setup_instructions(platform));
+            print!(
+                "{}",
+                mj_controller::hel_doctor::setup_instructions(platform)
+            );
             Ok(())
         }
         None => match run_setup_dialog(&config_path())? {
@@ -962,13 +967,15 @@ fn setup(args: SetupArgs) -> Result<()> {
 }
 
 fn doctor(args: DoctorArgs) -> Result<()> {
-    let checks = hel::hel_doctor::run_current(hel::hel_doctor::DoctorOptions { smoke: args.smoke });
+    let checks = mj_controller::hel_doctor::run_current(mj_controller::hel_doctor::DoctorOptions {
+        smoke: args.smoke,
+    });
     if args.json {
         println!("{}", serde_json::to_string_pretty(&checks)?);
     } else {
-        hel::hel_doctor::render_human(&checks, &mut io::stdout())?;
+        mj_controller::hel_doctor::render_human(&checks, &mut io::stdout())?;
     }
-    if hel::hel_doctor::all_ready(&checks) {
+    if mj_controller::hel_doctor::all_ready(&checks) {
         Ok(())
     } else {
         Err(doctor_failure())

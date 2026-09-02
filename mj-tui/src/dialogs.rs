@@ -14,9 +14,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::path::PathBuf;
 
 use hel::hel_config::{HarnessKind, mount_history_host};
-use hel::hel_selection::FrameSurfaces;
 use hel::hel_targets::{AdditionalMount, default_mount_destination, validate_additional_mounts};
-use hel::hel_text_input::TextInput;
+use mj_chat::hel_selection::FrameSurfaces;
+use mj_chat::hel_text_input::TextInput;
 
 use crate::widgets::{
     action_buttons, centered_modal, centered_modal_fixed, focused_buttons, modal_area,
@@ -1910,7 +1910,9 @@ impl DashboardState {
                     session_id,
                     typed: TextInput::new()
                         .with_max_chars(FORCE_STOP_CONFIRMATION.len())
-                        .with_filter(hel::hel_text_input::InputFilter::AsciiAlphabeticUppercase),
+                        .with_filter(
+                            mj_chat::hel_text_input::InputFilter::AsciiAlphabeticUppercase,
+                        ),
                 }));
                 DashboardAction::None
             }

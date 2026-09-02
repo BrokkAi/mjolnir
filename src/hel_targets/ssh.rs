@@ -193,7 +193,7 @@ pub(super) fn ssh_validation_command(
 /// Wrap a value so a POSIX shell reads it as one literal argument. Used at the
 /// SSH boundary here and when Hel rebuilds an agent's terminal command line
 /// (`hel_terminal::shell_line`).
-pub(crate) fn posix_quote(value: &str) -> String {
+pub fn posix_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

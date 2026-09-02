@@ -1596,7 +1596,7 @@ fn validate_checkpoint_source(
     Ok(())
 }
 
-pub(crate) fn canonical_session_contains_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
+pub fn canonical_session_contains_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
     snapshot
         .transcript
         .iter()
@@ -3843,7 +3843,7 @@ mod tests {
         let memory_root = spec.harness_home.join("projects/replica/memory");
         fs::create_dir_all(&memory_root).unwrap();
         fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
-        crate::hel_worker_runtime::WorkerLaunchConfig {
+        crate::hel_worker_launch::WorkerLaunchConfig {
             session_id: SESSION.into(),
             harness: HarnessKind::Codex,
             bridge_command: "codex-acp".into(),
@@ -3852,14 +3852,14 @@ mod tests {
             cwd: spec.workspace_root.join("app"),
             additional_directories: Vec::new(),
             native_session_id: Some(NATIVE.into()),
-            project_memory: Some(crate::hel_worker_runtime::ProjectMemoryLaunchConfig {
+            project_memory: Some(crate::hel_worker_launch::ProjectMemoryLaunchConfig {
                 project_key: "project".into(),
                 root: memory_root,
                 baseline_root: spec
                     .harness_home
                     .join("projects/replica/.hel-memory-baseline"),
                 repository_roots: Default::default(),
-                mcp_delivery: crate::hel_worker_runtime::ProjectMemoryMcpDelivery::Acp,
+                mcp_delivery: crate::hel_worker_launch::ProjectMemoryMcpDelivery::Acp,
             }),
             execution_policy: crate::hel_config::ExecutionPolicy::Unconstrained,
         }

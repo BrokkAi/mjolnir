@@ -1,0 +1,56 @@
+[package]
+name = "brokk-mj-controller"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Daemon-side controller, session manager, and web server for Mjolnir"
+license = "GPL-3.0-only"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_controller"
+
+[features]
+default = []
+test-hooks = ["hel/test-hooks"]
+
+[lints]
+workspace = true
+
+[dependencies]
+hel.workspace = true
+agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
+anyhow = "1"
+axum = "0.8"
+# Use the ring provider already pulled by reqwest instead of aws-lc-rs, which
+# needs a C toolchain and complicates cross-compilation.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "6"
+getrandom = "0.3"
+# HMAC-SHA256 signs the stateless remote-viewer session cookie (keyed on a
+# persisted signing key); pairs with the existing `sha2`.
+hmac = "0.12"
+libc = "0.2"
+qrcode = { version = "0.14", default-features = false }
+rayon = "1"
+reedline = { version = "0.51", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }

@@ -5,8 +5,8 @@
 //! summaries under it, with a shared one-row footer. There is no second screen
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
-use hel::hel_chat::{ActiveChat, ChatRegions};
-use hel::hel_selection::{SurfaceFrame, SurfaceId};
+use mj_chat::hel_chat::{ActiveChat, ChatRegions};
+use mj_chat::hel_selection::{SurfaceFrame, SurfaceId};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};

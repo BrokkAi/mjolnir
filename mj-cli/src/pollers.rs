@@ -15,17 +15,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use hel::clock::epoch_seconds;
 use hel::hel_config::HelConfig;
-use hel::hel_controller::Controller;
 use hel::hel_credentials::{
     CredentialSyncCause, CredentialSyncHandle, CredentialSyncReason, CredentialSyncSignal,
     CredentialSyncTarget,
-};
-use hel::hel_quota::{QuotaManager, QuotaRefreshOutcome, QuotaRefreshRequest};
-use hel::hel_recovery::{RecoveryCoordinator, RecoveryResult};
-use hel::hel_session_manager::{
-    ManagedSessionView, RelaySessionTarget, RemoteSessionRequest, SessionManagerControl,
-    SessionManagerShutdown, SessionManagerUpdate, SessionManagerUpdates, ViewError,
-    spawn_remote_session_manager,
 };
 use hel::hel_state::{
     HelState, ManagedSessionSnapshot, MaterializedSession, SessionRecord,
@@ -36,8 +28,16 @@ use hel::hel_targets::{
     DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, ImageRefresh,
     SessionResourceProbe, SessionResourceUsage,
 };
-use hel::hel_worker_client::CredentialSyncCoordinator;
 use hel_tui::DashboardState;
+use mj_controller::hel_controller::Controller;
+use mj_controller::hel_quota::{QuotaManager, QuotaRefreshOutcome, QuotaRefreshRequest};
+use mj_controller::hel_recovery::{RecoveryCoordinator, RecoveryResult};
+use mj_controller::hel_session_manager::{
+    ManagedSessionView, RelaySessionTarget, RemoteSessionRequest, SessionManagerControl,
+    SessionManagerShutdown, SessionManagerUpdate, SessionManagerUpdates, ViewError,
+    spawn_remote_session_manager,
+};
+use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 
 use crate::daemon;
 use crate::dashboard::io::DashboardIoUpdate;
@@ -1351,7 +1351,10 @@ pub(crate) struct RemoteDashboardWorkerPoller {
     pub(crate) shutdown: SessionManagerShutdown,
     pub(crate) lifecycles: tokio::sync::watch::Receiver<Vec<daemon::RuntimeLifecycleView>>,
     /// Reviews the daemon is running for this workspace's sessions.
-    pub(crate) reviews: tokio::sync::watch::Receiver<Vec<hel::hel_review::host::RuntimeReviewView>>,
+    pub(crate) reviews:
+        tokio::sync::watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>,
+    /// Background events the daemon wants reported once, oldest first.
+    pub(crate) notices: tokio::sync::watch::Receiver<Vec<daemon::RuntimeNotice>>,
     pub(crate) config: tokio::sync::watch::Receiver<hel::hel_config::HelConfig>,
     pub(crate) records: tokio::sync::watch::Receiver<Vec<SessionRecord>>,
 }
@@ -1429,7 +1432,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
     workspace_id: String,
 ) -> Result<RemoteDashboardWorkerPoller> {
     let channels = spawn_remote_session_manager()?;
-    let hel::hel_session_manager::RemoteSessionManagerChannels {
+    let mj_controller::hel_session_manager::RemoteSessionManagerChannels {
         targets,
         control,
         updates,
@@ -1439,6 +1442,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
     } = channels;
     let (lifecycle_tx, lifecycle_rx) = tokio::sync::watch::channel(Vec::new());
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
+    let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
     let (config_tx, config_rx) = tokio::sync::watch::channel(hel::hel_config::HelConfig::default());
     let (records_tx, records_rx) = tokio::sync::watch::channel(Vec::new());
     tokio::spawn(async move {
@@ -1455,7 +1459,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
         let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
         // One session's requests reach the daemon in the order they were made;
         // different sessions still overlap.
-        let mut request_order = hel::hel_session_manager::SessionRequestOrder::new();
+        let mut request_order = mj_controller::hel_session_manager::SessionRequestOrder::new();
         loop {
             tokio::select! {
                 request = requests.recv(), if requests_open => {
@@ -1488,6 +1492,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
                             });
                             lifecycle_tx.send_replace(snapshot.lifecycles);
                             reviews_tx.send_replace(snapshot.reviews);
+                            notices_tx.send_replace(snapshot.notices);
                             for runtime in snapshot.sessions {
                                 let session_id = runtime.session_id.clone();
                                 // Nothing about this session has moved, so
@@ -1528,6 +1533,12 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
                                                         operational,
                                                         latest_credential_sync_signal:
                                                             runtime.latest_credential_sync_signal,
+                                                        // Views rebuilt from a
+                                                        // daemon snapshot carry
+                                                        // no live connection,
+                                                        // so they report no
+                                                        // worker build.
+                                                        worker_build: None,
                                                     }),
                                                     connected: runtime.connected,
                                                     error: runtime.error,
@@ -1630,6 +1641,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
         shutdown,
         lifecycles: lifecycle_rx,
         reviews: reviews_rx,
+        notices: notices_rx,
         config: config_rx,
         records: records_rx,
     })
@@ -1933,7 +1945,7 @@ fn queued_prompt_entries(
         .iter()
         .map(|prompt| hel::hel_worker::QueuedPrompt {
             id: prompt.command_id.clone(),
-            text: hel::hel_chat::materialized_content_text(&prompt.content),
+            text: hel::hel_transcript::materialized_content_text(&prompt.content),
             attachments: Vec::new(),
             created_at_ms: prompt.queued_at_ms,
         })

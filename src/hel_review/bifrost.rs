@@ -59,13 +59,13 @@ pub fn mcp_server_args(repository: &Path, toolset: &str) -> Vec<String> {
 pub fn review_mcp_servers(
     repositories: &[PathBuf],
     toolset: &str,
-) -> Vec<crate::hel_worker_runtime::ReviewMcpServer> {
+) -> Vec<crate::hel_worker_launch::ReviewMcpServer> {
     let binary = bifrost_binary();
     repositories
         .iter()
         .enumerate()
         .map(
-            |(index, repository)| crate::hel_worker_runtime::ReviewMcpServer {
+            |(index, repository)| crate::hel_worker_launch::ReviewMcpServer {
                 name: if index == 0 {
                     "bifrost".to_string()
                 } else {

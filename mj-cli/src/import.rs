@@ -15,8 +15,11 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Args, Subcommand};
 use hel::hel_archive::verify_archive_streaming;
 use hel::hel_config::{HarnessKind, HelConfig, sessions_dir};
-use hel::hel_controller::Controller;
-use hel::hel_import::{
+use hel::hel_projection::materialized_session_from_canonical;
+use hel::hel_state::{HelState, SessionRecord};
+use hel_tui::{ImportProfileOption, ImportSessionOption};
+use mj_controller::hel_controller::Controller;
+use mj_controller::hel_import::{
     BundleResolution, ClaudeImportRequest, ClaudeSessionSelection, ClaudeTranscript,
     CodexImportRequest, GrokImportRequest, ImportArchiveProgress, ImportControl,
     ImportedClaudeSession, KimiImportRequest, NativeImportRequest, SessionEditTargets,
@@ -27,9 +30,6 @@ use hel::hel_import::{
     locate_native_session, read_native_transcript, resolve_bundle, scan_native_sessions,
     session_edit_targets,
 };
-use hel::hel_projection::materialized_session_from_canonical;
-use hel::hel_state::{HelState, SessionRecord};
-use hel_tui::{ImportProfileOption, ImportSessionOption};
 
 const IMPORT_CANCELLED_MESSAGE: &str = "Import cancelled; no Mjolnir files were changed.";
 const DIRTY_IMPORT_WARNING: &str =
@@ -361,7 +361,7 @@ fn confirm_import_safety(
         };
         bail!("pass {flags} to acknowledge import safety warnings");
     }
-    let answer = hel::hel_readline::LineReader::default()
+    let answer = mj_controller::hel_readline::LineReader::default()
         .read_line("Proceed? [y/N]: ")?
         .unwrap_or_default();
     Ok(matches!(
@@ -474,7 +474,9 @@ pub(crate) fn discover_import_profile(
     profile
 }
 
-fn import_session_option(session: hel::hel_import::NativeSessionListing) -> ImportSessionOption {
+fn import_session_option(
+    session: mj_controller::hel_import::NativeSessionListing,
+) -> ImportSessionOption {
     let project_directory = display_home_relative(&session.cwd);
     let details = format!(
         "{} · {} · {}",

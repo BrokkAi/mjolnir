@@ -788,17 +788,17 @@ impl CredentialSyncResult {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SyncTrigger {
-    pub(crate) profile_id: String,
-    pub(crate) cause: Option<CredentialSyncCause>,
+pub struct SyncTrigger {
+    pub profile_id: String,
+    pub cause: Option<CredentialSyncCause>,
 }
 
 /// Handle the UI loops keep. Publishing targets and asking for an immediate
 /// sync are both non-blocking.
 #[derive(Clone)]
 pub struct CredentialSyncHandle {
-    pub(crate) targets: Arc<watch::Sender<Vec<CredentialSyncTarget>>>,
-    pub(crate) triggers: mpsc::UnboundedSender<SyncTrigger>,
+    pub targets: Arc<watch::Sender<Vec<CredentialSyncTarget>>>,
+    pub triggers: mpsc::UnboundedSender<SyncTrigger>,
 }
 
 impl CredentialSyncHandle {
@@ -823,7 +823,7 @@ impl CredentialSyncHandle {
     }
 }
 
-pub(crate) fn profiles_with_targets(targets: &[CredentialSyncTarget]) -> Vec<String> {
+pub fn profiles_with_targets(targets: &[CredentialSyncTarget]) -> Vec<String> {
     let mut profiles = BTreeSet::new();
     for target in targets {
         profiles.insert(target.profile_id.clone());
@@ -831,7 +831,7 @@ pub(crate) fn profiles_with_targets(targets: &[CredentialSyncTarget]) -> Vec<Str
     profiles.into_iter().collect()
 }
 
-pub(crate) fn enqueue(queue: &mut VecDeque<SyncTrigger>, trigger: SyncTrigger) {
+pub fn enqueue(queue: &mut VecDeque<SyncTrigger>, trigger: SyncTrigger) {
     if trigger.cause.is_none()
         && queue
             .iter()
@@ -845,7 +845,7 @@ pub(crate) fn enqueue(queue: &mut VecDeque<SyncTrigger>, trigger: SyncTrigger) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hel_setup::harness_authentication_marker;
+    use crate::hel_config::harness_authentication_marker;
 
     fn claude_credentials(expires_at: i64) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({

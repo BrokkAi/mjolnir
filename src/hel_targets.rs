@@ -27,6 +27,16 @@ pub const CONTAINER_WORKSPACE: &str = "/workspace";
 pub const PODMAN_DOCUMENTATION_PATH: &str = "docs/PODMAN.md";
 pub const DOCKER_DOCUMENTATION_PATH: &str = "docs/DOCKER.md";
 
+// `mj doctor` prints a self-contained setup page that quotes these two pages in
+// full. They are embedded here, beside the paths that name them, because this
+// crate's `include` list is what carries `docs/` into the published package;
+// the controller crate that renders the page cannot reach outside its own
+// directory.
+/// The rootless Podman postconditions page, verbatim.
+pub const PODMAN_DOCUMENTATION: &str = include_str!("../docs/PODMAN.md");
+/// The Docker postconditions page, verbatim.
+pub const DOCKER_DOCUMENTATION: &str = include_str!("../docs/DOCKER.md");
+
 const PODMAN_MINIMUM_MAJOR_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +166,7 @@ impl CommandSpec {
 
     /// Feed private file content through the shared concurrent pipe handler.
     /// The bytes stay out of argv, environments, serialization, and Debug.
-    pub(crate) fn with_sensitive_stdin(mut self, input: Vec<u8>) -> Self {
+    pub fn with_sensitive_stdin(mut self, input: Vec<u8>) -> Self {
         self.sensitive_stdin = Some(SensitiveCommandInput(input));
         self
     }
@@ -1351,7 +1361,7 @@ fn checked_command_output(command: &CommandSpec, output: CommandOutput) -> Resul
 }
 
 /// Describe a spawned command thread's panic payload for error context.
-pub(crate) fn command_thread_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub fn command_thread_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -2719,7 +2729,7 @@ hel_recorded_worker() {{
 /// Report whether the exact session worker is alive without signaling it.
 /// A successful probe prints one stable token; transport or shell failures
 /// stay distinguishable from a confirmed absent worker.
-pub(crate) fn worker_daemon_liveness_script(worker_root: &str) -> String {
+pub fn worker_daemon_liveness_script(worker_root: &str) -> String {
     let mut script = worker_daemon_identity_script(worker_root);
     script.push_str(
         r#"
@@ -2757,7 +2767,7 @@ printf 'dead\n'
 /// first to take the agent down with it. Shells disagree about how to write a
 /// negative PID (`dash` rejects `--`), hence the two forms before the
 /// single-process fallback for daemons predating the group leadership.
-pub(crate) fn stop_worker_daemon_script(worker_root: &str) -> String {
+pub fn stop_worker_daemon_script(worker_root: &str) -> String {
     let mut script = worker_daemon_identity_script(worker_root);
     script.push_str(
         r#"
@@ -3411,7 +3421,7 @@ fn at_boundary(boundary: ExecutionBoundary<'_>, args: Vec<String>) -> CommandSpe
 
 mod ssh;
 
-pub(crate) use ssh::posix_quote;
+pub use ssh::posix_quote;
 pub use ssh::{
     join_remote_command, ssh_connectivity_probe, ssh_directory_completions, ssh_directory_exists,
     validate_bare_project_directory,

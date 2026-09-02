@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Keep the release version in one place.
 //
-// Every published crate inherits `[workspace.package] version`, so the four
+// Every published crate inherits `[workspace.package] version`, so the
 // package versions cannot drift. Cargo still requires each published path
 // dependency to carry a registry version and does not let that version
 // inherit, so `[workspace.dependencies]` repeats the number. This script
@@ -18,7 +18,13 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const manifestPath = path.join(repositoryRoot, "Cargo.toml");
-const internalPackages = ["hel", "hel-tui"];
+const internalPackages = [
+  "hel",
+  "mj-worker",
+  "mj-controller",
+  "mj-chat",
+  "hel-tui",
+];
 
 function expectedManifest(manifest) {
   const workspacePackage = manifest.match(

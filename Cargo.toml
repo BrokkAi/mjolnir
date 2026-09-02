@@ -9,9 +9,6 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 include = [
     "src/**/*.rs",
-    "src/web/**",
-    "src/icons/**",
-    "src/fonts/jetbrains-mono.woff2",
     "Cargo.toml",
     "Cargo.lock",
     "README.md",
@@ -36,11 +33,11 @@ test-hooks = []
 # mj-desktop stays out of the default set: plain builds produce the headless
 # controller/worker, while its own GNU/Linux CI job and the macOS/Windows
 # matrix build the separate native application explicitly.
-members = [".", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
-default-members = [".", "mj-tui", "mj-cli"]
+members = [".", "mj-worker", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
+default-members = [".", "mj-worker", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
-# inherits it with `version.workspace = true`, so the five package versions
+# inherits it with `version.workspace = true`, so the eight package versions
 # cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
 version = "2.0.0"
@@ -64,6 +61,9 @@ rust-version = "1.96"
 # behind the workspace version.
 [workspace.dependencies]
 hel = { path = ".", package = "brokk-mj-core", version = "2.0.0" }
+mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.0.0" }
+mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.0.0" }
+mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.0.0" }
 hel-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.0.0" }
 
 [workspace.lints.clippy]
@@ -75,11 +75,6 @@ workspace = true
 [dependencies]
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
-axum = "0.8"
-# Use the ring provider already pulled by reqwest instead of aws-lc-rs, which
-# needs a C toolchain and complicates cross-compilation.
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 # Grok Build keys long session directories by BLAKE3; Hel has to reproduce that
 # name exactly to restore a checkpoint. `default-features = false` keeps the
@@ -89,24 +84,14 @@ blake3 = { version = "1", default-features = false, features = ["std"] }
 # timestamps in the machine's wall-clock time (DST-correct); `default-features
 # = false` drops the wasm-only bits.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6"
 getrandom = "0.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# HMAC-SHA256 signs the stateless remote-viewer session cookie (keyed on a
-# persisted signing key); pairs with the existing `sha2`.
-hmac = "0.12"
 # Resolves the IANA zone name (e.g. "Europe/Paris") to append to reset times.
 iana-time-zone = "0.1"
 libc = "0.2"
-pulldown-cmark = { version = "0.10", default-features = false }
-qrcode = { version = "0.14", default-features = false }
 signal-hook = "0.3"
-sysinfo = "0.32"
-ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 rayon = "1"
-reedline = { version = "0.51", default-features = false }
 regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive", "rc"] }
@@ -116,16 +101,10 @@ sha2 = "0.10"
 similar = "2.7"
 tar = "0.4"
 tempfile = "3"
-textwrap = "0.16"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
-tokio-stream = "0.1"
 toml = "0.8"
 tracing = "0.1"
-unicode-segmentation = "1"
-# Measures display width without the temporary `Line` that `Line::width()`
-# needs; transcript wrapping calls this once per grapheme.
-unicode-width = "0.2"
 url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -133,8 +112,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 proptest = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 
 [profile.dev]
 # Line tables keep file:line backtraces while cutting ~230MB of DWARF per
