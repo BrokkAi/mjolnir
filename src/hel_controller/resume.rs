@@ -734,7 +734,7 @@ impl Controller {
             .map(|worktree| managed_worktree_checkout_exists(executor, worktree))
             .transpose()?
             .unwrap_or(true);
-        // A checkout Hel did not retire remains the truth for a raw session.
+        // A checkout Mjolnir did not retire remains the truth for a raw session.
         // A retired checkout is recreated from the branch and archive below.
         if managed_checkout_present && let Some(project_directory) = &previous.project_directory {
             match raw_checkout_position(&previous, &self.config, project_directory, executor) {
@@ -746,7 +746,7 @@ impl Controller {
                         .map(|repository| &repository.metadata),
                     &live,
                 )),
-                // Informational only: a resume must not fail because Hel could
+                // Informational only: a resume must not fail because Mjolnir could
                 // not read where the checkout stands.
                 Err(error) => tracing::warn!(
                     session_id,
@@ -877,8 +877,9 @@ impl Controller {
             }
             // The record already names the worktree, so a failure here rolls
             // back through the same path that cleans up a new session's.
-            if let Some(conversion) =
-                conversion.as_ref().and_then(ResumeConversion::workspace_to_raw)
+            if let Some(conversion) = conversion
+                .as_ref()
+                .and_then(ResumeConversion::workspace_to_raw)
             {
                 create_managed_worktree(
                     executor,
@@ -939,8 +940,7 @@ impl Controller {
                 // A converted session's repository arrives as a seed from its
                 // own checkout. An in-place managed checkout recreated from
                 // its retained branch still needs the archive's dirty state.
-                restore_repositories: (resumed_project_directory.is_none()
-                    && conversion.is_none())
+                restore_repositories: (resumed_project_directory.is_none() && conversion.is_none())
                     || (recreated_managed_worktree && plan == ResumePlan::InPlace),
                 restore_native: same_harness,
                 // A conversion puts the checkout somewhere the archive could
@@ -992,8 +992,7 @@ impl Controller {
             let local_spec_ref = local_spec.as_path();
             execute_concurrent_lanes(
                 || {
-                    let syncing =
-                        &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                    let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
                     controller.prepare_worker_files(
                         session_id,
                         backend_ref,
@@ -1019,8 +1018,7 @@ impl Controller {
                     )
                 },
                 || {
-                    let restoring =
-                        &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
                     upload_checkpoint_spec(
                         restoring,
                         backend_ref,
@@ -1058,7 +1056,10 @@ impl Controller {
                     &backend,
                     &worker_root,
                     syncing,
-                    match conversion.as_ref().and_then(ResumeConversion::raw_to_workspace) {
+                    match conversion
+                        .as_ref()
+                        .and_then(ResumeConversion::raw_to_workspace)
+                    {
                         Some(conversion) => LocalBootstrap::SeedFrom(conversion.checkout.clone()),
                         None => LocalBootstrap::Seed,
                     },
@@ -1105,8 +1106,7 @@ impl Controller {
             } else {
                 // The new harness compacts the prior transcript itself, in a
                 // scratch session on this relay, before its first real prompt.
-                let _compacting =
-                    ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
+                let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
                 let context = compact_while_cancellable(
                     &canonical_session,
                     context_bytes,
@@ -1156,11 +1156,7 @@ impl Controller {
                     error = format!("{error:#}"),
                     "could not retire the old managed worktree after resume"
                 );
-                resume_notices.push(format!(
-                    "Hel could not remove the worktree at {}: {error:#}. Remove it with `git worktree remove --force {}`.",
-                    worktree.worktree_root.display(),
-                    worktree.worktree_root.display()
-                ));
+                resume_notices.push(worktree_cleanup_notice(&worktree.worktree_root, &error));
             }
             for notice in &resume_notices {
                 let submitted = async {
@@ -1317,6 +1313,14 @@ impl Controller {
         crate::hel_database::save_session(&self.state.sessions[session_id])?;
         Ok(failure)
     }
+}
+
+fn worktree_cleanup_notice(worktree_root: &Path, error: &anyhow::Error) -> String {
+    format!(
+        "Mjolnir could not remove the worktree at {}: {error:#}. Remove it with `git worktree remove --force {}`.",
+        worktree_root.display(),
+        worktree_root.display()
+    )
 }
 
 pub(super) fn apply_failed_resume_rollback(
@@ -2089,6 +2093,25 @@ mod tests {
         assert_eq!(cleanup_failed.last_profile, "codex-new");
         assert_eq!(cleanup_failed.target, Some(partial_target));
         assert!(failure.to_string().contains("cleanup"));
+    }
+    #[test]
+    fn failed_worktree_cleanup_notice_names_mjolnir_and_the_recovery_command() {
+        let notice = worktree_cleanup_notice(
+            Path::new("/workspace/project"),
+            &anyhow::anyhow!("permission denied"),
+        );
+
+        assert!(
+            notice.starts_with(
+                "Mjolnir could not remove the worktree at /workspace/project: permission denied."
+            ),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("`git worktree remove --force /workspace/project`"),
+            "{notice}"
+        );
+        assert!(!notice.contains("Hel"), "{notice}");
     }
     #[test]
     fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {

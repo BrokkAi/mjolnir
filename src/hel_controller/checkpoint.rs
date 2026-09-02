@@ -1118,15 +1118,15 @@ impl Controller {
         reconnect: &hel_targets::CommandSpec,
     ) -> Result<StandaloneSession> {
         stop_worker_after_target_recovery(executor, backend, session_id, worker_root)
-            .context("stop wedged Hel worker before retrying checkpoint")?;
+            .context("stop wedged Mjolnir worker before retrying checkpoint")?;
         // Copy through hel.next and rename. scp/cp onto a still-mapped hel
         // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
         // and prepare_worker_files writes that path in place.
         let binary = worker_binary_for(backend, executor)?;
         replace_installed_worker_binary(executor, backend, session_id, &binary)
-            .context("replace Hel worker binary before retrying checkpoint")?;
+            .context("replace Mjolnir worker binary before retrying checkpoint")?;
         start_worker(executor, backend, worker_root)
-            .context("start Hel worker after interrupting a wedged ACP turn")?;
+            .context("start Mjolnir worker after interrupting a wedged ACP turn")?;
         // Journal recovery runs before the daemon binds control.sock. A long
         // kimi session can take well over the ordinary 30s startup window.
         let mut connection = match connect_started_worker_with_timeout(
@@ -1143,7 +1143,7 @@ impl Controller {
             Err(error) => {
                 return Err(
                     worker_probe_diagnosis(executor, backend, worker_root, error)
-                        .context("connect to Hel worker after restarting it for checkpoint"),
+                        .context("connect to Mjolnir worker after restarting it for checkpoint"),
                 );
             }
         };
@@ -1445,7 +1445,7 @@ fn ensure_exact_checkpoint_cut(
 /// a prompt.
 ///
 /// A turn the harness starts on its own is the exception. The barrier freezes
-/// Hel's dispatch, not the harness, so a harness turn that opened after the
+/// Mjolnir's dispatch, not the harness, so a harness turn that opened after the
 /// cursor was captured means the agent may have been writing to the workspace
 /// while it was staged. That archive is abandoned rather than installed.
 fn validate_checkpoint_barrier_snapshot(
@@ -1680,7 +1680,7 @@ fn replace_stale_export_worker(
     }
     tracing::debug!(
         session_id,
-        "target worker does not support this checkpoint export protocol; replacing the installed Hel binary and retrying"
+        "target worker does not support this checkpoint export protocol; replacing the installed Mjolnir binary and retrying"
     );
     let owned_binary;
     let binary = if let Some(path) = worker_binary {
@@ -2628,7 +2628,7 @@ mod tests {
         }
     }
 
-    /// The barrier freezes Hel's dispatch, not the harness. A turn the harness
+    /// The barrier freezes Mjolnir's dispatch, not the harness. A turn the harness
     /// started on its own after the cursor was captured may have written to
     /// the workspace while it was staged, so that archive is abandoned.
     #[test]
@@ -2680,6 +2680,52 @@ mod tests {
         assert!(!worker_connect_needs_restart(&anyhow::anyhow!(
             "unknown session"
         )));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_restart_stop_failure_names_mjolnir() {
+        struct FailingStop;
+
+        impl CommandExecutor for FailingStop {
+            fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+                Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"permission denied".to_vec(),
+                })
+            }
+        }
+
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let worker_root = format!("/tmp/mjolnir-checkpoint-test/{session_id}");
+        let backend = hel_targets::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        };
+        let controller = Controller {
+            config: HelConfig::default(),
+            state: HelState::default(),
+        };
+        let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
+
+        let result = controller
+            .restart_worker_for_checkpoint(
+                session_id,
+                &FailingStop,
+                &backend,
+                &worker_root,
+                &reconnect,
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("a failed worker stop unexpectedly restarted the checkpoint worker"),
+            Err(error) => error,
+        };
+        let detail = format!("{error:#}");
+        assert!(
+            detail.starts_with("stop wedged Mjolnir worker before retrying checkpoint"),
+            "{detail}"
+        );
+        assert!(detail.contains("permission denied"), "{detail}");
     }
     #[test]
     fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
