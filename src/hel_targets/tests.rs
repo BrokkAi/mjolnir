@@ -171,6 +171,21 @@ fn podman_preflight_requires_supported_rootless_uid_mapped_runtime() {
 }
 
 #[test]
+fn podman_preflight_guidance_names_mjolnir() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output(b"podman version 5.4.2\n"),
+        podman_output(b"false\n"),
+    ]);
+
+    let error = verify_local_podman(&executor).unwrap_err().to_string();
+    assert!(
+        error.contains("Run Mjolnir as the ordinary user"),
+        "{error}"
+    );
+    assert!(!error.contains("Run Hel"), "{error}");
+}
+
+#[test]
 fn docker_preflight_requires_a_reachable_linux_daemon() {
     let ready = PodmanPreflightExecutor::with_outputs([podman_output(b"29.0.1 linux\n")]);
     assert_eq!(
@@ -189,6 +204,15 @@ fn docker_preflight_requires_a_reachable_linux_daemon() {
     let error = verify_local_docker(&desktop).unwrap_err().to_string();
     assert!(error.contains("expected a Linux Docker daemon"), "{error}");
     assert!(error.contains(DOCKER_DOCUMENTATION_PATH), "{error}");
+
+    let unavailable = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 1,
+        stdout: vec![],
+        stderr: b"daemon unavailable".to_vec(),
+    }]);
+    let error = verify_local_docker(&unavailable).unwrap_err().to_string();
+    assert!(error.contains("user running Mjolnir"), "{error}");
+    assert!(!error.contains("user running Hel"), "{error}");
 }
 
 #[test]
@@ -309,7 +333,8 @@ fn ssh_podman_preflight_warns_when_linger_check_is_unavailable() {
     assert!(warning.detail.contains("durability check is unavailable"));
     assert!(warning.detail.contains("`loginctl` was not found"));
     assert!(warning.detail.contains("may not use systemd"));
-    assert!(warning.detail.contains("cannot verify"));
+    assert!(warning.detail.contains("Mjolnir cannot verify"));
+    assert!(!warning.detail.contains("Hel"));
     assert!(warning.remediation.contains("service manager"));
 }
 
@@ -423,6 +448,23 @@ fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
 }
 
 #[test]
+fn container_template_ownership_errors_name_mjolnir() {
+    let template = ContainerTemplate {
+        image: "ubuntu:24.04".to_owned(),
+        pull_policy: ImagePullPolicy::Auto,
+        extra_run_args: vec!["--label=dev.mj.managed=false".to_owned()],
+    };
+
+    let error = validate_container_template(&template)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "container template may not override Mjolnir ownership labels"
+    );
+}
+
+#[test]
 fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
     let name = resource_name(SESSION).unwrap();
     let local = target_recovery_plan(
@@ -480,10 +522,10 @@ fn stopped_owned_podman_target_is_started_and_reinspected() {
     );
     let seen = executor.seen.borrow();
     assert_eq!(seen.len(), 4);
-    assert_eq!(seen[0].purpose, "check for Hel session container");
-    assert_eq!(seen[1].purpose, "inspect Hel session container");
-    assert_eq!(seen[2].purpose, "start stopped Hel session container");
-    assert_eq!(seen[3].purpose, "inspect Hel session container");
+    assert_eq!(seen[0].purpose, "check for Mjolnir session container");
+    assert_eq!(seen[1].purpose, "inspect Mjolnir session container");
+    assert_eq!(seen[2].purpose, "start stopped Mjolnir session container");
+    assert_eq!(seen[3].purpose, "inspect Mjolnir session container");
 }
 
 #[test]
@@ -533,7 +575,7 @@ fn unsafe_podman_target_states_and_ownership_never_start() {
         ("paused", SESSION, "true", "paused"),
         ("stopping", SESSION, "true", "stopping"),
         ("exited", "another-session", "true", "another session"),
-        ("exited", SESSION, "false", "does not own"),
+        ("exited", SESSION, "false", "Mjolnir does not own"),
     ] {
         let plan = TargetRecoveryPlan {
             exists: CommandSpec::new("exists", std::iter::empty::<&str>()),
@@ -1303,6 +1345,10 @@ fn setup_smoke_plan_uses_the_configured_local_runtime_and_cleans_up() {
     )
     .unwrap();
 
+    assert_eq!(
+        plan.description,
+        "smoke test Mjolnir setup target setup-123"
+    );
     assert_eq!(plan.commands.len(), 3);
     assert_eq!(plan.commands[0].program, "podman");
     assert!(plan.commands[0].args.contains(&"ubuntu:24.04".to_owned()));
@@ -1736,6 +1782,10 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
     ];
     for (template, purpose) in creating {
         let plan = provision_plan(&template, SESSION, &bundle(), &[]).unwrap();
+        assert_eq!(
+            plan.description,
+            format!("provision Mjolnir session {SESSION}")
+        );
         let (creation, remainder) = plan.split_at_target_creation().unwrap();
 
         assert_eq!(creation.commands.last().unwrap().purpose, purpose);
@@ -1856,6 +1906,10 @@ fn bare_project_plan_leaves_project_validation_to_dialog_and_launch() {
     let local =
         provision_bare_project_plan(&TargetTemplate::LocalBare, SESSION, "/home/me/project")
             .unwrap();
+    assert_eq!(
+        local.description,
+        format!("provision Mjolnir session {SESSION}")
+    );
     assert!(local.commands.is_empty());
 
     let template = TargetTemplate::SshBare {
@@ -1892,12 +1946,25 @@ fn local_bare_worker_commands_are_direct_and_cleanup_is_exact() {
     };
 
     let reconnect = reconnect_plan(&locator, SESSION).unwrap();
+    assert_eq!(
+        reconnect.description,
+        format!("reconnect Mjolnir session {SESSION}")
+    );
+    assert_eq!(reconnect.commands[0].purpose, "connect to Mjolnir worker");
     assert_eq!(reconnect.commands[0].program, format!("{worker_root}/hel"));
     assert_eq!(
         reconnect.commands[0].args,
         ["worker", "proxy", "--root", worker_root.as_str()]
     );
     let close = close_plan(&locator, SESSION).unwrap();
+    assert_eq!(
+        close.description,
+        format!("close Mjolnir session {SESSION}")
+    );
+    assert_eq!(
+        close.commands[0].purpose,
+        "stop the local Mjolnir worker and remove exact local Mjolnir worker state"
+    );
     assert_eq!(close.commands[0].program, "sh");
     assert_eq!(close.commands[0].args[0], "-c");
     let script = &close.commands[0].args[1];
@@ -1925,6 +1992,11 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
         SESSION,
     )
     .unwrap();
+
+    assert_eq!(
+        remote.commands[0].purpose,
+        "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state"
+    );
 
     for script in [
         local.commands[0].args[1].clone(),
@@ -2063,6 +2135,10 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     )
     .unwrap()
     .expect("raw localhost reuses its worker root");
+    assert_eq!(
+        local.purpose,
+        "stop a leaked local Mjolnir worker and clear its relay state"
+    );
     let script = &local.args[1];
     assert!(script.contains("hel_signal TERM"));
     assert!(script.contains(&format!(
@@ -2079,6 +2155,10 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     )
     .unwrap()
     .expect("an SSH host reuses its worker root");
+    assert_eq!(
+        remote.purpose,
+        "stop a leaked remote Mjolnir worker and clear its relay state"
+    );
     assert!(remote.args.last().unwrap().contains(&format!(
         ".local/share/hel/workers/{SESSION}/relay-state.json"
     )));
@@ -2146,7 +2226,7 @@ fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
     assert!(script.contains("label=dev.mj.managed=true"));
     assert!(script.contains("label=dev.mj.session=$2"));
     assert!(script.contains("true|$2"));
-    assert!(script.contains("refusing to remove a Docker container Hel does not own"));
+    assert!(script.contains("refusing to remove a Docker container Mjolnir does not own"));
 }
 
 #[test]

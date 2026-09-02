@@ -2178,10 +2178,10 @@ mod tests {
         assert_eq!(
             purposes,
             [
-                "check for Hel session container",
-                "inspect Hel session container",
-                "start stopped Hel session container",
-                "inspect Hel session container",
+                "check for Mjolnir session container",
+                "inspect Mjolnir session container",
+                "start stopped Mjolnir session container",
+                "inspect Mjolnir session container",
                 "stop Mjolnir worker daemon",
             ]
         );

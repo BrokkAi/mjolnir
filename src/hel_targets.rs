@@ -913,10 +913,10 @@ pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPref
     .stage(ProvisionStage::Provisioning);
     let output = executor
         .execute(&command)
-        .context("Docker preflight failed: run `docker info` as the user running Hel")?;
+        .context("Docker preflight failed: run `docker info` as the user running Mjolnir")?;
     ensure!(
         output.status == 0,
-        "Docker preflight failed: `docker version` exited with status {}: {}. Run `docker info` as the user running Hel. See {DOCKER_DOCUMENTATION_PATH}.",
+        "Docker preflight failed: `docker version` exited with status {}: {}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_PATH}.",
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -973,12 +973,12 @@ fn verify_podman(host: PodmanHost<'_>, executor: &impl CommandExecutor) -> Resul
         &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
         "check rootless Podman mode",
         "Postcondition `podman info --format '{{.Host.Security.Rootless}}'` prints `true`",
-        "Run Hel as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection.",
+        "Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection.",
     )?;
     let rootless_output = String::from_utf8_lossy(&rootless.stdout);
     if rootless_output.trim() != "true" {
         bail!(
-            "{}: Postcondition `podman info --format '{{{{.Host.Security.Rootless}}}}'` prints `true` returned {:?}. {}Run Hel as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection. See {PODMAN_DOCUMENTATION_PATH}.",
+            "{}: Postcondition `podman info --format '{{{{.Host.Security.Rootless}}}}'` prints `true` returned {:?}. {}Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection. See {PODMAN_DOCUMENTATION_PATH}.",
             host.failure(),
             rootless_output.trim(),
             host.remediation_scope(),
@@ -1061,7 +1061,7 @@ fn ssh_podman_linger_warning(
 fn linger_unavailable_warning(ssh: &SshTarget, reason: String) -> PodmanPreflightWarning {
     PodmanPreflightWarning {
         detail: format!(
-            "Remote user-manager durability check is unavailable on {} because {reason}. Hel cannot verify whether rootless Podman sessions survive logout.",
+            "Remote user-manager durability check is unavailable on {} because {reason}. Mjolnir cannot verify whether rootless Podman sessions survive logout.",
             ssh.destination
         ),
         remediation: format!(
@@ -1768,7 +1768,7 @@ pub fn provision_plan(
         }
     }
     Ok(CommandPlan {
-        description: format!("provision Hel session {session_id}"),
+        description: format!("provision Mjolnir session {session_id}"),
         commands,
     })
 }
@@ -1793,7 +1793,7 @@ pub fn provision_bare_project_plan(
         _ => bail!("raw project directories require a bare target"),
     }
     Ok(CommandPlan {
-        description: format!("provision Hel session {session_id}"),
+        description: format!("provision Mjolnir session {session_id}"),
         commands: Vec::new(),
     })
 }
@@ -1835,7 +1835,7 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
     ];
 
     Ok(CommandPlan {
-        description: format!("smoke test Hel setup target {smoke_id}"),
+        description: format!("smoke test Mjolnir setup target {smoke_id}"),
         commands: vec![
             at_boundary(boundary, run).purpose("create disposable setup container"),
             at_boundary(boundary, exec).purpose("execute setup smoke command"),
@@ -1996,10 +1996,10 @@ pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<Comma
             ],
         ),
     }
-    .purpose("connect to Hel worker")
+    .purpose("connect to Mjolnir worker")
     .stage(ProvisionStage::Starting);
     Ok(CommandPlan {
-        description: format!("reconnect Hel session {session_id}"),
+        description: format!("reconnect Mjolnir session {session_id}"),
         commands: vec![command],
     })
 }
@@ -2016,11 +2016,11 @@ pub fn target_recovery_plan(
     let (exists, inspect, start) = match locator {
         TargetLocator::LocalPodman { container_id } => (
             CommandSpec::new("podman", ["container", "exists", container_id])
-                .purpose("check for Hel session container"),
+                .purpose("check for Mjolnir session container"),
             CommandSpec::new("podman", ["container", "inspect", container_id])
-                .purpose("inspect Hel session container"),
+                .purpose("inspect Mjolnir session container"),
             CommandSpec::new("podman", ["start", container_id])
-                .purpose("start stopped Hel session container"),
+                .purpose("start stopped Mjolnir session container"),
         ),
         TargetLocator::LocalDocker { container_id } => (
             CommandSpec::new(
@@ -2032,19 +2032,19 @@ pub fn target_recovery_plan(
                     container_id,
                 ],
             )
-            .purpose("check for Hel Docker session container"),
+            .purpose("check for Mjolnir Docker session container"),
             CommandSpec::new("docker", ["container", "inspect", container_id])
-                .purpose("inspect Hel Docker session container"),
+                .purpose("inspect Mjolnir Docker session container"),
             CommandSpec::new("docker", ["start", container_id])
-                .purpose("start stopped Hel Docker session container"),
+                .purpose("start stopped Mjolnir Docker session container"),
         ),
         TargetLocator::SshPodman { ssh, container_id } => (
             ssh_command(ssh, ["podman", "container", "exists", container_id])
-                .purpose("check for remote Hel session container"),
+                .purpose("check for remote Mjolnir session container"),
             ssh_command(ssh, ["podman", "container", "inspect", container_id])
-                .purpose("inspect remote Hel session container"),
+                .purpose("inspect remote Mjolnir session container"),
             ssh_command(ssh, ["podman", "start", container_id])
-                .purpose("start stopped remote Hel session container"),
+                .purpose("start stopped remote Mjolnir session container"),
         ),
         TargetLocator::LocalBare { .. }
         | TargetLocator::AppleContainer { .. }
@@ -2130,7 +2130,7 @@ fn inspect_recovery_target(
             .get(MANAGED_LABEL)
             .and_then(serde_json::Value::as_str)
             == Some("true"),
-        "refusing to start a container target Hel does not own"
+        "refusing to start a container target Mjolnir does not own"
     );
     ensure!(
         labels
@@ -2722,11 +2722,11 @@ pub fn clear_relay_state_plan(
     Ok(match locator {
         TargetLocator::LocalBare { .. } => Some(
             CommandSpec::new("sh", ["-c", script.as_str()])
-                .purpose("stop a leaked local Hel worker and clear its relay state"),
+                .purpose("stop a leaked local Mjolnir worker and clear its relay state"),
         ),
         TargetLocator::SshBare { ssh, .. } => Some(
             ssh_command(ssh, ["sh", "-c", script.as_str()])
-                .purpose("stop a leaked remote Hel worker and clear its relay state"),
+                .purpose("stop a leaked remote Mjolnir worker and clear its relay state"),
         ),
         TargetLocator::LocalPodman { .. }
         | TargetLocator::LocalDocker { .. }
@@ -2749,8 +2749,9 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
                 stop_worker_daemon_script(&session_worker_root),
                 posix_quote(&session_worker_root),
             );
-            CommandSpec::new("sh", ["-c", script.as_str()])
-                .purpose("stop the local Hel worker and remove exact local Hel worker state")
+            CommandSpec::new("sh", ["-c", script.as_str()]).purpose(
+                "stop the local Mjolnir worker and remove exact local Mjolnir worker state",
+            )
         }
         TargetLocator::LocalPodman { container_id } => {
             let script = "status=0; podman rm --force --ignore \"$1\" || status=$?; rm -rf -- \"$HOME/.cache/mjolnir/git/sessions/$2\"; exit \"$status\"";
@@ -2763,7 +2764,7 @@ if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.
     if [ "$identity" = "true|$2" ]; then
         docker rm --force "$1" || status=$?
     else
-        echo 'refusing to remove a Docker container Hel does not own for this session' >&2
+        echo 'refusing to remove a Docker container Mjolnir does not own for this session' >&2
         status=2
     fi
 elif ! docker info >/dev/null 2>&1; then
@@ -2826,7 +2827,7 @@ exit "$status""#;
                 posix_quote(&session_profile_home),
             );
             ssh_command(ssh, ["sh", "-c", script.as_str()]).purpose(
-                "stop the remote Hel worker and remove exact SSH session workspace and runtime state",
+                "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state",
             )
         }
         TargetLocator::SshPodman { ssh, container_id } => {
@@ -2839,7 +2840,7 @@ exit "$status""#;
         }
     };
     Ok(CommandPlan {
-        description: format!("close Hel session {session_id}"),
+        description: format!("close Mjolnir session {session_id}"),
         commands: vec![command],
     })
 }
