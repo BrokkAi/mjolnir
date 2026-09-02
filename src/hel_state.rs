@@ -174,7 +174,9 @@ impl MaterializedSession {
                     let TranscriptBody::User { content } = &item.body else {
                         return None;
                     };
-                    provisional_session_title(&crate::hel_chat::materialized_content_text(content))
+                    provisional_session_title(&crate::hel_transcript::materialized_content_text(
+                        content,
+                    ))
                 })
             })
             .or_else(|| {
@@ -182,9 +184,9 @@ impl MaterializedSession {
                     .iter()
                     .filter(|prompt| prompt.kind.is_prompt())
                     .find_map(|prompt| {
-                        provisional_session_title(&crate::hel_chat::materialized_content_text(
-                            &prompt.content,
-                        ))
+                        provisional_session_title(
+                            &crate::hel_transcript::materialized_content_text(&prompt.content),
+                        )
                     })
             })
     }
@@ -306,7 +308,9 @@ impl ProjectionWindow {
                 let TranscriptBody::User { content } = &item.body else {
                     return None;
                 };
-                provisional_session_title(&crate::hel_chat::materialized_content_text(content))
+                provisional_session_title(&crate::hel_transcript::materialized_content_text(
+                    content,
+                ))
             }),
             latest_turn_start_position: session
                 .transcript
@@ -336,9 +340,9 @@ impl ManagedSessionSnapshot {
                     .iter()
                     .filter(|prompt| prompt.kind.is_prompt())
                     .find_map(|prompt| {
-                        provisional_session_title(&crate::hel_chat::materialized_content_text(
-                            &prompt.content,
-                        ))
+                        provisional_session_title(
+                            &crate::hel_transcript::materialized_content_text(&prompt.content),
+                        )
                     })
             })
     }

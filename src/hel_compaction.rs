@@ -387,7 +387,7 @@ fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>>
     for item in &snapshot.transcript {
         match &item.body {
             CanonicalTranscriptBody::User { content } => {
-                let text = crate::hel_chat::materialized_content_text(content);
+                let text = crate::hel_transcript::materialized_content_text(content);
                 turns.push(Turn {
                     user: if is_synthetic_handoff(&text) {
                         HANDOFF_PLACEHOLDER.to_owned()
@@ -399,7 +399,7 @@ fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>>
             }
             CanonicalTranscriptBody::Agent { chunks, .. } => push_turn_event(
                 &mut turns,
-                TurnEvent::Assistant(crate::hel_chat::materialized_chunks_text(chunks)),
+                TurnEvent::Assistant(crate::hel_transcript::materialized_chunks_text(chunks)),
             )?,
             CanonicalTranscriptBody::Tool { call, .. } => {
                 if let Some(turn) = turns.last_mut() {

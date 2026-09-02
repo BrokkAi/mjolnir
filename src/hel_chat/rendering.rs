@@ -288,75 +288,7 @@ impl MarkdownWriter {
     }
 }
 
-/// Remove terminal controls while preserving user-visible whitespace.
-pub(super) fn sanitize_terminal_text(text: &str) -> String {
-    let mut sanitized = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // One escape can end at the ESC introducing the next one, so keep
-            // consuming rather than recursing: transcript text is untrusted and
-            // may nest these arbitrarily deep.
-            while consume_escape_body(&mut chars) {}
-        } else if ch == '\r' {
-            if chars.peek() != Some(&'\n') {
-                sanitized.push('\n');
-            }
-        } else if matches!(ch, '\n' | '\t') || !ch.is_control() {
-            sanitized.push(ch);
-        }
-    }
-    sanitized
-}
-
-/// Consume one escape sequence's body, after its introducing ESC. Returns
-/// whether the body ended at another ESC, which introduces the next sequence.
-///
-/// Dropping the ESC alone is not enough: an OSC payload (a build tool setting
-/// the window title) or the second byte of a charset selection would otherwise
-/// reach the transcript as visible text.
-fn consume_escape_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
-    match chars.next() {
-        // CSI: parameter and intermediate bytes up to a final byte.
-        Some('[') => {
-            let _ = chars.find(|ch| ('@'..='~').contains(ch));
-            false
-        }
-        // OSC, DCS, SOS, PM, and APC all carry a string payload.
-        Some(']' | 'P' | 'X' | '^' | '_') => consume_string_body(chars),
-        // Two-byte sequences: charset selection (ESC ( B), ESC # 8, ESC SP F.
-        Some('(' | ')' | '*' | '+' | '-' | '.' | '/' | '#' | '%' | ' ') => {
-            chars.next();
-            false
-        }
-        // Everything else is a complete one-byte escape: ESC 7, ESC 8, ESC M,
-        // ESC =, and a trailing ESC with nothing after it.
-        _ => false,
-    }
-}
-
-/// Consume a string payload, which ends at BEL or at ST (ESC \). A line break
-/// or a cancel control aborts it instead, so one malformed OSC cannot swallow
-/// the rest of a transcript.
-fn consume_string_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
-    while let Some(&ch) = chars.peek() {
-        match ch {
-            '\n' | '\r' | '\x18' | '\x1a' => return false,
-            '\x07' => {
-                chars.next();
-                return false;
-            }
-            '\x1b' => {
-                chars.next();
-                return true;
-            }
-            _ => {
-                chars.next();
-            }
-        }
-    }
-    false
-}
+pub(super) use crate::hel_transcript::sanitize_terminal_text;
 
 pub(super) fn markdown_lines(
     source: &str,

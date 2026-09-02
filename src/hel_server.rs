@@ -32,7 +32,6 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::hel_chat::BrowserTranscript;
 use crate::hel_config::{HelConfig, TargetTemplate, validate_id};
 use crate::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
 use crate::hel_state::{HelState, SessionState};
@@ -67,6 +66,50 @@ const COOKIE_KEY_FILE: &str = "phone-cookie-key";
 
 /// Where the phone cookie signing key lives: beside Hel's other private
 /// controller state, never in the shared config directory.
+/// The conversation shape the phone reads. The chat layer projects its
+/// entries into this; the browser API owns the wire form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BrowserTranscript {
+    pub latest_seq: u64,
+    pub window_start_seq: u64,
+    pub reset: bool,
+    pub entries: Vec<BrowserTranscriptEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BrowserTranscriptEntry {
+    pub id: u64,
+    pub updated_seq: u64,
+    pub role: &'static str,
+    pub label: String,
+    pub recorded_at_ms: Option<i64>,
+    pub lines: Vec<String>,
+    /// The glyph the terminal draws for this role, so both surfaces read alike
+    /// without the browser keeping a second copy of the mapping. Taken from
+    /// the same `entry_visual` the terminal renders from.
+    pub glyph: &'static str,
+    /// The semantic colour name, not a colour. The stylesheet decides what
+    /// `agent` or `failed` looks like; this says which one applies.
+    pub tone: &'static str,
+    /// A tool call's state, for a tool entry. `None` for every other role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_status: Option<&'static str>,
+    /// The changed files a tool reported, as data rather than as extra lines
+    /// appended to `lines`. The terminal formats these for a terminal; a
+    /// browser re-parsing that formatting is how the phone came to render
+    /// every diffstat as one unsplit path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diffstats: Vec<BrowserDiffStat>,
+}
+
+/// One file a tool changed, and by how much.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BrowserDiffStat {
+    pub path: String,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
 /// How long stored viewer state outlives its last use.
 ///
 /// It matches the session cookie's own lifetime: state keyed to an identity
@@ -4563,7 +4606,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             window_start_seq: 3,
             reset: false,
             entries: vec![
-                crate::hel_chat::BrowserTranscriptEntry {
+                BrowserTranscriptEntry {
                     id: 3,
                     updated_seq: 3,
                     role: "user",
@@ -4575,7 +4618,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                     tool_status: None,
                     diffstats: Vec::new(),
                 },
-                crate::hel_chat::BrowserTranscriptEntry {
+                BrowserTranscriptEntry {
                     id: 7,
                     updated_seq: 8,
                     role: "agent",

@@ -18,7 +18,6 @@ use crate::hel_archive::{
     ArchiveInput, BundleManifest, GitCollectionSpec, GitHistoryMode, GitSnapshotProgress,
     SystemGit, TargetManifest, collect_git_snapshot_with_progress, write_archive_atomic,
 };
-use crate::hel_chat::ChatState;
 use crate::hel_checkpoint::{collect_import_native_artifacts, collect_native_artifacts};
 use crate::hel_config::{
     HarnessKind, HelConfig, ProjectBundle, ProjectRepository, TargetTemplate, validate_id,
@@ -30,9 +29,7 @@ use crate::hel_state::{
     CheckpointMetadata, HelState, SessionRecord, SessionState, harness_session_title,
     new_session_id, normalize_session_title,
 };
-use crate::hel_worker::{
-    SequencedEvent, WorkerEvent, WorkerPhase, WorkerSnapshot, strip_hidden_prompt_context,
-};
+use crate::hel_worker::{SequencedEvent, WorkerEvent, strip_hidden_prompt_context};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeSessionSelection {
@@ -2998,9 +2995,8 @@ fn canonical_import_session(
 ) -> Result<crate::hel_archive::CanonicalSessionSnapshot> {
     let mut events = events.to_vec();
     finalize_import_event_times(&mut events, source_path)?;
-    let latest = events.last().map_or(0, |event| event.seq);
-    let snapshot = WorkerSnapshot::summary(session_id.to_owned(), WorkerPhase::Idle, latest);
-    let mut materialized = ChatState::new(&snapshot, &events).materialized_session();
+    let mut materialized =
+        crate::hel_projection::imported_materialized_session(session_id, &events);
     materialized.session_title = harness_session_title(&events);
     if let Some(last_activity_at_ms) = events.iter().filter_map(|event| event.recorded_at_ms).max()
     {

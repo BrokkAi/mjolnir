@@ -18,7 +18,7 @@ Ryan Svihla approved the split on 2026-09-02.
 
 - [x] (2026-09-02 15:30Z) Measured the module graph (script in `Artifacts and Notes`), chose the four layers, and listed every edge that crosses a layer boundary in the wrong direction (see `Context and Orientation`).
 - [x] (2026-09-02 15:45Z) Recorded the pre-split baseline timings (see `Artifacts and Notes`).
-- [ ] M1a: text helpers and browser transcript types move out of `hel_chat`; reset-time helpers move out of `usage_format`; `hel_import` stops naming `ChatState`.
+- [x] (2026-09-02 21:05Z) M1a: text helpers and browser transcript types move out of `hel_chat`; reset-time helpers move out of `usage_format`; `hel_import` stops naming `ChatState`.
 - [x] (2026-09-02 18:35Z) M1b: launch-config and MCP types move out of `hel_worker_runtime`; `terminate_process_group` moves to `hel_subprocess`; `harness_authentication_marker` moves to `hel_config`.
 - [ ] M1 verification: the edge script reports zero escaping edges in non-test and test code; `cargo test` and clippy green; commit.
 - [ ] M2: create `mj-worker/`, `mj-controller/`, `mj-chat/` crates; move modules; `cargo check --workspace` green.
@@ -38,6 +38,11 @@ Ryan Svihla approved the split on 2026-09-02.
 - Observation: the edge script cannot see multi-line braced imports, so it under-reports. Its regex needs `crate::<module>::<word>`, and a `use crate::hel_worker_runtime::{` line ends in a brace, so three controller imports were invisible to it: `hel_controller/worker_binary.rs` and `hel_controller/reviewer.rs` pulled in the launch types plus the constants `DISCOVER_LOGIN_PATH_ENV`, `REVIEWER_DIR`, and `REVIEWER_PROFILE_DIR`. Those constants describe the worker root's file layout that the controller stages into, so they moved to `hel_worker_launch` with the types. Treat the script as a floor, not a ceiling: grep for the module name as well.
 
 - Observation: `src/hel_review/bifrost.rs` also built `hel_worker_runtime::ReviewMcpServer`, which the layer table did not anticipate. It now names `hel_worker_launch`, so `bifrost.rs` no longer forces a foundation-to-worker edge and the M2 question of where it lands stays open.
+
+- Observation: `hel_import` did not name `ChatState` for a type it could swap out. `canonical_import_session` built a whole `ChatState` from the events an importer synthesized, folded them into `ChatEntry` values, and converted those into a `MaterializedSession`; both of its callers are inside `hel_import`, so the function could not simply move up into `hel_chat`. The fix was to split the fold: the entry builders (`push_streamed_entry`, `apply_session_update_to_entries`, `apply_runtime_event_to_entries`, plus `ChatEntry::plain` and `ChatEntry::tool`) moved into `hel_transcript`, and the entry-to-session conversion became `hel_projection::materialized_session_from_entries`. `hel_chat` now delegates to the same builders, so the imported and the live transcript still come from one implementation. `hel_projection::imported_materialized_session` keeps the small event dispatch the importers need.
+  Evidence: `src/hel_import.rs` `canonical_import_session`; `src/hel_chat.rs` `apply_adapter`, `apply_session_update_at`; `src/hel_transcript.rs`; `src/hel_projection.rs`.
+
+- Observation: moving the three `materialized_*` text helpers pulled a larger set with them than the plan expected, because they sit on top of the chat view's ACP-to-text layer: `sanitize_terminal_text` (and its escape-consuming helpers, from `hel_chat/rendering.rs`), `content_block_text`, `tool_status`, `plan_status`, `tool_content_details`, `tool_diff_paths`, `tool_location_details`, the terminal-output summaries, and `format_diffstat`. None of them touch chat state, so they belong below it, and `hel_chat` re-exports the names it still uses.
 
 - Observation: clean-build parallelism is a small win; edit scope is the real win. The front end is serial per crate and the crates chain foundation, then controller, then chat, so the critical path only shrinks from ~152K to ~140K lines. But a chat edit recompiles 23K lines instead of 152K.
 
@@ -59,6 +64,14 @@ Ryan Svihla approved the split on 2026-09-02.
 
 - Decision: `WorkerLaunchConfig::enforce_execution_policy` stays in `hel_worker_runtime` as an inherent impl on a foundation type, rather than moving with the struct.
   Rationale: it translates a target's execution policy into harness environment variables, which is worker behaviour, and it is private to the runtime module tree (`unix.rs` and `relay_tests.rs` are its only callers). Rust allows an inherent impl anywhere in the crate that defines the type, and M2 will turn it into a free function or extension trait when the two modules land in different crates. Its serde and file-IO impls (`read`, `write`) did move, because they only touch `std::fs` and `hel_config::atomic_write`.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: `BrowserTranscript`, `BrowserTranscriptEntry` and `BrowserDiffStat` moved into `hel_server`, not into `hel_transcript`.
+  Rationale: they carry no chat state, and the chat view builds them only to answer the browser API, so they are that API's wire shape. `hel_server` already owns every other response type on that route. Chat may depend on the controller, so `hel_chat/transcript.rs` imports them from `hel_server`; `mj-cli` now names `hel::hel_server::BrowserTranscript`.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: `materialized_session_from_entries` and `imported_materialized_session` landed in `hel_projection`, while the per-event entry builders landed in `hel_transcript`.
+  Rationale: `hel_projection` already owns the conversions between a `MaterializedSession` and the canonical archive shape, and `hel_transcript` already owns `ChatEntry`. Splitting them this way kept each function beside the type it produces and avoided giving `hel_transcript` a dependency on `hel_state`'s session shapes.
   Date/Author: 2026-09-02, Fable.
 
 - Decision: the controller crate must not depend on the worker crate.

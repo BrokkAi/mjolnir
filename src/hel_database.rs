@@ -1906,7 +1906,7 @@ fn materialized_user_message(
         let TranscriptBody::User { content } = body else {
             continue;
         };
-        let text = crate::hel_chat::materialized_content_text(&content);
+        let text = crate::hel_transcript::materialized_content_text(&content);
         if !text.trim().is_empty() {
             return Ok(Some((position, text)));
         }
@@ -1985,7 +1985,7 @@ fn last_materialized_agent_message(
     let TranscriptBody::Agent { chunks, .. } = body else {
         return Ok(None);
     };
-    let text = crate::hel_chat::materialized_chunks_text(&chunks);
+    let text = crate::hel_transcript::materialized_chunks_text(&chunks);
     Ok((!text.trim().is_empty()).then_some((position, text)))
 }
 

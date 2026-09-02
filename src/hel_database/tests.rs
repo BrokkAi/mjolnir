@@ -2270,7 +2270,8 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
     let before = load_materialized_session_from(&database, "session-1")
         .unwrap()
         .unwrap();
-    let stat_before = crate::hel_chat::materialized_tool_diffstats(&before.transcript[0]).unwrap();
+    let stat_before =
+        crate::hel_transcript::materialized_tool_diffstats(&before.transcript[0]).unwrap();
     assert_eq!(stat_before, vec!["src/legacy.rs  +1 −1"]);
 
     let retention = compact_materialized_transcript_in(&database, "session-1", 15).unwrap();
@@ -2281,7 +2282,7 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        crate::hel_chat::materialized_tool_diffstats(&after.transcript[0]).unwrap(),
+        crate::hel_transcript::materialized_tool_diffstats(&after.transcript[0]).unwrap(),
         stat_before,
         "the counts had to be computed from the copies before they were dropped"
     );
@@ -2324,7 +2325,7 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
     let stats_before = before
         .transcript
         .iter()
-        .filter_map(|item| crate::hel_chat::materialized_tool_diffstats(item))
+        .filter_map(|item| crate::hel_transcript::materialized_tool_diffstats(item))
         .collect::<Vec<_>>();
 
     // A checkpoint at frontier 15 covers the first tool call, not the second.
@@ -2344,7 +2345,7 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
         after
             .transcript
             .iter()
-            .filter_map(|item| crate::hel_chat::materialized_tool_diffstats(item))
+            .filter_map(|item| crate::hel_transcript::materialized_tool_diffstats(item))
             .collect::<Vec<_>>(),
         stats_before,
         "the diffstat the transcript shows must survive the release"

@@ -65,7 +65,7 @@ impl CodexUsageWindow {
         let mut label = format!("{} {}% left", self.label, self.remaining_percent);
         if let Some(reset) = self
             .resets_at
-            .and_then(crate::usage_format::format_reset_local_seconds)
+            .and_then(crate::hel_quota::format_reset_local_seconds)
         {
             label.push_str(" · resets ");
             label.push_str(&reset);
