@@ -664,12 +664,18 @@ fn track_user_shell_completion(
     }
 }
 
-fn record_runtime_event_and_track_configuration(
+pub(super) fn record_runtime_event_and_track_configuration(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
     session_configured: &mut bool,
 ) -> Result<bool> {
+    // A fresh bridge must configure its session again before any command is
+    // dispatched to it. That gap is what lets the bridge drop the requests the
+    // previous one left queued without racing a new dispatch.
+    if matches!(event, RuntimeEvent::HarnessRestarting { .. }) {
+        *session_configured = false;
+    }
     *session_configured |= matches!(event, RuntimeEvent::SessionConfigured { .. });
     record_runtime_event(relay, in_flight, event)
 }

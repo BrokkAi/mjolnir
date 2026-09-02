@@ -497,9 +497,18 @@ async fn run_inner(
     events: mpsc::Sender<RuntimeEvent>,
 ) -> Result<()> {
     let mut rapid_deaths = 0_u32;
+    let mut replacing_previous_bridge = false;
     loop {
         let opened = Arc::new(Mutex::new(None));
-        match run_bridge(&spec, &mut requests, &events, opened.clone()).await? {
+        match run_bridge(
+            &spec,
+            &mut requests,
+            &events,
+            opened.clone(),
+            replacing_previous_bridge,
+        )
+        .await?
+        {
             None => return Ok(()),
             Some(restart) => {
                 if restart.unexpected {
@@ -521,6 +530,7 @@ async fn run_inner(
                 )
                 .await?;
                 spec.resume_session = Some(restart.native_session_id);
+                replacing_previous_bridge = true;
             }
         }
     }
@@ -533,6 +543,7 @@ async fn run_bridge(
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: &mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
+    replacing_previous_bridge: bool,
 ) -> Result<Option<BridgeRestart>> {
     let mut child = Command::new(&spec.command)
         .args(&spec.args)
@@ -563,6 +574,7 @@ async fn run_bridge(
             requests,
             events.clone(),
             opened.clone(),
+            replacing_previous_bridge,
         );
         tokio::pin!(drive);
         tokio::select! {
@@ -997,15 +1009,6 @@ const CANCEL_UNACKED_WARNING: &str =
 const ACP_BRIDGE_LOST_WARNING: &str = "ACP bridge exited; reloading the native session";
 const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the native session";
 
-/// Kimi may start an internal background-task notification turn as a cancelled
-/// `session/prompt` settles. Reusing that connection lets the next ACP prompt be
-/// accepted but parked behind the invisible turn, so Hel reports the new user
-/// prompt as running before Kimi has added it to the conversation. Reloading the
-/// native session gives the next durable command a genuinely idle bridge.
-fn restart_after_acknowledged_cancel(harness: HarnessKind) -> bool {
-    harness == HarnessKind::Kimi
-}
-
 /// Give up if a freshly opened session dies this many times in a row before it
 /// has lived for [`RAPID_BRIDGE_WINDOW`]. A later crash of a healthy session
 /// resets the count.
@@ -1018,6 +1021,7 @@ async fn drive<T>(
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
+    replacing_previous_bridge: bool,
 ) -> Result<Option<String>>
 where
     T: ConnectTo<Client>,
@@ -1590,6 +1594,7 @@ where
                 opened,
                 session_update_count,
                 session_updates_enabled,
+                replacing_previous_bridge,
             )
             .await
             {
@@ -1657,6 +1662,7 @@ async fn drive_connection(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_update_count: Arc<AtomicU64>,
     session_updates_enabled: Arc<AtomicBool>,
+    replacing_previous_bridge: bool,
 ) -> Result<Option<String>> {
     // Terminals belong to the connection. However the session ends — closed,
     // failed, or with its command channel dropped — their process groups must
@@ -1672,6 +1678,7 @@ async fn drive_connection(
         opened,
         &session_update_count,
         &session_updates_enabled,
+        replacing_previous_bridge,
     )
     .await;
     pending_elicitations
@@ -1807,6 +1814,33 @@ async fn settle_steer(
     }
 }
 
+/// Discard requests left in the channel by the bridge that just restarted. See
+/// the call site in [`serve_session`] for why nothing is reported back.
+fn drain_requests_from_the_previous_bridge(requests: &mut mpsc::Receiver<CommandRequest>) {
+    while let Ok(request) = requests.try_recv() {
+        let (variant, request_id) = match request {
+            CommandRequest::Prompt { request_id, .. } => ("Prompt", Some(request_id)),
+            CommandRequest::SetConfig { request_id, .. } => ("SetConfig", Some(request_id)),
+            CommandRequest::SetSessionMode { request_id, .. } => {
+                ("SetSessionMode", Some(request_id))
+            }
+            CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
+            CommandRequest::Close { request_id } => ("Close", Some(request_id)),
+            CommandRequest::ResolveElicitation { .. } => ("ResolveElicitation", None),
+            CommandRequest::Compact { response, .. } => {
+                let _ = response.send(Err("ACP bridge restarted before the request ran".into()));
+                ("Compact", None)
+            }
+        };
+        tracing::debug!(
+            operation = "acp_bridge_restart",
+            variant,
+            request_id = request_id.as_deref().unwrap_or("-"),
+            "dropping a request queued for the previous ACP bridge"
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn serve_session(
     connection: &ConnectionTo<Agent>,
@@ -1819,6 +1853,7 @@ async fn serve_session(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_update_count: &AtomicU64,
     session_updates_enabled: &AtomicBool,
+    replacing_previous_bridge: bool,
 ) -> Result<Option<String>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
@@ -1946,6 +1981,22 @@ async fn serve_session(
     if let Some(state) = &grok_models {
         grok::merge_config_options(&mut config_options, state);
     }
+    // Drop anything the worker queued for the bridge this one replaced. The
+    // worker dispatches only while it believes the session is configured; it
+    // clears that flag on `HarnessRestarting` and sets it again only after this
+    // bridge's `SessionConfigured`, which has not been sent yet. So every
+    // request still in the channel was dispatched before the worker saw the
+    // restart and is already in the set the worker interrupted. Emitting a
+    // runtime event for one would interrupt it twice and fail the coordinator's
+    // `require_in_flight`; delivering it would run it untracked on the fresh
+    // session. A first start drains nothing: out-of-band senders such as
+    // compaction are not gated on the session being configured, so a request
+    // that arrives while the very first bridge is still handshaking is a live
+    // request for this session, not a leftover.
+    if replacing_previous_bridge {
+        drain_requests_from_the_previous_bridge(requests);
+    }
+
     emit_runtime_event(
         events,
         RuntimeEvent::SessionStarted {
@@ -2066,11 +2117,8 @@ async fn serve_session(
                                 },
                             )
                             .await?;
-                            if cancel_deadline.is_some()
-                                && restart_after_acknowledged_cancel(spec.harness)
-                            {
-                                return Ok(Some(session_id.to_string()));
-                            }
+                            // An acknowledged cancel leaves the bridge in
+                            // place; the next prompt goes to the same session.
                             break;
                         }
                         _ = async {

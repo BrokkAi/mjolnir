@@ -2089,6 +2089,44 @@ fn typed_acp_observations_are_journaled() {
 }
 
 #[test]
+fn a_harness_restart_gates_dispatch_until_the_session_is_configured_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let mut in_flight = BTreeMap::new();
+    let mut session_configured = true;
+
+    unix::record_runtime_event_and_track_configuration(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::HarnessRestarting {
+            message: "ACP bridge exited; reloading the native session".into(),
+        },
+        &mut session_configured,
+    )
+    .unwrap();
+    assert!(
+        !session_configured,
+        "a restart must stop dispatch until the fresh bridge configures its session"
+    );
+
+    unix::record_runtime_event_and_track_configuration(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        },
+        &mut session_configured,
+    )
+    .unwrap();
+    assert!(
+        session_configured,
+        "the fresh bridge's SessionConfigured must reopen dispatch"
+    );
+}
+
+#[test]
 fn harness_restarting_interrupts_in_flight_commands() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();

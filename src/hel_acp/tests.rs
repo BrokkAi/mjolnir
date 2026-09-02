@@ -578,6 +578,7 @@ async fn answer_to_ext_request(
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -727,6 +728,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -1103,6 +1105,7 @@ async fn config_change_request(
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -1243,6 +1246,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -1312,6 +1316,7 @@ async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -1422,6 +1427,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -1593,6 +1599,7 @@ async fn a_cancel_is_served_while_a_compaction_is_in_flight() {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -1720,6 +1727,74 @@ async fn stalled_prompt_bridge(
     }
 }
 
+/// Read scripted-bridge methods into `methods` until a `session/prompt`
+/// arrives, so a test can assert what the bridge saw and in what order.
+async fn wait_for_bridge_prompt(
+    observed: &mut mpsc::UnboundedReceiver<String>,
+    methods: &mut Vec<String>,
+) {
+    loop {
+        let method = tokio::time::timeout(Duration::from_secs(5), observed.recv())
+            .await
+            .expect("the prompt must reach the bridge")
+            .expect("the bridge must keep reporting methods");
+        let is_prompt = method == "session/prompt";
+        methods.push(method);
+        if is_prompt {
+            return;
+        }
+    }
+}
+
+/// Answers `initialize`, `session/load`, and every `session/prompt` at once,
+/// reporting each prompt's text so a test can tell which prompts reached it.
+async fn prompt_echoing_bridge(
+    stream: tokio::io::DuplexStream,
+    observed: mpsc::UnboundedSender<String>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await.expect("read echoing bridge input") {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("bridge input must be JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let response = match method {
+            "initialize" => {
+                let _ = observed.send(method.to_owned());
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})
+            }
+            "session/new" | "session/load" => {
+                let _ = observed.send(method.to_owned());
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "scripted"}})
+            }
+            "session/prompt" => {
+                let text = request
+                    .pointer("/params/prompt/0/text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let _ = observed.send(format!("session/prompt:{text}"));
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}})
+            }
+            _ => continue,
+        };
+        if write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 async fn wait_for_runtime_event<F>(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     mut matches: F,
@@ -1840,6 +1915,7 @@ async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -1914,7 +1990,7 @@ async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn acknowledged_kimi_cancel_reloads_before_the_next_prompt() {
+async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (complete_tx, complete_rx) = mpsc::channel(1);
@@ -1947,9 +2023,11 @@ async fn acknowledged_kimi_cancel_reloads_before_the_next_prompt() {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
+    let mut methods = Vec::new();
     request_tx
         .send(CommandRequest::Prompt {
             request_id: "prompt-1".into(),
@@ -1957,22 +2035,11 @@ async fn acknowledged_kimi_cancel_reloads_before_the_next_prompt() {
         })
         .await
         .unwrap();
-    loop {
-        let method = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx.recv())
-            .await
-            .expect("the prompt must reach the bridge")
-            .expect("the bridge must keep reporting methods");
-        if method == "session/prompt" {
-            break;
-        }
-    }
+    wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
     request_tx
         .send(CommandRequest::Cancel {
             request_id: "cancel-1".into(),
-            steering_prompt: Some(ClaimedSteeringPrompt {
-                queued_command_id: "queued-1".into(),
-                prompt: vec![ContentBlock::Text(TextContent::new("change direction"))],
-            }),
+            steering_prompt: None,
         })
         .await
         .unwrap();
@@ -1982,27 +2049,66 @@ async fn acknowledged_kimi_cancel_reloads_before_the_next_prompt() {
         .await;
     tokio::time::advance(CANCEL_ACK_TIMEOUT - Duration::from_secs(1)).await;
     complete_tx.send(()).await.unwrap();
-    let finished = wait_for_runtime_event(&mut event_rx, |event| {
+    wait_for_runtime_event(&mut event_rx, |event| {
         matches!(
             event,
             RuntimeEvent::PromptFinished { request_id, .. } if request_id == "prompt-1"
         )
     })
     .await;
-    let RuntimeEvent::PromptFinished { stop_reason, .. } = finished else {
-        panic!("expected prompt finished: {finished:?}");
-    };
-    assert!(
-        stop_reason.to_lowercase().contains("cancel"),
-        "{stop_reason}"
-    );
-    let restart = tokio::time::timeout(std::time::Duration::from_secs(5), driver)
+
+    // The acknowledged cancel leaves the bridge in place, so the next prompt
+    // runs on the same connection and the same native session.
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-2".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("carry on"))],
+        })
+        .await
+        .unwrap();
+    wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
+    complete_tx.send(()).await.unwrap();
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(
+            event,
+            RuntimeEvent::PromptFinished { request_id, .. } if request_id == "prompt-2"
+        )
+    })
+    .await;
+    drop(request_tx);
+    let restart = tokio::time::timeout(Duration::from_secs(5), driver)
         .await
         .expect("runtime exits")
         .expect("runtime task does not panic")
         .expect("a cancelled prompt must not fail the runtime");
-    assert_eq!(restart.as_deref(), Some("scripted"));
-    drop(request_tx);
+    // `run_inner` emits `HarnessRestarting` exactly when the bridge asks for a
+    // restart, so no restart request means no restart event.
+    assert_eq!(
+        restart, None,
+        "an acknowledged cancel must not restart the bridge"
+    );
+    while let Ok(event) = event_rx.try_recv() {
+        assert!(
+            !matches!(event, RuntimeEvent::HarnessRestarting { .. }),
+            "unexpected restart: {event:?}"
+        );
+    }
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "initialize")
+            .count(),
+        1,
+        "the second prompt must not re-handshake: {methods:?}"
+    );
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "session/new" || *method == "session/load")
+            .count(),
+        1,
+        "the second prompt must reuse the open session: {methods:?}"
+    );
     bridge.abort();
 }
 
@@ -2040,6 +2146,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
             &mut request_rx,
             event_tx,
             Arc::new(Mutex::new(None)),
+            false,
         )
         .await
     });
@@ -2090,6 +2197,158 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         .expect("an unacked cancel restarts instead of failing the runtime");
     assert_eq!(restart.as_deref(), Some("scripted"));
     bridge.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
+    fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
+        LaunchSpec {
+            command: "scripted".into(),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cwd: std::env::current_dir().unwrap(),
+            additional_directories: Vec::new(),
+            extra_mcp_servers: Vec::new(),
+            project_memory: None,
+            resume_session,
+            harness: HarnessKind::Kimi,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            acp_activity: AcpActivityClock::default(),
+        }
+    }
+
+    // The first bridge stalls its prompt, so an unacknowledged cancel restarts
+    // the harness the way `run_inner` would.
+    let (first_client, first_bridge) = tokio::io::duplex(64 * 1024);
+    let (first_observed_tx, mut first_observed_rx) = mpsc::unbounded_channel();
+    let (_complete_tx, complete_rx) = mpsc::channel(1);
+    let first = tokio::spawn(stalled_prompt_bridge(
+        first_bridge,
+        first_observed_tx,
+        complete_rx,
+    ));
+    let (first_read, first_write) = tokio::io::split(first_client);
+    let first_transport = ByteStreams::new(first_write.compat_write(), first_read.compat());
+    let (request_tx, request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let first_events = event_tx.clone();
+    let first_driver = tokio::spawn(async move {
+        let mut request_rx = request_rx;
+        let result = drive(
+            first_transport,
+            scripted_spec(None),
+            &mut request_rx,
+            first_events,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await;
+        (result, request_rx)
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-1".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("go"))],
+        })
+        .await
+        .unwrap();
+    let mut first_methods = Vec::new();
+    wait_for_bridge_prompt(&mut first_observed_rx, &mut first_methods).await;
+    request_tx
+        .send(CommandRequest::Cancel {
+            request_id: "cancel-1".into(),
+            steering_prompt: None,
+        })
+        .await
+        .unwrap();
+    wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::CancelApplied { request_id } if request_id == "cancel-1")
+        })
+        .await;
+    tokio::time::advance(CANCEL_ACK_TIMEOUT).await;
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(
+            event,
+            RuntimeEvent::CommandInterrupted { request_id, .. } if request_id == "prompt-1"
+        )
+    })
+    .await;
+    let (restart, mut request_rx) = tokio::time::timeout(Duration::from_secs(5), first_driver)
+        .await
+        .expect("runtime exits after an unacked cancel")
+        .expect("runtime task does not panic");
+    let restart = restart.expect("an unacked cancel restarts instead of failing the runtime");
+    assert_eq!(restart.as_deref(), Some("scripted"));
+    first.abort();
+
+    // The worker queued this before it saw `HarnessRestarting`, so it is
+    // already in the set the worker interrupted. The fresh bridge must drop it
+    // instead of running it untracked on the reloaded session.
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "late-prompt".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("stale"))],
+        })
+        .await
+        .unwrap();
+
+    let (second_client, second_bridge) = tokio::io::duplex(64 * 1024);
+    let (second_observed_tx, mut second_observed_rx) = mpsc::unbounded_channel();
+    let second = tokio::spawn(prompt_echoing_bridge(second_bridge, second_observed_tx));
+    let (second_read, second_write) = tokio::io::split(second_client);
+    let second_transport = ByteStreams::new(second_write.compat_write(), second_read.compat());
+    let second_driver = tokio::spawn(async move {
+        drive(
+            second_transport,
+            scripted_spec(Some("scripted".into())),
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            true,
+        )
+        .await
+    });
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+
+    // A command dispatched after the worker sees the fresh session does run.
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "after-restart".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("fresh"))],
+        })
+        .await
+        .unwrap();
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(
+            event,
+            RuntimeEvent::PromptFinished { request_id, .. } if request_id == "after-restart"
+        )
+    })
+    .await;
+    drop(request_tx);
+    let restart = tokio::time::timeout(Duration::from_secs(5), second_driver)
+        .await
+        .expect("the second bridge exits when its requests end")
+        .expect("runtime task does not panic")
+        .expect("the second bridge must not fail the runtime");
+    assert_eq!(restart, None);
+    let mut second_methods = Vec::new();
+    while let Ok(method) = second_observed_rx.try_recv() {
+        second_methods.push(method);
+    }
+    assert_eq!(
+        second_methods,
+        vec![
+            "initialize".to_owned(),
+            "session/load".to_owned(),
+            "session/prompt:fresh".to_owned(),
+        ],
+        "the queued prompt must never reach the fresh bridge"
+    );
+    second.abort();
 }
 
 /// Terminals run real children in real process groups, which only Unix has.
@@ -2282,6 +2541,7 @@ mod terminals {
                 &mut request_rx,
                 event_tx,
                 Arc::new(Mutex::new(None)),
+                false,
             )
             .await
         });
@@ -2844,9 +3104,10 @@ while True:
 
 #[cfg(unix)]
 #[tokio::test]
-async fn planned_bridge_replacement_reports_a_harness_restart() {
+async fn an_acknowledged_cancel_keeps_the_running_bridge() {
     let temp = tempfile::tempdir().unwrap();
     let prompt_seen = temp.path().join("prompt-seen");
+    let initializes = temp.path().join("initializes");
     let script = temp.path().join("cancelled_acp.py");
     std::fs::write(
         &script,
@@ -2854,6 +3115,7 @@ async fn planned_bridge_replacement_reports_a_harness_restart() {
             r#"
 import json, sys
 prompt_seen = {prompt_seen:?}
+initializes = {initializes:?}
 
 def read():
     line = sys.stdin.readline()
@@ -2863,6 +3125,7 @@ def write(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
 
+prompts = 0
 while True:
     request = read()
     if request is None:
@@ -2870,14 +3133,20 @@ while True:
     method = request.get("method")
     ident = request.get("id")
     if method == "initialize":
+        with open(initializes, "a") as handle:
+            handle.write("x")
         write({{"jsonrpc": "2.0", "id": ident, "result": {{"protocolVersion": 1}}}})
     elif method in ("session/new", "session/load"):
         write({{"jsonrpc": "2.0", "id": ident, "result": {{"sessionId": "scripted"}}}})
     elif method == "session/prompt":
-        open(prompt_seen, "w").close()
-        cancellation = read()
-        assert cancellation.get("method") == "session/cancel", cancellation
-        write({{"jsonrpc": "2.0", "id": ident, "result": {{"stopReason": "cancelled"}}}})
+        prompts += 1
+        if prompts == 1:
+            open(prompt_seen, "w").close()
+            cancellation = read()
+            assert cancellation.get("method") == "session/cancel", cancellation
+            write({{"jsonrpc": "2.0", "id": ident, "result": {{"stopReason": "cancelled"}}}})
+        else:
+            write({{"jsonrpc": "2.0", "id": ident, "result": {{"stopReason": "end_turn"}}}})
     elif ident is not None:
         write({{"jsonrpc": "2.0", "id": ident, "result": {{}}}})
 "#,
@@ -2902,6 +3171,27 @@ while True:
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
 
+    let mut finished = Vec::new();
+    let wait_for_finished_prompt =
+        async |event_rx: &mut mpsc::Receiver<RuntimeEvent>, finished: &mut Vec<String>| {
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                    .await
+                    .expect("the ACP runtime keeps reporting")
+                    .expect("the event channel stays open");
+                match event {
+                    RuntimeEvent::HarnessRestarting { message } => {
+                        panic!("an acknowledged cancel must not restart the bridge: {message}")
+                    }
+                    RuntimeEvent::PromptFinished { request_id, .. } => {
+                        finished.push(request_id);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        };
+
     wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event, RuntimeEvent::SessionStarted { resumed: false, .. })
     })
@@ -2913,7 +3203,7 @@ while True:
         })
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         while !prompt_seen.exists() {
             tokio::task::yield_now().await;
         }
@@ -2927,26 +3217,30 @@ while True:
         })
         .await
         .unwrap();
+    wait_for_finished_prompt(&mut event_rx, &mut finished).await;
 
-    let restart = wait_for_runtime_event(&mut event_rx, |event| {
-        matches!(event, RuntimeEvent::HarnessRestarting { .. })
-    })
-    .await;
-    let RuntimeEvent::HarnessRestarting { message } = restart else {
-        unreachable!();
-    };
-    assert!(message.contains("restarting"), "{message}");
-    wait_for_runtime_event(&mut event_rx, |event| {
-        matches!(event, RuntimeEvent::SessionStarted { resumed: true, .. })
-    })
-    .await;
+    // The bridge that acknowledged the cancel serves the next prompt too.
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-2".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("carry on"))],
+        })
+        .await
+        .unwrap();
+    wait_for_finished_prompt(&mut event_rx, &mut finished).await;
+    assert_eq!(finished, vec!["prompt-1".to_owned(), "prompt-2".to_owned()]);
+    assert_eq!(
+        std::fs::read_to_string(&initializes).unwrap(),
+        "x",
+        "the second prompt must run on the bridge that was already open"
+    );
 
     drop(request_tx);
-    tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
+    tokio::time::timeout(Duration::from_secs(5), runtime)
         .await
         .expect("closing the command channel ends the runtime")
         .expect("runtime task does not panic")
-        .expect("planned bridge replacement remains healthy");
+        .expect("an acknowledged cancel keeps the runtime healthy");
 }
 
 #[cfg(unix)]
