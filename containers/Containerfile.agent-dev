@@ -23,10 +23,6 @@ RUN cargo install brokk-bifrost@${BIFROST_VERSION} --locked --bin bifrost --root
 
 FROM ${RUST_IMAGE}
 
-LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
-      org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
-      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges"
-
 # The Node image and Rust image share the Trixie base. Copying /usr/local
 # brings in Node, npm, npx, Corepack, and the headers needed by native modules.
 COPY --from=node /usr/local/ /usr/local/
@@ -202,6 +198,13 @@ USER hel
 ENV HOME=/home/hel \
     SHELL=/bin/bash
 WORKDIR /workspace
+
+# Metadata comes last so that editing it never invalidates the cached layers
+# above; a label-only change then republishes an image whose filesystem layers
+# every host already has.
+LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
+      org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
+      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges"
 
 # Hel overrides the command with the same keepalive, but retaining it here also
 # makes the image convenient to inspect directly.
