@@ -21,8 +21,8 @@ Ryan Svihla approved the split on 2026-09-02.
 - [x] (2026-09-02 21:05Z) M1a: text helpers and browser transcript types move out of `hel_chat`; reset-time helpers move out of `usage_format`; `hel_import` stops naming `ChatState`.
 - [x] (2026-09-02 18:35Z) M1b: launch-config and MCP types move out of `hel_worker_runtime`; `terminate_process_group` moves to `hel_subprocess`; `harness_authentication_marker` moves to `hel_config`.
 - [x] (2026-09-02 21:40Z) M1 verification: the edge script reports zero escaping edges in non-test and test code (after switching `src/hel_review/host.rs` to `hel_transcript`); `cargo clippy --all-targets -- -D warnings` clean; `cargo test` green (1663 core, 270 tui, 111 cli); committed.
-- [ ] M2: create `mj-worker/`, `mj-controller/`, `mj-chat/` crates; move modules; `cargo check --workspace` green.
-- [ ] M3: rewrite `hel::` paths in `mj-tui`, `mj-cli`, `mj-desktop`; update CI, publish, coverage, release-version script, RELEASING.md, CONTRIBUTING.md; full `cargo test` and clippy green; commit.
+- [x] (2026-09-02 18:04Z) M2: created `mj-worker/`, `mj-controller/`, `mj-chat/`; moved every module with `git mv`; `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings` and `cargo test` green over the default members; `--workspace` additionally builds `mj-desktop`, which this host cannot compile because the GTK development libraries are absent (a pre-existing environment limit, not a split effect); `cargo build --bin mj` and `cargo build --target x86_64-unknown-linux-musl --bin mj` link; the edge script prints two empty reports.
+- [ ] M3: update CI, publish, coverage, release-version script, RELEASING.md, CONTRIBUTING.md; commit. The downstream half (rewriting `hel::` paths in `mj-tui`, `mj-cli`, `mj-desktop` and adding the new workspace dependencies) was done inside M2, because the workspace has to compile at the end of M2.
 - [ ] M4: re-measure the three baseline timings and record them in `Outcomes & Retrospective`; push.
 
 
@@ -43,6 +43,18 @@ Ryan Svihla approved the split on 2026-09-02.
   Evidence: `src/hel_import.rs` `canonical_import_session`; `src/hel_chat.rs` `apply_adapter`, `apply_session_update_at`; `src/hel_transcript.rs`; `src/hel_projection.rs`.
 
 - Observation: moving the three `materialized_*` text helpers pulled a larger set with them than the plan expected, because they sit on top of the chat view's ACP-to-text layer: `sanitize_terminal_text` (and its escape-consuming helpers, from `hel_chat/rendering.rs`), `content_block_text`, `tool_status`, `plan_status`, `tool_content_details`, `tool_diff_paths`, `tool_location_details`, the terminal-output summaries, and `format_diffstat`. None of them touch chat state, so they belong below it, and `hel_chat` re-exports the names it still uses.
+
+- Observation: `src/hel_review/bifrost.rs` has two callers, not one. `hel_worker_runtime/reviewer.rs` builds its change packet and `hel_review/host.rs` calls `review_mcp_servers`. Moving it into the worker crate would therefore have forced a controller-to-worker edge, which is exactly the edge this split exists to remove, so it stayed in the foundation's `hel_review`.
+  Evidence: `mj-worker/src/hel_worker_runtime/reviewer.rs` `changed_functions_packet`; `mj-controller/src/hel_review_host.rs` `hel::hel_review::bifrost::review_mcp_servers`.
+
+- Observation: `include_str!` is the one thing a crate split cannot move freely. `hel_doctor::setup_instructions` embedded `../docs/PODMAN.md` and `../docs/DOCKER.md`, and from `mj-controller/src` that path escapes the package directory, which `cargo package` cannot carry. The docs stayed where humans and the README expect them and the foundation now exposes them as `hel_targets::PODMAN_DOCUMENTATION` and `DOCKER_DOCUMENTATION`, beside the `*_DOCUMENTATION_PATH` constants that already named the files; the root package's `include` list already carried `docs/`. The web, icon and font assets moved with `hel_server` into `mj-controller/src/`, so their relative paths still resolve.
+
+- Observation: three tests re-exec the test binary with `--exact <name>` built from `module_path!()` with the `hel::` prefix stripped. In the controller crate the prefix is `mj_controller::`, so the child filter matched nothing and the parent failed with "the isolated broker retirement test never ran". Fourteen call sites needed the new prefix. A test that names its own crate is a hidden dependency on the crate layout.
+  Evidence: `mj-controller/src/hel_controller/lifecycle.rs`, `checkpoint.rs`, `resume.rs`, `provisioning.rs`, `hel_session_manager.rs`.
+
+- Observation: `env!("CARGO_MANIFEST_DIR")` is the same trap in integration tests. `tests/import_e2e.rs` read `scripts/*.sh` relative to the manifest directory; after the move to `mj-cli/tests/` that directory is the crate, not the repository, so the test now takes its parent.
+
+- Observation: `iana-time-zone` is a direct dependency that no source file names. `chrono`'s `clock` feature pulls it regardless, so it stayed in the root manifest rather than being moved or dropped in a split commit.
 
 - Observation: clean-build parallelism is a small win; edit scope is the real win. The front end is serial per crate and the crates chain foundation, then controller, then chat, so the critical path only shrinks from ~152K to ~140K lines. But a chat edit recompiles 23K lines instead of 152K.
 
@@ -76,6 +88,30 @@ Ryan Svihla approved the split on 2026-09-02.
 
 - Decision: the controller crate must not depend on the worker crate.
   Rationale: this is what lets Cargo build the two in parallel. Everything the controller needs from `hel_worker_runtime` today is a handful of plain data types (`WorkerOwnership`, `WorkerLaunchConfig`, `ReviewerLaunchConfig`, `ProjectMemoryLaunchConfig`, `ProjectMemoryMcpDelivery`, `ReviewMcpServer`, `ReviewMcpDelivery`) plus one function (`terminate_process_group`); those move to the foundation in M1b.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: `hel_review/bifrost.rs` stays in the foundation instead of moving into `brokk-mj-worker`.
+  Rationale: the review host calls `review_mcp_servers` from it, so a worker-crate home would make the controller depend on the worker. Its own dependencies are `hel_config` and `hel_worker_launch`, both foundation, so it sits in the foundation without pulling anything up.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: test fixtures needed across crates become `#[doc(hidden)] pub` rather than being gated on the `test-hooks` feature.
+  Rationale: `test-hooks` is not a "expose test helpers" switch; it compiles the crash-boundary hooks of the reliability laboratory into the binary and changes runtime behaviour. Gating fixtures on it would force every ordinary `cargo test` run to enable it. Two items needed this: `hel_database::install_isolated_test_writer` and `hel_session_manager::replacement_session_test_fixture` (with its result type). Both are thin wrappers over code that is public anyway, so nothing test-only leaks into the library. The new crates still declare `test-hooks = ["hel/test-hooks"]` so `mj-cli` can turn the real hooks on through them.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: `WorkerLaunchConfig::enforce_execution_policy` became the free function `mj_worker::hel_worker_runtime::enforce_execution_policy(&mut config)` rather than an extension trait.
+  Rationale: it has two callers, both inside `mj-worker`. A trait would add a name to import at each call site and a public surface to document for no gain.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: the two container-runtime documentation pages are embedded from the foundation (`hel_targets::PODMAN_DOCUMENTATION` and `DOCKER_DOCUMENTATION`) instead of moving `docs/PODMAN.md` and `docs/DOCKER.md` under `mj-controller/`.
+  Rationale: `cargo package` cannot carry a file from outside the package directory, and these pages are human documentation that the README and `docs/SSH.md` link to; the repository's own convention reserves `docs/` for readers. The root package already lists them in its `include`, so publishing keeps working with no plumbing change.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: `tests/import_e2e.rs` moved to `mj-cli/tests/` and the four `scripts/test-*-import-e2e.sh` runners now pass `-p brokk-mjolnir`.
+  Rationale: the test needs the controller, which the foundation crate cannot depend on, and it drives the `mj` binary through `CARGO_BIN_EXE_mj`, which only the crate that defines that binary provides.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: the M1 re-exports at the old paths were removed wherever no caller in the owning crate still needed the name, and demoted to plain `use` where one did.
+  Rationale: a cross-crate `pub use` gives every type two public paths, which is what the plan set out to avoid. `hel_worker_runtime`'s launch-type and `terminate_process_group` re-exports are gone, `hel_setup::harness_authentication_marker` is now a private import with `mj-cli` naming `hel::hel_config`, and `hel_chat`'s `materialized_*` re-exports are `pub(super)` with `mj-tui` and `mj-cli` naming `hel::hel_transcript`.
   Date/Author: 2026-09-02, Fable.
 
 
