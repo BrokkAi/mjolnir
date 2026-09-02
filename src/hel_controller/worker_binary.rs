@@ -901,7 +901,7 @@ pub(super) fn bridge_launch(
             "sh".into(),
             vec![
                 "-c".into(),
-                "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Hel needs compatible Kimi Code or curl for its official installer; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi".into(),
+                "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code or curl for its official installer; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi".into(),
             ],
         ),
         crate::hel_config::HarnessKind::Grok => {
@@ -913,7 +913,7 @@ pub(super) fn bridge_launch(
                 vec![
                     "-c".into(),
                     format!(
-                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Hel needs compatible Grok Build or curl for its official installer; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi"
+                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build or curl for its official installer; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi"
                     ),
                 ],
             )
@@ -923,7 +923,7 @@ pub(super) fn bridge_launch(
             vec![
                 "-c".into(),
                 format!(
-                    "{}; if command -v dsh >/dev/null 2>&1 && command -v dsh-acp-server >/dev/null 2>&1; then exec dsh-acp-server; fi; echo 'Hel needs @deepseek-ai/dsh@{DEEPSEEK_HARNESS_FALLBACK_VERSION} and dsh-acp-server@{DEEPSEEK_ACP_FALLBACK_VERSION} installed on PATH; configure the profile executable or environment PATH when they are installed elsewhere' >&2; exit 127",
+                    "{}; if command -v dsh >/dev/null 2>&1 && command -v dsh-acp-server >/dev/null 2>&1; then exec dsh-acp-server; fi; echo 'Mjolnir needs @deepseek-ai/dsh@{DEEPSEEK_HARNESS_FALLBACK_VERSION} and dsh-acp-server@{DEEPSEEK_ACP_FALLBACK_VERSION} installed on PATH; configure the profile executable or environment PATH when they are installed elsewhere' >&2; exit 127",
                     ensure_node_22_script(),
                 ),
             ],
@@ -932,7 +932,7 @@ pub(super) fn bridge_launch(
 }
 
 fn ensure_node_script() -> &'static str {
-    "if ! command -v npx >/dev/null 2>&1; then if [ \"$(id -u)\" = 0 ]; then SUDO=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true; then SUDO='sudo'; else echo 'Hel needs Node/npx or passwordless sudo to install it; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y nodejs npm; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y nodejs npm; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y nodejs npm; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache nodejs npm; else echo 'Hel cannot install Node on this image; bake npx or a compatible ACP bridge into it, or configure the profile executable or environment PATH' >&2; exit 127; fi; fi"
+    "if ! command -v npx >/dev/null 2>&1; then if [ \"$(id -u)\" = 0 ]; then SUDO=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true; then SUDO='sudo'; else echo 'Mjolnir needs Node/npx or passwordless sudo to install it; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y nodejs npm; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y nodejs npm; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y nodejs npm; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache nodejs npm; else echo 'Mjolnir cannot install Node on this image; bake npx or a compatible ACP bridge into it, or configure the profile executable or environment PATH' >&2; exit 127; fi; fi"
 }
 
 fn ensure_node_22_script() -> String {
@@ -2430,6 +2430,8 @@ mod tests {
         assert!(deepseek_arguments[1].contains("dsh-acp-server@0.10.0"));
         assert!(!deepseek_arguments[1].contains("npx -y -p @deepseek-ai/dsh"));
         assert!(deepseek_arguments[1].contains("exec dsh-acp-server"));
+        assert!(deepseek_arguments[1].contains("Mjolnir needs @deepseek-ai/dsh"));
+        assert!(!deepseek_arguments[1].contains("Hel"));
     }
     #[test]
     fn codex_execution_environment_follows_the_target_policy() {
@@ -2552,6 +2554,8 @@ mod tests {
         assert_eq!(arguments[0], "-c");
         assert!(arguments[1].contains("install.sh | bash &&"));
         assert!(arguments[1].contains("$HOME/.kimi-code/bin/kimi"));
+        assert!(arguments[1].contains("Mjolnir needs compatible Kimi Code"));
+        assert!(!arguments[1].contains("Hel"));
     }
     #[test]
     fn grok_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
@@ -2570,6 +2574,15 @@ mod tests {
         assert!(script.contains("exit 127"));
         assert!(script.contains("exec grok agent stdio"));
         assert!(!script.contains("--always-approve"));
+        assert!(script.contains("Mjolnir needs compatible Grok Build"));
+        assert!(!script.contains("Hel"));
+    }
+    #[test]
+    fn node_bootstrap_errors_name_mjolnir() {
+        let script = ensure_node_script();
+        assert!(script.contains("Mjolnir needs Node/npx or passwordless sudo"));
+        assert!(script.contains("Mjolnir cannot install Node on this image"));
+        assert!(!script.contains("Hel"));
     }
     #[test]
     fn grok_default_bridge_adds_the_always_approve_flag_when_unrestricted() {
