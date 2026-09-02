@@ -2244,7 +2244,7 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
         !output.contains("first line of the build log"),
         "the head is what gets dropped, not the tail"
     );
-    assert!(output.contains("[hel dropped"), "the drop is disclosed");
+    assert!(output.contains("[mj dropped"), "the drop is disclosed");
     assert!(
         output.len() < produced,
         "the journal copy is capped below what the terminal produced"
