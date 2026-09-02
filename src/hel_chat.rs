@@ -26,16 +26,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority,
-    PlanEntryStatus, SessionConfigOption, SessionModeState, SessionUpdate, TextContent, ToolCall,
-    ToolCallContent, ToolCallStatus,
+    AvailableCommand, SessionConfigOption, SessionModeState, SessionUpdate,
 };
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
-use sha2::{Digest, Sha256};
 
 use crate::clock::epoch_seconds;
 pub use crate::hel_acp::PlanControl;
@@ -50,12 +47,13 @@ use crate::hel_state::{
     MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession, QueuedCommandKind,
     SessionRecord, TranscriptBody, TranscriptItem,
 };
+#[cfg(test)]
+use crate::hel_transcript::PlanStatus;
 use crate::hel_transcript::{
-    ChatEntry, ChatRole, PlanLine, PlanStatus, ToolStatus, TranscriptSource,
+    ChatEntry, ChatRole, apply_runtime_event_to_entries, apply_session_update_to_entries,
 };
 use crate::hel_worker::{
-    ActiveAgentTerminal, RELAY_EVENT_GENESIS_DIGEST, SequencedEvent, WorkerEvent, WorkerPhase,
-    WorkerSnapshot,
+    ActiveAgentTerminal, SequencedEvent, WorkerEvent, WorkerPhase, WorkerSnapshot,
 };
 
 use autocomplete::{
@@ -70,8 +68,7 @@ use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
     ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptSelectionSpace,
-    content_block_text, materialized_chat_entries_reusing, plan_status, tool_content_details,
-    tool_diff_paths, tool_location_details, tool_status,
+    materialized_chat_entries_reusing,
 };
 use turn_review::{TurnReview, TurnReviewIntent};
 
@@ -80,9 +77,9 @@ const MOUSE_SCROLL_ROWS: usize = 3;
 pub use active::{ActiveChat, ChatDaemonRequest};
 pub use second_opinion::SecondOpinionIntent as SecondOpinionRequest;
 pub use transcript::{
-    BrowserTranscript, BrowserTranscriptEntry, TAIL_SEED_ITEMS, TranscriptSnapshot,
-    format_event_time, materialized_chunks_text, materialized_content_text,
-    materialized_tool_diffstats, render_agent_message_head, render_agent_message_tail,
+    TAIL_SEED_ITEMS, TranscriptSnapshot, format_event_time, materialized_chunks_text,
+    materialized_content_text, materialized_tool_diffstats, render_agent_message_head,
+    render_agent_message_tail,
 };
 pub use turn_review::TurnReviewIntent as TurnReviewRequest;
 
@@ -256,58 +253,6 @@ pub struct SessionHeaderIdentity {
 pub struct ChatSessionContext {
     pub config: HelConfig,
     pub session: SessionRecord,
-}
-
-/// Constructors that need [`sanitize_terminal_text`], which is chat-view
-/// specific and so cannot live with the rest of [`ChatEntry`] in
-/// `hel_transcript`.
-impl ChatEntry {
-    fn plain(seq: u64, role: ChatRole, text: impl Into<String>) -> Self {
-        Self {
-            start_seq: seq,
-            seq,
-            role,
-            text: sanitize_terminal_text(&text.into()),
-            recorded_at_ms: None,
-            revision: 0,
-            message_id: None,
-            tool_call_id: None,
-            tool_status: None,
-            tool_content: Vec::new(),
-            tool_diffstats: Vec::new(),
-            tool_locations: Vec::new(),
-            plan: Vec::new(),
-            leading_omitted: false,
-            raw_only: false,
-            source: TranscriptSource::default(),
-        }
-    }
-
-    fn tool(
-        seq: u64,
-        title: impl Into<String>,
-        tool_call_id: Option<String>,
-        tool_status: ToolStatus,
-    ) -> Self {
-        Self {
-            start_seq: seq,
-            seq,
-            role: ChatRole::Tool,
-            text: sanitize_terminal_text(&title.into()),
-            recorded_at_ms: None,
-            revision: 0,
-            message_id: None,
-            tool_call_id,
-            tool_status: Some(tool_status),
-            tool_content: Vec::new(),
-            tool_diffstats: Vec::new(),
-            tool_locations: Vec::new(),
-            plan: Vec::new(),
-            leading_omitted: false,
-            raw_only: false,
-            source: TranscriptSource::default(),
-        }
-    }
 }
 
 pub struct ChatState {
@@ -990,146 +935,6 @@ impl ChatState {
     /// canonical logical-session model. Native importers use this at their
     /// boundary; live relay sessions are projected directly from relay events.
     pub fn materialized_session(&self) -> MaterializedSession {
-        let mut stable_ids = BTreeSet::new();
-        let transcript = self
-            .entries
-            .iter()
-            .filter(|entry| entry.start_seq > 0)
-            .map(|entry| {
-                let base_id = match entry.role {
-                    ChatRole::User => format!("user:{}", entry.start_seq),
-                    ChatRole::Agent => entry.message_id.as_ref().map_or_else(
-                        || format!("agent:{}", entry.start_seq),
-                        |id| format!("agent:{id}"),
-                    ),
-                    ChatRole::Thought => entry.message_id.as_ref().map_or_else(
-                        || format!("thought:{}", entry.start_seq),
-                        |id| format!("thought:{id}"),
-                    ),
-                    ChatRole::Tool => entry.tool_call_id.as_ref().map_or_else(
-                        || format!("tool:{}", entry.start_seq),
-                        |id| format!("tool:{id}"),
-                    ),
-                    ChatRole::Plan => format!("plan:{}", entry.start_seq),
-                    ChatRole::PlanProposal => format!("plan-proposal:{}", entry.start_seq),
-                    ChatRole::System => format!("system:{}", entry.start_seq),
-                };
-                let stable_id = if stable_ids.insert(base_id.clone()) {
-                    base_id
-                } else {
-                    format!("{base_id}:{}", entry.start_seq)
-                };
-                let body = match entry.role {
-                    ChatRole::User => TranscriptBody::User {
-                        content: vec![serde_json::json!({
-                            "type": "text",
-                            "text": entry.text,
-                        })],
-                    },
-                    ChatRole::Agent | ChatRole::Thought => {
-                        let mut chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(
-                            entry.text.clone(),
-                        )));
-                        if let Some(message_id) = &entry.message_id {
-                            chunk = chunk.message_id(message_id.as_str());
-                        }
-                        let chunks = vec![
-                            serde_json::to_value(chunk)
-                                .expect("ACP content chunk serialization cannot fail"),
-                        ];
-                        if entry.role == ChatRole::Agent {
-                            TranscriptBody::Agent {
-                                chunks,
-                                streaming: false,
-                            }
-                        } else {
-                            TranscriptBody::Thought {
-                                chunks,
-                                streaming: false,
-                            }
-                        }
-                    }
-                    ChatRole::Tool => {
-                        let call_id = entry
-                            .tool_call_id
-                            .clone()
-                            .unwrap_or_else(|| stable_id.clone());
-                        let content = entry
-                            .tool_content
-                            .iter()
-                            .cloned()
-                            .map(|text| {
-                                ToolCallContent::from(ContentBlock::Text(TextContent::new(text)))
-                            })
-                            .collect();
-                        let mut call = ToolCall::new(call_id, entry.text.clone())
-                            .status(match entry.tool_status.unwrap_or(ToolStatus::Pending) {
-                                ToolStatus::Pending => ToolCallStatus::Pending,
-                                ToolStatus::Running => ToolCallStatus::InProgress,
-                                ToolStatus::Completed => ToolCallStatus::Completed,
-                                ToolStatus::Failed => ToolCallStatus::Failed,
-                            })
-                            .content(content);
-                        if !entry.tool_diffstats.is_empty() || !entry.tool_locations.is_empty() {
-                            call = call.raw_output(serde_json::json!({
-                                "legacyDiffstats": entry.tool_diffstats,
-                                "legacyLocations": entry.tool_locations,
-                            }));
-                        }
-                        TranscriptBody::Tool {
-                            call: serde_json::to_value(call)
-                                .expect("ACP tool call serialization cannot fail"),
-                            terminal_outputs: Vec::new(),
-                            terminal_refs: Vec::new(),
-                        }
-                    }
-                    ChatRole::Plan => TranscriptBody::Plan {
-                        plan: serde_json::to_value(Plan::new(
-                            entry
-                                .plan
-                                .iter()
-                                .map(|line| {
-                                    PlanEntry::new(
-                                        line.text.clone(),
-                                        PlanEntryPriority::Medium,
-                                        match line.status {
-                                            PlanStatus::Pending => PlanEntryStatus::Pending,
-                                            PlanStatus::Running => PlanEntryStatus::InProgress,
-                                            PlanStatus::Completed => PlanEntryStatus::Completed,
-                                        },
-                                    )
-                                })
-                                .collect(),
-                        ))
-                        .expect("ACP plan serialization cannot fail"),
-                    },
-                    ChatRole::PlanProposal => TranscriptBody::PlanProposal {
-                        proposal_id: format!("legacy:{}", entry.start_seq),
-                        plan: entry.text.clone(),
-                    },
-                    ChatRole::System => TranscriptBody::System {
-                        text: entry.text.clone(),
-                    },
-                };
-                let timestamp = entry.recorded_at_ms.unwrap_or_default();
-                Arc::new(TranscriptItem {
-                    stable_id,
-                    position: entry.start_seq,
-                    latest_content_event_ordinal: (entry.role == ChatRole::Agent)
-                        .then_some(entry.seq),
-                    created_at_ms: timestamp,
-                    last_changed_at_ms: timestamp,
-                    body,
-                })
-            })
-            .collect::<Vec<_>>();
-        let started_at_ms = self
-            .entries
-            .iter()
-            .rev()
-            .find(|entry| entry.role == ChatRole::User)
-            .and_then(|entry| entry.recorded_at_ms)
-            .unwrap_or_default();
         let mut configuration = BTreeMap::new();
         if let Some(model) = self.acp_surface.current_model() {
             configuration.insert("model".into(), serde_json::Value::String(model.to_owned()));
@@ -1140,35 +945,13 @@ impl ChatState {
                 serde_json::Value::String(effort.to_owned()),
             );
         }
-        let applied_event_digest = if self.latest_seq == 0 {
-            RELAY_EVENT_GENESIS_DIGEST.to_owned()
-        } else {
-            let mut digest = Sha256::new();
-            digest.update(b"hel-imported-transcript-frontier-v1\0");
-            digest.update(self.session_id.as_bytes());
-            digest.update(self.latest_seq.to_le_bytes());
-            format!("{:x}", digest.finalize())
-        };
-        MaterializedSession {
-            session_id: self.session_id.clone(),
-            applied_event_ordinal: self.latest_seq,
-            applied_event_digest,
-            last_activity_at_ms: self
-                .entries
-                .iter()
-                .filter_map(|entry| entry.recorded_at_ms)
-                .max(),
-            execution: match self.phase {
-                WorkerPhase::Idle => MaterializedExecutionState::Idle,
-                WorkerPhase::Running => MaterializedExecutionState::Running { started_at_ms },
-                WorkerPhase::Closing => MaterializedExecutionState::Closing,
-                WorkerPhase::Closed => MaterializedExecutionState::Closed,
-            },
-            session_title: None,
+        crate::hel_projection::materialized_session_from_entries(
+            &self.session_id,
+            &self.entries,
+            self.latest_seq,
+            self.phase,
             configuration,
-            transcript,
-            queued_prompts: self
-                .queued_prompts
+            self.queued_prompts
                 .iter()
                 .map(|prompt| MaterializedQueuedPrompt {
                     command_id: prompt.id.clone(),
@@ -1180,12 +963,11 @@ impl ChatState {
                     queued_at_ms: 0,
                 })
                 .collect(),
-            pending_elicitations: self
-                .elicitation
+            self.elicitation
                 .as_ref()
                 .map(|dialog| vec![dialog.request().clone()])
                 .unwrap_or_default(),
-        }
+        )
     }
 
     pub fn queued_prompt_snapshot(&self) -> Vec<crate::hel_worker::QueuedPrompt> {
@@ -2027,28 +1809,19 @@ impl ChatState {
                 return;
             }
         };
+        let Some(runtime) =
+            apply_runtime_event_to_entries(&mut self.entries, seq, recorded_at_ms, runtime)
+        else {
+            return;
+        };
         match runtime {
             RuntimeEvent::SessionUpdate { update } => {
                 self.apply_session_update_at(seq, recorded_at_ms, &update)
             }
-            RuntimeEvent::Warning { message } => self.entries.push(ChatEntry::plain(
-                seq,
-                ChatRole::System,
-                format!("warning: {message}"),
-            )),
-            RuntimeEvent::ConfigApplied { key, value, .. } => self.entries.push(ChatEntry::plain(
-                seq,
-                ChatRole::System,
-                format!("{key} set to {value}"),
-            )),
             RuntimeEvent::SessionConfigured { config_options } => {
                 self.set_config_options(&config_options)
             }
             RuntimeEvent::SessionModesConfigured { modes } => self.set_session_modes(modes),
-            RuntimeEvent::SessionStarted { resumed: false, .. } => self.entries.push(
-                ChatEntry::plain(seq, ChatRole::System, "harness session started"),
-            ),
-            RuntimeEvent::SessionStarted { resumed: true, .. } => {}
             _ => {}
         }
     }
@@ -2074,86 +1847,12 @@ impl ChatState {
                 return;
             }
         };
+        let Some(parsed) =
+            apply_session_update_to_entries(&mut self.entries, seq, recorded_at_ms, parsed)
+        else {
+            return;
+        };
         match parsed {
-            SessionUpdate::AgentMessageChunk(chunk) => {
-                let message_id = chunk.message_id.map(|id| id.to_string());
-                if let Some(text) = content_block_text(&chunk.content) {
-                    self.push_streamed(seq, recorded_at_ms, ChatRole::Agent, message_id, &text);
-                }
-            }
-            SessionUpdate::AgentThoughtChunk(chunk) => {
-                let message_id = chunk.message_id.map(|id| id.to_string());
-                if let Some(text) = content_block_text(&chunk.content) {
-                    self.push_streamed(seq, recorded_at_ms, ChatRole::Thought, message_id, &text);
-                }
-            }
-            // PromptAccepted is the canonical local user-message event. ACP
-            // user chunks would duplicate it during replay.
-            SessionUpdate::UserMessageChunk(_) => {}
-            SessionUpdate::ToolCall(call) => {
-                let mut entry = ChatEntry::tool(
-                    seq,
-                    call.title,
-                    Some(call.tool_call_id.to_string()),
-                    tool_status(&call.status),
-                );
-                entry.tool_content =
-                    tool_content_details(&call.content, &[], call.raw_output.as_ref());
-                entry.tool_diffstats = tool_diff_paths(&call.content);
-                entry.tool_locations = tool_location_details(&call.locations);
-                self.entries.push(entry);
-            }
-            SessionUpdate::ToolCallUpdate(update) => {
-                let tool_call_id = update.tool_call_id.to_string();
-                let Some(entry) = self.entries.iter_mut().rev().find(|entry| {
-                    entry.role == ChatRole::Tool
-                        && entry.tool_call_id.as_deref() == Some(tool_call_id.as_str())
-                }) else {
-                    return;
-                };
-                entry.touch(seq);
-                if let Some(title) = update.fields.title {
-                    entry.text = sanitize_terminal_text(&title);
-                }
-                if let Some(status) = update.fields.status {
-                    entry.tool_status = Some(tool_status(&status));
-                }
-                if let Some(content) = update.fields.content {
-                    entry.tool_content =
-                        tool_content_details(&content, &[], update.fields.raw_output.as_ref());
-                    entry.tool_diffstats = tool_diff_paths(&content);
-                }
-                if let Some(locations) = update.fields.locations {
-                    entry.tool_locations = tool_location_details(&locations);
-                }
-            }
-            SessionUpdate::Plan(plan) => {
-                let lines = plan
-                    .entries
-                    .into_iter()
-                    .map(|entry| PlanLine {
-                        text: sanitize_terminal_text(&entry.content),
-                        status: plan_status(&entry.status),
-                    })
-                    .collect();
-                let latest_user_seq = self
-                    .entries
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.role == ChatRole::User)
-                    .map_or(0, |entry| entry.seq);
-                if let Some(entry) = self
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .find(|entry| entry.role == ChatRole::Plan && entry.seq > latest_user_seq)
-                {
-                    entry.touch(seq);
-                    entry.plan = lines;
-                } else {
-                    self.entries.push(ChatEntry::plan(seq, lines));
-                }
-            }
             SessionUpdate::AvailableCommandsUpdate(update) => {
                 self.acp_surface
                     .set_agent_commands(update.available_commands);
@@ -2167,40 +1866,6 @@ impl ChatState {
                 .apply_current_mode_update(update.current_mode_id.to_string()),
             _ => {}
         }
-    }
-
-    fn push_streamed(
-        &mut self,
-        seq: u64,
-        recorded_at_ms: Option<i64>,
-        role: ChatRole,
-        message_id: Option<String>,
-        text: &str,
-    ) {
-        let text = sanitize_terminal_text(text);
-        if let Some(last) = self.entries.last_mut()
-            && last.role == role
-            && (role == ChatRole::Thought || last.message_id == message_id)
-        {
-            last.touch(seq);
-            if role == ChatRole::Thought
-                && last.message_id != message_id
-                && !last.text.is_empty()
-                && !text.is_empty()
-            {
-                while last.text.ends_with('\n') {
-                    last.text.pop();
-                }
-                last.text.push('\n');
-                last.text.push_str(text.trim_start_matches('\n'));
-            } else {
-                last.text.push_str(&text);
-            }
-            return;
-        }
-        let mut entry = ChatEntry::plain(seq, role, text).with_recorded_at(recorded_at_ms);
-        entry.message_id = message_id;
-        self.entries.push(entry);
     }
 }
 

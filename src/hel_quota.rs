@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Datelike, Days, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -315,9 +316,7 @@ async fn refresh_profile(
                             remaining_percent: Some(window.remaining_percent),
                             used: None,
                             limit: None,
-                            resets: window
-                                .resets_at
-                                .and_then(crate::usage_format::format_reset_local_seconds),
+                            resets: window.resets_at.and_then(format_reset_local_seconds),
                             resets_at_epoch_seconds: window.resets_at,
                         })
                         .collect(),
@@ -347,11 +346,11 @@ async fn refresh_profile(
                     resets: window
                         .reset_context
                         .as_deref()
-                        .and_then(crate::usage_format::normalize_reset_text),
+                        .and_then(normalize_reset_text),
                     resets_at_epoch_seconds: window
                         .reset_context
                         .as_deref()
-                        .and_then(crate::usage_format::normalize_reset_epoch_seconds),
+                        .and_then(normalize_reset_epoch_seconds),
                 })
                 .collect(),
                 extra: None,
@@ -386,9 +385,7 @@ async fn refresh_profile(
                         // credit amounts behind it.
                         used: None,
                         limit: None,
-                        resets: report
-                            .resets_at
-                            .and_then(crate::usage_format::format_reset_local_seconds),
+                        resets: report.resets_at.and_then(format_reset_local_seconds),
                         resets_at_epoch_seconds: report.resets_at,
                     }],
                     extra: None,
@@ -1295,12 +1292,8 @@ fn value_i64(value: &Value) -> Option<i64> {
 fn normalize_kimi_reset(value: &Value) -> Option<String> {
     value
         .as_f64()
-        .and_then(crate::usage_format::format_reset_local)
-        .or_else(|| {
-            value
-                .as_str()
-                .and_then(crate::usage_format::normalize_reset_text)
-        })
+        .and_then(format_reset_local)
+        .or_else(|| value.as_str().and_then(normalize_reset_text))
 }
 
 fn kimi_reset_epoch_seconds(value: &Value) -> Option<i64> {
@@ -1313,11 +1306,130 @@ fn kimi_reset_epoch_seconds(value: &Value) -> Option<i64> {
                 epoch.trunc() as i64
             }
         })
-        .or_else(|| {
-            value
-                .as_str()
-                .and_then(crate::usage_format::normalize_reset_epoch_seconds)
-        })
+        .or_else(|| value.as_str().and_then(normalize_reset_epoch_seconds))
+}
+
+/// Format a Unix reset timestamp as wall-clock time in the machine's local
+/// time zone. Accepts seconds or milliseconds and rejects non-finite or
+/// out-of-range values.
+pub(crate) fn format_reset_local(epoch: f64) -> Option<String> {
+    if !epoch.is_finite() {
+        return None;
+    }
+    let seconds = if epoch.abs() >= 1_000_000_000_000.0 {
+        (epoch / 1000.0).trunc() as i64
+    } else {
+        epoch.trunc() as i64
+    };
+    let local = Local.timestamp_opt(seconds, 0).single()?;
+    Some(format_reset_label(local.fixed_offset()))
+}
+
+pub(crate) fn format_reset_local_seconds(epoch: i64) -> Option<String> {
+    format_reset_local(epoch as f64)
+}
+
+/// Normalize a provider's textual reset value to the compact 24-hour form
+/// used by the dashboard. A time-only value is the next occurrence of that
+/// wall-clock time; Claude Code uses this shape for its five-hour window.
+pub(crate) fn normalize_reset_text(value: &str) -> Option<String> {
+    normalize_reset_at(value, Local::now().fixed_offset()).map(format_reset_label)
+}
+
+pub(crate) fn normalize_reset_epoch_seconds(value: &str) -> Option<i64> {
+    normalize_reset_at(value, Local::now().fixed_offset()).map(|reset| reset.timestamp())
+}
+
+fn normalize_reset_at(value: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(epoch) = value.parse::<f64>() {
+        let seconds = if epoch.abs() >= 1_000_000_000_000.0 {
+            (epoch / 1000.0).trunc() as i64
+        } else {
+            epoch.trunc() as i64
+        };
+        return Local
+            .timestamp_opt(seconds, 0)
+            .single()
+            .map(|reset| reset.fixed_offset());
+    }
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Some(timestamp.with_timezone(&Local).fixed_offset());
+    }
+
+    let value = value
+        .strip_prefix("at ")
+        .unwrap_or(value)
+        .split('(')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_end_matches(',');
+    let parse_time = |value: &str| {
+        let value = value
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        let value = ["am", "pm"]
+            .into_iter()
+            .find_map(|suffix| {
+                let hour = value.strip_suffix(suffix)?;
+                (!hour.contains(':')).then(|| format!("{hour}:00{suffix}"))
+            })
+            .unwrap_or(value);
+        ["%I:%M%P", "%I%P", "%H:%M"]
+            .iter()
+            .find_map(|format| NaiveTime::parse_from_str(&value, format).ok())
+    };
+
+    // Claude has used both `Aug 14 at 4am` and `Aug 14, 4am` across
+    // releases. Keep the provider punctuation out of the date/time parsers.
+    let dated_time = value.split_once(" at ").or_else(|| {
+        value
+            .split_once(',')
+            .map(|(date, time)| (date, time.trim()))
+    });
+    if let Some((date, time)) = dated_time {
+        let time = parse_time(time.trim())?;
+        let date = date.trim().trim_end_matches(',');
+        let date = match date.to_ascii_lowercase().as_str() {
+            "today" => now.date_naive(),
+            "tomorrow" => now.date_naive().checked_add_days(Days::new(1))?,
+            _ => NaiveDate::parse_from_str(
+                &format!("{} {}", date.replace(',', ""), now.year()),
+                "%b %e %Y",
+            )
+            .ok()?,
+        };
+        return now
+            .timezone()
+            .from_local_datetime(&date.and_time(time))
+            .single();
+    }
+
+    let time = parse_time(value)?;
+    let mut date = now.date_naive();
+    let mut reset = now
+        .timezone()
+        .from_local_datetime(&date.and_time(time))
+        .single()?;
+    if reset <= now {
+        date = date.checked_add_days(Days::new(1))?;
+        reset = now
+            .timezone()
+            .from_local_datetime(&date.and_time(time))
+            .single()?;
+    }
+    Some(reset)
+}
+
+/// Pure formatter split from local-zone discovery for deterministic tests.
+fn format_reset_label(reset: DateTime<FixedOffset>) -> String {
+    reset.format("%H:%M %b %-d").to_string()
 }
 
 #[cfg(test)]
@@ -2516,5 +2628,68 @@ while IFS= read -r line; do :; done
             "a profile removed from the configuration must not leave its `codex app-server` child running"
         );
         quotas.shutdown().await;
+    }
+
+    #[test]
+    fn reset_time_normalization_uses_24_hour_month_day_format() {
+        let paris = FixedOffset::east_opt(2 * 3_600).expect("offset");
+        let reset = paris
+            .with_ymd_and_hms(2026, 6, 17, 16, 49, 0)
+            .single()
+            .expect("instant");
+        assert_eq!(format_reset_label(reset), "16:49 Jun 17");
+        assert_eq!(
+            normalize_reset_text("Jun 17 at 4:49pm").as_deref(),
+            Some("16:49 Jun 17")
+        );
+    }
+
+    #[test]
+    fn reset_timestamp_accepts_seconds_and_milliseconds() {
+        let seconds = 1_781_712_540_f64;
+        assert_eq!(
+            format_reset_local(seconds),
+            format_reset_local(seconds * 1_000.0)
+        );
+        assert_eq!(
+            format_reset_local(seconds),
+            format_reset_local_seconds(seconds as i64)
+        );
+    }
+
+    #[test]
+    fn time_only_reset_is_rendered_as_the_next_datetime() {
+        let zone = FixedOffset::west_opt(5 * 3_600).expect("offset");
+        let now = zone
+            .with_ymd_and_hms(2026, 8, 10, 14, 0, 0)
+            .single()
+            .expect("now");
+        assert_eq!(
+            normalize_reset_at("3:30 PM (America/Chicago)", now)
+                .map(format_reset_label)
+                .as_deref(),
+            Some("15:30 Aug 10")
+        );
+        assert_eq!(
+            normalize_reset_at("at 1pm (America/Chicago)", now)
+                .map(format_reset_label)
+                .as_deref(),
+            Some("13:00 Aug 11")
+        );
+    }
+
+    #[test]
+    fn claude_comma_separated_reset_is_normalized() {
+        let zone = FixedOffset::west_opt(5 * 3_600).expect("offset");
+        let now = zone
+            .with_ymd_and_hms(2026, 8, 11, 7, 0, 0)
+            .single()
+            .expect("now");
+        assert_eq!(
+            normalize_reset_at("Aug 14, 4am (America/Chicago)", now)
+                .map(format_reset_label)
+                .as_deref(),
+            Some("04:00 Aug 14")
+        );
     }
 }

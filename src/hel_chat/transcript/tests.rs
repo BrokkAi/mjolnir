@@ -1294,13 +1294,6 @@ fn a_later_running_tool_releases_earlier_results_and_stays_expanded_when_complet
 }
 
 #[test]
-fn acp_new_file_diff_counts_each_inserted_line() {
-    let diff = agent_client_protocol::schema::v1::Diff::new("/workspace/new.txt", "one\ntwo\n");
-
-    assert_eq!(format_diffstat(&diff), "/workspace/new.txt  +2 −0");
-}
-
-#[test]
 fn exact_diffstats_are_available_only_after_the_tool_finishes() {
     let item = |status: &str| TranscriptItem {
         stable_id: "tool:edit".into(),
@@ -2414,40 +2407,6 @@ fn browser_tool_entries_show_the_title_and_diffstats_only() {
         "the remote viewer carries the Rich feed's title and diffstat, \
              not the Raw content or locations"
     );
-}
-
-#[test]
-fn terminal_exit_summary_names_signal_release_and_truncation() {
-    let record = |exit_code, signal: Option<&str>, truncated| TerminalOutputRecord {
-        terminal_id: "term-1".into(),
-        output: "out".into(),
-        truncated,
-        exit_code,
-        signal: signal.map(str::to_owned),
-    };
-
-    assert_eq!(
-        terminal_exit_summary(&record(Some(0), None, false)),
-        "exited 0"
-    );
-    assert_eq!(
-        terminal_exit_summary(&record(Some(1), None, true)),
-        "exited 1 · output truncated"
-    );
-    assert_eq!(
-        terminal_exit_summary(&record(None, Some("SIGKILL"), false)),
-        "killed by SIGKILL"
-    );
-    assert_eq!(
-        terminal_exit_summary(&record(None, None, false)),
-        "released before exit"
-    );
-
-    // A terminal that produced nothing is still worth a line: the summary
-    // is all a reader has to go on.
-    let mut silent = record(None, Some("SIGTERM"), false);
-    silent.output.clear();
-    assert_eq!(terminal_output_detail(&silent), "killed by SIGTERM");
 }
 
 #[test]

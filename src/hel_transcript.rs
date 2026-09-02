@@ -4,11 +4,22 @@
 //! what the chat view renders, and [`TranscriptItem`] is the materialized
 //! form controller state persists, so both live below the modules that use
 //! them rather than inside any one of them.
+//!
+//! The text helpers that read one of those shapes live here for the same
+//! reason: the database, the projection, controller state, the compactor and
+//! the review host all need the plain text of a stored message, and none of
+//! them should have to reach up into the chat view to get it.
 
 use std::sync::Arc;
 
+use agent_client_protocol::schema::v1::{
+    ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, SessionUpdate, ToolCall,
+    ToolCallContent, ToolCallLocation, ToolCallStatus,
+};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::hel_acp::RuntimeEvent;
 
 pub const SESSION_RESTART_TEXT: &str = "[session restarted]";
 pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
@@ -440,8 +451,552 @@ impl ChatEntry {
     }
 }
 
+/// Constructors that sanitize the text they are given, so terminal escape
+/// sequences from a harness never reach a transcript entry.
+impl ChatEntry {
+    pub(crate) fn plain(seq: u64, role: ChatRole, text: impl Into<String>) -> Self {
+        Self {
+            start_seq: seq,
+            seq,
+            role,
+            text: sanitize_terminal_text(&text.into()),
+            recorded_at_ms: None,
+            revision: 0,
+            message_id: None,
+            tool_call_id: None,
+            tool_status: None,
+            tool_content: Vec::new(),
+            tool_diffstats: Vec::new(),
+            tool_locations: Vec::new(),
+            plan: Vec::new(),
+            leading_omitted: false,
+            raw_only: false,
+            source: TranscriptSource::default(),
+        }
+    }
+
+    pub(crate) fn tool(
+        seq: u64,
+        title: impl Into<String>,
+        tool_call_id: Option<String>,
+        tool_status: ToolStatus,
+    ) -> Self {
+        Self {
+            start_seq: seq,
+            seq,
+            role: ChatRole::Tool,
+            text: sanitize_terminal_text(&title.into()),
+            recorded_at_ms: None,
+            revision: 0,
+            message_id: None,
+            tool_call_id,
+            tool_status: Some(tool_status),
+            tool_content: Vec::new(),
+            tool_diffstats: Vec::new(),
+            tool_locations: Vec::new(),
+            plan: Vec::new(),
+            leading_omitted: false,
+            raw_only: false,
+            source: TranscriptSource::default(),
+        }
+    }
+}
+
 pub(crate) fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub(crate) fn plan_status(status: &PlanEntryStatus) -> PlanStatus {
+    match status {
+        PlanEntryStatus::InProgress => PlanStatus::Running,
+        PlanEntryStatus::Completed => PlanStatus::Completed,
+        _ => PlanStatus::Pending,
+    }
+}
+
+pub(crate) fn tool_content_details(
+    content: &[ToolCallContent],
+    terminal_outputs: &[TerminalOutputRecord],
+    raw_output: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let mut details = Vec::new();
+    let mut referenced: Vec<&str> = Vec::new();
+    for item in content {
+        let detail = match item {
+            ToolCallContent::Content(content) => content_block_text(&content.content),
+            ToolCallContent::Diff(_) => None,
+            // Kimi-style agents send a terminal reference and no textual copy
+            // of the output, so the record hel captured is the only thing a
+            // reader ever sees. Until the terminal is reaped there is none.
+            ToolCallContent::Terminal(terminal) => {
+                let terminal_id = terminal.terminal_id.0.as_ref();
+                referenced.push(terminal_id);
+                Some(
+                    terminal_outputs
+                        .iter()
+                        .find(|record| record.terminal_id.as_str() == terminal_id)
+                        .map(terminal_output_detail)
+                        .or_else(|| raw_output.and_then(raw_output_terminal_detail))
+                        .unwrap_or_else(|| format!("terminal {}", terminal.terminal_id)),
+                )
+            }
+            _ => None,
+        };
+        if let Some(detail) = detail {
+            details.push(sanitize_terminal_text(&detail));
+        }
+    }
+    // Grok-style agents name the terminal on a mid-flight update and then
+    // replace `content` wholesale without it, so the output hel captured has
+    // nothing in the final call pointing at it. Show it rather than lose it.
+    for record in terminal_outputs {
+        if referenced.contains(&record.terminal_id.as_str()) {
+            continue;
+        }
+        let output = sanitize_terminal_text(&record.output);
+        if !output.is_empty() && details.iter().any(|detail| detail == &output) {
+            // Kimi sends the captured stdout as ordinary tool content and in
+            // its raw result. Keep the exit summary without printing those
+            // same bytes a second time in Raw mode.
+            details.push(terminal_exit_summary(record));
+        } else {
+            details.push(sanitize_terminal_text(&terminal_output_detail(record)));
+        }
+    }
+    details
+}
+
+/// The output codex reports for a terminal it ran itself. Codex names its own
+/// server-side terminal, which hel never opened and has no record for, and
+/// puts the text in `rawOutput`; reading it here keeps such a call from
+/// rendering as a bare terminal id.
+fn raw_output_terminal_detail(raw_output: &serde_json::Value) -> Option<String> {
+    let output = raw_output.get("formatted_output")?.as_str()?;
+    let Some(exit_code) = raw_output
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+    else {
+        return Some(output.to_owned());
+    };
+    let summary = format!("exited {exit_code}");
+    if output.is_empty() {
+        return Some(summary);
+    }
+    Some(format!("{output}\n{summary}"))
+}
+
+/// One terminal's output followed by how it ended.
+pub(crate) fn terminal_output_detail(record: &TerminalOutputRecord) -> String {
+    let summary = terminal_exit_summary(record);
+    if record.output.is_empty() {
+        return summary;
+    }
+    format!("{}\n{summary}", record.output)
+}
+
+/// How a terminal ended, in one line.
+fn terminal_exit_summary(record: &TerminalOutputRecord) -> String {
+    let mut summary = match (record.exit_code, &record.signal) {
+        (_, Some(signal)) => format!("killed by {signal}"),
+        (Some(code), None) => format!("exited {code}"),
+        (None, None) => "released before exit".to_owned(),
+    };
+    if record.truncated {
+        summary.push_str(" · output truncated");
+    }
+    summary
+}
+
+pub(crate) fn tool_diff_paths(content: &[ToolCallContent]) -> Vec<String> {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            ToolCallContent::Diff(diff) => Some(diff.path.display().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn tool_location_details(locations: &[ToolCallLocation]) -> Vec<String> {
+    locations
+        .iter()
+        .map(|location| match location.line {
+            Some(line) => format!("{}:{line}", location.path.display()),
+            None => location.path.display().to_string(),
+        })
+        .collect()
+}
+
+/// Append streamed agent or thought text to the transcript, merging it into
+/// the entry it continues so a message arrives as one entry rather than one
+/// per chunk.
+pub(crate) fn push_streamed_entry(
+    entries: &mut Vec<ChatEntry>,
+    seq: u64,
+    recorded_at_ms: Option<i64>,
+    role: ChatRole,
+    message_id: Option<String>,
+    text: &str,
+) {
+    let text = sanitize_terminal_text(text);
+    if let Some(last) = entries.last_mut()
+        && last.role == role
+        && (role == ChatRole::Thought || last.message_id == message_id)
+    {
+        last.touch(seq);
+        if role == ChatRole::Thought
+            && last.message_id != message_id
+            && !last.text.is_empty()
+            && !text.is_empty()
+        {
+            while last.text.ends_with('\n') {
+                last.text.pop();
+            }
+            last.text.push('\n');
+            last.text.push_str(text.trim_start_matches('\n'));
+        } else {
+            last.text.push_str(&text);
+        }
+        return;
+    }
+    let mut entry = ChatEntry::plain(seq, role, text).with_recorded_at(recorded_at_ms);
+    entry.message_id = message_id;
+    entries.push(entry);
+}
+
+/// Apply the transcript-visible part of one ACP session update. Returns the
+/// update again when it changes the session surface rather than the
+/// transcript, so the chat view handles those without decoding twice.
+pub(crate) fn apply_session_update_to_entries(
+    entries: &mut Vec<ChatEntry>,
+    seq: u64,
+    recorded_at_ms: Option<i64>,
+    update: SessionUpdate,
+) -> Option<SessionUpdate> {
+    match update {
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            let message_id = chunk.message_id.map(|id| id.to_string());
+            if let Some(text) = content_block_text(&chunk.content) {
+                push_streamed_entry(
+                    entries,
+                    seq,
+                    recorded_at_ms,
+                    ChatRole::Agent,
+                    message_id,
+                    &text,
+                );
+            }
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            let message_id = chunk.message_id.map(|id| id.to_string());
+            if let Some(text) = content_block_text(&chunk.content) {
+                push_streamed_entry(
+                    entries,
+                    seq,
+                    recorded_at_ms,
+                    ChatRole::Thought,
+                    message_id,
+                    &text,
+                );
+            }
+        }
+        // PromptAccepted is the canonical local user-message event. ACP
+        // user chunks would duplicate it during replay.
+        SessionUpdate::UserMessageChunk(_) => {}
+        SessionUpdate::ToolCall(call) => {
+            let mut entry = ChatEntry::tool(
+                seq,
+                call.title,
+                Some(call.tool_call_id.to_string()),
+                tool_status(&call.status),
+            );
+            entry.tool_content = tool_content_details(&call.content, &[], call.raw_output.as_ref());
+            entry.tool_diffstats = tool_diff_paths(&call.content);
+            entry.tool_locations = tool_location_details(&call.locations);
+            entries.push(entry);
+        }
+        SessionUpdate::ToolCallUpdate(update) => {
+            let tool_call_id = update.tool_call_id.to_string();
+            let entry = entries.iter_mut().rev().find(|entry| {
+                entry.role == ChatRole::Tool
+                    && entry.tool_call_id.as_deref() == Some(tool_call_id.as_str())
+            })?;
+            entry.touch(seq);
+            if let Some(title) = update.fields.title {
+                entry.text = sanitize_terminal_text(&title);
+            }
+            if let Some(status) = update.fields.status {
+                entry.tool_status = Some(tool_status(&status));
+            }
+            if let Some(content) = update.fields.content {
+                entry.tool_content =
+                    tool_content_details(&content, &[], update.fields.raw_output.as_ref());
+                entry.tool_diffstats = tool_diff_paths(&content);
+            }
+            if let Some(locations) = update.fields.locations {
+                entry.tool_locations = tool_location_details(&locations);
+            }
+        }
+        SessionUpdate::Plan(plan) => {
+            let lines = plan
+                .entries
+                .into_iter()
+                .map(|entry| PlanLine {
+                    text: sanitize_terminal_text(&entry.content),
+                    status: plan_status(&entry.status),
+                })
+                .collect();
+            let latest_user_seq = entries
+                .iter()
+                .rev()
+                .find(|entry| entry.role == ChatRole::User)
+                .map_or(0, |entry| entry.seq);
+            if let Some(entry) = entries
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.role == ChatRole::Plan && entry.seq > latest_user_seq)
+            {
+                entry.touch(seq);
+                entry.plan = lines;
+            } else {
+                entries.push(ChatEntry::plan(seq, lines));
+            }
+        }
+        other => return Some(other),
+    }
+    None
+}
+
+/// Apply the transcript-visible part of one persisted runtime event. Returns
+/// the event again when it only configures the session surface, which is the
+/// chat view's business rather than the transcript's.
+pub(crate) fn apply_runtime_event_to_entries(
+    entries: &mut Vec<ChatEntry>,
+    seq: u64,
+    recorded_at_ms: Option<i64>,
+    runtime: RuntimeEvent,
+) -> Option<RuntimeEvent> {
+    match runtime {
+        RuntimeEvent::SessionUpdate { update } => {
+            let parsed = match serde_json::from_value::<SessionUpdate>(update.clone()) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    tracing::debug!(%error, "ignoring invalid ACP session update");
+                    return None;
+                }
+            };
+            apply_session_update_to_entries(entries, seq, recorded_at_ms, parsed)
+                .map(|_| RuntimeEvent::SessionUpdate { update })
+        }
+        RuntimeEvent::Warning { message } => {
+            entries.push(ChatEntry::plain(
+                seq,
+                ChatRole::System,
+                format!("warning: {message}"),
+            ));
+            None
+        }
+        RuntimeEvent::ConfigApplied { key, value, .. } => {
+            entries.push(ChatEntry::plain(
+                seq,
+                ChatRole::System,
+                format!("{key} set to {value}"),
+            ));
+            None
+        }
+        RuntimeEvent::SessionStarted { resumed: false, .. } => {
+            entries.push(ChatEntry::plain(
+                seq,
+                ChatRole::System,
+                "harness session started",
+            ));
+            None
+        }
+        RuntimeEvent::SessionStarted { resumed: true, .. } => None,
+        other => Some(other),
+    }
+}
+
+/// Remove terminal controls while preserving user-visible whitespace.
+pub(crate) fn sanitize_terminal_text(text: &str) -> String {
+    let mut sanitized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // One escape can end at the ESC introducing the next one, so keep
+            // consuming rather than recursing: transcript text is untrusted and
+            // may nest these arbitrarily deep.
+            while consume_escape_body(&mut chars) {}
+        } else if ch == '\r' {
+            if chars.peek() != Some(&'\n') {
+                sanitized.push('\n');
+            }
+        } else if matches!(ch, '\n' | '\t') || !ch.is_control() {
+            sanitized.push(ch);
+        }
+    }
+    sanitized
+}
+
+/// Consume one escape sequence's body, after its introducing ESC. Returns
+/// whether the body ended at another ESC, which introduces the next sequence.
+///
+/// Dropping the ESC alone is not enough: an OSC payload (a build tool setting
+/// the window title) or the second byte of a charset selection would otherwise
+/// reach the transcript as visible text.
+fn consume_escape_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    match chars.next() {
+        // CSI: parameter and intermediate bytes up to a final byte.
+        Some('[') => {
+            let _ = chars.find(|ch| ('@'..='~').contains(ch));
+            false
+        }
+        // OSC, DCS, SOS, PM, and APC all carry a string payload.
+        Some(']' | 'P' | 'X' | '^' | '_') => consume_string_body(chars),
+        // Two-byte sequences: charset selection (ESC ( B), ESC # 8, ESC SP F.
+        Some('(' | ')' | '*' | '+' | '-' | '.' | '/' | '#' | '%' | ' ') => {
+            chars.next();
+            false
+        }
+        // Everything else is a complete one-byte escape: ESC 7, ESC 8, ESC M,
+        // ESC =, and a trailing ESC with nothing after it.
+        _ => false,
+    }
+}
+
+/// Consume a string payload, which ends at BEL or at ST (ESC \). A line break
+/// or a cancel control aborts it instead, so one malformed OSC cannot swallow
+/// the rest of a transcript.
+fn consume_string_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    while let Some(&ch) = chars.peek() {
+        match ch {
+            '\n' | '\r' | '\x18' | '\x1a' => return false,
+            '\x07' => {
+                chars.next();
+                return false;
+            }
+            '\x1b' => {
+                chars.next();
+                return true;
+            }
+            _ => {
+                chars.next();
+            }
+        }
+    }
+    false
+}
+
+pub fn materialized_content_text(content: &[serde_json::Value]) -> String {
+    let text = content
+        .iter()
+        .map(materialized_value_text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::hel_worker::strip_hidden_prompt_context(&text).to_owned()
+}
+
+pub fn materialized_chunks_text(chunks: &[serde_json::Value]) -> String {
+    chunks
+        .iter()
+        .filter_map(|value| match ContentChunk::deserialize(value) {
+            Ok(chunk) => Some(chunk),
+            Err(error) => {
+                tracing::warn!(%error, "could not decode a stored content chunk");
+                None
+            }
+        })
+        .filter_map(|chunk| content_block_text(&chunk.content))
+        .map(|text| sanitize_terminal_text(&text))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn materialized_value_text(value: &serde_json::Value) -> String {
+    if let Ok(block) = ContentBlock::deserialize(value)
+        && let Some(text) = content_block_text(&block)
+    {
+        return sanitize_terminal_text(&text);
+    }
+    if let Some(text) = value.as_str() {
+        return sanitize_terminal_text(text);
+    }
+    sanitize_terminal_text(&serde_json::to_string(value).unwrap_or_else(|_| "[content]".into()))
+}
+
+pub(crate) fn tool_status(status: &ToolCallStatus) -> ToolStatus {
+    match status {
+        ToolCallStatus::InProgress => ToolStatus::Running,
+        ToolCallStatus::Completed => ToolStatus::Completed,
+        ToolCallStatus::Failed => ToolStatus::Failed,
+        _ => ToolStatus::Pending,
+    }
+}
+
+pub(crate) fn content_block_text(content: &ContentBlock) -> Option<String> {
+    match content {
+        ContentBlock::Text(text) => Some(text.text.clone()),
+        ContentBlock::Image(_) => Some("[image]".into()),
+        ContentBlock::Audio(_) => Some("[audio]".into()),
+        ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
+        ContentBlock::Resource(resource) => Some(match &resource.resource {
+            EmbeddedResourceResource::TextResourceContents(resource) => resource.text.clone(),
+            EmbeddedResourceResource::BlobResourceContents(resource) => {
+                format!("[embedded resource: {}]", resource.uri)
+            }
+            _ => "[embedded resource]".into(),
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn compute_tool_diffstats(content: &[ToolCallContent]) -> Vec<String> {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            ToolCallContent::Diff(diff) => Some(format_diffstat(diff)),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn materialized_tool_diffstats(item: &TranscriptItem) -> Option<Vec<String>> {
+    let TranscriptBody::Tool { call, .. } = &item.body else {
+        return None;
+    };
+    let call = match ToolCall::deserialize(call) {
+        Ok(call) => call,
+        Err(error) => {
+            tracing::warn!(
+                stable_id = %item.stable_id,
+                %error,
+                "could not decode a stored tool call while reading diff summary"
+            );
+            return None;
+        }
+    };
+    if !matches!(
+        tool_status(&call.status),
+        ToolStatus::Completed | ToolStatus::Failed
+    ) {
+        return None;
+    }
+    let diffstats = compute_tool_diffstats(&call.content);
+    (!diffstats.is_empty()).then_some(diffstats)
+}
+
+fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
+    // A diff recorded since `hel_diff` landed already carries its counts, so
+    // this is a lookup. An older record still holds both file copies and is
+    // diffed here on demand.
+    let patch = crate::hel_diff::patch_of(diff);
+    format!(
+        "{}  +{} −{}",
+        diff.path.display(),
+        patch.insertions,
+        patch.deletions
+    )
 }
 
 #[cfg(test)]
@@ -477,4 +1032,50 @@ pub(crate) enum PlanStatus {
 pub(crate) struct PlanLine {
     pub(crate) text: String,
     pub(crate) status: PlanStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acp_new_file_diff_counts_each_inserted_line() {
+        let diff = agent_client_protocol::schema::v1::Diff::new("/workspace/new.txt", "one\ntwo\n");
+
+        assert_eq!(format_diffstat(&diff), "/workspace/new.txt  +2 \u{2212}0");
+    }
+
+    #[test]
+    fn terminal_exit_summary_names_signal_release_and_truncation() {
+        let record = |exit_code, signal: Option<&str>, truncated| TerminalOutputRecord {
+            terminal_id: "term-1".into(),
+            output: "out".into(),
+            truncated,
+            exit_code,
+            signal: signal.map(str::to_owned),
+        };
+
+        assert_eq!(
+            terminal_exit_summary(&record(Some(0), None, false)),
+            "exited 0"
+        );
+        assert_eq!(
+            terminal_exit_summary(&record(Some(1), None, true)),
+            "exited 1 · output truncated"
+        );
+        assert_eq!(
+            terminal_exit_summary(&record(None, Some("SIGKILL"), false)),
+            "killed by SIGKILL"
+        );
+        assert_eq!(
+            terminal_exit_summary(&record(None, None, false)),
+            "released before exit"
+        );
+
+        // A terminal that produced nothing is still worth a line: the summary
+        // is all a reader has to go on.
+        let mut silent = record(None, Some("SIGTERM"), false);
+        silent.output.clear();
+        assert_eq!(terminal_output_detail(&silent), "killed by SIGTERM");
+    }
 }

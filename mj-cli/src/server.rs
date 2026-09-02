@@ -1777,7 +1777,7 @@ async fn apply_phone_action(
 /// controller's durable state. They arrive from relay snapshots rather than
 /// from disk, so they travel together instead of as separate arguments.
 struct PhoneSessionViews<'a> {
-    conversations: &'a std::collections::BTreeMap<String, hel::hel_chat::BrowserTranscript>,
+    conversations: &'a std::collections::BTreeMap<String, hel::hel_server::BrowserTranscript>,
     queued_prompts: &'a std::collections::BTreeMap<String, Vec<hel::hel_worker::QueuedPrompt>>,
     active_user_shells:
         &'a std::collections::BTreeMap<String, Vec<hel::hel_worker::ActiveUserShell>>,

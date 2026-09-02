@@ -6,22 +6,29 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, EmbeddedResourceResource, Plan, PlanEntryStatus, ToolCall,
-    ToolCallContent, ToolCallLocation, ToolCallStatus,
-};
+use agent_client_protocol::schema::v1::{Plan, ToolCall, ToolCallContent, ToolCallStatus};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::hel_selection::{ContentPos, SelectionRange, SurfaceFrame, SurfaceId};
+use crate::hel_server::{BrowserDiffStat, BrowserTranscript, BrowserTranscriptEntry};
 use crate::hel_state::{MaterializedSession, TerminalOutputRecord, TranscriptBody, TranscriptItem};
 use crate::hel_transcript::{
     ChatEntry, ChatRole, PlanLine, PlanStatus, ToolStatus, TranscriptSource,
+};
+// The transcript text helpers moved down to `hel_transcript`, which sits below
+// every module that reads a transcript. The chat view keeps naming them here.
+pub use crate::hel_transcript::{
+    materialized_chunks_text, materialized_content_text, materialized_tool_diffstats,
+};
+pub(super) use crate::hel_transcript::{
+    plan_status, terminal_output_detail, tool_content_details, tool_diff_paths,
+    tool_location_details, tool_status,
 };
 
 use super::ChatState;
@@ -72,48 +79,6 @@ pub struct TranscriptSnapshot {
 
 const BROWSER_TRANSCRIPT_LINES: usize = 1_000;
 const BROWSER_LINE_BYTES: usize = 4 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BrowserTranscript {
-    pub latest_seq: u64,
-    pub window_start_seq: u64,
-    pub reset: bool,
-    pub entries: Vec<BrowserTranscriptEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BrowserTranscriptEntry {
-    pub id: u64,
-    pub updated_seq: u64,
-    pub role: &'static str,
-    pub label: String,
-    pub recorded_at_ms: Option<i64>,
-    pub lines: Vec<String>,
-    /// The glyph the terminal draws for this role, so both surfaces read alike
-    /// without the browser keeping a second copy of the mapping. Taken from
-    /// the same `entry_visual` the terminal renders from.
-    pub glyph: &'static str,
-    /// The semantic colour name, not a colour. The stylesheet decides what
-    /// `agent` or `failed` looks like; this says which one applies.
-    pub tone: &'static str,
-    /// A tool call's state, for a tool entry. `None` for every other role.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_status: Option<&'static str>,
-    /// The changed files a tool reported, as data rather than as extra lines
-    /// appended to `lines`. The terminal formats these for a terminal; a
-    /// browser re-parsing that formatting is how the phone came to render
-    /// every diffstat as one unsplit path.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diffstats: Vec<BrowserDiffStat>,
-}
-
-/// One file a tool changed, and by how much.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BrowserDiffStat {
-    pub path: String,
-    pub insertions: u32,
-    pub deletions: u32,
-}
 
 impl TranscriptSnapshot {
     pub fn from_entries(entries: Vec<ChatEntry>) -> Self {
@@ -584,44 +549,6 @@ fn materialized_chat_entry_with_diffstats(
     }
     entry.source = TranscriptSource(Some(item.clone()));
     entry
-}
-
-pub fn materialized_content_text(content: &[serde_json::Value]) -> String {
-    let text = content
-        .iter()
-        .map(materialized_value_text)
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    crate::hel_worker::strip_hidden_prompt_context(&text).to_owned()
-}
-
-pub fn materialized_chunks_text(chunks: &[serde_json::Value]) -> String {
-    chunks
-        .iter()
-        .filter_map(|value| match ContentChunk::deserialize(value) {
-            Ok(chunk) => Some(chunk),
-            Err(error) => {
-                tracing::warn!(%error, "could not decode a stored content chunk");
-                None
-            }
-        })
-        .filter_map(|chunk| content_block_text(&chunk.content))
-        .map(|text| sanitize_terminal_text(&text))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-fn materialized_value_text(value: &serde_json::Value) -> String {
-    if let Ok(block) = ContentBlock::deserialize(value)
-        && let Some(text) = content_block_text(&block)
-    {
-        return sanitize_terminal_text(&text);
-    }
-    if let Some(text) = value.as_str() {
-        return sanitize_terminal_text(text);
-    }
-    sanitize_terminal_text(&serde_json::to_string(value).unwrap_or_else(|_| "[content]".into()))
 }
 
 fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
@@ -1707,178 +1634,6 @@ pub(super) fn compact_terminal_command(command: &str) -> String {
     preview
 }
 
-pub(super) fn tool_status(status: &ToolCallStatus) -> ToolStatus {
-    match status {
-        ToolCallStatus::InProgress => ToolStatus::Running,
-        ToolCallStatus::Completed => ToolStatus::Completed,
-        ToolCallStatus::Failed => ToolStatus::Failed,
-        _ => ToolStatus::Pending,
-    }
-}
-
-pub(super) fn plan_status(status: &PlanEntryStatus) -> PlanStatus {
-    match status {
-        PlanEntryStatus::InProgress => PlanStatus::Running,
-        PlanEntryStatus::Completed => PlanStatus::Completed,
-        _ => PlanStatus::Pending,
-    }
-}
-
-pub(super) fn content_block_text(content: &ContentBlock) -> Option<String> {
-    match content {
-        ContentBlock::Text(text) => Some(text.text.clone()),
-        ContentBlock::Image(_) => Some("[image]".into()),
-        ContentBlock::Audio(_) => Some("[audio]".into()),
-        ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
-        ContentBlock::Resource(resource) => Some(match &resource.resource {
-            EmbeddedResourceResource::TextResourceContents(resource) => resource.text.clone(),
-            EmbeddedResourceResource::BlobResourceContents(resource) => {
-                format!("[embedded resource: {}]", resource.uri)
-            }
-            _ => "[embedded resource]".into(),
-        }),
-        _ => None,
-    }
-}
-
-pub(super) fn tool_content_details(
-    content: &[ToolCallContent],
-    terminal_outputs: &[TerminalOutputRecord],
-    raw_output: Option<&serde_json::Value>,
-) -> Vec<String> {
-    let mut details = Vec::new();
-    let mut referenced: Vec<&str> = Vec::new();
-    for item in content {
-        let detail = match item {
-            ToolCallContent::Content(content) => content_block_text(&content.content),
-            ToolCallContent::Diff(_) => None,
-            // Kimi-style agents send a terminal reference and no textual copy
-            // of the output, so the record hel captured is the only thing a
-            // reader ever sees. Until the terminal is reaped there is none.
-            ToolCallContent::Terminal(terminal) => {
-                let terminal_id = terminal.terminal_id.0.as_ref();
-                referenced.push(terminal_id);
-                Some(
-                    terminal_outputs
-                        .iter()
-                        .find(|record| record.terminal_id.as_str() == terminal_id)
-                        .map(terminal_output_detail)
-                        .or_else(|| raw_output.and_then(raw_output_terminal_detail))
-                        .unwrap_or_else(|| format!("terminal {}", terminal.terminal_id)),
-                )
-            }
-            _ => None,
-        };
-        if let Some(detail) = detail {
-            details.push(sanitize_terminal_text(&detail));
-        }
-    }
-    // Grok-style agents name the terminal on a mid-flight update and then
-    // replace `content` wholesale without it, so the output hel captured has
-    // nothing in the final call pointing at it. Show it rather than lose it.
-    for record in terminal_outputs {
-        if referenced.contains(&record.terminal_id.as_str()) {
-            continue;
-        }
-        let output = sanitize_terminal_text(&record.output);
-        if !output.is_empty() && details.iter().any(|detail| detail == &output) {
-            // Kimi sends the captured stdout as ordinary tool content and in
-            // its raw result. Keep the exit summary without printing those
-            // same bytes a second time in Raw mode.
-            details.push(terminal_exit_summary(record));
-        } else {
-            details.push(sanitize_terminal_text(&terminal_output_detail(record)));
-        }
-    }
-    details
-}
-
-/// The output codex reports for a terminal it ran itself. Codex names its own
-/// server-side terminal, which hel never opened and has no record for, and
-/// puts the text in `rawOutput`; reading it here keeps such a call from
-/// rendering as a bare terminal id.
-fn raw_output_terminal_detail(raw_output: &serde_json::Value) -> Option<String> {
-    let output = raw_output.get("formatted_output")?.as_str()?;
-    let Some(exit_code) = raw_output
-        .get("exit_code")
-        .and_then(serde_json::Value::as_i64)
-    else {
-        return Some(output.to_owned());
-    };
-    let summary = format!("exited {exit_code}");
-    if output.is_empty() {
-        return Some(summary);
-    }
-    Some(format!("{output}\n{summary}"))
-}
-
-/// One terminal's output followed by how it ended.
-fn terminal_output_detail(record: &TerminalOutputRecord) -> String {
-    let summary = terminal_exit_summary(record);
-    if record.output.is_empty() {
-        return summary;
-    }
-    format!("{}\n{summary}", record.output)
-}
-
-/// How a terminal ended, in one line.
-fn terminal_exit_summary(record: &TerminalOutputRecord) -> String {
-    let mut summary = match (record.exit_code, &record.signal) {
-        (_, Some(signal)) => format!("killed by {signal}"),
-        (Some(code), None) => format!("exited {code}"),
-        (None, None) => "released before exit".to_owned(),
-    };
-    if record.truncated {
-        summary.push_str(" · output truncated");
-    }
-    summary
-}
-
-pub(super) fn tool_diff_paths(content: &[ToolCallContent]) -> Vec<String> {
-    content
-        .iter()
-        .filter_map(|item| match item {
-            ToolCallContent::Diff(diff) => Some(diff.path.display().to_string()),
-            _ => None,
-        })
-        .collect()
-}
-
-pub(super) fn compute_tool_diffstats(content: &[ToolCallContent]) -> Vec<String> {
-    content
-        .iter()
-        .filter_map(|item| match item {
-            ToolCallContent::Diff(diff) => Some(format_diffstat(diff)),
-            _ => None,
-        })
-        .collect()
-}
-
-pub fn materialized_tool_diffstats(item: &TranscriptItem) -> Option<Vec<String>> {
-    let TranscriptBody::Tool { call, .. } = &item.body else {
-        return None;
-    };
-    let call = match ToolCall::deserialize(call) {
-        Ok(call) => call,
-        Err(error) => {
-            tracing::warn!(
-                stable_id = %item.stable_id,
-                %error,
-                "could not decode a stored tool call while reading diff summary"
-            );
-            return None;
-        }
-    };
-    if !matches!(
-        tool_status(&call.status),
-        ToolStatus::Completed | ToolStatus::Failed
-    ) {
-        return None;
-    }
-    let diffstats = compute_tool_diffstats(&call.content);
-    (!diffstats.is_empty()).then_some(diffstats)
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct ToolDiffstatRequest {
     pub(super) tool_call_id: String,
@@ -1921,29 +1676,6 @@ impl ToolDiffstatRequest {
         materialized_tool_diffstats(&self.item)
             .ok_or_else(|| format!("tool {} no longer has a final diff", self.tool_call_id))
     }
-}
-
-fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
-    // A diff recorded since `hel_diff` landed already carries its counts, so
-    // this is a lookup. An older record still holds both file copies and is
-    // diffed here on demand.
-    let patch = crate::hel_diff::patch_of(diff);
-    format!(
-        "{}  +{} −{}",
-        diff.path.display(),
-        patch.insertions,
-        patch.deletions
-    )
-}
-
-pub(super) fn tool_location_details(locations: &[ToolCallLocation]) -> Vec<String> {
-    locations
-        .iter()
-        .map(|location| match location.line {
-            Some(line) => format!("{}:{line}", location.path.display()),
-            None => location.path.display().to_string(),
-        })
-        .collect()
 }
 
 pub(super) fn render_transcript(
