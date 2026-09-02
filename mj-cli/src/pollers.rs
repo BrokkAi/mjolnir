@@ -32,8 +32,9 @@ use hel::hel_state::{
     SessionResourceAllocation, SessionState,
 };
 use hel::hel_targets::{
-    CancellableProcessExecutor, CommandOutput, CommandSpec, DeploymentCapacityKind,
-    DeploymentCapacityTarget, DeploymentCapacityUsage, SessionResourceProbe, SessionResourceUsage,
+    CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec,
+    DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, ImageRefresh,
+    SessionResourceProbe, SessionResourceUsage,
 };
 use hel::hel_worker_client::CredentialSyncCoordinator;
 use hel_tui::DashboardState;
@@ -50,6 +51,14 @@ pub(crate) const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60)
 /// The extra interval is slack for a refresh that is itself still running.
 pub(crate) const QUOTA_STALE_AFTER: Duration =
     Duration::from_secs(2 * QUOTA_REFRESH_INTERVAL.as_secs());
+/// How often the daemon looks for a newer copy of every container image its
+/// targets use. Launches no longer pull, so this is what makes a remote
+/// `:latest` tag current, and it has to be rare enough to stay off the
+/// registry's back.
+pub(crate) const IMAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// The daemon has startup work of its own, and a pull competes with it for the
+/// network. The first refresh waits this long, then the interval takes over.
+const IMAGE_REFRESH_DELAY: Duration = Duration::from_secs(30);
 pub(crate) const RESOURCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const RESOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const CAPACITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -445,6 +454,141 @@ async fn refresh_profile_quotas(
     } else {
         true
     }
+}
+
+/// Keep every configured container image current, away from any session
+/// launch.
+///
+/// `plan` is called on every tick rather than once, so a config reload changes
+/// what gets refreshed without a daemon restart. Hosts refresh concurrently;
+/// each host runs its own commands in order.
+pub(crate) fn spawn_image_refresher(
+    plan: impl Fn() -> Vec<ImageRefresh> + Send + 'static,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + IMAGE_REFRESH_DELAY,
+            IMAGE_REFRESH_INTERVAL,
+        );
+        // A refresh slower than the interval collapses the ticks it missed
+        // instead of stacking a second pull behind the first.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                // Quitting wins over a tick that came due during a long
+                // refresh, so shutdown never starts one more pull.
+                biased;
+                _ = cancellation.cancelled() => return,
+                _ = interval.tick() => refresh_images(plan(), &cancellation).await,
+            }
+        }
+    })
+}
+
+async fn refresh_images(
+    plan: Vec<ImageRefresh>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) {
+    if plan.is_empty() {
+        return;
+    }
+    // One flag for every host, so quitting kills the pulls in flight instead of
+    // waiting out a multi-gigabyte download.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut hosts = tokio::task::JoinSet::new();
+    for refresh in plan {
+        // ProcessExecutor is synchronous, and a pull is long: it belongs on a
+        // blocking thread, never on the runtime.
+        let executor = CancellableProcessExecutor::new(cancelled.clone());
+        hosts.spawn_blocking(move || {
+            let Err(error) = refresh_host_image(&refresh, &executor) else {
+                return;
+            };
+            if executor.is_cancelled() {
+                // The daemon is leaving. That is not a fault of the host.
+                tracing::debug!(
+                    host = refresh.host.label(),
+                    image = refresh.image,
+                    "container image refresh cancelled"
+                );
+                return;
+            }
+            tracing::warn!(
+                host = refresh.host.label(),
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "could not refresh a container image"
+            );
+        });
+    }
+    let mut cancelling = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled(), if !cancelling => {
+                cancelling = true;
+                cancelled.store(true, Ordering::Release);
+            }
+            joined = hosts.join_next() => match joined {
+                None => return,
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "container image refresh task failed");
+                }
+            },
+        }
+    }
+}
+
+/// Pull one image on one host, then drop whatever that unlinked.
+///
+/// The image id before and after says whether the pull actually changed
+/// anything, which is the only part worth an `info` line.
+fn refresh_host_image(refresh: &ImageRefresh, executor: &impl CommandExecutor) -> Result<()> {
+    let cached = image_id(&refresh.image_id, executor);
+    run_refresh_command(&refresh.pull, executor)?;
+    let pulled = image_id(&refresh.image_id, executor);
+    if pulled.is_some() && pulled != cached {
+        tracing::info!(
+            host = refresh.host.label(),
+            image = refresh.image,
+            id = pulled.unwrap_or_default(),
+            "pulled a newer container image"
+        );
+    } else {
+        tracing::debug!(
+            host = refresh.host.label(),
+            image = refresh.image,
+            "container image is already current"
+        );
+    }
+    run_refresh_command(&refresh.prune, executor)?;
+    Ok(())
+}
+
+/// The host's id for an image, or `None` when it has no copy of it yet. A
+/// missing image is the ordinary first-pull case, not a fault.
+fn image_id(command: &CommandSpec, executor: &impl CommandExecutor) -> Option<String> {
+    let output = executor.execute(command).ok()?;
+    if output.status != 0 {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!id.is_empty()).then_some(id)
+}
+
+fn run_refresh_command(command: &CommandSpec, executor: &impl CommandExecutor) -> Result<()> {
+    let output = executor.execute(command)?;
+    if output.status != 0 {
+        bail!(
+            "{} failed with status {}: {}",
+            command.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn complete_manual_quota_refresh(
@@ -2616,5 +2760,89 @@ mod tests {
         assert_eq!(total.memory_total_bytes, 24);
         assert_eq!(total.logical_cores, 6);
         assert_eq!(total.disk_total_bytes, Some(300));
+    }
+
+    /// A background refresh is a chore, not a launch. One host that cannot
+    /// reach its registry must not cost the other hosts their pull, and the
+    /// failure has to say which host, which image, and what the engine
+    /// reported. `refresh_images` gives every host its own task for the same
+    /// reason.
+    #[test]
+    fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
+        struct FailingPullExecutor {
+            failing_image: String,
+            commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+        }
+
+        impl CommandExecutor for FailingPullExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands
+                    .lock()
+                    .unwrap()
+                    .push((command.program.clone(), command.args.clone()));
+                if command.args.contains(&"pull".to_owned())
+                    && command.args.contains(&self.failing_image)
+                {
+                    return Ok(CommandOutput {
+                        status: 125,
+                        stdout: Vec::new(),
+                        stderr: b"short-name resolution failed".to_vec(),
+                    });
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"sha256:1111\n".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let failing_image = "ghcr.io/example/broken:latest";
+        let broken = hel::hel_targets::image_refresh(
+            hel::hel_targets::ImageHost::LocalPodman,
+            failing_image,
+            None,
+            hel::hel_config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed");
+        let healthy = hel::hel_targets::image_refresh(
+            hel::hel_targets::ImageHost::LocalDocker,
+            "ghcr.io/example/dev:latest",
+            None,
+            hel::hel_config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed");
+        let executor = FailingPullExecutor {
+            failing_image: failing_image.to_owned(),
+            commands: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let reported = refresh_host_image(&broken, &executor)
+            .expect_err("a failed pull has to reach the caller");
+        let reported = format!("{reported:#}");
+        assert!(
+            reported.contains("short-name resolution failed"),
+            "{reported}"
+        );
+        assert!(reported.contains(failing_image), "{reported}");
+
+        refresh_host_image(&healthy, &executor).expect("the second host still refreshes");
+
+        let commands = executor.commands.lock().unwrap();
+        let ran = |program: &str, args: &[&str]| {
+            commands
+                .iter()
+                .any(|(command, arguments)| command == program && arguments == args)
+        };
+        assert!(ran("podman", &["pull", failing_image]), "{commands:?}");
+        assert!(
+            !ran("podman", &["image", "prune", "-f"]),
+            "a host that could not pull has nothing to prune: {commands:?}"
+        );
+        assert!(
+            ran("docker", &["pull", "ghcr.io/example/dev:latest"]),
+            "{commands:?}"
+        );
+        assert!(ran("docker", &["image", "prune", "-f"]), "{commands:?}");
     }
 }

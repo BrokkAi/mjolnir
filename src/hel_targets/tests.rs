@@ -906,24 +906,60 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
     assert!(!apple.commands[1].args.contains(&"--init".to_owned()));
 }
 
+/// A launch never waits on a registry under the default policy. The daemon
+/// refreshes remote `:latest` images in the background instead, so a session
+/// starts from whatever the host already has.
 #[test]
-fn automatic_pull_policy_refreshes_only_remote_latest_images() {
-    for (image, expected) in [
-        ("ghcr.io/example/dev:latest", Some("--pull=newer")),
-        ("ghcr.io/example/dev", Some("--pull=newer")),
-        ("ghcr.io/example/dev:1.2.3", None),
-        ("localhost/example/dev:latest", None),
-        ("local/example:latest", None),
-        (
+fn an_automatic_pull_policy_never_pulls_during_a_launch() {
+    for engine in ["podman", "docker"] {
+        for image in [
+            "ghcr.io/example/dev:latest",
+            "ghcr.io/example/dev",
+            "ghcr.io/example/dev:1.2.3",
+            "localhost/example/dev:latest",
+            "local/example:latest",
             "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            None,
-        ),
-    ] {
+        ] {
+            let args = container_run_args(
+                engine,
+                &ContainerTemplate {
+                    image: image.to_owned(),
+                    pull_policy: ImagePullPolicy::Auto,
+                    extra_run_args: vec![],
+                },
+                "container-name",
+                SESSION,
+                &[],
+            )
+            .unwrap();
+            let pull = args
+                .iter()
+                .find(|argument| argument.starts_with("--pull="))
+                .map(String::as_str);
+            // Podman spells "use the cached image" as no flag at all; Docker
+            // needs the flag.
+            let expected = if engine == "podman" {
+                None
+            } else {
+                Some("--pull=missing")
+            };
+            assert_eq!(
+                pull, expected,
+                "unexpected {engine} pull policy for {image}"
+            );
+        }
+    }
+}
+
+/// A configured policy is a decision about launches, and it survives.
+#[test]
+fn an_explicit_newer_pull_policy_still_pulls_during_a_launch() {
+    for image in ["ghcr.io/example/dev:latest", "ghcr.io/example/dev:1.2.3"] {
         let args = container_run_args(
             "podman",
             &ContainerTemplate {
                 image: image.to_owned(),
-                pull_policy: ImagePullPolicy::Auto,
+                pull_policy: ImagePullPolicy::Newer,
                 extra_run_args: vec![],
             },
             "container-name",
@@ -931,12 +967,9 @@ fn automatic_pull_policy_refreshes_only_remote_latest_images() {
             &[],
         )
         .unwrap();
-        assert_eq!(
-            args.iter()
-                .find(|argument| argument.starts_with("--pull="))
-                .map(String::as_str),
-            expected,
-            "unexpected pull policy for {image}"
+        assert!(
+            args.contains(&"--pull=newer".to_owned()),
+            "explicit newer policy lost for {image}: {args:?}"
         );
     }
 }
@@ -1400,12 +1433,14 @@ fn remote_podman_is_ssh_plus_podman_not_remote_api() {
     )
     .unwrap();
     assert!(plan.commands.iter().all(|command| command.program == "ssh"));
+    // The default policy launches from the cached image; the daemon's
+    // background refresh is what keeps a remote `:latest` tag current.
     assert!(
         plan.commands[0]
             .args
             .last()
             .unwrap()
-            .contains("'podman' 'run' '--pull=newer' '--init'")
+            .contains("'podman' 'run' '--init'")
     );
     assert!(plan.commands[0].args.last().unwrap().contains(&format!(
         "'--label' '{SESSION_LABEL}={SESSION}' '--label' '{MANAGED_LABEL}=true'"

@@ -1420,6 +1420,8 @@ pub struct ContainerTemplate {
 }
 
 impl ImagePullPolicy {
+    /// How fresh this target wants its image, with `Auto` read from the image
+    /// reference. This is the freshness the background refresher acts on.
     fn resolve(self, image: &str) -> Self {
         if self != Self::Auto {
             return self;
@@ -1433,8 +1435,21 @@ impl ImagePullPolicy {
         }
     }
 
-    fn podman_value(self, image: &str) -> &'static str {
-        match self.resolve(image) {
+    /// How fresh a launch insists on being. `Auto` never pulls here: the daemon
+    /// refreshes remote `:latest` images on its own schedule, so a session
+    /// starts from the cached image instead of blocking a launch on a
+    /// multi-gigabyte download. An explicit policy still means what it says.
+    fn at_launch(self, image: &str) -> Self {
+        if self == Self::Auto {
+            Self::Missing
+        } else {
+            self.resolve(image)
+        }
+    }
+
+    /// Podman's spelling of an already-resolved policy.
+    fn podman_value(self) -> &'static str {
+        match self {
             Self::Always => "always",
             Self::Newer => "newer",
             Self::Missing => "missing",
@@ -1442,6 +1457,112 @@ impl ImagePullPolicy {
             Self::Auto => unreachable!("auto pull policy must resolve"),
         }
     }
+}
+
+/// Where a background image refresh runs.
+///
+/// The SSH form wraps commands the way provisioning does rather than the way
+/// the preflight probes do: a pull runs for minutes, and the probes' two-second
+/// keepalive would drop the connection underneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageHost {
+    LocalPodman,
+    LocalDocker,
+    SshPodman(SshTarget),
+}
+
+impl ImageHost {
+    const fn engine(&self) -> &'static str {
+        match self {
+            Self::LocalPodman | Self::SshPodman(_) => "podman",
+            Self::LocalDocker => "docker",
+        }
+    }
+
+    /// How this host is named in a log line.
+    pub fn label(&self) -> String {
+        match self {
+            Self::LocalPodman => "local podman".to_owned(),
+            Self::LocalDocker => "local docker".to_owned(),
+            Self::SshPodman(ssh) => format!("podman on {}", ssh.destination),
+        }
+    }
+
+    fn command(&self, args: Vec<String>, purpose: String) -> CommandSpec {
+        match self {
+            Self::LocalPodman | Self::LocalDocker => {
+                CommandSpec::new(args[0].clone(), args[1..].iter().cloned())
+            }
+            Self::SshPodman(ssh) => ssh_command_owned(ssh, args),
+        }
+        .purpose(purpose)
+    }
+}
+
+/// The commands that keep one host's copy of one image current, away from any
+/// session launch. They run in this order, and only for that host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRefresh {
+    pub host: ImageHost,
+    pub image: String,
+    pub platform: Option<String>,
+    /// Reads the cached image id, so a pull that changed nothing stays quiet.
+    /// Run before and after the pull.
+    pub image_id: CommandSpec,
+    pub pull: CommandSpec,
+    /// Dangling images only. Both engines keep an image a container still uses.
+    pub prune: CommandSpec,
+}
+
+/// The background refresh for one configured container target, or `None` when
+/// the target's pull policy is satisfied by whatever the host already has.
+pub fn image_refresh(
+    host: ImageHost,
+    image: &str,
+    platform: Option<&str>,
+    pull_policy: ImagePullPolicy,
+) -> Option<ImageRefresh> {
+    if !matches!(
+        pull_policy.resolve(image),
+        ImagePullPolicy::Always | ImagePullPolicy::Newer
+    ) {
+        return None;
+    }
+    let engine = host.engine();
+    let image_id = host.command(
+        vec![
+            engine.to_owned(),
+            "image".to_owned(),
+            "inspect".to_owned(),
+            "--format".to_owned(),
+            "{{.Id}}".to_owned(),
+            image.to_owned(),
+        ],
+        format!("read the cached id of container image {image}"),
+    );
+    let mut pull_args = vec![engine.to_owned(), "pull".to_owned()];
+    if let Some(platform) = platform {
+        pull_args.push(format!("--platform={platform}"));
+    }
+    pull_args.push(image.to_owned());
+    let pull = host.command(pull_args, format!("refresh container image {image}"));
+    let prune = host.command(
+        vec![
+            engine.to_owned(),
+            "image".to_owned(),
+            "prune".to_owned(),
+            "-f".to_owned(),
+        ],
+        "remove dangling container images".to_owned(),
+    );
+    Some(ImageRefresh {
+        host,
+        image: image.to_owned(),
+        platform: platform.map(str::to_owned),
+        image_id,
+        pull,
+        prune,
+    })
 }
 
 fn image_is_digest_pinned(image: &str) -> bool {
@@ -3179,19 +3300,16 @@ fn container_run_args(
     validate_additional_mounts(additional_mounts)?;
     let mut args = vec!["run".to_owned()];
     if engine == "podman" {
-        let pull_policy = template.pull_policy.resolve(&template.image);
+        let pull_policy = template.pull_policy.at_launch(&template.image);
         if pull_policy != ImagePullPolicy::Missing {
-            args.push(format!(
-                "--pull={}",
-                template.pull_policy.podman_value(&template.image)
-            ));
+            args.push(format!("--pull={}", pull_policy.podman_value()));
         }
         // PID 1 is `sleep infinity`, which reaps nothing, so every exec that
         // outlives its parent leaves a zombie behind. Apple's `container`
         // engine is left alone: its support for the flag is unverified.
         args.push("--init".to_owned());
     } else if engine == "docker" {
-        let pull = match template.pull_policy.resolve(&template.image) {
+        let pull = match template.pull_policy.at_launch(&template.image) {
             ImagePullPolicy::Always | ImagePullPolicy::Newer => "always",
             ImagePullPolicy::Missing => "missing",
             ImagePullPolicy::Never => "never",
