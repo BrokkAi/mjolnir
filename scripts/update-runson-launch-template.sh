@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Refresh the account-owned RunsOn AMI used by Hel and publish it as the
+# Refresh the account-owned RunsOn AMI used by Mjolnir and publish it as the
 # default version of a stable EC2 launch template. RunsOn deregisters older
-# AMIs, so Hel always launches an account-owned copy.
+# AMIs, so Mjolnir always launches an account-owned copy.
 set -euo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"
@@ -13,7 +13,7 @@ ROOT_VOLUME_GIB=60
 SSH_PUBLIC_KEY="${HOME}/.ssh/vastai.pub"
 SSH_IDENTITY_FILE="${HOME}/.ssh/vastai"
 SECURITY_GROUP_NAME="mj-runson-ssh"
-WRITE_HEL_CONFIG=false
+WRITE_MJ_CONFIG=false
 SOURCE_AMI=""
 
 usage() {
@@ -29,8 +29,8 @@ usage() {
         '  --source-ami AMI           Use this source AMI instead of resolving newest' \
         '  --instance-type TYPE       EC2 instance type (default: m8i-flex.large)' \
         '  --root-volume-gib GIB      Root volume size (default: 60)' \
-        '  --ssh-public-key PATH      Public key installed for Hel SSH' \
-        '  --ssh-identity-file PATH   Matching private key recorded in Hel config' \
+        '  --ssh-public-key PATH      Public key installed for Mjolnir SSH' \
+        '  --ssh-identity-file PATH   Matching private key recorded in Mjolnir config' \
         '  --write-mj-config          Append targets.aws-runson if not configured' \
         '  -h, --help                 Show this help'
 }
@@ -44,7 +44,7 @@ while (($#)); do
         --root-volume-gib) ROOT_VOLUME_GIB="$2"; shift 2 ;;
         --ssh-public-key) SSH_PUBLIC_KEY="$2"; shift 2 ;;
         --ssh-identity-file) SSH_IDENTITY_FILE="$2"; shift 2 ;;
-        --write-mj-config | --write-hel-config) WRITE_HEL_CONFIG=true; shift ;;
+        --write-mj-config) WRITE_MJ_CONFIG=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
@@ -86,18 +86,18 @@ fi
 # Reuse the owned copy on retries, while every newly released upstream AMI gets
 # one immutable account-owned copy. This is the durable part of the P2T pattern.
 owned_ami="$(aws_ec2 describe-images --owners self \
-    --filters "Name=tag:HelSourceAmi,Values=${SOURCE_AMI}" \
+    --filters "Name=tag:MjolnirSourceAmi,Values=${SOURCE_AMI}" \
     --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text)"
 if [[ -z "$owned_ami" || "$owned_ami" == None ]]; then
-    image_name="hel-runson-$(date -u +%Y%m%d%H%M%S)"
+    image_name="mjolnir-runson-$(date -u +%Y%m%d%H%M%S)"
     printf 'Copying RunsOn %s into this account as %s...\n' "$SOURCE_AMI" "$image_name"
     owned_ami="$(aws_ec2 copy-image --source-region "$REGION" --source-image-id "$SOURCE_AMI" \
-        --name "$image_name" --description "Account-owned copy of RunsOn ${SOURCE_AMI} for Hel" \
+        --name "$image_name" --description "Account-owned copy of RunsOn ${SOURCE_AMI} for Mjolnir" \
         --query ImageId --output text)"
     aws_ec2 create-tags --resources "$owned_ami" --tags \
-        "Key=Name,Value=${image_name}" 'Key=Project,Value=hel' 'Key=Purpose,Value=hel-runson' \
+        "Key=Name,Value=${image_name}" 'Key=Project,Value=mjolnir' 'Key=Purpose,Value=mjolnir-runson' \
         'Key=ManagedBy,Value=scripts/update-runson-launch-template.sh' \
-        "Key=HelSourceAmi,Value=${SOURCE_AMI}" "Key=HelSourceOwner,Value=${SOURCE_OWNER}"
+        "Key=MjolnirSourceAmi,Value=${SOURCE_AMI}" "Key=MjolnirSourceOwner,Value=${SOURCE_OWNER}"
 else
     printf 'Reusing account-owned copy %s of RunsOn %s.\n' "$owned_ami" "$SOURCE_AMI"
 fi
@@ -114,8 +114,8 @@ security_group_id="$(aws_ec2 describe-security-groups \
     --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)"
 if [[ -z "$security_group_id" || "$security_group_id" == None ]]; then
     security_group_id="$(aws_ec2 create-security-group --group-name "$SECURITY_GROUP_NAME" \
-        --description 'SSH access for Hel RunsOn sessions' --vpc-id "$vpc_id" \
-        --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${SECURITY_GROUP_NAME}},{Key=Project,Value=hel},{Key=Purpose,Value=hel-runson},{Key=ManagedBy,Value=scripts/update-runson-launch-template.sh}]" \
+        --description 'SSH access for Mjolnir RunsOn sessions' --vpc-id "$vpc_id" \
+        --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${SECURITY_GROUP_NAME}},{Key=Project,Value=mjolnir},{Key=Purpose,Value=mjolnir-runson},{Key=ManagedBy,Value=scripts/update-runson-launch-template.sh}]" \
         --query GroupId --output text)"
 fi
 controller_ip="$(curl --fail --silent --show-error https://checkip.amazonaws.com | tr -d '[:space:]')"
@@ -124,7 +124,7 @@ if [[ ! "$controller_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
     exit 1
 fi
 if ! aws_ec2 authorize-security-group-ingress --group-id "$security_group_id" \
-    --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${controller_ip}/32,Description=Hel-controller-ssh}]" \
+    --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${controller_ip}/32,Description=Mjolnir-controller-ssh}]" \
     >/dev/null 2>&1; then
     existing_cidrs="$(aws_ec2 describe-security-groups --group-ids "$security_group_id" \
         --query "SecurityGroups[0].IpPermissions[?FromPort==\`22\`].IpRanges[].CidrIp" --output text)"
@@ -145,7 +145,7 @@ printf '%s\n' \
     'users:' \
     '  - default' \
     '  - name: ubuntu' \
-    '    gecos: Hel session user' \
+    '    gecos: Mjolnir session user' \
     '    groups: [adm, sudo]' \
     '    sudo: ALL=(ALL) NOPASSWD:ALL' \
     '    shell: /bin/bash' \
@@ -167,11 +167,11 @@ jq -n --arg image_id "$owned_ami" --arg instance_type "$INSTANCE_TYPE" \
 
 template_id="$(aws_ec2 describe-launch-templates --filters "Name=launch-template-name,Values=${TEMPLATE_NAME}" \
     --query 'LaunchTemplates[0].LaunchTemplateId' --output text 2>/dev/null || true)"
-version_description="RunsOn ${SOURCE_AMI} copied as ${owned_ami} on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+version_description="Mjolnir RunsOn ${SOURCE_AMI} copied as ${owned_ami} on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [[ -z "$template_id" || "$template_id" == None ]]; then
     create_result="$(aws_ec2 create-launch-template --launch-template-name "$TEMPLATE_NAME" \
         --version-description "$version_description" --launch-template-data "file://${launch_data_file}" \
-        --tag-specifications "ResourceType=launch-template,Tags=[{Key=Name,Value=${TEMPLATE_NAME}},{Key=Project,Value=hel},{Key=Purpose,Value=hel-runson},{Key=ManagedBy,Value=scripts/update-runson-launch-template.sh}]" --output json)"
+        --tag-specifications "ResourceType=launch-template,Tags=[{Key=Name,Value=${TEMPLATE_NAME}},{Key=Project,Value=mjolnir},{Key=Purpose,Value=mjolnir-runson},{Key=ManagedBy,Value=scripts/update-runson-launch-template.sh}]" --output json)"
     template_id="$(jq -r '.LaunchTemplate.LaunchTemplateId' <<<"$create_result")"
     template_version="$(jq -r '.LaunchTemplate.LatestVersionNumber' <<<"$create_result")"
 else
@@ -190,18 +190,19 @@ else
     fi
 fi
 
-if [[ "$WRITE_HEL_CONFIG" == true ]]; then
-    hel_config="${XDG_CONFIG_HOME:-${HOME}/.config}/hel/config.toml"
-    if [[ ! -f "$hel_config" ]]; then
-        printf 'Hel config does not exist: %s\n' "$hel_config" >&2
+if [[ "$WRITE_MJ_CONFIG" == true ]]; then
+    mj_config_dir="${MJ_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/mjolnir}"
+    mj_config="$mj_config_dir/config.toml"
+    if [[ ! -f "$mj_config" ]]; then
+        printf 'Mjolnir config does not exist: %s\n' "$mj_config" >&2
         exit 1
     fi
-    if grep -Fqx '[targets.aws-runson]' "$hel_config"; then
-        printf '%s\n' 'Hel target targets.aws-runson already exists; leaving it unchanged.'
+    if grep -Fqx '[targets.aws-runson]' "$mj_config"; then
+        printf '%s\n' 'Mjolnir target targets.aws-runson already exists; leaving it unchanged.'
     else
         printf '\n[targets.aws-runson]\nkind = "aws-ec2"\nregion = "%s"\nlaunch_template = "%s"\nssh_user = "ubuntu"\naddress_source = "public-ip"\nidentity_file = "%s"\n' \
-            "$REGION" "$TEMPLATE_NAME" "$SSH_IDENTITY_FILE" >>"$hel_config"
-        printf 'Added targets.aws-runson to %s.\n' "$hel_config"
+            "$REGION" "$TEMPLATE_NAME" "$SSH_IDENTITY_FILE" >>"$mj_config"
+        printf 'Added Mjolnir target targets.aws-runson to %s.\n' "$mj_config"
     fi
 fi
 
