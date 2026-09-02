@@ -254,8 +254,13 @@ pub fn run(
     let webview = {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
+        // The GtkApplicationWindow already holds tao's default vbox; adding the
+        // WebView to the window itself is rejected and leaves the window empty.
+        let vbox = window
+            .default_vbox()
+            .context("Mjolnir desktop window has no GTK content box")?;
         builder
-            .build_gtk(window.gtk_window())
+            .build_gtk(vbox)
             .context("create Mjolnir WebKitGTK view")?
     };
     #[cfg(not(target_os = "linux"))]
