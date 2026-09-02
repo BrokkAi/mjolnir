@@ -9,6 +9,7 @@
 
 mod active;
 mod autocomplete;
+mod config_picker;
 mod elicitation;
 mod history;
 mod input;
@@ -61,6 +62,7 @@ use autocomplete::{
     Autocomplete, CommandChoice, LocalCommand, builtin_command_choices, parse_local_command,
     prompt_invokes_command,
 };
+use config_picker::ConfigPicker;
 use elicitation::ElicitationDialog;
 use history::{HistorySearch, HistorySearchRequest};
 pub use rendering::truncate_line_to_width;
@@ -441,6 +443,9 @@ pub struct ChatState {
     model_values: Vec<SessionConfigChoice>,
     effort_values: Vec<SessionConfigChoice>,
     autocomplete: Option<Autocomplete>,
+    /// The `/model` / `/effort` value selector, when one is open. It owns the
+    /// keyboard while it is up, though an arriving elicitation still wins.
+    config_picker: Option<ConfigPicker>,
     anchor: TranscriptAnchor,
     /// On entry, reveal the response advertised by the session list when later
     /// tool activity would otherwise push it above the first viewport.
@@ -534,6 +539,7 @@ impl ChatState {
             model_values: Vec::new(),
             effort_values: Vec::new(),
             autocomplete: None,
+            config_picker: None,
             anchor: TranscriptAnchor::Bottom,
             reveal_latest_agent_on_draw: true,
             last_viewport_height: 0,
@@ -1400,7 +1406,19 @@ impl ChatState {
                         "effort"
                     };
                     if args.is_empty() {
-                        self.set_notice(format!("usage: /{key} <value>"));
+                        if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
+                            self.set_notice(
+                                "The worker is closing; this configuration change was not sent",
+                            );
+                            return ChatAction::None;
+                        }
+                        if self.open_config_picker(key) {
+                            self.clear_input();
+                        } else {
+                            self.set_notice(format!(
+                                "The agent does not advertise {key} values; usage: /{key} <value>"
+                            ));
+                        }
                         return ChatAction::None;
                     }
                     if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
@@ -1653,6 +1671,12 @@ impl ChatState {
                 return ChatAction::RespondElicitation { request, response };
             }
             return ChatAction::None;
+        }
+
+        // The value selector owns the keyboard while it is up; it is checked
+        // after the elicitation dialog because the dialog draws on top of it.
+        if self.config_picker_active() {
+            return self.handle_config_picker_key(code, modifiers);
         }
 
         if code == KeyCode::Char('v')
@@ -2988,7 +3012,7 @@ mod tests {
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
         assert_eq!(
             chat.notices.current().as_deref(),
-            Some("usage: /model <value>")
+            Some("The agent does not advertise model values; usage: /model <value>")
         );
 
         chat.input = "/model sonnet".into();
@@ -3434,7 +3458,10 @@ mod tests {
         chat.input = "/model".into();
 
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert_eq!(chat.notice().as_deref(), Some("usage: /model <value>"));
+        assert_eq!(
+            chat.notice().as_deref(),
+            Some("The agent does not advertise model values; usage: /model <value>")
+        );
     }
 
     #[test]

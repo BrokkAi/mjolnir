@@ -115,6 +115,12 @@ impl ChatState {
             ("/effort ", "effort", &self.effort_values),
         ] {
             if let Some(query) = self.input.strip_prefix(prefix) {
+                // A bare command submits into the full value selector; the
+                // inline popup only completes a partially typed value.
+                if query.is_empty() {
+                    self.autocomplete = None;
+                    return;
+                }
                 // An advertised value is already a complete command. Leaving
                 // its popup open makes Enter accept the text without
                 // submitting it, and a concurrent session refresh can reopen
@@ -139,6 +145,13 @@ impl ChatState {
             return;
         };
         if query.contains(char::is_whitespace) {
+            self.autocomplete = None;
+            return;
+        }
+        // A fully typed command is ready to submit. Leaving its popup open
+        // would make Enter re-complete the text instead of running it, which
+        // matters most for the bare /model and /effort selectors.
+        if self.command_choices.iter().any(|command| command.name == query) {
             self.autocomplete = None;
             return;
         }
@@ -241,7 +254,7 @@ impl ChatState {
     }
 }
 
-fn matching_indices<T>(
+pub(super) fn matching_indices<T>(
     values: &[T],
     query: &str,
     fields: impl Fn(&T) -> (&str, Option<&str>),
@@ -414,7 +427,7 @@ fn autocomplete_row(chat: &ChatState, kind: AutocompleteKind, index: usize) -> O
     }
 }
 
-fn config_value_row(choice: &SessionConfigChoice) -> Option<String> {
+pub(super) fn config_value_row(choice: &SessionConfigChoice) -> Option<String> {
     let description = choice
         .description
         .as_deref()

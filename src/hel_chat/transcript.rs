@@ -1980,9 +1980,9 @@ pub(super) fn render_transcript(
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         // The border style reaches the title too, and the title is the name of
-        // the conversation you are in, not chrome. Give it the terminal's own
-        // foreground and leave the rule dim.
-        .title(Line::styled(title, Style::default().fg(Color::Reset)))
+        // the conversation you are in, not chrome. Draw it bright white so it
+        // stands out from the dim rule and the transcript's default text.
+        .title(Line::styled(title, Style::default().fg(Color::White)))
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     frame.render_widget(block, area);
