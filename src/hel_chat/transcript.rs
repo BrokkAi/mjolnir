@@ -1163,7 +1163,7 @@ impl ChatState {
     }
 
     fn viewport(&mut self, width: u16, height: usize) -> TranscriptViewport {
-        let fallback = self.active_terminal_fallback();
+        let trailing = self.trailing_entries();
         prepare_render_cache(
             &self.entries,
             &mut self.render_cache,
@@ -1171,7 +1171,7 @@ impl ChatState {
             self.render_mode,
         );
         let top = AnchorRow { entry: 0, row: 0 };
-        if self.entries.is_empty() && fallback.is_none() {
+        if self.entries.is_empty() && trailing.is_empty() {
             return TranscriptViewport {
                 rows: vec![empty_transcript_row(self.transcript_loading)],
                 anchor: TranscriptAnchor::Bottom,
@@ -1215,9 +1215,8 @@ impl ChatState {
                     break;
                 }
             }
-            if let Some(fallback) = fallback.as_ref() {
-                for line in render_transcript_entry(fallback, usize::from(width), self.render_mode)
-                {
+            for entry in &trailing {
+                for line in render_transcript_entry(entry, usize::from(width), self.render_mode) {
                     if rows.len() == height {
                         break;
                     }
@@ -1251,16 +1250,20 @@ impl ChatState {
                 top,
             };
         }
-        if let Some(fallback) = self.active_terminal_fallback() {
-            let lines = render_transcript_entry(
-                &fallback,
-                usize::from(self.render_cache.width),
-                self.render_mode,
-            );
-            let start = lines.len().saturating_sub(height);
-            for line in lines[start..].iter().rev() {
-                rows.push_front(line.clone());
-            }
+        let trailing = self
+            .trailing_entries()
+            .iter()
+            .flat_map(|entry| {
+                render_transcript_entry(
+                    entry,
+                    usize::from(self.render_cache.width),
+                    self.render_mode,
+                )
+            })
+            .collect::<Vec<_>>();
+        let start = trailing.len().saturating_sub(height);
+        for line in trailing[start..].iter().rev() {
+            rows.push_front(line.clone());
         }
         for index in (0..self.entries.len()).rev() {
             if rows.len() >= height {
@@ -1285,6 +1288,19 @@ impl ChatState {
             anchor: TranscriptAnchor::Bottom,
             top,
         }
+    }
+
+    /// The client-local rows drawn after the projected entries: the live
+    /// terminal card, then every submit the relay refused. Neither is in
+    /// `entries`, which `apply_materialized` rebuilds from the projection.
+    fn trailing_entries(&self) -> Vec<ChatEntry> {
+        let mut rows = Vec::from_iter(self.active_terminal_fallback());
+        rows.extend(
+            self.unsent_prompts
+                .iter()
+                .map(|unsent| unsent.entry(self.latest_seq)),
+        );
+        rows
     }
 
     /// A live, non-durable tool card for ACP terminals whose agent omitted the
@@ -2083,9 +2099,9 @@ pub(super) fn transcript_lines(chat: &mut ChatState, width: u16) -> Vec<Line<'st
             index,
         ));
     }
-    if let Some(fallback) = chat.active_terminal_fallback() {
+    for entry in chat.trailing_entries() {
         lines.extend(render_transcript_entry(
-            &fallback,
+            &entry,
             usize::from(width),
             chat.render_mode,
         ));
@@ -2139,10 +2155,12 @@ fn render_transcript_entry(
     let mut out = Vec::new();
     let visual = entry_visual(entry);
     let label = match entry.role {
-        ChatRole::User | ChatRole::Agent => format_event_time(entry.recorded_at_ms).map_or_else(
-            || visual.label.clone(),
-            |time| format!("{} · {time}", visual.label),
-        ),
+        ChatRole::User | ChatRole::Agent | ChatRole::System => {
+            format_event_time(entry.recorded_at_ms).map_or_else(
+                || visual.label.clone(),
+                |time| format!("{} · {time}", visual.label),
+            )
+        }
         _ => visual.label.clone(),
     };
     let header = Line::from(vec![
