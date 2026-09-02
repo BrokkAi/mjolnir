@@ -874,6 +874,9 @@ impl Controller {
                 canonical_session,
                 output_path: target_path(&remote_archive),
             };
+            // Only the single-shot export path measures itself here; the
+            // capture/pack path already logs its own phases above.
+            let mut export_ms: Option<u64> = None;
             let exported = if releases_after_capture {
                 let capture_spec = CheckpointCaptureSpec {
                     protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
@@ -938,11 +941,30 @@ impl Controller {
                 );
                 output
             } else {
-                export_target_checkpoint(executor, &backend, session_id, &spec, &remote_spec)?
+                let export_started = Instant::now();
+                let output =
+                    export_target_checkpoint(executor, &backend, session_id, &spec, &remote_spec)?;
+                export_ms = Some(export_started.elapsed().as_millis() as u64);
+                output
             };
             let target_checkpoint: crate::hel_checkpoint::TargetCheckpoint =
                 serde_json::from_slice(&exported.stdout)
                     .context("decode target checkpoint result")?;
+            if let Some(export_ms) = export_ms {
+                // A worker that predates the timings field reports nothing, so
+                // the phase numbers read as zero; `timings_reported` says which.
+                let timings = target_checkpoint.timings.unwrap_or_default();
+                tracing::info!(
+                    session_id,
+                    export_ms,
+                    timings_reported = target_checkpoint.timings.is_some(),
+                    native_ms = timings.native_ms,
+                    repositories_ms = timings.repositories_ms,
+                    archive_ms = timings.archive_ms,
+                    worker_total_ms = timings.total_ms,
+                    "checkpoint archive exported on the target"
+                );
+            }
             if target_checkpoint.event_frontier != expected_ordinal {
                 bail!(
                     "target checkpoint event frontier changed: expected {expected_ordinal}, found {}",
@@ -2179,6 +2201,7 @@ mod tests {
             sha256: "c".repeat(64),
             event_frontier: 7,
             event_frontier_digest: "d".repeat(64),
+            timings: None,
         })
         .unwrap()
     }

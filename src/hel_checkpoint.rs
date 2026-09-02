@@ -161,6 +161,28 @@ pub struct TargetCheckpoint {
     pub sha256: String,
     pub event_frontier: u64,
     pub event_frontier_digest: String,
+    /// Phase timings measured on the target. A worker that predates this field
+    /// simply omits it, so the controller must treat it as optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timings: Option<CheckpointExportTimings>,
+}
+
+/// Wall-clock cost of each target-side checkpoint phase, in milliseconds.
+///
+/// The worker runs as a child process over ssh or `podman exec`, so its own
+/// tracing output never reaches the daemon log. These numbers ride back in the
+/// JSON result instead, which is the only channel the controller reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointExportTimings {
+    /// Collecting native harness artifacts from the relay and harness home.
+    pub native_ms: u64,
+    /// Collecting Git bundles and patches for every workspace repository.
+    pub repositories_ms: u64,
+    /// Writing and hashing the archive.
+    pub archive_ms: u64,
+    /// The whole target-side operation, including validation and path resolution.
+    pub total_ms: u64,
 }
 
 /// Spec argument that means "read the export spec from standard input".
@@ -1125,6 +1147,7 @@ fn fingerprint_tree(root: &Path, path: &Path, digest: &mut Sha256) -> Result<()>
 /// Package a previously sealed target generation with the controller's
 /// canonical projection. This operation runs after ACP dispatch resumes.
 pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
+    let started = std::time::Instant::now();
     ensure!(
         spec.protocol_version == CHECKPOINT_STAGING_PROTOCOL_VERSION,
         "unsupported checkpoint staging protocol version {}; worker supports {}",
@@ -1152,6 +1175,7 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
             "unsupported sealed checkpoint stage version {}",
             manifest.protocol_version
         );
+        let native_started = std::time::Instant::now();
         let native_artifacts = manifest
             .native_artifacts
             .into_iter()
@@ -1168,6 +1192,8 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let native_ms = native_started.elapsed().as_millis() as u64;
+        let repositories_started = std::time::Instant::now();
         let repositories = manifest
             .repositories
             .into_iter()
@@ -1197,8 +1223,10 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let repositories_ms = repositories_started.elapsed().as_millis() as u64;
         let event_frontier = spec.canonical_session.event_frontier;
         let event_frontier_digest = spec.canonical_session.event_frontier_digest.clone();
+        let archive_started = std::time::Instant::now();
         let sha256 = write_archive_hashed(
             &output_path,
             &ArchiveInput {
@@ -1210,11 +1238,18 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                 repositories,
             },
         )?;
+        let archive_ms = archive_started.elapsed().as_millis() as u64;
         Ok(TargetCheckpoint {
             path: output_path.clone(),
             sha256,
             event_frontier,
             event_frontier_digest,
+            timings: Some(CheckpointExportTimings {
+                native_ms,
+                repositories_ms,
+                archive_ms,
+                total_ms: started.elapsed().as_millis() as u64,
+            }),
         })
     })();
     if let Err(cleanup_error) = fs::remove_dir_all(&stage_path)
@@ -1281,6 +1316,7 @@ pub fn export_checkpoint_with_git(
     spec: &CheckpointExportSpec,
     git: &dyn GitCommandRunner,
 ) -> Result<TargetCheckpoint> {
+    let started = std::time::Instant::now();
     ensure!(
         spec.protocol_version == CHECKPOINT_EXPORT_PROTOCOL_VERSION,
         "unsupported checkpoint export protocol version {}; worker supports {}",
@@ -1300,18 +1336,23 @@ pub fn export_checkpoint_with_git(
     // harness artifacts yet; requiring them would make an unused session
     // impossible to close cleanly.
     let prompted = canonical_session_contains_prompt(&spec.canonical_session);
+    let native_started = std::time::Instant::now();
     let native_artifacts = collect_checkpoint_native_artifacts(
         &spec.session,
         &spec.relay_root,
         &spec.harness_home,
         !prompted,
     )?;
+    let native_ms = native_started.elapsed().as_millis() as u64;
+    let repositories_started = std::time::Instant::now();
     let repositories =
         collect_checkpoint_repositories(&spec.workspace_root, &spec.repositories, git)?;
+    let repositories_ms = repositories_started.elapsed().as_millis() as u64;
     // The export runs while the relay's barrier freezes ACP dispatch, so it
     // hashes the archive it just wrote instead of structurally re-reading it.
     // `CheckpointTransfer::execute` performs the one full structural verify,
     // on the copy the controller actually installs.
+    let archive_started = std::time::Instant::now();
     let sha256 = write_archive_hashed(
         &spec.output_path,
         &ArchiveInput {
@@ -1323,11 +1364,18 @@ pub fn export_checkpoint_with_git(
             repositories,
         },
     )?;
+    let archive_ms = archive_started.elapsed().as_millis() as u64;
     Ok(TargetCheckpoint {
         path: spec.output_path.clone(),
         sha256,
         event_frontier,
         event_frontier_digest,
+        timings: Some(CheckpointExportTimings {
+            native_ms,
+            repositories_ms,
+            archive_ms,
+            total_ms: started.elapsed().as_millis() as u64,
+        }),
     })
 }
 
@@ -4424,6 +4472,41 @@ mod tests {
         let error = export_checkpoint(&spec).unwrap_err();
 
         assert!(format!("{error:#}").contains("repository has no valid Git HEAD"));
+    }
+
+    #[test]
+    fn export_reports_phase_timings_to_the_controller() {
+        let temp = tempfile::tempdir().unwrap();
+        let (spec, _) = fixture(temp.path());
+        let git_runner = RecordingGit::forwarding();
+
+        let exported = export_checkpoint_with_git(&spec, &git_runner).unwrap();
+
+        let timings = exported.timings.expect("export reports its phase timings");
+        assert!(
+            timings.total_ms
+                >= timings
+                    .native_ms
+                    .max(timings.repositories_ms)
+                    .max(timings.archive_ms),
+            "{timings:?}"
+        );
+    }
+
+    #[test]
+    fn target_checkpoint_from_a_worker_without_timings_still_decodes() {
+        let target = serde_json::from_value::<TargetCheckpoint>(json!({
+            "path": "/worker/checkpoint.hel.zip",
+            "sha256": "abc",
+            "event_frontier": 7,
+            "event_frontier_digest": "def"
+        }))
+        .unwrap();
+
+        assert_eq!(target.timings, None);
+        // The field is also absent from the wire form when nothing measured it.
+        let encoded = serde_json::to_value(&target).unwrap();
+        assert!(encoded.get("timings").is_none(), "{encoded}");
     }
 
     #[test]
