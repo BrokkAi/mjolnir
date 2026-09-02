@@ -11,13 +11,13 @@ use ratatui::widgets::{
     ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
 };
 
-use hel::hel_chat::render_agent_message_head;
-#[cfg(test)]
-use hel::hel_chat::render_agent_message_tail;
 use hel::hel_config::{HarnessKind, HelConfig, PermissionMode};
-use hel::hel_quota::{ProfileQuota, QuotaWindow};
 use hel::hel_state::{SessionRecord, SessionState};
 use hel::hel_targets::DeploymentCapacityKind;
+use mj_chat::hel_chat::render_agent_message_head;
+#[cfg(test)]
+use mj_chat::hel_chat::render_agent_message_tail;
+use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
 
 use crate::dialogs::{
     render_config_id_editor, render_confirmation, render_container_editor,
@@ -431,7 +431,7 @@ impl SessionRowFacts<'_> {
 
     fn clock(&self) -> String {
         let activity = self.detail.map(|detail| &detail.activity);
-        hel::usage_format::format_activity_clock(
+        mj_chat::usage_format::format_activity_clock(
             self.now_epoch_seconds,
             self.detail
                 .and_then(|detail| detail.current_turn_started_at),
@@ -849,13 +849,13 @@ fn session_top_line(
         let (label, started_at) = operation_status(operation);
         Some(vec![format!(
             "{label} {}",
-            hel::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
+            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
         )])
     } else if session.state == SessionState::Provisioning {
         let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
         Some(vec![format!(
             "Launch {}",
-            hel::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
+            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
         )])
     } else {
         None
@@ -894,8 +894,8 @@ fn session_top_line(
 const DASHBOARD_CLOCK_WIDTH: usize = 6;
 
 /// A session the dashboard has heard nothing operational about yet.
-static EMPTY_ACTIVITY: std::sync::LazyLock<hel::usage_format::SessionActivity> =
-    std::sync::LazyLock::new(hel::usage_format::SessionActivity::default);
+static EMPTY_ACTIVITY: std::sync::LazyLock<mj_chat::usage_format::SessionActivity> =
+    std::sync::LazyLock::new(mj_chat::usage_format::SessionActivity::default);
 
 /// The two column heads an expanded row puts in front of the agent's last
 /// lines: the turn and its step while a turn runs, the background work the
@@ -905,11 +905,11 @@ fn dashboard_agent_prefixes(now_epoch_seconds: u64, detail: Option<&SessionDetai
         let time = detail
             .and_then(|detail| detail.last_activity_at_ms)
             .and_then(|value| i64::try_from(value).ok())
-            .and_then(|value| hel::hel_chat::format_event_time(Some(value)))
+            .and_then(|value| mj_chat::hel_chat::format_event_time(Some(value)))
             .unwrap_or_default();
         format!("{time:<6}")
     };
-    let columns = hel::usage_format::format_activity_columns(
+    let columns = mj_chat::usage_format::format_activity_columns(
         now_epoch_seconds,
         detail.and_then(|detail| detail.current_turn_started_at),
         detail.and_then(|detail| detail.last_acp_activity_at_ms),
@@ -1065,7 +1065,7 @@ fn session_values(
         let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
         format!("Launch {}s", now_epoch_seconds.saturating_sub(started_at))
     } else {
-        hel::usage_format::format_activity_clock(
+        mj_chat::usage_format::format_activity_clock(
             now_epoch_seconds,
             detail.and_then(|detail| detail.current_turn_started_at),
             detail.map_or(&*EMPTY_ACTIVITY, |detail| &detail.activity),
@@ -1592,7 +1592,7 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
 /// apparent shade exists only in the eye. Reusing the glyph reproduces that
 /// shade exactly under any terminal theme or font, which a fixed color cannot.
 fn api_quota_bar() -> Line<'static> {
-    let label = hel::hel_quota::API_LABEL;
+    let label = mj_controller::hel_quota::API_LABEL;
     let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
     let left = (QUOTA_BAR_CELLS - label_cells) / 2;
     let right = QUOTA_BAR_CELLS - label_cells - left;
@@ -1978,12 +1978,12 @@ mod tests {
     use ratatui::style::Color;
 
     use hel::hel_config::{HarnessKind, HelConfig, ProjectRepository};
-    use hel::hel_quota::{ProfileQuota, QuotaWindow};
-    use hel::hel_selection::SurfaceId;
     use hel::hel_state::{
         HelState, MaterializedExecutionState, STATE_VERSION, SessionState, TranscriptBody,
     };
     use hel::hel_targets::{DeploymentCapacityUsage, ProvisionStage};
+    use mj_chat::hel_selection::SurfaceId;
+    use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
 
     use super::*;
     use crate::test_support::*;
@@ -2223,7 +2223,7 @@ mod tests {
             last_activity_at_ms: Some(1_297_000),
             ..SessionDetail::default()
         };
-        let activity_time = hel::hel_chat::format_event_time(Some(1_297_000)).unwrap();
+        let activity_time = mj_chat::hel_chat::format_event_time(Some(1_297_000)).unwrap();
         assert_eq!(
             dashboard_agent_prefixes(1_330, Some(&idle)),
             ["Agent:".to_owned(), format!("{activity_time:<6}")]
@@ -2233,7 +2233,7 @@ mod tests {
         // column and keeps the time it last spoke beside it.
         let background = SessionDetail {
             last_activity_at_ms: Some(1_297_000),
-            activity: hel::usage_format::SessionActivity {
+            activity: mj_chat::usage_format::SessionActivity {
                 harness_turn_started_at_ms: None,
                 background_commands: vec![hel::hel_worker::BackgroundCommand {
                     started_at_ms: 1_000_000,
@@ -2255,7 +2255,7 @@ mod tests {
             materialized_session_for("session-1", vec![agent_message(2, "Finished work")]);
         materialized.execution = MaterializedExecutionState::Idle;
         dashboard.apply_materialized_session(&materialized);
-        let activity_time = hel::hel_chat::format_event_time(Some(2_000)).unwrap();
+        let activity_time = mj_chat::hel_chat::format_event_time(Some(2_000)).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
 
         terminal
@@ -3103,7 +3103,7 @@ mod tests {
             profile_id: profile_id.into(),
             harness: HarnessKind::Deepseek,
             windows: Vec::new(),
-            extra: Some(hel::hel_quota::API_LABEL.into()),
+            extra: Some(mj_controller::hel_quota::API_LABEL.into()),
             error: None,
             refreshed_at_epoch_seconds: now_seconds(),
         }
@@ -3137,7 +3137,7 @@ mod tests {
     #[test]
     fn background_work_reaches_both_session_row_forms() {
         let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
-        let activity = hel::usage_format::SessionActivity {
+        let activity = mj_chat::usage_format::SessionActivity {
             harness_turn_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 started_at_ms,

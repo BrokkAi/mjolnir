@@ -13,10 +13,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle, ProjectRepository};
-use hel::hel_controller::Controller;
-use hel::hel_controller::ResumeRepositorySourcePreflight;
-use hel::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
-use hel::hel_setup::github_repository_from_origin;
 use hel::hel_state::{
     HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord, SessionState,
 };
@@ -25,6 +21,10 @@ use hel_tui::{
     DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
     SessionOperationKind, WebViewerAccess,
 };
+use mj_controller::hel_controller::Controller;
+use mj_controller::hel_controller::ResumeRepositorySourcePreflight;
+use mj_controller::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
+use mj_controller::hel_setup::github_repository_from_origin;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
@@ -61,7 +61,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     ChatOpened {
         session_id: String,
-        result: Box<std::result::Result<hel::hel_chat::ActiveChat, String>>,
+        result: Box<std::result::Result<mj_chat::hel_chat::ActiveChat, String>>,
     },
     /// The daemon refused a review action. The message is a sentence for the
     /// person who pressed the key, so it goes back to the chat that sent it.
@@ -721,7 +721,7 @@ pub(crate) fn spawn_clipboard_read(updates: UnboundedSender<DashboardIoUpdate>) 
     spawn_io(
         "read clipboard",
         updates,
-        hel::hel_clipboard::read_text,
+        mj_chat::hel_clipboard::read_text,
         DashboardIoUpdate::ClipboardText,
     )
 }
@@ -734,7 +734,7 @@ pub(crate) fn spawn_clipboard_write(
     spawn_io(
         "write clipboard",
         updates,
-        move || hel::hel_clipboard::write_text(&text),
+        move || mj_chat::hel_clipboard::write_text(&text),
         DashboardIoUpdate::ClipboardWritten,
     )
 }
@@ -1137,7 +1137,7 @@ impl DashboardContext {
                         self.dashboard.set_current_session(
                             self.active_chat
                                 .as_ref()
-                                .map(hel::hel_chat::ActiveChat::session_id),
+                                .map(mj_chat::hel_chat::ActiveChat::session_id),
                         );
                         // The startup pick often attaches before the session
                         // manager has adopted the session. That resolves

@@ -22,9 +22,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
 use hel::hel_config::{HarnessKind, HelConfig};
-use hel::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 use hel::hel_state::{HelState, SessionRecord, SessionState};
-use hel::hel_text_input::TextInput;
+use mj_chat::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
+use mj_chat::hel_text_input::TextInput;
 
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;

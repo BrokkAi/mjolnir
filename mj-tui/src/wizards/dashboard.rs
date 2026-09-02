@@ -695,7 +695,7 @@ impl DashboardState {
         target_id: &str,
     ) -> Option<String> {
         let session = self.state.sessions.get(session_id)?;
-        hel::hel_controller::resume_compatibility(session, &self.config, target_id).err()
+        mj_controller::hel_controller::resume_compatibility(session, &self.config, target_id).err()
     }
 
     fn prepare_resume_target(&self, wizard: &mut ResumeWizard) -> DashboardAction {
@@ -1445,8 +1445,8 @@ impl DashboardState {
             target,
             mounts: MountWizard::new(Vec::new()),
             review_focus: ReviewFocus::Submit,
-            new_bundle_source: hel::hel_text_input::TextInput::new(),
-            project_directory: hel::hel_text_input::TextInput::new(),
+            new_bundle_source: mj_chat::hel_text_input::TextInput::new(),
+            project_directory: mj_chat::hel_text_input::TextInput::new(),
             project_directory_error: None,
             project_history: Vec::new(),
             project_history_index: 0,

@@ -401,9 +401,9 @@ pub fn latest_completed_turn_ordinal(session: &MaterializedSession) -> Option<u6
 /// or not queued observations have been read yet.
 #[derive(Clone)]
 pub struct RecoveryObserver {
-    pub(crate) observations: mpsc::UnboundedSender<RecoveryObservation>,
-    pub(crate) busy: watch::Receiver<BTreeSet<String>>,
-    pub(crate) gate: Arc<RecoveryGate>,
+    pub observations: mpsc::UnboundedSender<RecoveryObservation>,
+    pub busy: watch::Receiver<BTreeSet<String>>,
+    pub gate: Arc<RecoveryGate>,
 }
 
 /// A per-session reservation held by a foreground lifecycle operation. The
@@ -420,7 +420,7 @@ impl Drop for RecoveryReservation {
 }
 
 #[derive(Default)]
-pub(crate) struct RecoveryGate {
+pub struct RecoveryGate {
     state: Mutex<RecoveryGateState>,
 }
 
@@ -433,7 +433,7 @@ struct RecoveryGateState {
 }
 
 impl RecoveryGate {
-    pub(crate) fn reserve(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
+    pub fn reserve(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         *state.reservations.entry(session_id.to_owned()).or_default() += 1;
         RecoveryReservation {
@@ -455,7 +455,7 @@ impl RecoveryGate {
 
     /// Claims the session for a copy and returns the cancel flag that copy
     /// must watch, or `None` when a copy or a reservation already holds it.
-    pub(crate) fn try_start(&self, session_id: &str) -> Option<Arc<AtomicBool>> {
+    pub fn try_start(&self, session_id: &str) -> Option<Arc<AtomicBool>> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.busy.contains_key(session_id) || state.reservations.contains_key(session_id) {
             return None;
@@ -465,12 +465,12 @@ impl RecoveryGate {
         Some(cancelled)
     }
 
-    pub(crate) fn finish(&self, session_id: &str) {
+    pub fn finish(&self, session_id: &str) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.busy.remove(session_id);
     }
 
-    pub(crate) fn is_busy(&self, session_id: &str) -> bool {
+    pub fn is_busy(&self, session_id: &str) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -479,7 +479,7 @@ impl RecoveryGate {
     }
 
     /// Asks the in-flight copy for this session, if any, to stop.
-    pub(crate) fn cancel_busy(&self, session_id: &str) {
+    pub fn cancel_busy(&self, session_id: &str) {
         if let Some(cancelled) = self
             .state
             .lock()
@@ -492,7 +492,7 @@ impl RecoveryGate {
     }
 
     /// Asks every in-flight copy to stop, used when the coordinator shuts down.
-    pub(crate) fn cancel_all(&self) {
+    pub fn cancel_all(&self) {
         for cancelled in self
             .state
             .lock()
@@ -504,7 +504,7 @@ impl RecoveryGate {
         }
     }
 
-    pub(crate) fn busy_sessions(&self) -> BTreeSet<String> {
+    pub fn busy_sessions(&self) -> BTreeSet<String> {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())

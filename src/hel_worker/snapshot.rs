@@ -856,7 +856,7 @@ fn truncate_with_marker(text: &mut String, keep: usize) {
 /// The Unix worker is the only production caller; the helper stays compiled
 /// on Windows so its unit test still builds under `cargo test --no-run`.
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) fn truncate_start_with_marker(text: &mut String, keep: usize) -> bool {
+pub fn truncate_start_with_marker(text: &mut String, keep: usize) -> bool {
     if text.len() <= keep {
         return false;
     }

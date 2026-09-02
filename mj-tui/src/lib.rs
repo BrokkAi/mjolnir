@@ -17,14 +17,14 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use hel::hel_chat::Notices;
 use hel::hel_config::{HarnessKind, HelConfig, TargetTemplate as HelTargetTemplate};
-use hel::hel_quota::ProfileQuota;
-use hel::hel_selection::FrameSurfaces;
 use hel::hel_state::{
     HelState, ProjectSourceIdentity, SessionRecord, SessionResourceAllocation, SessionState,
 };
 use hel::hel_targets::AdditionalMount;
+use mj_chat::hel_chat::Notices;
+use mj_chat::hel_selection::FrameSurfaces;
+use mj_controller::hel_quota::ProfileQuota;
 
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
@@ -1977,7 +1977,7 @@ mod tests {
         assert_eq!(
             dashboard.handle_key_at(
                 key(KeyCode::Down),
-                shown_at + hel::hel_chat::NOTICE_MINIMUM_DISPLAY
+                shown_at + mj_chat::hel_chat::NOTICE_MINIMUM_DISPLAY
             ),
             DashboardAction::None
         );

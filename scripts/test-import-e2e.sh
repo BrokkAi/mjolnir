@@ -25,4 +25,4 @@ cd "$repo_root"
 if [[ ! -x "$MJ_WORKER_BINARY" ]]; then
     cargo build --target x86_64-unknown-linux-musl
 fi
-cargo test --test import_e2e imported_claude_session_resumes_natively -- --ignored --nocapture
+cargo test -p brokk-mjolnir --test import_e2e imported_claude_session_resumes_natively -- --ignored --nocapture

@@ -27,7 +27,7 @@ pub use protocol::{
     unsupported_relay_method_response, write_relay_frame,
 };
 #[cfg(unix)]
-pub(crate) use snapshot::truncate_start_with_marker;
+pub use snapshot::truncate_start_with_marker;
 pub use snapshot::{
     ActiveAgentTerminal, ActiveRelayPrompt, ActiveUserShell, BackgroundCommand,
     ClaimedRelayCommand, ClaimedSteeringPrompt, HarnessTurn, QueuedRelayPrompt,
@@ -877,7 +877,7 @@ impl DurableRelay {
         Ok(RelayResponseBody::Ok { payload })
     }
 
-    pub(crate) fn install_prompt_context(&mut self, text: String) -> Result<()> {
+    pub fn install_prompt_context(&mut self, text: String) -> Result<()> {
         if text.trim().is_empty() {
             bail!("pending prompt context is empty");
         }

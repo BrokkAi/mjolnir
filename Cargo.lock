@@ -506,33 +506,80 @@ dependencies = [
 ]
 
 [[package]]
-name = "brokk-mj-core"
+name = "brokk-mj-chat"
 version = "2.0.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
  "arboard",
- "axum",
- "axum-server",
- "base64",
- "blake3",
+ "brokk-mj-controller",
+ "brokk-mj-core",
  "chrono",
  "crossterm",
  "dirs",
- "flate2",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "textwrap",
+ "tokio",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "brokk-mj-controller"
+version = "2.0.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "axum",
+ "axum-server",
+ "base64",
+ "brokk-mj-core",
+ "chrono",
+ "dirs",
  "getrandom 0.3.4",
  "hmac",
  "http-body-util",
+ "libc",
+ "qrcode",
+ "rayon",
+ "reedline",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-core"
+version = "2.0.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "base64",
+ "blake3",
+ "chrono",
+ "dirs",
+ "flate2",
+ "getrandom 0.3.4",
  "iana-time-zone",
  "libc",
  "proptest",
- "pulldown-cmark",
- "qrcode",
- "ratatui",
  "rayon",
- "reedline",
  "regex",
- "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -540,18 +587,12 @@ dependencies = [
  "sha2",
  "signal-hook",
  "similar",
- "sysinfo",
  "tar",
  "tempfile",
- "textwrap",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "toml",
- "tower",
  "tracing",
- "unicode-segmentation",
- "unicode-width",
  "url",
  "zip",
 ]
@@ -565,6 +606,7 @@ dependencies = [
  "axum-server",
  "base64",
  "block2",
+ "brokk-mj-controller",
  "brokk-mj-core",
  "gio",
  "image",
@@ -591,6 +633,8 @@ dependencies = [
 name = "brokk-mj-tui"
 version = "2.0.0"
 dependencies = [
+ "brokk-mj-chat",
+ "brokk-mj-controller",
  "brokk-mj-core",
  "chrono",
  "crossterm",
@@ -617,14 +661,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-worker"
+version = "2.0.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "base64",
+ "brokk-mj-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "brokk-mjolnir"
 version = "2.0.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
  "axum-server",
+ "brokk-mj-chat",
+ "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-tui",
+ "brokk-mj-worker",
  "chrono",
  "clap",
  "crossterm",

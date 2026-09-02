@@ -113,7 +113,7 @@ impl TerminalOutputRecord {
     /// and no signal. Anything else — a nonzero exit, a signal, or no status at
     /// all because the terminal was released before one was observed — is
     /// abnormal, and stays visible in every render mode.
-    pub(crate) fn exited_cleanly(&self) -> bool {
+    pub fn exited_cleanly(&self) -> bool {
         self.exit_code == Some(0) && self.signal.is_none()
     }
 
@@ -121,7 +121,7 @@ impl TerminalOutputRecord {
     /// child result. Kimi reports shell output as a byte array beside its exit
     /// status but omits the ACP terminal reference, so the exact result is the
     /// only ownership information it publishes.
-    pub(crate) fn matches_tool_raw_result(&self, call: &serde_json::Value) -> bool {
+    pub fn matches_tool_raw_result(&self, call: &serde_json::Value) -> bool {
         if !matches!(
             call.get("status").and_then(serde_json::Value::as_str),
             Some("completed" | "failed")
@@ -337,31 +337,31 @@ pub enum ChatRole {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChatEntry {
     #[serde(default)]
-    pub(crate) start_seq: u64,
+    pub start_seq: u64,
     pub seq: u64,
     pub role: ChatRole,
     pub text: String,
-    pub(crate) recorded_at_ms: Option<i64>,
-    pub(crate) revision: u64,
-    pub(crate) message_id: Option<String>,
-    pub(crate) tool_call_id: Option<String>,
-    pub(crate) tool_status: Option<ToolStatus>,
-    pub(crate) tool_content: Vec<String>,
-    pub(crate) tool_diffstats: Vec<String>,
-    pub(crate) tool_locations: Vec<String>,
-    pub(crate) plan: Vec<PlanLine>,
+    pub recorded_at_ms: Option<i64>,
+    pub revision: u64,
+    pub message_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub tool_status: Option<ToolStatus>,
+    pub tool_content: Vec<String>,
+    pub tool_diffstats: Vec<String>,
+    pub tool_locations: Vec<String>,
+    pub plan: Vec<PlanLine>,
     #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) leading_omitted: bool,
+    pub leading_omitted: bool,
     /// Detail the decluttered feed leaves out: the entry renders only in the
     /// raw transcript mode. Set once, when the entry is built, because Alt-T
     /// switches render mode without rebuilding entries.
     #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) raw_only: bool,
+    pub raw_only: bool,
     /// The materialized transcript item this entry was derived from, when it
     /// came from the controller's projection. Provenance only, so it is
     /// neither serialized nor part of the entry's value.
     #[serde(skip)]
-    pub(crate) source: TranscriptSource,
+    pub source: TranscriptSource,
 }
 
 /// Handle on the transcript item an entry was derived from. Unchanged items
@@ -371,10 +371,10 @@ pub struct ChatEntry {
 /// The handle records where an entry came from, not what it says, so two
 /// entries with equal content are equal whatever they were derived from.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TranscriptSource(pub(crate) Option<Arc<TranscriptItem>>);
+pub struct TranscriptSource(pub Option<Arc<TranscriptItem>>);
 
 impl TranscriptSource {
-    pub(crate) fn is(&self, item: &Arc<TranscriptItem>) -> bool {
+    pub fn is(&self, item: &Arc<TranscriptItem>) -> bool {
         self.0
             .as_ref()
             .is_some_and(|source| Arc::ptr_eq(source, item))
@@ -390,7 +390,7 @@ impl PartialEq for TranscriptSource {
 impl Eq for TranscriptSource {}
 
 impl ChatEntry {
-    pub(crate) fn plan(seq: u64, plan: Vec<PlanLine>) -> Self {
+    pub fn plan(seq: u64, plan: Vec<PlanLine>) -> Self {
         Self {
             start_seq: seq,
             seq,
@@ -411,18 +411,22 @@ impl ChatEntry {
         }
     }
 
-    pub(crate) fn touch(&mut self, seq: u64) {
+    pub fn touch(&mut self, seq: u64) {
         self.seq = seq;
         self.revision = self.revision.wrapping_add(1);
     }
 
-    #[cfg(test)]
-    pub(crate) fn bounded_for_dashboard(mut self) -> Self {
+    /// Bound one entry to the sizes the dashboard's summary tolerates.
+    ///
+    /// Compiled unconditionally and hidden from the documentation because the
+    /// chat crate's tests need it, and a `#[cfg(test)]` item is invisible to
+    /// another crate.
+    #[doc(hidden)]
+    pub fn bounded_for_dashboard(mut self) -> Self {
         self.bound_dashboard_content();
         self
     }
 
-    #[cfg(test)]
     fn bound_dashboard_content(&mut self) {
         const TEXT_BYTES: usize = 64 * 1024;
         const DETAIL_BYTES: usize = 2 * 1024;
@@ -445,7 +449,7 @@ impl ChatEntry {
         }
     }
 
-    pub(crate) fn with_recorded_at(mut self, recorded_at_ms: Option<i64>) -> Self {
+    pub fn with_recorded_at(mut self, recorded_at_ms: Option<i64>) -> Self {
         self.recorded_at_ms = recorded_at_ms;
         self
     }
@@ -454,7 +458,7 @@ impl ChatEntry {
 /// Constructors that sanitize the text they are given, so terminal escape
 /// sequences from a harness never reach a transcript entry.
 impl ChatEntry {
-    pub(crate) fn plain(seq: u64, role: ChatRole, text: impl Into<String>) -> Self {
+    pub fn plain(seq: u64, role: ChatRole, text: impl Into<String>) -> Self {
         Self {
             start_seq: seq,
             seq,
@@ -475,7 +479,7 @@ impl ChatEntry {
         }
     }
 
-    pub(crate) fn tool(
+    pub fn tool(
         seq: u64,
         title: impl Into<String>,
         tool_call_id: Option<String>,
@@ -506,7 +510,7 @@ pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
-pub(crate) fn plan_status(status: &PlanEntryStatus) -> PlanStatus {
+pub fn plan_status(status: &PlanEntryStatus) -> PlanStatus {
     match status {
         PlanEntryStatus::InProgress => PlanStatus::Running,
         PlanEntryStatus::Completed => PlanStatus::Completed,
@@ -514,7 +518,7 @@ pub(crate) fn plan_status(status: &PlanEntryStatus) -> PlanStatus {
     }
 }
 
-pub(crate) fn tool_content_details(
+pub fn tool_content_details(
     content: &[ToolCallContent],
     terminal_outputs: &[TerminalOutputRecord],
     raw_output: Option<&serde_json::Value>,
@@ -586,7 +590,7 @@ fn raw_output_terminal_detail(raw_output: &serde_json::Value) -> Option<String> 
 }
 
 /// One terminal's output followed by how it ended.
-pub(crate) fn terminal_output_detail(record: &TerminalOutputRecord) -> String {
+pub fn terminal_output_detail(record: &TerminalOutputRecord) -> String {
     let summary = terminal_exit_summary(record);
     if record.output.is_empty() {
         return summary;
@@ -607,7 +611,7 @@ fn terminal_exit_summary(record: &TerminalOutputRecord) -> String {
     summary
 }
 
-pub(crate) fn tool_diff_paths(content: &[ToolCallContent]) -> Vec<String> {
+pub fn tool_diff_paths(content: &[ToolCallContent]) -> Vec<String> {
     content
         .iter()
         .filter_map(|item| match item {
@@ -617,7 +621,7 @@ pub(crate) fn tool_diff_paths(content: &[ToolCallContent]) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn tool_location_details(locations: &[ToolCallLocation]) -> Vec<String> {
+pub fn tool_location_details(locations: &[ToolCallLocation]) -> Vec<String> {
     locations
         .iter()
         .map(|location| match location.line {
@@ -667,7 +671,7 @@ pub(crate) fn push_streamed_entry(
 /// Apply the transcript-visible part of one ACP session update. Returns the
 /// update again when it changes the session surface rather than the
 /// transcript, so the chat view handles those without decoding twice.
-pub(crate) fn apply_session_update_to_entries(
+pub fn apply_session_update_to_entries(
     entries: &mut Vec<ChatEntry>,
     seq: u64,
     recorded_at_ms: Option<i64>,
@@ -770,7 +774,7 @@ pub(crate) fn apply_session_update_to_entries(
 /// Apply the transcript-visible part of one persisted runtime event. Returns
 /// the event again when it only configures the session surface, which is the
 /// chat view's business rather than the transcript's.
-pub(crate) fn apply_runtime_event_to_entries(
+pub fn apply_runtime_event_to_entries(
     entries: &mut Vec<ChatEntry>,
     seq: u64,
     recorded_at_ms: Option<i64>,
@@ -818,7 +822,7 @@ pub(crate) fn apply_runtime_event_to_entries(
 }
 
 /// Remove terminal controls while preserving user-visible whitespace.
-pub(crate) fn sanitize_terminal_text(text: &str) -> String {
+pub fn sanitize_terminal_text(text: &str) -> String {
     let mut sanitized = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -925,7 +929,7 @@ fn materialized_value_text(value: &serde_json::Value) -> String {
     sanitize_terminal_text(&serde_json::to_string(value).unwrap_or_else(|_| "[content]".into()))
 }
 
-pub(crate) fn tool_status(status: &ToolCallStatus) -> ToolStatus {
+pub fn tool_status(status: &ToolCallStatus) -> ToolStatus {
     match status {
         ToolCallStatus::InProgress => ToolStatus::Running,
         ToolCallStatus::Completed => ToolStatus::Completed,
@@ -999,7 +1003,6 @@ fn format_diffstat(diff: &agent_client_protocol::schema::v1::Diff) -> String {
     )
 }
 
-#[cfg(test)]
 fn truncate_string_start(value: &mut String, maximum_bytes: usize) -> bool {
     if value.len() <= maximum_bytes {
         return false;
@@ -1014,7 +1017,7 @@ fn truncate_string_start(value: &mut String, maximum_bytes: usize) -> bool {
 
 /// The ACP tool states needed to keep a compact tool block visually useful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum ToolStatus {
+pub enum ToolStatus {
     Pending,
     Running,
     Completed,
@@ -1022,16 +1025,16 @@ pub(crate) enum ToolStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum PlanStatus {
+pub enum PlanStatus {
     Pending,
     Running,
     Completed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PlanLine {
-    pub(crate) text: String,
-    pub(crate) status: PlanStatus,
+pub struct PlanLine {
+    pub text: String,
+    pub status: PlanStatus,
 }
 
 #[cfg(test)]

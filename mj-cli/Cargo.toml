@@ -17,10 +17,13 @@ path = "src/main.rs"
 
 [features]
 default = []
-test-hooks = ["hel/test-hooks"]
+test-hooks = ["hel/test-hooks", "mj-worker/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"]
 
 [dependencies]
 hel.workspace = true
+mj-worker.workspace = true
+mj-controller.workspace = true
+mj-chat.workspace = true
 hel-tui.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"

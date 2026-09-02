@@ -69,8 +69,8 @@ mod supported {
     use axum::body::Body;
     use axum::extract::State;
     use axum::http::{HeaderMap, Request, Response, StatusCode, header};
-    use hel::hel_desktop::{DesktopLaunch, sibling_executable};
-    use hel::hel_server::COOKIE_NAME;
+    use mj_controller::hel_desktop::{DesktopLaunch, sibling_executable};
+    use mj_controller::hel_server::COOKIE_NAME;
 
     /// Headers that describe one transport hop rather than the end-to-end
     /// request and therefore must not cross the desktop proxy.

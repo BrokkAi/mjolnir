@@ -1226,7 +1226,7 @@ fn is_github_source(source: &str) -> bool {
 }
 
 /// Replace `path` without exposing a partially-written configuration/state file.
-pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
+pub fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
     atomic_write_with_parent(path, body, ParentDirectory::Create)
 }
 
@@ -1235,7 +1235,7 @@ pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
 /// Worker state lives inside a directory that session teardown deletes out
 /// from under the running daemon. Recreating it here would resurrect a closed
 /// session's relay state, so a vanished parent must be an error instead.
-pub(crate) fn atomic_write_existing(path: &Path, body: &[u8]) -> Result<()> {
+pub fn atomic_write_existing(path: &Path, body: &[u8]) -> Result<()> {
     atomic_write_with_parent(path, body, ParentDirectory::Require)
 }
 

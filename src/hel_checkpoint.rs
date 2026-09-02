@@ -1596,7 +1596,7 @@ fn validate_checkpoint_source(
     Ok(())
 }
 
-pub(crate) fn canonical_session_contains_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
+pub fn canonical_session_contains_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
     snapshot
         .transcript
         .iter()

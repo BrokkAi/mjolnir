@@ -11,19 +11,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use hel::hel_config::{HelConfig, data_dir};
-use hel::hel_controller::{
-    Controller, ControllerStoreGuard, ResumeRepositorySourceReceipt, SessionLaunchOptions,
-    SessionResumeOptions,
-};
 use hel::hel_credentials::CredentialSyncSignal;
 use hel::hel_database::StoreSchemaMismatch;
 use hel::hel_elicitation::ElicitationResponse;
 use hel::hel_review::driver::Resolution;
-use hel::hel_review::host::{RuntimeReviewView, TurnReviewHost};
-use hel::hel_session_manager::{
-    ManagedSessionView, RemoteSessionPublisher, RemoteSessionRequest, SessionManagerChannels,
-    SessionManagerControl, ViewError, spawn_remote_session_manager, spawn_session_manager,
-};
 use hel::hel_state::{
     HostContainerSize, RecoveryObservation, RecoveryObserver, SessionRecord,
     SessionResourceAllocation, SessionState,
@@ -34,6 +25,15 @@ use hel::hel_targets::{
 };
 use hel::hel_worker::{RelayCommand, RelayOperationalState};
 use hel::hel_workspace::WorkspaceRecord;
+use mj_controller::hel_controller::{
+    Controller, ControllerStoreGuard, ResumeRepositorySourceReceipt, SessionLaunchOptions,
+    SessionResumeOptions,
+};
+use mj_controller::hel_review_host::{RuntimeReviewView, TurnReviewHost};
+use mj_controller::hel_session_manager::{
+    ManagedSessionView, RemoteSessionPublisher, RemoteSessionRequest, SessionManagerChannels,
+    SessionManagerControl, ViewError, spawn_remote_session_manager, spawn_session_manager,
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -362,7 +362,7 @@ enum DaemonAction {
         /// one, which is what plan review uses.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
-        action: hel::hel_session_manager::ReviewerAction,
+        action: mj_controller::hel_session_manager::ReviewerAction,
     },
     /// Review the turn this session just finished, on a surface's request.
     StartTurnReview {
@@ -427,8 +427,8 @@ enum DaemonReply {
     Text(String),
     OptionalSessionState(Option<SessionState>),
     Checkpoint(hel::hel_state::CheckpointMetadata),
-    RecoveryScan(hel::hel_controller::RecoveryScan),
-    Reviewer(Box<hel::hel_session_manager::ReviewerOutcome>),
+    RecoveryScan(mj_controller::hel_controller::RecoveryScan),
+    Reviewer(Box<mj_controller::hel_session_manager::ReviewerOutcome>),
     Done,
 }
 
@@ -2043,7 +2043,9 @@ impl DaemonClient {
         }
     }
 
-    pub(crate) async fn scan_recovery(&mut self) -> Result<hel::hel_controller::RecoveryScan> {
+    pub(crate) async fn scan_recovery(
+        &mut self,
+    ) -> Result<mj_controller::hel_controller::RecoveryScan> {
         match self.request(DaemonAction::ScanRecovery).await? {
             DaemonReply::RecoveryScan(scan) => Ok(scan),
             reply => bail!("unexpected recovery-scan reply {reply:?}"),
@@ -2172,8 +2174,8 @@ impl DaemonClient {
         &mut self,
         session_id: String,
         role: Option<String>,
-        action: hel::hel_session_manager::ReviewerAction,
-    ) -> Result<hel::hel_session_manager::ReviewerOutcome> {
+        action: mj_controller::hel_session_manager::ReviewerAction,
+    ) -> Result<mj_controller::hel_session_manager::ReviewerOutcome> {
         match self
             .request(DaemonAction::ReviewerAction {
                 session_id,
@@ -2507,7 +2509,7 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
     hel::hel_database::recover_interrupted_checkpointing_sessions(
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     )?;
-    hel::hel_controller::reconcile_managed_checkpoint_archives()?;
+    mj_controller::hel_controller::reconcile_managed_checkpoint_archives()?;
 
     let controller = Controller::load()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
@@ -2538,7 +2540,8 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
     let mut manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
-    let mut recovery = hel::hel_recovery::RecoveryCoordinator::spawn(manager_control.clone());
+    let mut recovery =
+        mj_controller::hel_recovery::RecoveryCoordinator::spawn(manager_control.clone());
     let recovery_observer = recovery.observer();
     let state = Arc::new(RuntimeState::new(
         manager_control.clone(),
@@ -2812,7 +2815,9 @@ fn spawn_shutdown_watchdog() {
 }
 
 fn spawn_manager_target_refresher(
-    targets: tokio::sync::watch::Sender<Vec<hel::hel_session_manager::RelaySessionTarget>>,
+    targets: tokio::sync::watch::Sender<
+        Vec<mj_controller::hel_session_manager::RelaySessionTarget>,
+    >,
     cancellation: CancellationToken,
     state: Arc<RuntimeState>,
 ) -> tokio::task::JoinHandle<()> {
@@ -2947,13 +2952,13 @@ fn spawn_phone_server(
 }
 
 fn spawn_remote_request_bridge(
-    mut requests: hel::hel_session_manager::RemoteSessionRequests,
+    mut requests: mj_controller::hel_session_manager::RemoteSessionRequests,
     manager: SessionManagerControl,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // One session's requests reach its relay actor in the order they were
         // made; different sessions still overlap.
-        let mut request_order = hel::hel_session_manager::SessionRequestOrder::new();
+        let mut request_order = mj_controller::hel_session_manager::SessionRequestOrder::new();
         while let Some(request) = requests.recv().await {
             let manager = manager.clone();
             request_order.dispatch(request, move |request| {
@@ -3449,7 +3454,7 @@ async fn handle_action(
                 let values = values
                     .as_array()
                     .context("serialized prompt content is not an array")?;
-                let text = hel::hel_chat::materialized_content_text(values);
+                let text = hel::hel_transcript::materialized_content_text(values);
                 let bundle_id = state
                     .controller
                     .lock()
@@ -3731,7 +3736,8 @@ mod tests {
 
     fn test_runtime_state() -> Arc<RuntimeState> {
         let remote = spawn_remote_session_manager().unwrap();
-        let recovery = hel::hel_recovery::RecoveryCoordinator::spawn(remote.control.clone());
+        let recovery =
+            mj_controller::hel_recovery::RecoveryCoordinator::spawn(remote.control.clone());
         Arc::new(RuntimeState::new_with_controller_loader(
             remote.control,
             Controller {

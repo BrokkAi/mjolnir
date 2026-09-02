@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::hel_config::{ExecutionPolicy, HarnessKind};
 
-pub(crate) const DISCOVER_LOGIN_PATH_ENV: &str = "MJ_DISCOVER_LOGIN_PATH";
+pub const DISCOVER_LOGIN_PATH_ENV: &str = "MJ_DISCOVER_LOGIN_PATH";
 /// Directory inside the primary worker root that holds everything the reviewer owns.
-pub(crate) const REVIEWER_DIR: &str = "reviewer";
+pub const REVIEWER_DIR: &str = "reviewer";
 /// Where the controller stages the chosen profile, inside [`REVIEWER_DIR`].
-pub(crate) const REVIEWER_PROFILE_DIR: &str = "profile";
+pub const REVIEWER_PROFILE_DIR: &str = "profile";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

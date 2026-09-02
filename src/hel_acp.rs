@@ -5,12 +5,13 @@
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod dialect;
-pub(crate) mod surface;
+pub mod surface;
 mod terminal_compat;
 pub use surface::PlanControl;
 #[cfg(any(unix, test))]
-pub(crate) use terminal_compat::fallback_terminal_tool_call;
-pub(crate) use terminal_compat::{fallback_terminal_tool_call_id, is_fallback_terminal_tool_call};
+pub use terminal_compat::fallback_terminal_tool_call;
+pub(crate) use terminal_compat::fallback_terminal_tool_call_id;
+pub use terminal_compat::is_fallback_terminal_tool_call;
 
 use dialect::grok;
 
@@ -56,7 +57,7 @@ use crate::hel_terminal::{
 use crate::hel_worker::{AcpActivityClock, ClaimedSteeringPrompt};
 use crate::hel_worker_launch::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};
 
-pub(crate) fn plan_review_carries_native_feedback(id: &str) -> bool {
+pub fn plan_review_carries_native_feedback(id: &str) -> bool {
     grok::is_plan_review_id(id)
 }
 
@@ -742,7 +743,7 @@ fn is_plan_permission(request: &RequestPermissionRequest) -> bool {
         })
 }
 
-pub(crate) fn normalized_plan_review(id: String, value: &serde_json::Value) -> ElicitationRequest {
+pub fn normalized_plan_review(id: String, value: &serde_json::Value) -> ElicitationRequest {
     let plan = nested_string(value, &["plan", "plan_content", "planContent"])
         .unwrap_or("The agent did not provide plan text in its review request.");
     ElicitationRequest {

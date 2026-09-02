@@ -26,7 +26,7 @@ pub enum PlanControl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlanControlError {
+pub enum PlanControlError {
     DeepseekUnsupported,
     CodexIncompatible,
     GrokIncompatible,
@@ -35,7 +35,7 @@ pub(crate) enum PlanControlError {
 
 /// ACP controls and commands available to one live session.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AcpSessionSurface {
+pub struct AcpSessionSurface {
     harness_kind: Option<HarnessKind>,
     config_options: Vec<SessionConfigOption>,
     session_modes: Option<SessionModeState>,
@@ -47,7 +47,7 @@ pub(crate) struct AcpSessionSurface {
 }
 
 impl AcpSessionSurface {
-    pub(crate) fn from_configuration(configuration: &BTreeMap<String, Value>) -> Self {
+    pub fn from_configuration(configuration: &BTreeMap<String, Value>) -> Self {
         Self {
             current_mode: configuration
                 .get("collaboration_mode")
@@ -66,24 +66,24 @@ impl AcpSessionSurface {
         }
     }
 
-    pub(crate) fn set_harness_kind(&mut self, harness_kind: HarnessKind) {
+    pub fn set_harness_kind(&mut self, harness_kind: HarnessKind) {
         self.harness_kind = Some(harness_kind);
         self.sync_plan_mode();
     }
 
-    pub(crate) fn set_config_options(&mut self, options: &[SessionConfigOption]) {
+    pub fn set_config_options(&mut self, options: &[SessionConfigOption]) {
         self.config_options = options.to_vec();
         self.current_model = config_current_value(options, "model");
         self.current_effort = config_current_value(options, "effort");
         self.sync_plan_mode();
     }
 
-    pub(crate) fn set_session_modes(&mut self, modes: Option<SessionModeState>) {
+    pub fn set_session_modes(&mut self, modes: Option<SessionModeState>) {
         self.session_modes = modes;
         self.sync_plan_mode();
     }
 
-    pub(crate) fn apply_current_mode_update(&mut self, mode: String) {
+    pub fn apply_current_mode_update(&mut self, mode: String) {
         if self.mode_config_key() == "collaboration_mode" {
             return;
         }
@@ -93,10 +93,7 @@ impl AcpSessionSurface {
         }
     }
 
-    pub(crate) fn apply_projected_configuration(
-        &mut self,
-        configuration: &BTreeMap<String, Value>,
-    ) {
+    pub fn apply_projected_configuration(&mut self, configuration: &BTreeMap<String, Value>) {
         if let Some(mode) = configuration
             .get(self.mode_config_key())
             .and_then(Value::as_str)
@@ -115,29 +112,29 @@ impl AcpSessionSurface {
             .or_else(|| config_current_value(&self.config_options, "effort"));
     }
 
-    pub(crate) fn set_agent_commands(&mut self, commands: Vec<AvailableCommand>) {
+    pub fn set_agent_commands(&mut self, commands: Vec<AvailableCommand>) {
         self.agent_commands = commands;
     }
 
-    pub(crate) fn agent_commands(&self) -> &[AvailableCommand] {
+    pub fn agent_commands(&self) -> &[AvailableCommand] {
         &self.agent_commands
     }
 
-    pub(crate) fn advertises_command(&self, name: &str) -> bool {
+    pub fn advertises_command(&self, name: &str) -> bool {
         self.agent_commands
             .iter()
             .any(|command| command.name == name)
     }
 
-    pub(crate) fn current_model(&self) -> Option<&str> {
+    pub fn current_model(&self) -> Option<&str> {
         self.current_model.as_deref()
     }
 
-    pub(crate) fn current_effort(&self) -> Option<&str> {
+    pub fn current_effort(&self) -> Option<&str> {
         self.current_effort.as_deref()
     }
 
-    pub(crate) fn supports_fast_mode(&self) -> bool {
+    pub fn supports_fast_mode(&self) -> bool {
         self.config_options.iter().any(|option| {
             option.id.to_string() == FAST_MODE_CONFIG_ID
                 && select_contains(&option.kind, FAST_MODE_ON)
@@ -145,35 +142,35 @@ impl AcpSessionSurface {
         })
     }
 
-    pub(crate) fn fast_mode_active(&self) -> bool {
+    pub fn fast_mode_active(&self) -> bool {
         self.supports_fast_mode()
             && config_current_value(&self.config_options, FAST_MODE_CONFIG_ID).as_deref()
                 == Some(FAST_MODE_ON)
     }
 
-    pub(crate) fn current_mode(&self) -> Option<&str> {
+    pub fn current_mode(&self) -> Option<&str> {
         self.current_mode.as_deref()
     }
 
-    pub(crate) fn begin_plan_mode_change(&mut self, active: bool) {
+    pub fn begin_plan_mode_change(&mut self, active: bool) {
         self.plan_mode_change_pending = true;
         self.current_mode = Some(if active { "plan" } else { "default" }.into());
     }
 
-    pub(crate) fn finish_plan_mode_change(&mut self, active: bool) {
+    pub fn finish_plan_mode_change(&mut self, active: bool) {
         self.plan_mode_change_pending = false;
         self.current_mode = Some(if active { "plan" } else { "default" }.into());
     }
 
-    pub(crate) fn supports_plan_mode(&self) -> bool {
+    pub fn supports_plan_mode(&self) -> bool {
         self.plan_control(true).is_ok()
     }
 
-    pub(crate) fn plan_mode_active(&self) -> bool {
+    pub fn plan_mode_active(&self) -> bool {
         self.supports_plan_mode() && self.current_mode() == Some("plan")
     }
 
-    pub(crate) fn plan_control(&self, active: bool) -> Result<PlanControl, PlanControlError> {
+    pub fn plan_control(&self, active: bool) -> Result<PlanControl, PlanControlError> {
         let value = if active { "plan" } else { "default" };
         match self.harness_kind {
             Some(HarnessKind::Deepseek) => Err(PlanControlError::DeepseekUnsupported),

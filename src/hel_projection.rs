@@ -45,7 +45,7 @@ pub struct ProjectedRelayEvent {
 /// while catch-up avoids rediscovering keyed items and open streams with a
 /// full transcript walk for every event.
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectionIndex {
+pub struct ProjectionIndex {
     transcript: HashMap<String, Arc<TranscriptItem>>,
     transcript_positions: HashMap<String, usize>,
     open_agent_streams: BTreeSet<(u64, String)>,
@@ -54,7 +54,7 @@ pub(crate) struct ProjectionIndex {
 }
 
 impl ProjectionIndex {
-    pub(crate) fn new(current: &MaterializedSession) -> Self {
+    pub fn new(current: &MaterializedSession) -> Self {
         let mut index = Self {
             transcript: HashMap::with_capacity(current.transcript.len()),
             transcript_positions: HashMap::with_capacity(current.transcript.len()),
@@ -193,7 +193,7 @@ pub fn project_relay_event(
     project_relay_event_indexed(current, &index, event)
 }
 
-pub(crate) fn project_relay_event_indexed(
+pub fn project_relay_event_indexed(
     current: &MaterializedSession,
     index: &ProjectionIndex,
     event: &RelayEvent,
@@ -224,7 +224,7 @@ pub fn apply_committed_projection_event(
     apply_committed_projection_event_inner(current, event, mutation, None)
 }
 
-pub(crate) fn apply_committed_projection_event_indexed(
+pub fn apply_committed_projection_event_indexed(
     current: &mut MaterializedSession,
     index: &mut ProjectionIndex,
     event: &RelayEvent,

@@ -76,7 +76,7 @@ pub struct WorkerSnapshot {
 }
 
 impl WorkerSnapshot {
-    pub(crate) fn summary(session_id: String, phase: WorkerPhase, latest_seq: u64) -> Self {
+    pub fn summary(session_id: String, phase: WorkerPhase, latest_seq: u64) -> Self {
         Self {
             session_id,
             phase,

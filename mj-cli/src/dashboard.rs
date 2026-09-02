@@ -24,23 +24,23 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use hel::hel_config::{HelConfig, config_path};
-use hel::hel_controller::Controller;
 use hel::hel_credentials::CredentialSyncHandle;
-use hel::hel_selection::{
-    FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
-};
-use hel::hel_session_manager::{
-    SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
-};
-use hel::hel_setup::{SetupOutcome, run_setup_dialog};
 use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation, SessionState};
 use hel::hel_targets::DeploymentCapacityTarget;
-use hel::hel_worker_client::CredentialSyncCoordinator;
 use hel_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption,
     PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
     resume_profile_placeholders,
 };
+use mj_chat::hel_selection::{
+    FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
+};
+use mj_controller::hel_controller::Controller;
+use mj_controller::hel_session_manager::{
+    SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
+};
+use mj_controller::hel_setup::{SetupOutcome, run_setup_dialog};
+use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio_stream::StreamExt as _;
@@ -347,14 +347,14 @@ pub(crate) struct DashboardContext {
     pub(crate) dashboard: DashboardState,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
-    notices: hel::hel_chat::Notices,
+    notices: mj_chat::hel_chat::Notices,
     /// Absent only while the setup dialog owns the terminal; see
     /// [`DashboardContext::run_setup_dialog`].
     events: Option<event::EventStream>,
     /// The conversation on screen. One chat stays warm at a time; its feeds
     /// keep running while another pane has the keyboard, so switching back is
     /// a redraw rather than a rebuild.
-    pub(crate) active_chat: Option<hel::hel_chat::ActiveChat>,
+    pub(crate) active_chat: Option<mj_chat::hel_chat::ActiveChat>,
     /// Session-manager attachment is asynchronous: an actor may need to
     /// answer from a worker or relay before a chat can be built.
     pub(crate) opening_chat_session: Option<String>,
@@ -391,10 +391,10 @@ pub(crate) struct DashboardContext {
     runtime_lifecycles: Feed<watch::Receiver<Vec<crate::daemon::RuntimeLifecycleView>>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
-    runtime_reviews: Feed<watch::Receiver<Vec<hel::hel_review::host::RuntimeReviewView>>>,
+    runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>>,
     /// Last complete review projection, retained even while the session list
     /// is on screen so a subsequently opened chat starts in the right state.
-    runtime_review_views: BTreeMap<String, hel::hel_review::host::RuntimeReviewView>,
+    runtime_review_views: BTreeMap<String, mj_controller::hel_review_host::RuntimeReviewView>,
     runtime_config: Feed<watch::Receiver<HelConfig>>,
     runtime_records: Feed<watch::Receiver<Vec<SessionRecord>>>,
     config_reload_in_flight: bool,
@@ -543,7 +543,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         }
         context.draw()?;
         let mut action = DashboardAction::None;
-        let mut chat_outcome = hel::hel_chat::ChatEventOutcome::None;
+        let mut chat_outcome = mj_chat::hel_chat::ChatEventOutcome::None;
         // The winning arm takes the message that woke the loop; the drains
         // below batch whatever is queued behind it, so one wakeup is one draw.
         tokio::select! {
@@ -622,7 +622,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            () = hel::hel_chat::ActiveChat::pump(context.active_chat.as_mut()) => {
+            () = mj_chat::hel_chat::ActiveChat::pump(context.active_chat.as_mut()) => {
                 // The conversation is always on screen, so its own feeds
                 // always redraw it and always advance its read receipt.
                 context.dirty = true;
@@ -881,7 +881,7 @@ impl DashboardContext {
             controller.state.clone(),
             BTreeMap::new(),
         );
-        let notices = hel::hel_chat::Notices::default();
+        let notices = mj_chat::hel_chat::Notices::default();
         dashboard.share_notices(notices.clone());
         for (session_id, queued) in projected_queued_prompts(&controller)? {
             dashboard.apply_queued_prompts(&session_id, queued);
@@ -1052,7 +1052,7 @@ impl DashboardContext {
                 move || {
                     hel::hel_database::load_materialized_projection_tail(
                         &session_id,
-                        hel::hel_chat::TAIL_SEED_ITEMS,
+                        mj_chat::hel_chat::TAIL_SEED_ITEMS,
                     )
                 }
             })
@@ -1293,7 +1293,7 @@ impl DashboardContext {
         let invalidated = self
             .active_chat
             .as_mut()
-            .is_some_and(hel::hel_chat::ActiveChat::transcript_selection_invalidated);
+            .is_some_and(mj_chat::hel_chat::ActiveChat::transcript_selection_invalidated);
         if invalidated && self.selection.active_surface() == Some(SurfaceId::Transcript) {
             self.selection.clear();
             self.dirty = true;
@@ -1511,11 +1511,11 @@ impl DashboardContext {
             .active_chat
             .as_ref()
             .filter(|chat| chat.session_id() != session_id)
-            .map(hel::hel_chat::ActiveChat::latest_event_ordinal)
+            .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
         {
             self.record_detach(ordinal);
         }
-        let header = hel::hel_chat::SessionHeaderIdentity {
+        let header = mj_chat::hel_chat::SessionHeaderIdentity {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
@@ -1527,12 +1527,12 @@ impl DashboardContext {
         let session_id = session_id.to_owned();
         let bundle_id = session_record.bundle_id.clone();
         let draft = session_record.draft_input.clone();
-        let context = hel::hel_chat::ChatSessionContext {
+        let context = mj_chat::hel_chat::ChatSessionContext {
             config: self.controller.config.clone(),
             session: session_record,
         };
         let (persistence_tx, mut persistence_rx) =
-            tokio::sync::mpsc::unbounded_channel::<hel::hel_chat::ChatDaemonRequest>();
+            tokio::sync::mpsc::unbounded_channel::<mj_chat::hel_chat::ChatDaemonRequest>();
         let refusals = self.dashboard_io_tx.clone();
         tokio::spawn(async move {
             while let Some(request) = persistence_rx.recv().await {
@@ -1540,22 +1540,22 @@ impl DashboardContext {
                 // pressed the key, so it comes back to the chat rather than
                 // only into the log.
                 let refusal_session = match &request {
-                    hel::hel_chat::ChatDaemonRequest::StartTurnReview { session_id }
-                    | hel::hel_chat::ChatDaemonRequest::ResolveTurnReview { session_id, .. } => {
-                        Some(session_id.clone())
-                    }
+                    mj_chat::hel_chat::ChatDaemonRequest::StartTurnReview { session_id }
+                    | mj_chat::hel_chat::ChatDaemonRequest::ResolveTurnReview {
+                        session_id, ..
+                    } => Some(session_id.clone()),
                     _ => None,
                 };
                 let result = async {
                     let mut daemon = crate::daemon::connect_or_start().await?;
                     match request {
-                        hel::hel_chat::ChatDaemonRequest::SaveReview { session_id, review } => {
+                        mj_chat::hel_chat::ChatDaemonRequest::SaveReview { session_id, review } => {
                             daemon.save_active_review(session_id, review).await
                         }
-                        hel::hel_chat::ChatDaemonRequest::ClearReview { session_id } => {
+                        mj_chat::hel_chat::ChatDaemonRequest::ClearReview { session_id } => {
                             daemon.clear_active_review(session_id).await
                         }
-                        hel::hel_chat::ChatDaemonRequest::RememberReviewerSelection {
+                        mj_chat::hel_chat::ChatDaemonRequest::RememberReviewerSelection {
                             workspace_id,
                             selection,
                         } => {
@@ -1563,10 +1563,10 @@ impl DashboardContext {
                                 .remember_reviewer_selection(workspace_id, selection)
                                 .await
                         }
-                        hel::hel_chat::ChatDaemonRequest::StartTurnReview { session_id } => {
+                        mj_chat::hel_chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                             daemon.start_turn_review(session_id).await
                         }
-                        hel::hel_chat::ChatDaemonRequest::ResolveTurnReview {
+                        mj_chat::hel_chat::ChatDaemonRequest::ResolveTurnReview {
                             session_id,
                             resolution,
                         } => daemon.resolve_turn_review(session_id, resolution).await,
@@ -1596,7 +1596,7 @@ impl DashboardContext {
                 .session(session_id.clone())
                 .await
                 .map(|managed| {
-                    hel::hel_chat::ActiveChat::open_with_persistence(
+                    mj_chat::hel_chat::ActiveChat::open_with_persistence(
                         managed,
                         &bundle_id,
                         Some(context),
@@ -1777,13 +1777,10 @@ impl DashboardContext {
             // running after the turn that started them ended.
             self.dashboard.set_session_activity(
                 &session_id,
-                update
-                    .view
-                    .snapshot
-                    .as_ref()
-                    .map_or_else(hel::usage_format::SessionActivity::default, |snapshot| {
-                        hel::usage_format::SessionActivity::of(&snapshot.operational)
-                    }),
+                update.view.snapshot.as_ref().map_or_else(
+                    mj_chat::usage_format::SessionActivity::default,
+                    |snapshot| mj_chat::usage_format::SessionActivity::of(&snapshot.operational),
+                ),
             );
             // A view is published as disconnected only once the relay has
             // failed past the unreachable threshold, so this reddens the band
@@ -2200,14 +2197,15 @@ impl DashboardContext {
     }
 
     /// Applies what the chat view asked for after handling its own input.
-    async fn apply_chat_outcome(&mut self, outcome: hel::hel_chat::ChatEventOutcome) {
+    async fn apply_chat_outcome(&mut self, outcome: mj_chat::hel_chat::ChatEventOutcome) {
         match outcome {
-            hel::hel_chat::ChatEventOutcome::None | hel::hel_chat::ChatEventOutcome::Handled => {}
-            hel::hel_chat::ChatEventOutcome::CycleFocus { reverse } => {
+            mj_chat::hel_chat::ChatEventOutcome::None
+            | mj_chat::hel_chat::ChatEventOutcome::Handled => {}
+            mj_chat::hel_chat::ChatEventOutcome::CycleFocus { reverse } => {
                 self.dashboard.cycle_focus(reverse);
                 self.dirty = true;
             }
-            hel::hel_chat::ChatEventOutcome::QuitDetach {
+            mj_chat::hel_chat::ChatEventOutcome::QuitDetach {
                 last_seen_event_ordinal,
             } => {
                 // The warm chat goes on holding this input in memory, so save
@@ -2374,7 +2372,7 @@ fn dispatch_event(
     context: &mut DashboardContext,
     event: Event,
     action: &mut DashboardAction,
-    chat_outcome: &mut hel::hel_chat::ChatEventOutcome,
+    chat_outcome: &mut mj_chat::hel_chat::ChatEventOutcome,
 ) -> bool {
     let to_chat = match &event {
         Event::Mouse(mouse) if !context.dashboard.modal_open() => {
@@ -2391,7 +2389,7 @@ fn dispatch_event(
     match context.active_chat.as_mut().filter(|_| to_chat) {
         Some(chat) => {
             *chat_outcome = chat.handle_event(event);
-            matches!(*chat_outcome, hel::hel_chat::ChatEventOutcome::None)
+            matches!(*chat_outcome, mj_chat::hel_chat::ChatEventOutcome::None)
         }
         None => {
             *action = dashboard_event_action(&mut context.dashboard, event);
@@ -2416,14 +2414,14 @@ fn draw_selection(
     let id = selection.active_surface()?;
     let range = selection.range()?;
     let surface = *surfaces.surface(id)?;
-    hel::hel_selection::highlight(frame.buffer_mut(), &surface, &range);
+    mj_chat::hel_selection::highlight(frame.buffer_mut(), &surface, &range);
     if matches!(
         id,
         SurfaceId::Transcript | SurfaceId::ElicitationMessage | SurfaceId::ReviewerTranscript
     ) {
         return None;
     }
-    Some(hel::hel_selection::extract_rows(
+    Some(mj_chat::hel_selection::extract_rows(
         frame.buffer_mut(),
         &surface,
         &range,
@@ -2556,8 +2554,8 @@ fn configuration_needs_setup(config: &HelConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hel::hel_selection::SurfaceFrame;
     use hel::hel_state::HelState;
+    use mj_chat::hel_selection::SurfaceFrame;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Position, Rect};
@@ -2767,8 +2765,8 @@ mod tests {
             SelectionRouting::Copy {
                 surface: SurfaceId::DashboardPane(2),
                 range: SelectionRange {
-                    start: hel::hel_selection::ContentPos::new(1, 0),
-                    end: hel::hel_selection::ContentPos::new(2, quotas.rect.width - 1),
+                    start: mj_chat::hel_selection::ContentPos::new(1, 0),
+                    end: mj_chat::hel_selection::ContentPos::new(2, quotas.rect.width - 1),
                 },
             }
         );

@@ -424,7 +424,7 @@ pub struct CheckpointRepositoryBundle {
 /// import its pack. Importing into an empty repository can make partial-clone
 /// Git versions lazily contact the archived origin before Hel has installed
 /// the configured source's credentials.
-pub(crate) fn checkpoint_bundle_prerequisites(
+pub fn checkpoint_bundle_prerequisites(
     repository: &CheckpointRepositoryBundle,
 ) -> Result<Vec<String>> {
     let bundle = &repository.committed_bundle;

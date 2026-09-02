@@ -18,8 +18,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use hel::hel_selection::FrameSurfaces;
-use hel::hel_text_input::TextInput;
+use mj_chat::hel_selection::FrameSurfaces;
+use mj_chat::hel_text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, spec};
 use crate::widgets::centered_modal;
