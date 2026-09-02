@@ -659,13 +659,30 @@ pub(crate) fn log_credential_sync_actions(result: &hel::hel_credentials::Credent
     }
 }
 
+/// The extra option a Claude profile has after an auth failure.
+///
+/// Claude Code cannot refresh its rotating login early, so a container copy
+/// can lose the single-use refresh race with the host. A setup token does not
+/// rotate, which takes the race away rather than retrying it.
+fn setup_token_advice(profile_id: &str, harness: Option<hel::hel_config::HarnessKind>) -> String {
+    if harness == Some(hel::hel_config::HarnessKind::Claude) {
+        format!(
+            ", or store a long-lived token with `mj login --profile {profile_id} --setup-token`"
+        )
+    } else {
+        String::new()
+    }
+}
+
 impl CredentialSyncNotices {
     /// Healthy no-op cycles stay out of the UI; only actions, new failures, and
     /// answers to an event-triggered reconciliation are worth a notice.
     pub(crate) fn notice(
         &mut self,
         result: &hel::hel_credentials::CredentialSyncResult,
+        harness: Option<hel::hel_config::HarnessKind>,
     ) -> Option<String> {
+        let advice = setup_token_advice(&result.profile_id, harness);
         // Event-triggered syncs always speak: the upstream per-session
         // cooldown, not this dedup, is what keeps them rare.
         if let Some(trigger) = &result.trigger {
@@ -678,7 +695,7 @@ impl CredentialSyncNotices {
             if let Some(detail) = sync_failure {
                 return Some(match trigger.reason {
                     CredentialSyncReason::AuthenticationFailure => format!(
-                        "Auth failure on profile {} (session {}); credential reconciliation failed: {detail}. Run `mj login --profile {}`.",
+                        "Auth failure on profile {} (session {}); credential reconciliation failed: {detail}. Run `mj login --profile {}`{advice}.",
                         result.profile_id,
                         short_id(session_id),
                         result.profile_id
@@ -694,13 +711,13 @@ impl CredentialSyncNotices {
             // scrolls off, so the profile leads and the advice trails.
             return Some(match (trigger.reason, result.pushed_to(session_id)) {
                 (CredentialSyncReason::AuthenticationFailure, true) => format!(
-                    "Auth failure on profile {} (session {}); refreshed credentials were pushed. Retry the prompt, and if it repeats run `mj login --profile {}`.",
+                    "Auth failure on profile {} (session {}); refreshed credentials were pushed. Retry the prompt, and if it repeats run `mj login --profile {}`{advice}.",
                     result.profile_id,
                     short_id(session_id),
                     result.profile_id
                 ),
                 (CredentialSyncReason::AuthenticationFailure, false) => format!(
-                    "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`.",
+                    "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`{advice}.",
                     result.profile_id,
                     short_id(session_id),
                     result.profile_id
@@ -2271,7 +2288,7 @@ mod tests {
             failure: None,
             outcomes: Vec::new(),
         };
-        assert_eq!(CredentialSyncNotices::default().notice(&result), None);
+        assert_eq!(CredentialSyncNotices::default().notice(&result, None), None);
     }
 
     #[test]
@@ -2329,7 +2346,7 @@ mod tests {
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
             }],
         };
-        let notice = notices.notice(&pushed).unwrap();
+        let notice = notices.notice(&pushed, None).unwrap();
         assert!(notice.contains("were pushed"), "{notice}");
         assert!(notice.contains("mj login --profile work"), "{notice}");
 
@@ -2341,11 +2358,62 @@ mod tests {
             outcomes: Vec::new(),
             ..pushed
         };
-        let notice = notices.notice(&nothing_to_push).unwrap();
+        let notice = notices.notice(&nothing_to_push, None).unwrap();
         assert!(notice.contains("nothing fresher"), "{notice}");
         assert!(notice.contains("mj login --profile work"), "{notice}");
         // The per-session cooldown upstream limits these; the dedup must not.
-        assert_eq!(notices.notice(&nothing_to_push), Some(notice));
+        assert_eq!(notices.notice(&nothing_to_push, None), Some(notice));
+    }
+
+    #[test]
+    fn a_claude_authentication_failure_offers_the_long_lived_token() {
+        use hel::hel_config::HarnessKind;
+        use hel::hel_credentials::{CredentialSyncOutcome, CredentialSyncResult};
+
+        let result = CredentialSyncResult {
+            profile_id: "claude-max".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "018f9dd2-a3b4".into(),
+                reason: CredentialSyncReason::AuthenticationFailure,
+            }),
+            failure: None,
+            outcomes: Vec::new(),
+        };
+
+        let claude = CredentialSyncNotices::default()
+            .notice(&result, Some(HarnessKind::Claude))
+            .unwrap();
+        assert!(
+            claude.ends_with(
+                "Run `mj login --profile claude-max`, or store a long-lived token with `mj login --profile claude-max --setup-token`."
+            ),
+            "{claude}"
+        );
+
+        // Only Claude can rotate ahead of expiry this way.
+        let codex = CredentialSyncNotices::default()
+            .notice(&result, Some(HarnessKind::Codex))
+            .unwrap();
+        assert!(
+            codex.ends_with("Run `mj login --profile claude-max`."),
+            "{codex}"
+        );
+
+        // The advice also reaches a failed reconciliation, not only a clean one.
+        let failed = CredentialSyncResult {
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "018f9dd2-a3b4".into(),
+                outcome: Err("worker proxy disconnected".into()),
+            }],
+            ..result
+        };
+        let claude_failure = CredentialSyncNotices::default()
+            .notice(&failed, Some(HarnessKind::Claude))
+            .unwrap();
+        assert!(
+            claude_failure.contains("--setup-token`."),
+            "{claude_failure}"
+        );
     }
 
     #[test]
@@ -2366,7 +2434,9 @@ mod tests {
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
             }],
         };
-        let notice = CredentialSyncNotices::default().notice(&result).unwrap();
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
         assert!(notice.contains("returned no response"), "{notice}");
         assert!(notice.contains("were pushed"), "{notice}");
         assert!(!notice.contains("Auth failure"), "{notice}");
@@ -2385,7 +2455,9 @@ mod tests {
             failure: Some("controller credential file is unreadable".into()),
             outcomes: Vec::new(),
         };
-        let notice = CredentialSyncNotices::default().notice(&result).unwrap();
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
         assert!(notice.contains("reconciliation failed"), "{notice}");
         assert!(notice.contains("credential file is unreadable"), "{notice}");
         assert!(!notice.contains("nothing fresher"), "{notice}");
@@ -2404,7 +2476,9 @@ mod tests {
                 outcome: Err("worker proxy disconnected".into()),
             }],
         };
-        let notice = CredentialSyncNotices::default().notice(&result).unwrap();
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
         assert!(notice.contains("worker proxy disconnected"), "{notice}");
     }
 
@@ -2427,14 +2501,17 @@ mod tests {
 
         assert!(
             notices
-                .notice(&failed("worker proxy disconnected"))
+                .notice(&failed("worker proxy disconnected"), None)
                 .is_some()
         );
-        assert_eq!(notices.notice(&failed("worker proxy disconnected")), None);
+        assert_eq!(
+            notices.notice(&failed("worker proxy disconnected"), None),
+            None
+        );
 
-        let changed = notices.notice(&failed("container is gone")).unwrap();
+        let changed = notices.notice(&failed("container is gone"), None).unwrap();
         assert!(changed.contains("container is gone"), "{changed}");
-        assert_eq!(notices.notice(&failed("container is gone")), None);
+        assert_eq!(notices.notice(&failed("container is gone"), None), None);
 
         // A clean cycle forgets the failure, so a recurrence is reported again.
         let healthy = CredentialSyncResult {
@@ -2446,8 +2523,8 @@ mod tests {
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
             }],
         };
-        assert_eq!(notices.notice(&healthy), None);
-        assert!(notices.notice(&failed("container is gone")).is_some());
+        assert_eq!(notices.notice(&healthy, None), None);
+        assert!(notices.notice(&failed("container is gone"), None).is_some());
     }
 
     #[test]
@@ -2462,12 +2539,12 @@ mod tests {
         };
         let mut notices = CredentialSyncNotices::default();
 
-        let notice = notices.notice(&failed("work")).unwrap();
+        let notice = notices.notice(&failed("work"), None).unwrap();
         assert!(notice.contains("profile work"), "{notice}");
-        assert_eq!(notices.notice(&failed("work")), None);
+        assert_eq!(notices.notice(&failed("work"), None), None);
         // Another profile failing the same way is its own key.
-        assert!(notices.notice(&failed("personal")).is_some());
-        assert_eq!(notices.notice(&failed("work")), None);
+        assert!(notices.notice(&failed("personal"), None).is_some());
+        assert_eq!(notices.notice(&failed("work"), None), None);
     }
 
     #[test]
@@ -2498,7 +2575,9 @@ mod tests {
                 },
             ],
         };
-        let notice = CredentialSyncNotices::default().notice(&result).unwrap();
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
         assert!(!notice.contains("harness credentials"), "{notice}");
         assert!(
             notice.contains("Synced skills for profile work to 2 session(s)."),

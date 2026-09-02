@@ -311,6 +311,11 @@ fn worker_launch_config(
             project_memory_replica_slug(&project_memory.project_key, session_id),
         );
     }
+    apply_claude_setup_token(
+        &mut environment,
+        profile.kind,
+        &crate::hel_credentials::claude_oauth_token_path(&session.last_profile),
+    );
     Ok((
         WorkerLaunchConfig {
             session_id: session_id.to_string(),
@@ -327,6 +332,39 @@ fn worker_launch_config(
         project_memory,
         target_profile_home,
     ))
+}
+
+/// Hand a Claude worker the profile's long-lived setup token, when it has one.
+///
+/// Claude Code reads `CLAUDE_CODE_OAUTH_TOKEN` ahead of the `/login`
+/// credentials file, and a setup token does not rotate, so a container copy
+/// cannot lose the single-use refresh race with the host. A profile that sets
+/// the variable itself stays authoritative.
+fn apply_claude_setup_token(
+    environment: &mut std::collections::BTreeMap<String, String>,
+    kind: crate::hel_config::HarnessKind,
+    token_path: &Path,
+) {
+    use crate::hel_credentials::CLAUDE_OAUTH_TOKEN_ENV;
+
+    if kind != crate::hel_config::HarnessKind::Claude
+        || environment.contains_key(CLAUDE_OAUTH_TOKEN_ENV)
+    {
+        return;
+    }
+    match crate::hel_credentials::read_claude_oauth_token(token_path) {
+        Ok(Some(token)) => {
+            environment.insert(CLAUDE_OAUTH_TOKEN_ENV.to_owned(), token);
+        }
+        Ok(None) => {}
+        // A stored token Hel cannot read is worth reporting, but the session
+        // still starts on the synced credentials file.
+        Err(error) => tracing::warn!(
+            path = %token_path.display(),
+            %error,
+            "ignoring an unreadable Claude setup token"
+        ),
+    }
 }
 
 fn configure_login_path_discovery(
@@ -1972,6 +2010,50 @@ mod tests {
     use std::collections::BTreeMap;
 
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() {
+        use crate::hel_config::HarnessKind;
+        use crate::hel_credentials::{CLAUDE_OAUTH_TOKEN_ENV, write_claude_oauth_token};
+
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("profiles/claude/claude-oauth-token");
+        let missing = directory.path().join("profiles/absent/claude-oauth-token");
+        write_claude_oauth_token(&token_path, b"sk-ant-oat01-stored").unwrap();
+
+        let mut claude = BTreeMap::new();
+        apply_claude_setup_token(&mut claude, HarnessKind::Claude, &token_path);
+        assert_eq!(
+            claude.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
+            Some("sk-ant-oat01-stored")
+        );
+
+        // Every other harness ignores the variable, so it must not appear.
+        for kind in HarnessKind::ALL
+            .into_iter()
+            .filter(|kind| *kind != HarnessKind::Claude)
+        {
+            let mut environment = BTreeMap::new();
+            apply_claude_setup_token(&mut environment, kind, &token_path);
+            assert!(environment.is_empty(), "{kind:?} must not read the token");
+        }
+
+        // A profile that sets the variable itself stays authoritative.
+        let mut overridden = BTreeMap::from([(
+            CLAUDE_OAUTH_TOKEN_ENV.to_owned(),
+            "profile-token".to_owned(),
+        )]);
+        apply_claude_setup_token(&mut overridden, HarnessKind::Claude, &token_path);
+        assert_eq!(
+            overridden.get(CLAUDE_OAUTH_TOKEN_ENV).map(String::as_str),
+            Some("profile-token")
+        );
+
+        // A profile with no stored token launches exactly as before.
+        let mut without = BTreeMap::new();
+        apply_claude_setup_token(&mut without, HarnessKind::Claude, &missing);
+        assert!(without.is_empty());
+    }
 
     #[test]
     fn packaged_worker_names_match_release_archives() {

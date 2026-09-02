@@ -126,6 +126,23 @@ impl CodexUsageClient {
         Ok(())
     }
 
+    /// Ask app-server to rotate the stored login now.
+    ///
+    /// `account/read` with `refreshToken: true` "requests a proactive token
+    /// refresh before returning; in managed auth mode this triggers the normal
+    /// refresh-token flow; in external auth mode this flag is ignored". An
+    /// app-server too old to know the flag answers `-32601`, which means there
+    /// is nothing to do here rather than a failed poll.
+    async fn refresh_token(&mut self) -> Result<(), QueryError> {
+        let id = self
+            .send_request("account/read", json!({ "refreshToken": true }))
+            .await?;
+        match self.read_result(id).await {
+            Ok(_) | Err(QueryError::Unsupported) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn query(&mut self) -> Result<CodexUsageReport, QueryError> {
         let account_id = self
             .send_request("account/read", json!({ "refreshToken": false }))
@@ -244,6 +261,28 @@ fn parse_response(message: &Value, expected_id: u64) -> Result<Option<Value>, Qu
         .ok_or(QueryError::Protocol(ProtocolError::InvalidResponse))
 }
 
+/// Spawn the cached client if it is missing, then make sure it is initialized.
+async fn prepare(
+    client: &mut Option<CodexUsageClient>,
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+) -> Result<&mut CodexUsageClient, QueryError> {
+    if client.is_none() {
+        *client = Some(CodexUsageClient::spawn(cwd, env)?);
+    }
+    let ready = client.as_mut().expect("client initialized above");
+    ready.initialize().await?;
+    Ok(ready)
+}
+
+/// Drop a client the failure says is no longer usable. A transport or protocol
+/// break leaves the stream out of step, so the next call needs a fresh child.
+async fn discard_failed_client(client: &mut Option<CodexUsageClient>, replaceable: bool) {
+    if replaceable && let Some(stale_client) = client.take() {
+        stale_client.shutdown().await;
+    }
+}
+
 /// Refresh a persistent app-server client, recreating it after transport or
 /// protocol failures. Calls are awaited serially by the session worker.
 pub async fn refresh(
@@ -252,32 +291,55 @@ pub async fn refresh(
     env: HashMap<String, String>,
 ) -> CodexUsageStatus {
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        if client.is_none() {
-            *client = Some(CodexUsageClient::spawn(cwd, env)?);
-        }
-        let client = client.as_mut().expect("client initialized above");
-        client.initialize().await?;
-        client.query().await
+        prepare(client, cwd, env).await?.query().await
     })
     .await;
 
     match result {
         Ok(Ok(report)) => CodexUsageStatus::Available(report),
         Ok(Err(error)) => {
-            if matches!(error, QueryError::Protocol(_) | QueryError::Unsupported)
-                && let Some(stale_client) = client.take()
-            {
-                stale_client.shutdown().await;
-            }
+            discard_failed_client(
+                client,
+                matches!(error, QueryError::Protocol(_) | QueryError::Unsupported),
+            )
+            .await;
             tracing::warn!("codex quota query failed: {error}");
             CodexUsageStatus::Unavailable(error.user_reason().to_string())
         }
         Err(_) => {
-            if let Some(stale_client) = client.take() {
-                stale_client.shutdown().await;
-            }
+            discard_failed_client(client, true).await;
             tracing::warn!("codex quota query timed out");
             CodexUsageStatus::Unavailable("request timed out".to_string())
+        }
+    }
+}
+
+/// Rotate the profile's Codex login ahead of its expiry, reusing the cached
+/// client the way [`refresh`] does.
+///
+/// Codex refresh tokens are single use. A host and a container that reach
+/// expiry at the same instant both try to spend the same token, one wins, and
+/// the loser's turn dies. Rotating early on the host, so the sync can push the
+/// new file, keeps container copies away from that instant.
+pub async fn refresh_login(
+    client: &mut Option<CodexUsageClient>,
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+) -> Result<(), String> {
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        prepare(client, cwd, env).await?.refresh_token().await
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            discard_failed_client(client, matches!(error, QueryError::Protocol(_))).await;
+            Err(error.to_string())
+        }
+        Err(_) => {
+            discard_failed_client(client, true).await;
+            Err("request timed out".to_string())
         }
     }
 }
@@ -795,6 +857,89 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
         assert_eq!(messages[3]["method"], "account/rateLimits/read");
         assert_eq!(messages[4]["id"], 4);
         assert_eq!(messages[5]["id"], 5);
+
+        client.take().expect("client").shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_login_asks_app_server_for_a_proactive_token_refresh() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, log) = fake_codex_env(
+            &temp,
+            r#"#!/bin/sh
+read_and_log() {
+    IFS= read -r line || exit 1
+    printf '%s\n' "$line" >> "$CODEX_USAGE_TEST_LOG"
+}
+read_and_log
+printf '%s\n' '{"id":1,"result":{}}'
+read_and_log
+read_and_log
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+"#,
+        );
+        let mut client = None;
+
+        refresh_login(&mut client, temp.path().to_path_buf(), env)
+            .await
+            .expect("proactive refresh");
+
+        let requests = std::fs::read_to_string(log).expect("request log");
+        let messages = requests
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("request json"))
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "initialized");
+        assert_eq!(messages[2]["method"], "account/read");
+        assert_eq!(messages[2]["params"]["refreshToken"], true);
+
+        client.take().expect("client").shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_login_keeps_the_client_when_the_refresh_flag_is_unsupported() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, _log) = fake_codex_env(
+            &temp,
+            r#"#!/bin/sh
+read_and_log() {
+    IFS= read -r line || exit 1
+    printf '%s\n' "$line" >> "$CODEX_USAGE_TEST_LOG"
+}
+read_and_log
+printf '%s\n' '{"id":1,"result":{}}'
+read_and_log
+read_and_log
+printf '%s\n' '{"id":2,"error":{"code":-32601,"message":"unknown parameter"}}'
+read_and_log
+printf '%s\n' '{"id":3,"result":{"account":{"type":"chatgpt"}}}'
+read_and_log
+printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}}'
+"#,
+        );
+        let mut client = None;
+
+        refresh_login(&mut client, temp.path().to_path_buf(), env.clone())
+            .await
+            .expect("an app-server without the flag has nothing to refresh");
+        assert!(client.is_some(), "the client stays usable for the poll");
+
+        let status = refresh(&mut client, temp.path().to_path_buf(), env).await;
+
+        assert!(matches!(
+            status,
+            CodexUsageStatus::Available(CodexUsageReport {
+                primary: Some(CodexUsageWindow {
+                    remaining_percent: 90,
+                    ..
+                }),
+                ..
+            })
+        ));
 
         client.take().expect("client").shutdown().await;
     }

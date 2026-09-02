@@ -1993,7 +1993,13 @@ impl DashboardContext {
     fn drain_credential_results(&mut self) {
         while let Some(result) = self.credential_sync.next_ready() {
             crate::pollers::log_credential_sync_actions(&result);
-            if let Some(notice) = self.credential_sync_notices.notice(&result) {
+            let harness = self
+                .controller
+                .config
+                .profiles
+                .get(&result.profile_id)
+                .map(|profile| profile.kind);
+            if let Some(notice) = self.credential_sync_notices.notice(&result, harness) {
                 self.dashboard.set_notice(notice);
             }
         }

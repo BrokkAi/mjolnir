@@ -118,6 +118,10 @@ struct LoginArgs {
     /// Profile to authenticate. Optional when exactly one profile exists.
     #[arg(long)]
     profile: Option<String>,
+    /// Claude profiles only: mint a long-lived subscription token with
+    /// `claude setup-token` and store it for every session of this profile.
+    #[arg(long)]
+    setup_token: bool,
 }
 
 #[derive(Debug, Args)]
@@ -698,6 +702,9 @@ async fn login(args: LoginArgs) -> Result<()> {
                 profile_ids(&controller.config)
             )
         })?;
+    if args.setup_token {
+        return store_claude_setup_token(&profile_id, profile).await;
+    }
     let marker = hel::hel_setup::harness_authentication_marker(profile.kind, &profile.home);
     let (before, _) = hel::hel_credentials::read_credential_file(profile.kind, &marker)?;
     let (program, arguments) = hel::hel_credentials::login_command(profile);
@@ -732,6 +739,111 @@ async fn login(args: LoginArgs) -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+/// Mint a long-lived Claude subscription token and store it for the profile.
+///
+/// Claude Code has no early-refresh command, and its `/login` grant rotates: a
+/// container copy that reaches expiry at the same instant as the host spends a
+/// single-use refresh token the host has already spent, and the container's
+/// turn dies. `claude setup-token` mints a one-year token that never rotates,
+/// and Claude Code reads it from `CLAUDE_CODE_OAUTH_TOKEN` ahead of the
+/// credentials file, so there is nothing left to race.
+async fn store_claude_setup_token(
+    profile_id: &str,
+    profile: &hel::hel_config::HarnessProfile,
+) -> Result<()> {
+    use hel::hel_config::HarnessKind;
+    use hel::hel_credentials::CLAUDE_OAUTH_TOKEN_ENV;
+
+    if profile.kind != HarnessKind::Claude {
+        bail!(
+            "--setup-token applies to Claude profiles only; profile {profile_id} is a {} profile",
+            profile.kind.display_name()
+        );
+    }
+    let token_path = hel::hel_credentials::claude_oauth_token_path(profile_id);
+
+    println!(
+        "Running `claude setup-token` against {}.",
+        profile.home.display()
+    );
+    let environment = profile.environment.clone();
+    let home = profile.home.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new("claude");
+        command
+            .arg("setup-token")
+            .envs(&environment)
+            .env(HarnessKind::Claude.home_env(), &home);
+        hel::hel_subprocess::run_capturing_stdout(&mut command)
+    })
+    .await
+    .context("run `claude setup-token`")??;
+    if !output.status.success() {
+        bail!(
+            "`claude setup-token` exited with {} for profile {profile_id}",
+            output.status
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .context("`claude setup-token` printed non-UTF-8 output")?;
+    let token = extract_setup_token(&stdout).with_context(|| {
+        format!("`claude setup-token` printed no token for profile {profile_id}")
+    })?;
+    hel::hel_credentials::write_claude_oauth_token(&token_path, token.as_bytes())?;
+
+    let environment = profile.environment.clone();
+    let home = profile.home.clone();
+    let verify_token = token.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new("claude");
+        command
+            .args(["auth", "status"])
+            .envs(&environment)
+            .env(HarnessKind::Claude.home_env(), &home)
+            .env(CLAUDE_OAUTH_TOKEN_ENV, &verify_token);
+        hel::hel_subprocess::run_inherited(&mut command)
+    })
+    .await
+    .context("run `claude auth status`")??;
+    if !status.success() {
+        bail!(
+            "the stored token did not authenticate: `claude auth status` exited with {status}. \
+             The token is at {}; remove it to go back to the synced credentials file.",
+            token_path.display()
+        );
+    }
+
+    println!(
+        "Stored a long-lived Claude token for profile {profile_id} at {}.",
+        token_path.display()
+    );
+    println!(
+        "New and resumed sessions of this profile run with {CLAUDE_OAUTH_TOKEN_ENV} set, so they no longer race the host over a rotating login."
+    );
+    Ok(())
+}
+
+/// The token in `claude setup-token` output.
+///
+/// The command prints instructions as well as the token, so the last
+/// whitespace-free `sk-ant-oat01-` line wins. A future format that stops using
+/// that prefix still leaves the token as the last thing printed, so the last
+/// non-empty line is the fallback.
+fn extract_setup_token(stdout: &str) -> Option<String> {
+    let candidates = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    candidates
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("sk-ant-oat01-") && !line.contains(char::is_whitespace))
+        .or_else(|| candidates.last())
+        .map(|line| line.to_string())
 }
 
 fn profile_ids(config: &HelConfig) -> String {
@@ -974,6 +1086,39 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
     use hel::hel_state::{HelState, SessionRecord, SessionState};
+
+    #[test]
+    fn the_setup_token_is_read_out_of_the_surrounding_instructions() {
+        let stdout = "Opening browser to authenticate...\n\
+             Paste the code shown in your browser.\n\n\
+             Your token:\n\
+             sk-ant-oat01-EXAMPLE-token-value\n\n\
+             This token expires in one year.\n";
+        assert_eq!(
+            extract_setup_token(stdout).as_deref(),
+            Some("sk-ant-oat01-EXAMPLE-token-value")
+        );
+
+        // Surrounding whitespace is not part of the token.
+        assert_eq!(
+            extract_setup_token("  sk-ant-oat01-padded  \n").as_deref(),
+            Some("sk-ant-oat01-padded")
+        );
+
+        // A prefix Hel has not seen still leaves the token printed last.
+        assert_eq!(
+            extract_setup_token("Your token:\nsk-ant-oat02-future\n").as_deref(),
+            Some("sk-ant-oat02-future")
+        );
+
+        // A line that merely mentions the prefix is not a token.
+        assert_eq!(
+            extract_setup_token("tokens start with sk-ant-oat01-\nsk-ant-oat01-real\n").as_deref(),
+            Some("sk-ant-oat01-real")
+        );
+
+        assert_eq!(extract_setup_token("   \n\n"), None);
+    }
 
     #[test]
     fn dashboard_runtime_does_not_wait_for_disposable_blocking_work() {
