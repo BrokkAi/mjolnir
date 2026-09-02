@@ -160,11 +160,15 @@ jobs:
                 ;;
             esac
           }
-          # Dependency order: brokk-mj-core has no workspace dependencies;
-          # brokk-mj-tui and brokk-mj-desktop need it; and the root binary
-          # needs core plus TUI. The voice worker is independent. Publishing
-          # out of this order fails on a missing registry dependency.
-          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-tui brokk-mj-desktop brokk-mjolnir; do
+          # Dependency order, lowest layer first. The voice worker is
+          # independent. brokk-mj-core is the foundation and has no workspace
+          # dependencies. brokk-mj-worker and brokk-mj-controller each need
+          # only the foundation, and neither needs the other. brokk-mj-chat
+          # needs the controller. brokk-mj-tui and brokk-mj-desktop need the
+          # layers below them, and the root binary needs everything.
+          # Publishing out of this order fails on a missing registry
+          # dependency.
+          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-worker brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mj-desktop brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"
               continue

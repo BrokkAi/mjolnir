@@ -45,6 +45,32 @@ The worker is optional for ordinary Mjolnir development. When testing
 dictation, put `mj-voice-worker` beside `mj` in the target directory or set
 `MJ_VOICE_WORKER` to the worker executable.
 
+## Crate Layout
+
+The control plane is split into four crates that stack in one direction. A
+crate may use the crates below it. It must never use a crate above it.
+
+- `brokk-mj-core` (repository root, library `hel`) is the foundation. It holds
+  configuration, persisted state, the database, the relay protocol, and the
+  shared transcript, diff, and target types.
+- `brokk-mj-worker` (`mj-worker/`, library `mj_worker`) is the target side. It
+  runs inside a container or on an SSH host and supervises the agent process
+  there.
+- `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
+  daemon side. It provisions targets, manages sessions, and serves the web
+  surface.
+- `brokk-mj-chat` (`mj-chat/`, library `mj_chat`) holds the conversation view
+  state that the terminal and web surfaces render. It uses the controller.
+
+The controller must not depend on the worker, and the worker must not depend on
+the controller. Anything both need lives in the foundation, and the two sides
+talk over the relay protocol. Keeping them apart lets Cargo compile them at the
+same time, and it stops an edit in one from rebuilding the other.
+
+`brokk-mj-tui` (`mj-tui/`), `brokk-mjolnir` (`mj-cli/`, which builds the `mj`
+binary), and `brokk-mj-desktop` (`mj-desktop/`) sit on top of all four. Put new
+code in the lowest crate that can hold it.
+
 ## Understand the Runtime Boundaries
 
 Mjolnir is an ACP client that owns terminal presentation, user input,
