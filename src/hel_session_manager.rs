@@ -3605,6 +3605,8 @@ mod tests {
                     checkpoint_barrier: None,
                     checkpoint_ready: None,
                     last_acp_activity_at_ms: None,
+                    harness_turn: None,
+                    last_harness_turn_started_ordinal: None,
                 },
                 latest_credential_sync_signal: None,
             }),

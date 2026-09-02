@@ -782,16 +782,54 @@ fn project_observation(
         RelayObservation::Warning { message } => {
             push_system(mutation, event, format!("warning: {message}"));
         }
-        RelayObservation::SessionRestarted => push_system_with_id(
-            mutation,
-            event,
-            format!(
-                "{}{}",
-                crate::hel_transcript::SESSION_RESTART_ITEM_PREFIX,
-                event.ordinal
-            ),
-            crate::hel_transcript::SESSION_RESTART_TEXT,
-        ),
+        RelayObservation::SessionRestarted => {
+            push_system_with_id(
+                mutation,
+                event,
+                format!(
+                    "{}{}",
+                    crate::hel_transcript::SESSION_RESTART_ITEM_PREFIX,
+                    event.ordinal
+                ),
+                crate::hel_transcript::SESSION_RESTART_TEXT,
+            );
+            // A restart during a turn the harness started on its own leaves
+            // nothing that can finish it. Without this the session stays
+            // Running with open streams, which canonical export refuses.
+            if matches!(
+                current.execution,
+                MaterializedExecutionState::Running { .. }
+            ) {
+                close_streams(index, mutation, event.recorded_at_ms);
+                mutation.execution = Some(MaterializedExecutionState::Idle);
+            }
+        }
+        RelayObservation::HarnessTurnStarted { started_at_ms } => {
+            upsert(
+                mutation,
+                TranscriptItem {
+                    stable_id: format!(
+                        "{}{}",
+                        crate::hel_transcript::HARNESS_TURN_ITEM_PREFIX,
+                        event.ordinal
+                    ),
+                    position: event.ordinal,
+                    latest_content_event_ordinal: None,
+                    created_at_ms: event.recorded_at_ms,
+                    last_changed_at_ms: event.recorded_at_ms,
+                    body: TranscriptBody::System {
+                        text: crate::hel_transcript::HARNESS_TURN_TEXT.to_owned(),
+                    },
+                },
+            );
+            mutation.execution = Some(MaterializedExecutionState::Running {
+                started_at_ms: *started_at_ms,
+            });
+        }
+        RelayObservation::HarnessTurnSettled { .. } => {
+            close_streams(index, mutation, event.recorded_at_ms);
+            mutation.execution = Some(MaterializedExecutionState::Idle);
+        }
         // Keyed on the command rather than the event ordinal, and skipped once
         // the line exists: a relay that re-records the same notice after a
         // persistence retry leaves exactly one line in the conversation.
@@ -993,18 +1031,21 @@ fn project_session_update(
         SessionUpdate::Plan(plan) => {
             close_streams(index, mutation, event.recorded_at_ms);
             let plan = serde_json::to_value(plan)?;
-            let latest_user_position = current
+            // A plan belongs to the turn that produced it, so a plan from a
+            // turn the harness started on its own must not overwrite the
+            // previous turn's plan.
+            let latest_turn_start_position = current
                 .transcript
                 .iter()
                 .rev()
-                .find(|item| matches!(item.body, TranscriptBody::User { .. }))
+                .find(|item| item.is_turn_start())
                 .map_or(0, |item| item.position);
             if let Some(mut item) = current
                 .transcript
                 .iter()
                 .rev()
                 .find(|item| {
-                    item.position > latest_user_position
+                    item.position > latest_turn_start_position
                         && matches!(item.body, TranscriptBody::Plan { .. })
                 })
                 .map(|item| TranscriptItem::clone(item))
@@ -1851,6 +1892,155 @@ mod tests {
                 .transcript
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
+        let mut session = MaterializedSession::empty("session");
+
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnStarted {
+                started_at_ms: 4_200,
+            },
+        );
+
+        assert_eq!(
+            session.execution,
+            MaterializedExecutionState::Running {
+                started_at_ms: 4_200
+            }
+        );
+        let marker = session.transcript.last().expect("a marker item");
+        assert_eq!(
+            marker.stable_id,
+            format!("{}1", crate::hel_transcript::HARNESS_TURN_ITEM_PREFIX)
+        );
+        assert!(marker.is_turn_start());
+        assert!(matches!(
+            &marker.body,
+            TranscriptBody::System { text } if text == crate::hel_transcript::HARNESS_TURN_TEXT
+        ));
+
+        apply_observation(
+            &mut session,
+            agent_chunk("picking this back up", "answer-1"),
+        );
+        assert!(
+            session.transcript.iter().any(
+                |item| matches!(&item.body, TranscriptBody::Agent { streaming, .. } if *streaming)
+            ),
+            "output inside the turn streams into a fresh item"
+        );
+
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnSettled {
+                origin: Some("task-notification".into()),
+            },
+        );
+
+        assert_eq!(session.execution, MaterializedExecutionState::Idle);
+        assert!(
+            !session.transcript.iter().any(|item| matches!(
+                &item.body,
+                TranscriptBody::Agent { streaming, .. } if *streaming
+            )),
+            "settling closes the streams a canonical export refuses to hold open"
+        );
+        assert_eq!(
+            crate::hel_state::latest_completed_turn_ordinal(&session),
+            Some(1),
+            "the finished turn is covered from the marker that began it"
+        );
+        assert_eq!(
+            crate::hel_state::ProjectionWindow::of(&session).latest_turn_start_position,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_restart_during_a_harness_turn_leaves_an_idle_session_with_no_open_streams() {
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnStarted {
+                started_at_ms: 4_200,
+            },
+        );
+        apply_observation(&mut session, agent_chunk("half a sentence", "answer-1"));
+
+        apply_observation(&mut session, RelayObservation::SessionRestarted);
+
+        assert_eq!(session.execution, MaterializedExecutionState::Idle);
+        assert!(!session.transcript.iter().any(|item| matches!(
+            &item.body,
+            TranscriptBody::Agent { streaming, .. } | TranscriptBody::Thought { streaming, .. }
+                if *streaming
+        )));
+        canonical_session_from_materialized(&session)
+            .expect("a restarted session exports without open streams");
+    }
+
+    #[test]
+    fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
+        let plan = |content: &str| RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::Plan(
+                agent_client_protocol::schema::v1::Plan::new(vec![
+                    agent_client_protocol::schema::v1::PlanEntry::new(
+                        content,
+                        agent_client_protocol::schema::v1::PlanEntryPriority::High,
+                        agent_client_protocol::schema::v1::PlanEntryStatus::InProgress,
+                    ),
+                ]),
+            )),
+        };
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: "prompt-1".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                },
+                created_at_ms: 10,
+            },
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandStarted {
+                command_id: "prompt-1".into(),
+                started_at_ms: 20,
+            },
+        );
+        apply_observation(&mut session, plan("first turn plan"));
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandCompleted {
+                command_id: "prompt-1".into(),
+                outcome: RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                },
+            },
+        );
+
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnStarted { started_at_ms: 30 },
+        );
+        apply_observation(&mut session, plan("second turn plan"));
+
+        let plans: Vec<&TranscriptItem> = session
+            .transcript
+            .iter()
+            .filter(|item| matches!(item.body, TranscriptBody::Plan { .. }))
+            .map(std::convert::AsRef::as_ref)
+            .collect();
+        assert_eq!(
+            plans.len(),
+            2,
+            "the self-started turn keeps its own plan instead of rewriting the last one"
         );
     }
 

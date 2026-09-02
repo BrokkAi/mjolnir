@@ -2401,6 +2401,8 @@ mod tests {
             checkpoint_barrier: None,
             checkpoint_ready: None,
             last_acp_activity_at_ms: None,
+            harness_turn: None,
+            last_harness_turn_started_ordinal: None,
         };
 
         // A session whose agent has not answered `initialize` has advertised
@@ -2466,6 +2468,8 @@ mod tests {
             checkpoint_barrier: None,
             checkpoint_ready: None,
             last_acp_activity_at_ms: None,
+            harness_turn: None,
+            last_harness_turn_started_ordinal: None,
         };
         let operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
         let snapshot = viewer_snapshot(

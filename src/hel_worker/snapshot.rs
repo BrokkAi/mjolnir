@@ -203,6 +203,17 @@ pub struct ActiveAgentTerminal {
     pub started_at_ms: i64,
 }
 
+/// A turn the harness started on its own, with no prompt in flight.
+///
+/// Claude Code re-invokes itself when a background task it started finishes.
+/// The adapter streams that work through ordinary `session/update`
+/// notifications and settles it with a `usage_update` carrying an origin
+/// marker, so the relay models it as a turn rather than as idle chatter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessTurn {
+    pub started_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserShellStatus {
@@ -347,6 +358,14 @@ pub struct RelayOperationalState {
     pub checkpoint_ready: Option<RelayCursor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_acp_activity_at_ms: Option<i64>,
+    /// The turn the harness started on its own, while it is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_turn: Option<HarnessTurn>,
+    /// Ordinal of the newest `harness_turn_started` event, whether or not that
+    /// turn is still open. It only moves forward, so a checkpoint can compare
+    /// it against the cursor it captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_harness_turn_started_ordinal: Option<u64>,
 }
 
 /// On-disk record format for a relay event.
@@ -481,6 +500,17 @@ pub enum RelayObservation {
     Notice {
         message: String,
     },
+    /// The harness began working with no prompt in flight. Recorded just
+    /// before the agent output that revealed it, so the turn covers that
+    /// output.
+    HarnessTurnStarted {
+        started_at_ms: i64,
+    },
+    /// The harness reached a turn boundary on its own. `origin` is the
+    /// adapter's reported origin kind, kept for diagnostics.
+    HarnessTurnSettled {
+        origin: Option<String>,
+    },
     Closing,
     Closed,
 }
@@ -553,6 +583,15 @@ pub(crate) struct RelayDispatchRecord {
     pub(crate) state: RelayDispatchState,
 }
 
+/// The durable half of an open harness-initiated turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredHarnessTurn {
+    pub(crate) started_at_ms: i64,
+    /// Ordinal of the `harness_turn_started` event that opened this turn.
+    pub(crate) first_ordinal: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HandledRelayCommand {
     pub(crate) command: RelayCommand,
@@ -591,6 +630,10 @@ pub(crate) struct RelaySnapshot {
     pub(crate) checkpoint_barrier: Option<String>,
     pub(crate) checkpoint_ready_through: Option<u64>,
     pub(crate) checkpoint_ready_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) harness_turn: Option<StoredHarnessTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_harness_turn_started_ordinal: Option<u64>,
     pub(crate) handled_commands: BTreeMap<String, HandledRelayCommand>,
     pub(crate) dispatches: BTreeMap<String, RelayDispatchRecord>,
 }
@@ -622,6 +665,8 @@ impl RelaySnapshot {
             checkpoint_barrier: None,
             checkpoint_ready_through: None,
             checkpoint_ready_digest: None,
+            harness_turn: None,
+            last_harness_turn_started_ordinal: None,
             handled_commands: BTreeMap::new(),
             dispatches: BTreeMap::new(),
         }
@@ -668,6 +713,10 @@ impl RelaySnapshot {
                     digest: digest.clone(),
                 }),
             last_acp_activity_at_ms: None,
+            harness_turn: self.harness_turn.map(|turn| HarnessTurn {
+                started_at_ms: turn.started_at_ms,
+            }),
+            last_harness_turn_started_ordinal: self.last_harness_turn_started_ordinal,
         }
     }
 
@@ -1015,6 +1064,11 @@ pub(crate) fn observation_changes_state(observation: &RelayObservation) -> bool 
         | RelayObservation::CommandInterrupted { .. }
         | RelayObservation::ConfigurationUpdated { .. }
         | RelayObservation::CheckpointReady { .. }
+        // A restart ends any turn the harness started on its own, so it now
+        // moves durable state instead of only the frontier.
+        | RelayObservation::SessionRestarted
+        | RelayObservation::HarnessTurnStarted { .. }
+        | RelayObservation::HarnessTurnSettled { .. }
         | RelayObservation::Closing
         | RelayObservation::Closed => true,
         RelayObservation::SessionUpdate { update } => matches!(
@@ -1028,7 +1082,6 @@ pub(crate) fn observation_changes_state(observation: &RelayObservation) -> bool 
         | RelayObservation::ElicitationResolved { .. }
         | RelayObservation::ElicitationsCleared
         | RelayObservation::Warning { .. }
-        | RelayObservation::SessionRestarted
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
         | RelayObservation::Notice { .. } => false,
@@ -1200,6 +1253,9 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                     {
                         snapshot.active_prompt = None;
                     }
+                    // A prompt result means the SDK reached a turn boundary,
+                    // so whatever the harness had started on its own is over.
+                    snapshot.harness_turn = None;
                     if snapshot.execution == RelayExecutionState::Running {
                         snapshot.execution = RelayExecutionState::Idle;
                     }
@@ -1461,6 +1517,7 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                 == Some(command_id)
             {
                 snapshot.active_prompt = None;
+                snapshot.harness_turn = None;
                 snapshot.execution = RelayExecutionState::Idle;
             }
             if snapshot
@@ -1515,8 +1572,41 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
             snapshot.checkpoint_ready_through = Some(*through);
             snapshot.checkpoint_ready_digest = Some(event.digest.clone());
         }
-        RelayObservation::Closing => snapshot.execution = RelayExecutionState::Closing,
+        RelayObservation::HarnessTurnStarted { started_at_ms } => {
+            snapshot.harness_turn = Some(StoredHarnessTurn {
+                started_at_ms: *started_at_ms,
+                first_ordinal: event.ordinal,
+            });
+            snapshot.last_harness_turn_started_ordinal = Some(event.ordinal);
+            if snapshot.execution == RelayExecutionState::Idle {
+                snapshot.execution = RelayExecutionState::Running;
+            }
+        }
+        RelayObservation::HarnessTurnSettled { .. } => {
+            snapshot.harness_turn = None;
+            if snapshot.active_prompt.is_none()
+                && snapshot.execution == RelayExecutionState::Running
+            {
+                snapshot.execution = RelayExecutionState::Idle;
+            }
+        }
+        // The control plane behind the session was replaced, so a turn the
+        // harness had started on its own no longer exists. Both callers record
+        // this with no prompt in flight.
+        RelayObservation::SessionRestarted => {
+            if snapshot.harness_turn.take().is_some()
+                && snapshot.active_prompt.is_none()
+                && snapshot.execution == RelayExecutionState::Running
+            {
+                snapshot.execution = RelayExecutionState::Idle;
+            }
+        }
+        RelayObservation::Closing => {
+            snapshot.harness_turn = None;
+            snapshot.execution = RelayExecutionState::Closing;
+        }
         RelayObservation::Closed => {
+            snapshot.harness_turn = None;
             snapshot.execution = RelayExecutionState::Closed;
             snapshot.active_prompt = None;
         }
@@ -1542,7 +1632,6 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
         | RelayObservation::ElicitationResolved { .. }
         | RelayObservation::ElicitationsCleared
         | RelayObservation::Warning { .. }
-        | RelayObservation::SessionRestarted
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
         | RelayObservation::Notice { .. } => {}
@@ -1715,7 +1804,6 @@ mod tests {
             RelayObservation::Notice {
                 message: "noticed".into(),
             },
-            RelayObservation::SessionRestarted,
             RelayObservation::TerminalOutput {
                 terminal_id: "terminal-1".into(),
                 output: "output".into(),
@@ -1791,6 +1879,14 @@ mod tests {
                     )]),
                 )),
             },
+            // A harness-initiated turn moves execution state, and a restart
+            // ends one, so all three must be applied through a staged snapshot
+            // rather than appended as transcript-only frontier moves.
+            RelayObservation::HarnessTurnStarted { started_at_ms: 7 },
+            RelayObservation::HarnessTurnSettled {
+                origin: Some("task-notification".into()),
+            },
+            RelayObservation::SessionRestarted,
         ] {
             assert!(
                 observation_changes_state(&observation),

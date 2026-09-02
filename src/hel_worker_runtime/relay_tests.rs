@@ -2296,6 +2296,164 @@ fn a_fast_terminal_cannot_be_resurrected_by_a_late_start_event() {
     );
 }
 
+/// Claude Code re-invokes itself when a background task it started finishes.
+/// The coordinator must hand a prompt typed during that turn straight to the
+/// adapter, which queues it and answers it at the next turn boundary, while a
+/// checkpoint barrier waits for the turn to settle.
+#[tokio::test]
+async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
+    fn agent_output(text: &str, message_id: &str) -> RuntimeEvent {
+        RuntimeEvent::SessionUpdate {
+            update: serde_json::to_value(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+                    .message_id(message_id),
+            ))
+            .unwrap(),
+        }
+    }
+
+    /// The `usage_update` the Claude adapter sends when an SDK turn ends.
+    fn settle_marker(origin: &str) -> RuntimeEvent {
+        let mut usage = agent_client_protocol::schema::v1::UsageUpdate::new(10, 200);
+        usage.meta = Some(
+            serde_json::from_value(serde_json::json!({
+                "_claude/origin": {"kind": origin},
+            }))
+            .unwrap(),
+        );
+        RuntimeEvent::SessionUpdate {
+            update: serde_json::to_value(SessionUpdate::UsageUpdate(usage)).unwrap(),
+        }
+    }
+
+    fn harness_turn_open(relay: &Arc<Mutex<DurableRelay>>) -> bool {
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .harness_turn
+            .is_some()
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::hel_worker::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+
+    // Agent output with no prompt in flight: the harness picked its work back
+    // up on its own.
+    event_tx
+        .send(agent_output("the tests passed", "resumed-1"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output at idle did not open a turn",
+    )
+    .await;
+    assert_eq!(
+        relay.lock().unwrap().operational_state().execution,
+        RelayExecutionState::Running
+    );
+
+    // A prompt typed during that turn goes out at once.
+    submit(
+        &mut relay.lock().unwrap(),
+        "prompt-mid-turn",
+        prompt("also look at this"),
+    );
+    wake_tx.try_send(()).unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-mid-turn",
+        "also look at this",
+    );
+    assert!(
+        harness_turn_open(&relay),
+        "dispatching a prompt does not end the turn the harness started"
+    );
+
+    // The prompt result is itself a turn boundary, so the turn it interrupted
+    // is over. A fresh cycle opens the next one.
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            request_id: "prompt-mid-turn".into(),
+            stop_reason: "end_turn".into(),
+        })
+        .unwrap();
+    wait_until(
+        || !harness_turn_open(&relay),
+        "a prompt result did not settle the harness turn",
+    )
+    .await;
+    event_tx
+        .send(agent_output("and now the second task", "resumed-2"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "the second cycle did not open a turn",
+    )
+    .await;
+
+    // A checkpoint barrier waits for that turn instead of cutting through it.
+    submit(
+        &mut relay.lock().unwrap(),
+        "barrier-mid-turn",
+        RelayCommand::BeginCheckpoint {
+            reason: Some("recovery copy".into()),
+        },
+    );
+    wake_tx.try_send(()).unwrap();
+    // Long enough for the coordinator to run a claim cycle on that wake, so a
+    // barrier it would have admitted is admitted before this assertion.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .checkpoint_barrier
+            .is_none(),
+        "a checkpoint barrier was admitted while the harness was working"
+    );
+
+    event_tx.send(settle_marker("task-notification")).unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .checkpoint_barrier
+                .as_deref()
+                == Some("barrier-mid-turn")
+        },
+        "the checkpoint barrier was not admitted once the harness turn settled",
+    )
+    .await;
+    let state = relay.lock().unwrap().operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert!(state.last_harness_turn_started_ordinal.is_some());
+
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
     let temp = tempfile::tempdir().unwrap();

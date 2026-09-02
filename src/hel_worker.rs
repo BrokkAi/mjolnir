@@ -30,10 +30,10 @@ pub use protocol::{
 pub(crate) use snapshot::truncate_start_with_marker;
 pub use snapshot::{
     ActiveAgentTerminal, ActiveRelayPrompt, ActiveUserShell, ClaimedRelayCommand,
-    ClaimedSteeringPrompt, QueuedRelayPrompt, RELAY_EVENT_FORMAT_V1, RELAY_EVENT_FORMAT_V2,
-    RelayCommand, RelayCommandKind, RelayCommandOutcome, RelayCursor, RelayEvent,
-    RelayExecutionState, RelayObservation, RelayOperationalState, UserShellResult, UserShellStatus,
-    relay_event_digest, validate_relay_event, validate_relay_event_self,
+    ClaimedSteeringPrompt, HarnessTurn, QueuedRelayPrompt, RELAY_EVENT_FORMAT_V1,
+    RELAY_EVENT_FORMAT_V2, RelayCommand, RelayCommandKind, RelayCommandOutcome, RelayCursor,
+    RelayEvent, RelayExecutionState, RelayObservation, RelayOperationalState, UserShellResult,
+    UserShellStatus, relay_event_digest, validate_relay_event, validate_relay_event_self,
 };
 pub use types::{
     ActivePrompt, Attachment, QueuedPrompt, SequencedEvent, WorkerEvent, WorkerPhase,
@@ -65,6 +65,54 @@ use snapshot::{
     ensure_serialized_budget, releases_history, validate_relay_digest,
     validate_relay_snapshot_frontiers,
 };
+
+/// Whether this relay models turns the harness starts on its own.
+///
+/// Only Claude Code's adapter marks the end of such a turn today (an origin
+/// key on the settling `usage_update`), so every other harness keeps the
+/// behaviour it had before harness turns existed. See
+/// `.agents/docs/claude-autonomous-turns.md`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HarnessTurnPolicy {
+    #[default]
+    Disabled,
+    ClaudeAdapter,
+}
+
+/// `_meta` key the Claude adapter puts on the `usage_update` that settles a
+/// turn. Its value is an object with a `kind` naming the origin.
+const CLAUDE_ORIGIN_META_KEY: &str = "_claude/origin";
+
+/// The origin kind on a settling `usage_update`, if the marker is present.
+///
+/// The outer option says whether the update carries the marker at all; the
+/// inner one is the origin kind, which is only ever reported for diagnostics.
+fn claude_turn_origin(update: &SessionUpdate) -> Option<Option<String>> {
+    let SessionUpdate::UsageUpdate(usage) = update else {
+        return None;
+    };
+    let origin = usage.meta.as_ref()?.get(CLAUDE_ORIGIN_META_KEY)?;
+    Some(
+        origin
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    )
+}
+
+/// Whether this update is agent output, which is what reveals that the
+/// harness is working. Everything else is session bookkeeping the harness
+/// also sends while idle.
+fn is_agent_output(update: &SessionUpdate) -> bool {
+    matches!(
+        update,
+        SessionUpdate::AgentMessageChunk(_)
+            | SessionUpdate::AgentThoughtChunk(_)
+            | SessionUpdate::ToolCall(_)
+            | SessionUpdate::ToolCallUpdate(_)
+            | SessionUpdate::Plan(_)
+    )
+}
 
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// Serialized bytes of observations allowed in one attach response, well under
@@ -206,6 +254,9 @@ pub struct DurableRelay {
     /// lock-free reader already tolerates.
     journal_generation: u64,
     acp_activity: AcpActivityClock,
+    /// Whether agent output arriving with no prompt in flight opens a turn.
+    /// The runtime sets this from the configured harness right after `open`.
+    harness_turns: HarnessTurnPolicy,
     /// ACP terminals are connection-owned and disappear when that connection
     /// is torn down, so they belong in memory rather than the durable relay
     /// snapshot or transcript journal.
@@ -358,6 +409,7 @@ impl DurableRelay {
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
             acp_activity: AcpActivityClock::default(),
+            harness_turns: HarnessTurnPolicy::default(),
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
             #[cfg(test)]
@@ -437,6 +489,11 @@ impl DurableRelay {
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state
+    }
+
+    /// Choose whether agent output with no prompt in flight opens a turn.
+    pub fn set_harness_turn_policy(&mut self, policy: HarnessTurnPolicy) {
+        self.harness_turns = policy;
     }
 
     pub fn agent_terminal_started(&mut self, terminal: ActiveAgentTerminal) {
@@ -950,9 +1007,14 @@ impl DurableRelay {
         if let RelayCommand::Cancel = command
             && self.snapshot.active_prompt.is_none()
         {
+            let message = if self.snapshot.harness_turn.is_some() {
+                "the agent is working on its own after a background task; there is no prompt to cancel"
+            } else {
+                "there is no active prompt to cancel"
+            };
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidState,
-                "there is no active prompt to cancel",
+                message,
                 false,
                 None,
             )));
@@ -1195,7 +1257,12 @@ impl DurableRelay {
                 if !earlier_controls.is_empty() {
                     earlier_controls.truncate(maximum);
                     self.start_queued_controls(earlier_controls)?;
-                } else if !self.effectful_command_in_progress() {
+                // A turn the harness started on its own is real work in the
+                // agent's workspace, so the barrier waits for it exactly as it
+                // waits for a prompt.
+                } else if !self.effectful_command_in_progress()
+                    && self.snapshot.harness_turn.is_none()
+                {
                     self.append_relay_event(
                         Some(&barrier_id),
                         RelayObservation::CommandStarted {
@@ -1490,9 +1557,39 @@ impl DurableRelay {
             }
             _ => {}
         }
-        self.record_observation(RelayObservation::SessionUpdate {
+        let claude = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter;
+        if claude && self.opens_harness_turn(&update) {
+            self.append_relay_event(
+                None,
+                RelayObservation::HarnessTurnStarted {
+                    started_at_ms: epoch_millis(),
+                },
+            )?;
+        }
+        let settles = claude.then(|| claude_turn_origin(&update)).flatten();
+        let ordinal = self.record_observation(RelayObservation::SessionUpdate {
             update: Box::new(update),
-        })
+        })?;
+        // Any origin kind settles the turn: the marker means the SDK reached a
+        // turn boundary, whatever started the work.
+        if let Some(origin) = settles
+            && self.snapshot.harness_turn.is_some()
+        {
+            self.append_relay_event(None, RelayObservation::HarnessTurnSettled { origin })?;
+        }
+        Ok(ordinal)
+    }
+
+    /// Whether this update reveals the harness working with nothing of Hel's
+    /// in flight, which is what opens a harness-initiated turn.
+    fn opens_harness_turn(&self, update: &SessionUpdate) -> bool {
+        is_agent_output(update)
+            && self.snapshot.active_prompt.is_none()
+            && self.snapshot.harness_turn.is_none()
+            && !matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
     }
 
     pub fn record_command_completed(
@@ -1664,10 +1761,17 @@ impl DurableRelay {
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run strictly one at a time, in the order they were accepted.
     fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
+        // A turn the harness started on its own leaves execution Running, but
+        // it must not hold a queued prompt: the adapter queues a prompt that
+        // arrives mid-turn and answers it as soon as that turn ends.
+        // `active_prompt` is the real gate on dispatch.
         if self.snapshot.active_prompt.is_some()
             || self.promoted_config_in_progress()
             || self.snapshot.checkpoint_barrier.is_some()
-            || self.snapshot.execution != RelayExecutionState::Idle
+            || matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
             || self.pending_checkpoint_barrier()
             || self.close_requested()
         {
@@ -3316,6 +3420,208 @@ mod tests {
         }
 
         assert_eq!(session.transcript.len(), 1);
+    }
+
+    /// Build a relay that models the turns Claude Code starts on its own.
+    fn claude_relay(root: &std::path::Path) -> DurableRelay {
+        let mut relay = DurableRelay::open(root, SESSION, "1.0.0").unwrap();
+        relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        relay
+    }
+
+    fn tool_call_update() -> SessionUpdate {
+        SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
+            "call-1", "Bash",
+        ))
+    }
+
+    /// The `usage_update` the Claude adapter sends when an SDK turn ends.
+    fn settling_usage_update(origin: &str) -> SessionUpdate {
+        let mut usage = agent_client_protocol::schema::v1::UsageUpdate::new(10, 200);
+        usage.meta = Some(
+            serde_json::from_value(serde_json::json!({
+                CLAUDE_ORIGIN_META_KEY: {"kind": origin},
+            }))
+            .unwrap(),
+        );
+        SessionUpdate::UsageUpdate(usage)
+    }
+
+    fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
+        relay
+            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.observation)
+            .collect()
+    }
+
+    #[test]
+    fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+
+        relay.record_session_update(tool_call_update()).unwrap();
+
+        let running = relay.operational_state();
+        assert_eq!(running.execution, RelayExecutionState::Running);
+        assert!(running.active_prompt.is_none(), "no prompt is in flight");
+        let turn = running.harness_turn.expect("a harness turn is open");
+        assert!(turn.started_at_ms > 0);
+        assert_eq!(running.last_harness_turn_started_ordinal, Some(1));
+        assert!(matches!(
+            observations(&relay).as_slice(),
+            [
+                RelayObservation::HarnessTurnStarted { .. },
+                RelayObservation::SessionUpdate { .. }
+            ]
+        ));
+
+        relay
+            .record_session_update(settling_usage_update("task-notification"))
+            .unwrap();
+
+        let settled = relay.operational_state();
+        assert_eq!(settled.execution, RelayExecutionState::Idle);
+        assert!(settled.harness_turn.is_none());
+        assert_eq!(
+            settled.last_harness_turn_started_ordinal,
+            Some(1),
+            "the started ordinal only moves forward, so a checkpoint can compare against it"
+        );
+        assert!(matches!(
+            observations(&relay).last(),
+            Some(RelayObservation::HarnessTurnSettled { origin })
+                if origin.as_deref() == Some("task-notification")
+        ));
+    }
+
+    #[test]
+    fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.record_session_update(tool_call_update()).unwrap();
+
+        submit_relay(
+            &mut relay,
+            "barrier-command",
+            RelayCommand::BeginCheckpoint { reason: None },
+        );
+        assert!(
+            relay.claim_pending_commands(true).unwrap().is_empty(),
+            "a turn the harness started on its own must keep the barrier queued"
+        );
+
+        relay
+            .record_session_update(settling_usage_update("task-notification"))
+            .unwrap();
+
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "barrier-command");
+    }
+
+    #[test]
+    fn a_prompt_queued_during_a_harness_turn_dispatches_at_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.record_session_update(tool_call_update()).unwrap();
+
+        submit_relay(&mut relay, "typed-mid-turn", prompt("answer this too"));
+        let claimed = relay.claim_pending_commands(true).unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "typed-mid-turn");
+        assert!(
+            observations(&relay).iter().any(|observation| matches!(
+                observation,
+                RelayObservation::CommandStarted { command_id, .. } if command_id == "typed-mid-turn"
+            )),
+            "the prompt starts while the harness turn is still open"
+        );
+        assert!(
+            relay.operational_state().harness_turn.is_some(),
+            "dispatching a prompt does not end the turn the harness started"
+        );
+
+        // Barrier priority over queued prompts is an invariant: a pending
+        // barrier still freezes a prompt typed after it.
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.record_session_update(tool_call_update()).unwrap();
+        submit_relay(
+            &mut relay,
+            "barrier-command",
+            RelayCommand::BeginCheckpoint { reason: None },
+        );
+        submit_relay(&mut relay, "typed-after-barrier", prompt("wait for me"));
+
+        assert!(
+            relay.claim_pending_commands(true).unwrap().is_empty(),
+            "a pending barrier still outranks a prompt typed during a harness turn"
+        );
+    }
+
+    #[test]
+    fn a_prompt_result_settles_a_lingering_harness_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.record_session_update(tool_call_update()).unwrap();
+        submit_relay(&mut relay, "next-prompt", prompt("carry on"));
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+
+        relay
+            .record_command_completed(
+                "next-prompt",
+                RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                },
+            )
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert!(
+            state.harness_turn.is_none(),
+            "a prompt result means the SDK reached a turn boundary"
+        );
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+    }
+
+    #[test]
+    fn a_restart_clears_a_harness_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.record_session_update(tool_call_update()).unwrap();
+
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert!(state.harness_turn.is_none());
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+    }
+
+    #[test]
+    fn harness_turns_are_off_for_other_harnesses() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+
+        relay.record_session_update(tool_call_update()).unwrap();
+        relay
+            .record_session_update(settling_usage_update("human"))
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+        assert!(state.harness_turn.is_none());
+        assert!(state.last_harness_turn_started_ordinal.is_none());
+        assert!(
+            observations(&relay)
+                .iter()
+                .all(|observation| matches!(observation, RelayObservation::SessionUpdate { .. })),
+            "only the updates themselves are journaled"
+        );
     }
 
     #[test]

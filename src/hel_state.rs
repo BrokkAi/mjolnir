@@ -278,7 +278,7 @@ pub struct ManagedSessionSnapshot {
 /// A polled projection carries only the end of the transcript, because that is
 /// all any viewer shows and loading the rest is work proportional to history.
 /// Two facts a reader needs live outside that window: the provisional title
-/// comes from the *first* user message, and the newest user message is outside
+/// comes from the *first* user message, and the newest turn start is outside
 /// it whenever a single turn is longer than the window. Both are read
 /// separately, with one indexed query each, rather than found by scanning.
 ///
@@ -290,9 +290,10 @@ pub struct ProjectionWindow {
     pub omitted_items: usize,
     /// The title derived from the first user message.
     pub provisional_title: Option<String>,
-    /// Position of the newest user message, whether or not it is in the
+    /// Position of the newest turn start — a user message or the marker for a
+    /// turn the harness began on its own — whether or not it is in the
     /// window. `None` when the session has none.
-    pub latest_user_position: Option<u64>,
+    pub latest_turn_start_position: Option<u64>,
 }
 
 impl ProjectionWindow {
@@ -307,11 +308,11 @@ impl ProjectionWindow {
                 };
                 provisional_session_title(&crate::hel_chat::materialized_content_text(content))
             }),
-            latest_user_position: session
+            latest_turn_start_position: session
                 .transcript
                 .iter()
                 .rev()
-                .find(|item| matches!(item.body, TranscriptBody::User { .. }))
+                .find(|item| item.is_turn_start())
                 .map(|item| item.position),
         }
     }
@@ -351,7 +352,7 @@ impl ManagedSessionSnapshot {
         if self.materialized.execution != MaterializedExecutionState::Idle {
             return None;
         }
-        self.window.latest_user_position
+        self.window.latest_turn_start_position
     }
 }
 
@@ -364,6 +365,10 @@ pub struct RecoveryObservation {
     pub execution: MaterializedExecutionState,
 }
 
+/// The position where the session's most recent finished turn began, or
+/// `None` while it is still working. A turn starts at a user message or at the
+/// marker for a turn the harness began on its own, so autonomous work is
+/// covered once it settles.
 pub fn latest_completed_turn_ordinal(session: &MaterializedSession) -> Option<u64> {
     if session.execution != MaterializedExecutionState::Idle {
         return None;
@@ -372,7 +377,7 @@ pub fn latest_completed_turn_ordinal(session: &MaterializedSession) -> Option<u6
         .transcript
         .iter()
         .rev()
-        .find(|item| matches!(item.body, TranscriptBody::User { .. }))
+        .find(|item| item.is_turn_start())
         .map(|item| item.position)
 }
 

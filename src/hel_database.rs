@@ -1914,6 +1914,37 @@ fn materialized_user_message(
     Ok(None)
 }
 
+/// Where the newest turn began: a user message, or the marker for a turn the
+/// harness started on its own. This is the recovery boundary, so it reads a
+/// position only and never has to decode a transcript body.
+fn last_materialized_turn_start(connection: &Connection, session_id: &str) -> Result<Option<u64>> {
+    Ok(connection
+        .query_row(
+            "SELECT position
+             FROM materialized_transcript_items
+             WHERE session_id = ?1
+               AND (
+                   stable_id GLOB ?2
+                   OR json_extract(
+                       CASE
+                           WHEN stable_id GLOB 'user:*' OR stable_id GLOB 'user-*'
+                           THEN body_json
+                           ELSE '{}'
+                       END,
+                       '$.kind'
+                   ) = 'user'
+               )
+             ORDER BY position DESC, stable_id DESC
+             LIMIT 1",
+            params![
+                session_id,
+                format!("{}*", crate::hel_transcript::HARNESS_TURN_ITEM_PREFIX)
+            ],
+            |row| row.get::<_, u64>(0),
+        )
+        .optional()?)
+}
+
 fn last_materialized_agent_message(
     connection: &Connection,
     session_id: &str,
@@ -2139,8 +2170,7 @@ fn load_materialized_projection_tail_from(
         omitted_items: total_items.saturating_sub(transcript.len()),
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| crate::hel_state::provisional_session_title(&text)),
-        latest_user_position: last_materialized_user_message(&connection, session_id)?
-            .map(|(position, _)| position),
+        latest_turn_start_position: last_materialized_turn_start(&connection, session_id)?,
     };
     let materialized = MaterializedSession {
         session_id: session_id.to_owned(),

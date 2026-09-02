@@ -332,9 +332,13 @@ tailscale_detect = true
 
 Mjolnir saves a recovery copy automatically after completed turns when the session
 is idle (at most every ten minutes), and `mj checkpoint --session <id>`
-forces one. Recovery archives are verified end to end; a normal Stop writes
-and verifies the archive before any teardown, and refuses teardown if
-verification fails. Explicit force-destroy is the data-loss escape hatch.
+forces one. "Idle" includes work the agent starts on its own: when Claude Code
+picks a task back up after a background command finishes, the session shows as
+running and a recovery copy waits until that work ends, and the composer's Esc
+cancels only a prompt you sent. Recovery archives are verified end to end; a
+normal Stop writes and verifies the archive before any teardown, and refuses
+teardown if verification fails. Explicit force-destroy is the data-loss escape
+hatch.
 
 A stopped session resumes by provisioning a fresh target from its archive,
 with its pending prompt queue intact (resume asks whether to keep or discard

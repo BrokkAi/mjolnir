@@ -2391,6 +2391,22 @@ fn the_bounded_projection_carries_a_window_and_the_facts_outside_it() {
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
     let mut materialized = materialized_session("session-1");
     materialized.session_title = None;
+    // A turn the harness started on its own is a turn boundary too, and it
+    // sits outside the window here, so the read and the scan have to agree on
+    // it rather than on the user message alone.
+    materialized.transcript.insert(
+        2,
+        Arc::new(TranscriptItem {
+            stable_id: format!("{}2", crate::hel_transcript::HARNESS_TURN_ITEM_PREFIX),
+            position: 2,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1_150,
+            last_changed_at_ms: 1_150,
+            body: TranscriptBody::System {
+                text: crate::hel_transcript::HARNESS_TURN_TEXT.into(),
+            },
+        }),
+    );
     save_materialized_session_to(&database, &materialized).unwrap();
     let whole = load_materialized_session_from(&database, "session-1")
         .unwrap()
@@ -2420,14 +2436,19 @@ fn the_bounded_projection_carries_a_window_and_the_facts_outside_it() {
     let complete = crate::hel_state::ProjectionWindow::of(&whole);
     assert_eq!(complete.omitted_items, 0);
     assert_eq!(window.provisional_title, complete.provisional_title);
-    assert_eq!(window.latest_user_position, complete.latest_user_position);
+    assert_eq!(
+        window.latest_turn_start_position,
+        complete.latest_turn_start_position
+    );
+    assert_eq!(
+        window.latest_turn_start_position,
+        Some(2),
+        "the newest turn start is the harness turn, not the user message"
+    );
     assert!(window.provisional_title.is_some());
     assert!(
-        !bounded
-            .transcript
-            .iter()
-            .any(|item| matches!(item.body, crate::hel_state::TranscriptBody::User { .. })),
-        "the test only proves anything if the window excludes the user message"
+        !bounded.transcript.iter().any(|item| item.is_turn_start()),
+        "the test only proves anything if the window excludes both turn starts"
     );
 }
 

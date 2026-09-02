@@ -105,6 +105,13 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // failed startup must never leave a fresh endpoint that looks live.
     let mut durable_relay =
         DurableRelay::open(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?;
+    // Only Claude Code's adapter marks the end of a turn it started on its
+    // own, so only it can model those turns without leaving a session stuck
+    // Running. See `.agents/docs/claude-autonomous-turns.md`.
+    durable_relay.set_harness_turn_policy(match config.harness {
+        HarnessKind::Claude => crate::hel_worker::HarnessTurnPolicy::ClaudeAdapter,
+        _ => crate::hel_worker::HarnessTurnPolicy::Disabled,
+    });
     let resume_session = select_resume_session(&config, &durable_relay);
     let project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
     if resume_session.is_none()

@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 pub const SESSION_RESTART_TEXT: &str = "[session restarted]";
 pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
+/// Marks the point where the harness resumed work with no prompt in flight.
+pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
+pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
 
 /// The current value of one logical transcript item. ACP structures whose
 /// schemas can grow are kept as JSON values, while logical item identity and
@@ -158,6 +161,14 @@ pub struct TranscriptItem {
 impl TranscriptItem {
     pub fn is_session_restart(&self) -> bool {
         self.stable_id.starts_with(SESSION_RESTART_ITEM_PREFIX)
+    }
+
+    /// Whether this item begins a turn: a user message, or the marker for a
+    /// turn the harness started on its own. The recovery boundary and the
+    /// scope of a plan update both key on the newest of these.
+    pub fn is_turn_start(&self) -> bool {
+        matches!(self.body, TranscriptBody::User { .. })
+            || self.stable_id.starts_with(HARNESS_TURN_ITEM_PREFIX)
     }
 
     pub fn is_nonempty_agent_message(&self) -> bool {
