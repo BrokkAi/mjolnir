@@ -56,20 +56,20 @@ jobs:
     - name: Check crate package contents and build
       run: |
         diff -u LICENSE voice-worker/LICENSE
-        cargo package --locked --allow-dirty --list -p brokk-mj-core > /tmp/hel-package-files.txt
+        cargo package --locked --allow-dirty --list -p brokk-mj-core > /tmp/mj-core-package-files.txt
         cargo package --locked --allow-dirty --list -p brokk-mj-voice-worker > /tmp/voice-worker-package-files.txt
-        grep -Fx LICENSE /tmp/hel-package-files.txt
-        grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/hel-package-files.txt
-        grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/hel-package-files.txt
+        grep -Fx LICENSE /tmp/mj-core-package-files.txt
+        grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/mj-core-package-files.txt
+        grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/mj-core-package-files.txt
         grep -Fx LICENSE /tmp/voice-worker-package-files.txt
         diff -u LICENSE mj-tui/LICENSE
         diff -u LICENSE mj-cli/LICENSE
         diff -u LICENSE mj-desktop/LICENSE
-        cargo package --locked --allow-dirty --list -p brokk-mj-tui > /tmp/hel-tui-package-files.txt
-        cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/hel-cli-package-files.txt
+        cargo package --locked --allow-dirty --list -p brokk-mj-tui > /tmp/mj-tui-package-files.txt
+        cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/mj-cli-package-files.txt
         cargo package --locked --allow-dirty --list -p brokk-mj-desktop > /tmp/mj-desktop-package-files.txt
-        grep -Fx LICENSE /tmp/hel-tui-package-files.txt
-        grep -Fx LICENSE /tmp/hel-cli-package-files.txt
+        grep -Fx LICENSE /tmp/mj-tui-package-files.txt
+        grep -Fx LICENSE /tmp/mj-cli-package-files.txt
         grep -Fx LICENSE /tmp/mj-desktop-package-files.txt
         cargo package --locked -p brokk-mj-core
 
@@ -111,10 +111,10 @@ jobs:
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-hel-cargo-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
+        key: ${{ runner.os }}-mj-cargo-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-hel-cargo-${{ steps.toolchain.outputs.cachekey }}-
-          ${{ runner.os }}-hel-cargo-
+          ${{ runner.os }}-mj-cargo-${{ steps.toolchain.outputs.cachekey }}-
+          ${{ runner.os }}-mj-cargo-
 
     - name: Check Rust formatting
       run: cargo fmt --check
@@ -126,7 +126,7 @@ jobs:
       if: runner.os != 'Linux'
       run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
 
-    - name: Build Hel
+    - name: Build Mjolnir
       run: cargo build --release
 
     - name: Build desktop application
