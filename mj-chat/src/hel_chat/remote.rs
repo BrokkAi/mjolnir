@@ -852,7 +852,7 @@ pub(super) fn queue_chat_remote_operation(
 mod tests {
     use super::*;
     use crate::hel_chat::test_support::{snapshot, transcript_text};
-    use crate::hel_state::MaterializedSession;
+    use hel::hel_state::MaterializedSession;
 
     /// Whether any transcript row contains `text`, at a width wide enough that
     /// nothing under test wraps.
