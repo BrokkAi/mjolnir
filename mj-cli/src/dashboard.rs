@@ -3051,6 +3051,27 @@ mod tests {
         assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
     }
 
+    /// Resume is a chord like new session: the pane letter it used to answer
+    /// is gone, so this is the only way in from the composer.
+    #[test]
+    fn alt_s_opens_the_resume_dialog_from_the_composer() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_prompt();
+
+        let command = chord(&dashboard, alt('s')).expect("Alt-S is a global chord");
+        assert_eq!(command, CommandId::ResumeDialog);
+        assert!(matches!(
+            dashboard.dispatch_command(command),
+            DashboardAction::OpenResumeDialog
+        ));
+        assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
+
+        // Like Alt-N, it waits for an open dialog to close.
+        dashboard.show_resume_dialog(1, Vec::new());
+        assert!(dashboard.modal_open());
+        assert_eq!(chord(&dashboard, alt('s')), None);
+    }
+
     /// A chord that would act on a surface the user cannot see waits for the
     /// dialog to close.
     #[test]

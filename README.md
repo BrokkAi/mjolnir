@@ -193,9 +193,11 @@ Tab leaves the dial where you set it.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
 `F2` opens the command palette, `F3` the workspace picker, `F4` the web
-viewer, `Alt+N` creates a session, `Alt+A` marks everything read, `Alt+X`
-cancels whatever the selected session is in the middle of, `Alt+G` turns the
-pane dial, and `Alt+Q` detaches.
+viewer, `Alt+N` creates a session, `Alt+S` resumes one, `Alt+A` marks
+everything read, `Alt+X` cancels whatever the selected session is in the middle
+of, `Alt+G` turns the pane dial, and `Alt+Q` detaches. Each of these has one
+spelling: a command you can reach from anywhere has no plain-letter alias as
+well.
 
 `F2` is the way to reach a command you have no key for. It lists the selected
 session's own commands first — rename it, edit its container settings, stop it
@@ -213,8 +215,8 @@ editing key, as in a shell.
 Preferences, Profiles, Keys, "Left Option key: Esc+"; Terminal.app: "Use Option
 as Meta key"), and inside tmux a short `escape-time`, for example
 `set -sg escape-time 10` in `~/.tmux.conf`. Without those the terminal reports
-`Alt+N` as `Escape` then `n`. The Sessions pane's plain letters and the key
-reference below are the fallbacks.
+`Alt+N` as `Escape` then `n`. The command palette on `F2` and the key reference
+below are the fallbacks: every chord is also a line in both.
 
 `F1` opens the key reference, and so does `?` from any pane. It lists every key
 this screen answers, greying the ones that do not apply where you are; `Escape`,
@@ -223,13 +225,18 @@ generated from the same list, so it names only the keys that apply right now —
 `Alt-X cancel launch`, for instance, appears only while the selected session is
 starting or stopping.
 
+The footer reads in three groups, separated by a vertical bar: what the pane
+you are in answers, the `Alt` chords that answer anywhere, then the function
+keys. A narrow terminal drops hints from the left-hand groups first; the
+function keys stay, because they are the way to the palette and the reference.
+
 The panes take plain keys, because the composer is a separate focus and never
-sees them. On Sessions: `Enter` opens the selection, `n` creates a session, `s`
-opens Resume, `a` marks everything read, `Space` and `1`–`9` collapse and
-expand projects; a session's own commands are on `F2`. Cancelling an operation
-in flight is `Alt+X`, which works from any pane. On Targets and Quota:
-`r` refreshes and `Enter` or `e` opens that row's actions. Every list also takes
-the arrow keys, `j`/`k`, `Ctrl+N`/`Ctrl+P`, and `Home`/`End`.
+sees them. A plain letter is always pane-local: everything reachable from
+anywhere is a chord. On Sessions: `Enter` opens the selection, `Space` and
+`1`–`9` collapse and expand projects; a session's own commands are on `F2`. On
+Targets and Quota: `r` refreshes and `Enter` or `e` opens that row's actions.
+Every list also takes the arrow keys, `j`/`k`, `Ctrl+N`/`Ctrl+P`, and
+`Home`/`End`.
 
 `Escape` belongs to the conversation: it cancels a running turn or a shell
 command, and closes a dialog. It never quits.

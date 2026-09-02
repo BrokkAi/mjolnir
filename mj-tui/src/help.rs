@@ -63,8 +63,13 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("Ctrl-Y", "yank what was killed"),
     ("Ctrl-C", "stash the prompt into history and clear it"),
     ("Ctrl-P / Ctrl-N", "previous or next line, or history"),
+    ("Alt-N", "new session"),
+    ("Alt-S", "resume a session"),
+    ("Alt-A", "mark all read"),
     ("Alt-G", "pane layout"),
     ("Alt-Q", "detach"),
+    ("F2", "command palette"),
+    ("F3", "workspaces"),
     ("F4", "web viewer"),
 ];
 
@@ -209,7 +214,9 @@ mod tests {
     use crate::Focus;
     use crate::actions::COMMANDS;
     use crate::render::render;
-    use crate::test_support::{buffer_lines, dashboard_with_session, key, running_session};
+    use crate::test_support::{
+        alt_key, buffer_lines, dashboard_with_session, key, running_session,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -256,7 +263,7 @@ mod tests {
     fn help_overlay_returns_to_the_wizard_it_opened_over() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Char('n')));
+        dashboard.handle_key(alt_key('n'));
         let wizard = dashboard.mode.clone();
         assert!(matches!(wizard, Mode::New(_)), "{wizard:?}");
 

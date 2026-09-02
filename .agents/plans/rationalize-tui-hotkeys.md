@@ -24,6 +24,9 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
 - [x] (2026-09-01 00:00Z) M3. Added `mj-tui/src/palette.rs` (`Mode::Palette`, `begin_palette`, `handle_palette_key`, `palette_entries`, `render_palette`), added `CommandId::Palette` on `F2` as a global chord, deleted `SessionEditDialog` with its `begin_session_edit`/`handle_session_edit_key`/`render_session_edit` and `Mode::SessionEdit`, unbound `e`, and updated `README.md`.
 - [x] (2026-09-01 00:00Z) M3 tests. Nine named tests added in `mj-tui/src/palette.rs`; the M1 help test now asserts the palette entry and its key; the key-driven fixtures in `mj-tui/src/dialogs.rs` and the three tests in `mj-tui/src/lib.rs` and `mj-tui/src/render.rs` that pressed `e` now go through the palette.
 - [x] (2026-09-01 00:00Z) M3 validation. `cargo test -p brokk-mj-tui` 265 passed, `cargo test -p brokk-mjolnir` green, `cargo test --lib hel_chat` 249 passed, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
+- [x] (2026-09-01 00:00Z) M3.5. Made resume a global chord (`Alt-S`, `Scope::Global`), deleted the plain-letter aliases `n`, `a`, and `s` so plain letters are pane-local only, gave `CommandSpec` a `footer_group` and `footer_rank`, rebuilt `combined_footer_text` as three groups separated by ` │ `, shortened the footer words (`read`, `palette`), rewrote the chat's four footer strings in the same shape, fixed the resume dialog's unreachable tab arrows, and updated `README.md`.
+- [x] (2026-09-01 00:00Z) M3.5 tests. `sessions_pane_n_and_a_still_work_as_aliases` became `plain_n_a_and_s_no_longer_act`; three tests added (`footer_groups_pane_alt_and_function_keys_in_that_order` and `footer_drops_pane_hints_before_alt_hints_and_never_function_keys` in `mj-tui/src/render.rs`, `arrow_keys_switch_tabs_even_while_the_search_field_has_focus` in `mj-tui/src/resume.rs`) plus `alt_s_opens_the_resume_dialog_from_the_composer` beside the M2 chord tests in `mj-cli/src/dashboard.rs`; the footer- and key-asserting tests in `render.rs`, `resume.rs`, `active.rs`, `help.rs`, `lib.rs`, and `wizards/tests.rs` moved to the new map.
+- [x] (2026-09-01 00:00Z) M3.5 validation. `cargo test -p brokk-mj-tui` 268 passed, `cargo test -p brokk-mjolnir` green, `cargo test --lib hel_chat` 249 passed, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
 - [ ] M4 (optional, to be proposed separately after M3). One shared vocabulary of built-in slash commands for the terminal surface and the web viewer.
 
 ## Surprises & Discoveries
@@ -90,6 +93,27 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   column came out as `› r Refresh capacity` rather than aligned. The palette
   clips with its own `clip` instead.
   Evidence: the first live capture of the palette, before the fix.
+
+- Observation: the resume dialog's footer has always advertised `←/→ tabs`,
+  and from the search field those arrows have never switched tabs. The
+  `_ if typing => { dialog.search.handle_key(key) }` catch-all in
+  `handle_resume_dialog_key` sat above the `KeyCode::Left`/`KeyCode::Right`
+  arms, so while the search field had focus — which is where `/` and any typed
+  query leave it — the arrows moved the text cursor instead. The tab-switch
+  arms moved above the catch-all; an in-field cursor is not worth a tab the
+  footer promises and the surface does not give. Covered by
+  `arrow_keys_switch_tabs_even_while_the_search_field_has_focus`.
+  Evidence: reported from a live run, then reproduced in the source order of
+  `mj-tui/src/resume.rs`, and confirmed fixed in the M3.5 live check.
+
+- Observation: the chat's footer is not width-aware, so at 100 columns its row
+  is clipped rather than shortened. Grouping moved `Alt-G panes` to the right
+  of the composer's own keys, which makes the clipping easier to notice, but
+  the row was already longer than 100 columns before this milestone. Giving
+  the chat footer the dashboard's dropping rule is a candidate for M4.
+  Evidence: `render_chat_footer` draws a `Paragraph` with no width argument;
+  the two chat tests that asserted `Alt-G panes` at 100 columns now assert a
+  hint from the first group instead.
 
 ## Decision Log
 
@@ -207,6 +231,33 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   M4 proposes that home, and moving it there is one of M4's steps.
   Date/Author: 2026-09-01, implementation of M3.
 
+- Decision: resume moved to `Alt-S` in `Scope::Global`, and the plain-letter
+  aliases `n`, `a`, and `s` were removed rather than kept. The rule is now that
+  a plain letter is pane-local only; everything reachable from anywhere is a
+  chord and has exactly one spelling.
+  Rationale: M2 left two spellings for three commands, which is the drift this
+  plan exists to remove: the footer named one, the help overlay named both, and
+  the palette named both. One spelling means the footer, the reference, and the
+  palette agree without a rule about which alias to print. Resume had no chord
+  at all, so it could not be reached from the composer; `Alt-S` is allowed
+  under the same condition as `Alt-N` — no modal open, or over the help
+  overlay. The resume dialog's own `a` and `s` are modal-local and untouched.
+  Date/Author: 2026-09-01, implementation of M3.5.
+
+- Decision: the footer is three groups separated by ` │ ` — the focused pane's
+  commands, the `Alt` chords in a fixed order, then the function keys — and a
+  command's group and order come from `footer_group` and `footer_rank` on its
+  spec rather than from where it sits in `COMMANDS`.
+  Rationale: a row whose contents reshuffle as the pane changes is read from
+  the start every time. With three groups the reader looks in one place for a
+  given kind of key. Registry order cannot express this, because `Tab` and
+  `Alt-G` share `Scope::Pane` and belong in different groups, so the placement
+  had to be stated per command. Narrow terminals drop the pane group first,
+  then the chords, and never the function keys, because those are the way to
+  the palette and the key reference — the only things that can name what the
+  narrow row had to leave out.
+  Date/Author: 2026-09-01, implementation of M3.5.
+
 ## Outcomes & Retrospective
 
 M1 is complete and shipped green. What exists now that did not before: one table (`mj-tui/src/actions.rs`) that key handling, the footer, and the help overlay all read; an `F1` key reference that opens over anything and restores it; and a footer that names only the keys that apply. The user-visible gain from M1 alone is real but modest — the mislabelled `Ctrl+X` advice is gone, `x cancel launch` only appears when it can be used, and `F1` finally answers.
@@ -266,7 +317,7 @@ The **accelerator** is Command on macOS and Control everywhere else. `dashboard_
 
 ## Plan of Work
 
-The work is four milestones after this plan itself. Each ships with the test suite green and is committed on its own.
+The work is five milestones after this plan itself. Each ships with the test suite green and is committed on its own.
 
 ### M0 — this document
 
@@ -303,6 +354,28 @@ Then move the keys. `F2` becomes the command palette, `F3` the workspace picker,
 Create `mj-tui/src/palette.rs` with `Mode::Palette`, a searchable list of every available command, opened by `F2`. It lists the selected session's commands first under a heading naming that session, then the focused pane's, then the ones that apply anywhere. Unavailable commands are greyed with their reason. Selecting one returns to the dashboard and calls `dispatch_command`, so rename, container settings, and stop all work through the same path the keyboard uses.
 
 With the palette in place, delete the session edit dialog (`SessionEditDialog` and its `begin_session_edit`, `handle_session_edit_key`, and `render_session_edit` in `mj-tui/src/dialogs.rs`, and `Mode::SessionEdit`) and unbind `e`. The dialog only ever existed because the footer had no room for three more hints.
+
+### M3.5 — one spelling per command, and a footer in three groups
+
+Two things the earlier milestones left half-done.
+
+First, the plain-letter aliases. `Alt-N` and `Alt-A` arrived in M2 beside the
+letters `n` and `a` they duplicated, and resume kept only the letter `s` and so
+could not be reached from the composer at all. Resume becomes `Alt-S` in
+`Scope::Global`, the three plain letters go, and the rule becomes: a plain
+letter is pane-local only. What is left on the panes is `Enter` (open a
+session, or a target's or profile's actions), `Space` and `1`–`9` (fold a
+project), `r` (refresh), and `?` (help). The resume dialog's own `a` and `s`
+are modal-local and stay exactly as they are.
+
+Second, the footer. It becomes three groups separated by ` │ `: the focused
+pane's commands, the `Alt` chords in a fixed order (`Alt-N`, `Alt-S`, `Alt-A`,
+`Alt-G`, `Alt-X` while something is in flight, `Alt-Q`), then the function keys
+(`F2`, `F3`, `F4`, `F1`). `CommandSpec` gains `footer_group` and `footer_rank`
+so the placement is stated rather than inherited from the table's order, and
+the footer words shorten (`read`, `palette`). Width squeezes drop the pane
+group first, then the chords, and never the function keys. The chat's own
+footer strings take the same shape.
 
 ### M4 — shared command vocabulary (optional, propose separately)
 
@@ -465,6 +538,24 @@ After typing `help`, the list is the one match and its group heading:
 `Escape` put the dashboard back with its footer unchanged, and `Alt-Q`
 detached.
 
+The M3.5 live check, run the same way against an isolated `MJ_CONFIG_DIR` and
+`MJ_DATA_DIR`. The footer at 200 columns, with the Sessions pane focused, no
+session created, and nothing in flight:
+
+    Tab pane │ Alt-N new · Alt-S resume · Alt-A read · Alt-G panes · Alt-Q quit │ F2 palette · F3 workspaces · F4 web · F1 help
+
+`Enter open` is absent because there is no session to open; with one selected
+the row starts `Enter open · Tab pane │ …`. At 100 columns the pane group goes
+first and then the last chord, and the function keys stay whole:
+
+    Alt-N new · Alt-S resume · Alt-A read · Alt-G panes │ F2 palette · F3 workspaces · F4 web · F1 help
+
+`Alt-S` opened the resume dialog on the Mjolnir tab. Inside it, `/` moved to
+the search field, typing `x` filtered the list, and `→` switched to the Import
+tab from that field — the arrows the dialog's own footer has always advertised
+and which used to move the text cursor instead. `Escape` put the dashboard back
+with its footer unchanged, and `Alt-Q` detached.
+
 The live check was run against an isolated configuration and data directory (`MJ_CONFIG_DIR` and `MJ_DATA_DIR`, read by `env_override_os` in `src/hel_config.rs`) rather than the real one, because the real workspace was already attached to another process and attaching a second time would have taken it away from its owner.
 
 The shape of the registry entry, from `mj-tui/src/actions.rs`:
@@ -554,6 +645,10 @@ Dropping the composer's arm from the footer is safe: whenever the composer has t
 
 ## Revision notes
 
+- 2026-09-01: Updated through the end of M3.5. The single-spelling rule and
+  the three-group footer are in the `Decision Log`; the resume dialog's
+  unreachable tab arrows and the chat footer's missing width rule are in
+  `Surprises & Discoveries`.
 - 2026-09-01: Updated through the end of M3. The palette's group order at the
   composer, the treatment of `Blocked` versus `Hidden` entries, and the copied
   ranking rule are in the `Decision Log`; the two notices naming keys that do

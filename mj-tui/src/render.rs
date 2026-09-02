@@ -1869,44 +1869,74 @@ pub(crate) fn render_quotas(frame: &mut Frame, area: Rect, dashboard: &mut Dashb
 ///
 /// Built from the action registry ([`crate::actions`]) rather than written out
 /// as a string per pane, so a hint can never name a key the surface does not
-/// answer, and a command can never be added without the footer knowing. Only
-/// commands that are ready and carry a footer word appear; `F1 help` always
-/// closes the row.
+/// answer, and a command can never be added without the footer knowing.
+///
+/// The row is three groups separated by a vertical bar, always in this order:
+/// what the focused pane answers, the `Alt` chords that answer from anywhere,
+/// and the function keys. The reader therefore always looks in the same place
+/// for a given kind of key, and the row does not reshuffle itself as the pane
+/// changes. Each group's order comes from `footer_group` and `footer_rank` on
+/// the spec, not from where the command sits in the table.
 ///
 /// `width` is the row's width in cells. When the hints do not fit, whole
-/// segments are dropped from the right, never truncated mid-word: half a hint
-/// is worse than no hint.
+/// segments are dropped from the right — never truncated mid-word, because
+/// half a hint names a key that does not exist — first from the pane group,
+/// then from the chords. The function keys are never dropped: they are the way
+/// to the key reference and the palette, which is how the user finds
+/// everything the narrow row had to leave out.
 ///
 /// The composer's own hints come from the chat itself, because they depend on
 /// what it is doing (a queued prompt, dictation, a history search); this text
 /// is only drawn when a pane has the keyboard.
 pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> String {
-    const HELP: &str = "F1 help";
-    const SEPARATOR: &str = " · ";
-
-    let mut segments = crate::actions::available(dashboard, None)
+    let mut hints = crate::actions::available(dashboard, None)
         .into_iter()
-        .filter(|id| *id != crate::actions::CommandId::Help)
         .filter_map(|id| {
             let spec = crate::actions::spec(id);
             let word = (spec.footer)(dashboard)?;
             let hint = spec.keys.first()?;
-            Some(format!("{} {word}", hint.label))
+            Some((
+                spec.footer_group,
+                spec.footer_rank,
+                format!("{} {word}", hint.label),
+            ))
         })
         .collect::<Vec<_>>();
-    loop {
-        let text = segments
+    // Stable, so commands sharing a rank keep the table's order.
+    hints.sort_by_key(|(group, rank, _)| (*group, *rank));
+
+    let group_of = |wanted: crate::actions::FooterGroup| {
+        hints
             .iter()
-            .map(String::as_str)
-            .chain(std::iter::once(HELP))
+            .filter(|(group, _, _)| *group == wanted)
+            .map(|(_, _, text)| text.clone())
             .collect::<Vec<_>>()
-            .join(SEPARATOR);
-        if segments.is_empty() || text.chars().count() <= usize::from(width) {
+    };
+    let mut pane = group_of(crate::actions::FooterGroup::Pane);
+    let mut chords = group_of(crate::actions::FooterGroup::Chord);
+    let functions = group_of(crate::actions::FooterGroup::Function);
+
+    loop {
+        let text = [&pane, &chords, &functions]
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .map(|group| group.join(FOOTER_SEPARATOR))
+            .collect::<Vec<_>>()
+            .join(FOOTER_GROUP_SEPARATOR);
+        if text.chars().count() <= usize::from(width) {
             return text;
         }
-        segments.pop();
+        if pane.pop().is_some() || chords.pop().is_some() {
+            continue;
+        }
+        return text;
     }
 }
+
+/// Between two hints of one group.
+pub(crate) const FOOTER_SEPARATOR: &str = " \u{b7} ";
+/// Between the pane group, the chord group, and the function-key group.
+pub(crate) const FOOTER_GROUP_SEPARATOR: &str = " \u{2502} ";
 
 /// Draws the shared footer row.
 ///
@@ -2615,10 +2645,7 @@ mod tests {
     #[test]
     fn new_session_picker_keeps_choices_and_controls_visible_at_minimum_width() {
         let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('n'))),
-            DashboardAction::None
-        );
+        assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
         let mut terminal = Terminal::new(TestBackend::new(32, 24)).expect("terminal");
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -2678,7 +2705,7 @@ mod tests {
             .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
             .collect::<String>();
         assert!(hotkeys.contains("Alt-N new"), "{hotkeys:?}");
-        assert!(hotkeys.contains("Alt-A mark read"), "{hotkeys:?}");
+        assert!(hotkeys.contains("Alt-A read"), "{hotkeys:?}");
         assert!(!hotkeys.contains("[S]ort"));
     }
 
@@ -2737,20 +2764,82 @@ mod tests {
         for width in [7_u16, 12, 20, 40, 60, 80] {
             let footer = combined_footer_text(&dashboard, width);
             assert!(footer.ends_with("F1 help"), "{width}: {footer}");
-            // Every segment that survived is a whole segment of the full text.
-            for segment in footer.split(" · ") {
+            // Every hint that survived is a whole hint of the full text.
+            for hint in footer_hints(&footer) {
                 assert!(
-                    full.split(" · ").any(|candidate| candidate == segment),
-                    "{width}: {segment:?} is not a whole hint of {full:?}"
+                    footer_hints(&full).contains(&hint),
+                    "{width}: {hint:?} is not a whole hint of {full:?}"
                 );
             }
-            // Only the last hint may overflow, because help always stays.
-            if width >= 7 {
-                assert!(
-                    footer == "F1 help" || footer.chars().count() <= usize::from(width),
-                    "{width}: {footer}"
-                );
-            }
+        }
+    }
+
+    /// Every hint in the footer, whichever separator it sits between.
+    fn footer_hints(footer: &str) -> Vec<String> {
+        footer
+            .split(FOOTER_GROUP_SEPARATOR)
+            .flat_map(|group| group.split(FOOTER_SEPARATOR))
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    /// The row is read left to right by someone hunting one key, so the kinds
+    /// of key never swap places: what this pane answers, then the chords that
+    /// answer anywhere, then the function keys.
+    #[test]
+    fn footer_groups_pane_alt_and_function_keys_in_that_order() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert_eq!(
+            combined_footer_text(&dashboard, 200),
+            "Enter open · Tab pane │ Alt-N new · Alt-S resume · Alt-A read · Alt-G panes \
+             · Alt-Q quit │ F2 palette · F3 workspaces · F4 web · F1 help"
+        );
+
+        // The cancel chord takes its fixed place before quit, and only while
+        // there is something to cancel.
+        dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+        dashboard.begin_session_operation_at(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+            1_000,
+        );
+        let footer = combined_footer_text(&dashboard, 200);
+        assert!(footer.starts_with("Enter open · Tab pane │ "), "{footer}");
+        assert!(
+            footer.contains("Alt-G panes · Alt-X cancel launch · Alt-Q quit"),
+            "{footer}"
+        );
+    }
+
+    /// The function keys are the way to the key reference and the palette, so
+    /// they are the one group a narrow terminal may never take: the pane hints
+    /// go first, then the chords.
+    #[test]
+    fn footer_drops_pane_hints_before_alt_hints_and_never_function_keys() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+        dashboard.focus_sessions();
+        const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F1 help";
+
+        let full = combined_footer_text(&dashboard, 200);
+        assert!(
+            footer_hints(&full).contains(&"Enter open".to_owned()),
+            "{full}"
+        );
+
+        // Narrow enough to lose the pane group, wide enough to keep chords.
+        let squeezed = combined_footer_text(&dashboard, 90);
+        assert!(!squeezed.contains("Enter open"), "{squeezed}");
+        assert!(squeezed.contains("Alt-N new"), "{squeezed}");
+        assert!(squeezed.ends_with(FUNCTION_KEYS), "{squeezed}");
+
+        // Narrower still: the chords go too, and the function keys stay even
+        // when they no longer fit, because a row with no way out is worse.
+        for width in [0_u16, 5, 20, 40] {
+            let footer = combined_footer_text(&dashboard, width);
+            assert_eq!(footer, FUNCTION_KEYS, "{width}");
         }
     }
 
@@ -2856,7 +2945,7 @@ mod tests {
         let mut empty = DashboardState::new(config(), HelState::default(), BTreeMap::new());
         let lines = drawn(&mut empty, 120, 44).join("\n");
         assert!(lines.contains("Prompt (no live session)"), "{lines}");
-        assert!(lines.contains("n to create or s to resume"), "{lines}");
+        assert!(lines.contains("Alt-N to create one"), "{lines}");
 
         // A live session that simply is not open says so instead.
         let mut live = dashboard_with_session(running_session());

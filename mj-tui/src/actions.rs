@@ -44,7 +44,7 @@ pub enum CommandId {
 /// Where a command belongs: which pane has to own the keyboard for it to
 /// apply, or `Global`/`Pane` for the ones that apply wherever the keyboard is.
 ///
-/// `Sessions` is the pane itself (create, resume, mark read); `Session` is the
+/// `Sessions` is the pane itself (create, mark read); `Session` is the
 /// selected row (rename, container settings, stop). `Setup` is the first-run
 /// path that only exists while the configuration is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,7 @@ pub(crate) enum Availability {
 /// `modifiers` holds `KeyModifiers::ALT` for a chord, which answers from every
 /// surface including the composer. `KeyModifiers::NONE` on a character means
 /// the plain letter, which only reaches a pane because the composer is a
-/// separate focus.
+/// separate focus; a command that has a chord has no plain letter as well.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeyHint {
     pub(crate) code: KeyCode,
@@ -153,6 +153,20 @@ impl KeyHint {
     }
 }
 
+/// Which of the footer's three groups a hint prints in.
+///
+/// The row reads `pane commands │ Alt chords │ function keys`, so the reader
+/// always finds a key in the same place: what applies here, what applies
+/// everywhere, and the reference keys. Group membership is stated here rather
+/// than inferred from [`Scope`], because `Tab` and `Alt-G` share a scope and
+/// belong in different groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FooterGroup {
+    Pane,
+    Chord,
+    Function,
+}
+
 /// One command: what it is called, what runs it, and when it applies.
 pub(crate) struct CommandSpec {
     pub(crate) id: CommandId,
@@ -164,6 +178,11 @@ pub(crate) struct CommandSpec {
     /// footer never has room to name. Dynamic because
     /// [`CommandId::CancelOperation`] names the operation it would cancel.
     pub(crate) footer: fn(&DashboardState) -> Option<String>,
+    /// Which footer group the hint prints in, and where inside it. Equal
+    /// ranks keep registry order, so only the groups whose order matters to
+    /// the reader — the chords and the function keys — carry distinct ranks.
+    pub(crate) footer_group: FooterGroup,
+    pub(crate) footer_rank: u8,
     pub(crate) available: fn(&DashboardState) -> Availability,
 }
 
@@ -260,6 +279,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Sessions,
         keys: &[KeyHint::plain(KeyCode::Enter, "Enter")],
         footer: footer_word!("open"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: selected_session_ready,
     },
     CommandSpec {
@@ -267,20 +288,21 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "New session",
         description: "Start the wizard that picks a profile, a bundle, and a target.",
         scope: Scope::Sessions,
-        keys: &[
-            KeyHint::alt(KeyCode::Char('n'), "Alt-N"),
-            KeyHint::plain(KeyCode::Char('n'), "n"),
-        ],
+        keys: &[KeyHint::alt(KeyCode::Char('n'), "Alt-N")],
         footer: footer_word!("new"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
         available: config_present,
     },
     CommandSpec {
         id: CommandId::ResumeDialog,
         label: "Resume a session",
         description: "Open the picker for every session that is not live.",
-        scope: Scope::Sessions,
-        keys: &[KeyHint::plain(KeyCode::Char('s'), "s")],
+        scope: Scope::Global,
+        keys: &[KeyHint::alt(KeyCode::Char('s'), "Alt-S")],
         footer: footer_word!("resume"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 1,
         available: always_ready,
     },
     CommandSpec {
@@ -288,11 +310,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Mark all read",
         description: "Clear the unread marker on every session at once.",
         scope: Scope::Sessions,
-        keys: &[
-            KeyHint::alt(KeyCode::Char('a'), "Alt-A"),
-            KeyHint::plain(KeyCode::Char('a'), "a"),
-        ],
-        footer: footer_word!("mark read"),
+        keys: &[KeyHint::alt(KeyCode::Char('a'), "Alt-A")],
+        footer: footer_word!("read"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 2,
         available: always_ready,
     },
     CommandSpec {
@@ -302,6 +323,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Global,
         keys: &[KeyHint::alt(KeyCode::Char('x'), "Alt-X")],
         footer: cancel_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 4,
         available: operation_in_flight,
     },
     CommandSpec {
@@ -311,6 +334,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Sessions,
         keys: &[KeyHint::plain(KeyCode::Char(' '), "Space")],
         footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: selected_session_ready,
     },
     CommandSpec {
@@ -320,6 +345,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Session,
         keys: &[],
         footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: session_idle,
     },
     CommandSpec {
@@ -329,6 +356,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Session,
         keys: &[],
         footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: container_session,
     },
     CommandSpec {
@@ -338,6 +367,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Session,
         keys: &[],
         footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: selected_session_ready,
     },
     CommandSpec {
@@ -347,6 +378,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Targets,
         keys: &[KeyHint::plain(KeyCode::Char('r'), "r")],
         footer: footer_word!("refresh"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: always_ready,
     },
     CommandSpec {
@@ -359,6 +392,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
             KeyHint::plain(KeyCode::Char('e'), "e"),
         ],
         footer: footer_word!("actions"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: always_ready,
     },
     CommandSpec {
@@ -368,6 +403,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Quota,
         keys: &[KeyHint::plain(KeyCode::Char('r'), "r")],
         footer: footer_word!("refresh"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: always_ready,
     },
     CommandSpec {
@@ -380,6 +417,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
             KeyHint::plain(KeyCode::Char('e'), "e"),
         ],
         footer: footer_word!("edit profile"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: profiles_present,
     },
     CommandSpec {
@@ -389,6 +428,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Setup,
         keys: &[KeyHint::plain(KeyCode::Char('e'), "e")],
         footer: footer_word!("setup"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
         available: config_absent,
     },
     CommandSpec {
@@ -398,6 +439,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Pane,
         keys: &[KeyHint::plain(KeyCode::Tab, "Tab")],
         footer: footer_word!("pane"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 1,
         available: always_ready,
     },
     CommandSpec {
@@ -407,6 +450,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Pane,
         keys: &[KeyHint::alt(KeyCode::Char('g'), "Alt-G")],
         footer: footer_word!("panes"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 3,
         available: always_ready,
     },
     CommandSpec {
@@ -416,6 +461,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Global,
         keys: &[KeyHint::plain(KeyCode::F(3), "F3")],
         footer: footer_word!("workspaces"),
+        footer_group: FooterGroup::Function,
+        footer_rank: 1,
         available: always_ready,
     },
     CommandSpec {
@@ -425,6 +472,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Global,
         keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
         footer: footer_word!("web"),
+        footer_group: FooterGroup::Function,
+        footer_rank: 2,
         available: always_ready,
     },
     CommandSpec {
@@ -434,6 +483,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Global,
         keys: &[KeyHint::alt(KeyCode::Char('q'), "Alt-Q")],
         footer: footer_word!("quit"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 5,
         available: always_ready,
     },
     CommandSpec {
@@ -442,7 +493,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Search every command that applies right now and run one.",
         scope: Scope::Global,
         keys: &[KeyHint::plain(KeyCode::F(2), "F2")],
-        footer: footer_word!("commands"),
+        footer: footer_word!("palette"),
+        footer_group: FooterGroup::Function,
+        footer_rank: 0,
         available: always_ready,
     },
     CommandSpec {
@@ -455,6 +508,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
             KeyHint::plain(KeyCode::Char('?'), "?"),
         ],
         footer: footer_word!("help"),
+        footer_group: FooterGroup::Function,
+        footer_rank: 3,
         available: always_ready,
     },
 ];
@@ -463,9 +518,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 /// owns the keyboard.
 ///
 /// Each one's chord is the entry in its `keys` list that [`KeyHint::is_chord`]
-/// accepts — a function key or an Alt letter. The plain-letter aliases (`n`
-/// on the Sessions pane, `a`, `?`) stay pane keys, because the composer reads
-/// a bare letter as text.
+/// accepts — a function key or an Alt letter. A command reached from
+/// everywhere carries no plain-letter alias: the plain letters are pane-local
+/// only, because the composer reads a bare letter as text and two spellings of
+/// one command is what the key reference exists to avoid.
 ///
 /// `F2` opens the command palette; its old workspace-picker binding moved to
 /// `F3`.
@@ -475,6 +531,7 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::Workspaces,
     CommandId::WebViewer,
     CommandId::NewSession,
+    CommandId::ResumeDialog,
     CommandId::MarkAllRead,
     CommandId::CyclePaneLayout,
     CommandId::QuitDetach,

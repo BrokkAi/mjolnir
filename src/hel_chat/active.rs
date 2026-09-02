@@ -2286,21 +2286,27 @@ pub(super) fn render_chat_footer(
     // The host only hands the footer to the chat while the composer has
     // focus, so `prompt_focused` is normally true here; the other arm keeps
     // the row honest if it ever is not.
-    let default_footer = if !prompt_focused {
-        "Alt-G panes · Tab pane · PgUp/PgDn transcript · F1 help"
+    // The three groups are the dashboard's: what the composer answers, the
+    // chords that answer from anywhere, then the function keys. Only the
+    // first group changes with what the composer is doing.
+    const CHORDS: &str = " │ Alt-G panes · Alt-Q quit │ ";
+    const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F1 help";
+    let composer_keys = if !prompt_focused {
+        "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
-        "Alt-G panes · Listening… Alt-V stop · PgUp/PgDn transcript · F1 help"
+        "Listening… Alt-V stop · PgUp/PgDn transcript"
     } else if !chat.queued_prompts.is_empty() {
-        "Alt-G panes · Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Esc cancel · F1 help"
+        "Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Esc cancel"
     } else {
-        "Alt-G panes · Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Alt-T rendering · Esc cancel · F1 help"
+        "Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Alt-T rendering · Esc cancel"
     };
+    let default_footer = format!("{composer_keys}{CHORDS}{FUNCTION_KEYS}");
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
         .as_deref()
         .or(notice.as_deref())
-        .unwrap_or(default_footer);
+        .unwrap_or(&default_footer);
     // The shared notice bar is yellow wherever it shows; a search prompt or
     // the default hotkey hints stay the quieter dark gray.
     let footer_color = if search_footer.is_none() && notice.is_some() {
@@ -2549,7 +2555,7 @@ mod tests {
         // The chat underneath still shows through above and below the
         // dialog's centred popup.
         assert!(row_of("UNDERLYING CHAT SENTINEL") < popup_top);
-        assert!(row_of("Alt-G panes") > popup_top);
+        assert!(row_of("Tab pane") > popup_top);
     }
 
     #[test]
@@ -3170,12 +3176,13 @@ mod tests {
         let footer_text = (buffer.area.x..buffer.area.right())
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
-        assert!(footer_text.contains("Alt-G panes"));
+        assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
         assert_eq!(buffer[(buffer.area.x, footer_row)].fg, Color::DarkGray);
     }
 
     /// The composer's own row is where a user typing in it learns the keys,
-    /// so it names the Alt chords and the way into the full reference.
+    /// so it carries the same three groups the dashboard's row does: the
+    /// composer's own keys, the chords, then the function keys.
     #[test]
     fn chat_footer_advertises_alt_keys_and_f1() {
         let mut chat = ChatState::new(&snapshot(), &[]);
@@ -3192,7 +3199,12 @@ mod tests {
             .draw(|frame| render_full_frame(frame, &mut chat, true))
             .expect("draw chat");
         let footer = footer_of(&terminal);
-        for hint in ["Alt-G panes", "Alt-R history", "Alt-T rendering", "F1 help"] {
+        for hint in [
+            "Alt-R history",
+            "Alt-T rendering",
+            "│ Alt-G panes · Alt-Q quit │",
+            "F2 palette · F3 workspaces · F4 web · F1 help",
+        ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
         assert!(!footer.contains("Ctrl-G"), "{footer:?}");
@@ -3206,7 +3218,11 @@ mod tests {
             .draw(|frame| render_full_frame(frame, &mut chat, true))
             .expect("draw chat with a queued prompt");
         let footer = footer_of(&terminal);
-        for hint in ["Alt-G panes", "Alt-R history", "F1 help"] {
+        for hint in [
+            "Alt-R history",
+            "│ Alt-G panes · Alt-Q quit │",
+            "F2 palette · F3 workspaces · F4 web · F1 help",
+        ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
     }

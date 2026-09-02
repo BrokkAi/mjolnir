@@ -1463,14 +1463,11 @@ mod tests {
         let mut dashboard = dashboard_with_session(session);
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('s'))),
+            dashboard.handle_key(alt_key('s')),
             DashboardAction::OpenResumeDialog
         );
         dashboard.cancel_modal();
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('n'))),
-            DashboardAction::None
-        );
+        assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
         assert!(matches!(dashboard.mode, Mode::New(_)));
         dashboard.cancel_modal();
         // `e` was the session edit dialog's key. The command palette replaced
@@ -1517,7 +1514,7 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('n'))),
             DashboardAction::None,
-            "n creates a session only from the Sessions pane"
+            "the plain letter creates nothing anywhere"
         );
 
         dashboard.handle_key(key(KeyCode::Tab));
@@ -1581,24 +1578,36 @@ mod tests {
         assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-G moved to Alt-G"));
     }
 
-    /// The Sessions pane keeps its plain letters: the chord is for reaching
-    /// the command from somewhere else, not a replacement.
+    /// Plain letters are pane-local only. New session, resume, and mark read
+    /// answer from everywhere, so each has one spelling — its chord — and the
+    /// letters that used to alias them do nothing at all.
     #[test]
-    fn sessions_pane_n_and_a_still_work_as_aliases() {
+    fn plain_n_a_and_s_no_longer_act() {
+        for character in ['n', 'a', 's'] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.focus_sessions();
+
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char(character))),
+                DashboardAction::None,
+                "{character}"
+            );
+            assert_eq!(dashboard.mode, Mode::Dashboard, "{character}");
+            assert_eq!(dashboard.notice(), None, "{character}");
+        }
+
+        // The chords still do what the letters used to.
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('n'))),
-            DashboardAction::None
-        );
+        assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
         assert!(matches!(dashboard.mode, Mode::New(_)));
         dashboard.cancel_modal();
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
-            DashboardAction::None
+            dashboard.handle_key(alt_key('s')),
+            DashboardAction::OpenResumeDialog
         );
+        assert_eq!(dashboard.handle_key(alt_key('a')), DashboardAction::None);
         assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
     }
 
@@ -1962,7 +1971,7 @@ mod tests {
         let shown_at = Instant::now();
 
         assert_eq!(
-            dashboard.handle_key_at(key(KeyCode::Char('a')), shown_at),
+            dashboard.handle_key_at(alt_key('a'), shown_at),
             DashboardAction::None
         );
         assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
@@ -1971,10 +1980,7 @@ mod tests {
     #[test]
     fn alt_q_quits_without_mutating_any_dashboard_modal() {
         let mut new_session = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-        assert_eq!(
-            new_session.handle_key(key(KeyCode::Char('n'))),
-            DashboardAction::None
-        );
+        assert_eq!(new_session.handle_key(alt_key('n')), DashboardAction::None);
 
         let mut resume = dashboard_with_session(stopped_session());
         assert_eq!(open_resume_wizard(&mut resume), DashboardAction::None);
@@ -2140,7 +2146,7 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
+            dashboard.handle_key(alt_key('a')),
             DashboardAction::MarkAllRead {
                 receipts: vec![("session-1".into(), 4)]
             }
@@ -2165,7 +2171,7 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
+            dashboard.handle_key(alt_key('a')),
             DashboardAction::MarkAllRead {
                 receipts: vec![("session-1".into(), 3)]
             }
