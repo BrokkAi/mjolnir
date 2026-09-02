@@ -797,20 +797,30 @@ async fn store_claude_setup_token(
     let environment = profile.environment.clone();
     let home = profile.home.clone();
     let verify_token = token.clone();
-    let status = tokio::task::spawn_blocking(move || {
+    let verified = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new("claude");
         command
             .args(["auth", "status"])
             .envs(&environment)
             .env(HarnessKind::Claude.home_env(), &home)
             .env(CLAUDE_OAUTH_TOKEN_ENV, &verify_token);
-        hel::hel_subprocess::run_inherited(&mut command)
+        hel::hel_subprocess::run_capturing_stdout(&mut command)
     })
     .await
     .context("run `claude auth status`")??;
-    if !status.success() {
+    if !verified.status.success() {
         bail!(
-            "the stored token did not authenticate: `claude auth status` exited with {status}. \
+            "the stored token did not authenticate: `claude auth status` exited with {}. \
+             The token is at {}; remove it to go back to the synced credentials file.",
+            verified.status,
+            token_path.display()
+        );
+    }
+    if let Some(method) = reported_auth_method(&verified.stdout)
+        && method != "oauth_token"
+    {
+        bail!(
+            "Claude Code authenticated with {method:?} rather than the stored token. \
              The token is at {}; remove it to go back to the synced credentials file.",
             token_path.display()
         );
@@ -824,6 +834,20 @@ async fn store_claude_setup_token(
         "New and resumed sessions of this profile run with {CLAUDE_OAUTH_TOKEN_ENV} set, so they no longer race the host over a rotating login."
     );
     Ok(())
+}
+
+/// How `claude auth status` says it authenticated, when it says so.
+///
+/// Exit code alone proves little: `claude auth status` reports success for any
+/// value of `CLAUDE_CODE_OAUTH_TOKEN`. What is worth confirming is that Claude
+/// Code read the variable and gave it precedence, which the reported method
+/// says. A build whose output carries no method is not a failure to report.
+fn reported_auth_method(stdout: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()?
+        .get("authMethod")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// The token in `claude setup-token` output.
@@ -1086,6 +1110,21 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
     use hel::hel_state::{HelState, SessionRecord, SessionState};
+
+    #[test]
+    fn the_verification_reads_which_credential_claude_code_actually_used() {
+        assert_eq!(
+            reported_auth_method(br#"{"loggedIn":true,"authMethod":"oauth_token"}"#).as_deref(),
+            Some("oauth_token")
+        );
+        assert_eq!(
+            reported_auth_method(br#"{"loggedIn":true,"authMethod":"claudeai"}"#).as_deref(),
+            Some("claudeai")
+        );
+        // Output that names no method leaves the exit code as the only check.
+        assert_eq!(reported_auth_method(b"Logged in as someone\n"), None);
+        assert_eq!(reported_auth_method(br#"{"loggedIn":true}"#), None);
+    }
 
     #[test]
     fn the_setup_token_is_read_out_of_the_surrounding_instructions() {
