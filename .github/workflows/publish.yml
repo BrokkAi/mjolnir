@@ -24,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-      # Verify the voice and desktop packages against the native libraries
-      # installed below instead of inheriting the repository's musl default.
+      # Verify the whole workspace on the host target, where the native voice
+      # and desktop libraries installed below are available.
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
 
     steps:
@@ -59,16 +59,29 @@ jobs:
             fi
           done <<< "$versions"
 
-      - name: Package crates
+      - name: Assemble and verify crates
+        shell: bash
         run: |
+          set -euo pipefail
           # Assemble every source package now, but verify the current workspace
           # directly below: before publication, extracted packages cannot
           # resolve same-release path dependencies from crates.io.
           cargo package --locked --workspace --no-verify
-          # Build both executables for the native GNU/Linux desktop target;
-          # the repository default is the headless musl target.
-          cargo build --locked -p brokk-mjolnir -p brokk-mj-desktop \
-            --target x86_64-unknown-linux-gnu
+          # Compile every target from every publishable workspace package on
+          # the supported host target. CARGO_BUILD_TARGET overrides the
+          # repository's headless musl default for this job.
+          cargo check --locked --workspace --all-targets
+
+          packages="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | [.name, .version] | @tsv')"
+          test -n "$packages"
+          while IFS=$'\t' read -r crate version; do
+            artifact="target/package/$crate-$version.crate"
+            if [ ! -f "$artifact" ]; then
+              echo "missing packaged crate artifact: $artifact" >&2
+              exit 1
+            fi
+          done <<< "$packages"
 
       - uses: actions/upload-artifact@v7
         with:

@@ -67,10 +67,12 @@ each library crate must reach the registry before anything that depends on it.
 It refuses to publish when the tag differs from any workspace crate version. It
 assembles the whole workspace in one `cargo package --workspace --no-verify`
 run, because extracted packages cannot resolve same-release path dependencies
-from the registry before publication, then builds both `mj` and `mj-desktop`
-directly for GNU/Linux ahead of the `crates-io` environment gate so a failure
-surfaces without spending an approval. Each `cargo publish` performs package
-verification again after the loop has published the dependencies it needs.
+from the registry before publication. It then checks every target in the whole
+workspace on GNU/Linux and asserts that every publishable package produced its
+`.crate` artifact ahead of the `crates-io` environment gate, so a failure
+surfaces without spending an approval. Each `cargo publish` performs extracted
+package verification again after the loop has published the dependencies it
+needs.
 
 Publishing runs automatically once the release workflow succeeds. The automated
 release job explicitly dispatches `publish.yml` after creating the GitHub
