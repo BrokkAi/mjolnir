@@ -3479,9 +3479,9 @@ mod tests {
     }
 
     /// The title names the conversation you are in. The rule around it is
-    /// chrome and stays dim; the name must not be dimmed with it.
+    /// chrome and stays dim; the name draws bright white so it stands out.
     #[test]
-    fn the_conversation_title_is_not_dimmed_with_its_rule() {
+    fn the_conversation_title_is_bright_white_and_not_dimmed_with_its_rule() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
 
@@ -3501,8 +3501,8 @@ mod tests {
             let column = u16::try_from(title_start + offset).unwrap();
             assert_eq!(
                 buffer[(column, 0)].fg,
-                Color::Reset,
-                "the title draws in the terminal's own foreground: {}",
+                Color::White,
+                "the title draws bright white: {}",
                 cells.concat()
             );
         }
