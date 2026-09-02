@@ -4,7 +4,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 grok_home=${GROK_HOME:-"$HOME/.grok"}
-test_root=${MJ_IMPORT_E2E_GROK_ROOT:-"${XDG_STATE_HOME:-"$HOME/.local/state"}/hel/import-e2e/grok-native"}
+test_root=${MJ_IMPORT_E2E_GROK_ROOT:-"${XDG_STATE_HOME:-"$HOME/.local/state"}/mjolnir/import-e2e/grok-native"}
 
 if [[ ! -d "$grok_home" ]]; then
     echo "Grok Build home does not exist: $grok_home" >&2
@@ -14,12 +14,12 @@ fi
 export GROK_HOME="$grok_home"
 export MJ_IMPORT_E2E_ROOT="$test_root"
 export MJ_IMPORT_E2E_GROK_SESSION="${MJ_IMPORT_E2E_GROK_SESSION:-01a00c3a-553f-71e0-95ab-aa04396d3ad7}"
-export MJ_IMPORT_E2E_GROK_REPOSITORY="${MJ_IMPORT_E2E_GROK_REPOSITORY:-BrokkAi/hel}"
-export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-localhost/hel/agent-dev:latest}"
-# Keep the test's imported state and archive separate from the user's Hel data.
+export MJ_IMPORT_E2E_GROK_REPOSITORY="${MJ_IMPORT_E2E_GROK_REPOSITORY:-BrokkAi/mjolnir}"
+export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-localhost/mjolnir/agent-dev:latest}"
+# Keep the test's imported state and archive separate from the user's Mjolnir data.
 export MJ_CONFIG_DIR="$test_root/config/mjolnir"
-export MJ_DATA_DIR="$test_root/data/hel"
-export MJ_WORKER_BINARY="${MJ_WORKER_BINARY:-$repo_root/target/x86_64-unknown-linux-musl/debug/hel}"
+export MJ_DATA_DIR="$test_root/data/mjolnir"
+export MJ_WORKER_BINARY="${MJ_WORKER_BINARY:-$repo_root/target/x86_64-unknown-linux-musl/debug/mj}"
 
 mkdir -p "$test_root"
 cd "$repo_root"

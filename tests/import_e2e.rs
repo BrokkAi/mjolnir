@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -21,20 +21,58 @@ use hel::hel_session_manager::{StandaloneSession, new_command_id};
 use hel::hel_state::{HelState, MaterializedSession, SessionState, TranscriptBody};
 use hel::hel_worker::RelayCommand;
 
-fn hel_binary() -> PathBuf {
+fn mj_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_mj") {
         return PathBuf::from(path);
     }
-    let mut path = std::env::current_exe().expect("resolve current test executable");
+    fallback_mj_binary(&std::env::current_exe().expect("resolve current test executable"))
+}
+
+fn fallback_mj_binary(test_executable: &Path) -> PathBuf {
+    let mut path = test_executable.to_owned();
     path.pop();
     if path.file_name().is_some_and(|name| name == "deps") {
         path.pop();
     }
-    path.join("hel")
+    path.join("mj")
 }
 
 #[test]
-#[ignore = "requires a signed-in Claude, Podman, and the Hel agent-development image"]
+fn import_e2e_defaults_resolve_to_mjolnir_paths() {
+    assert_eq!(
+        fallback_mj_binary(Path::new(
+            "/workspace/target/x86_64-unknown-linux-musl/debug/deps/import_e2e-deadbeef"
+        )),
+        PathBuf::from("/workspace/target/x86_64-unknown-linux-musl/debug/mj")
+    );
+
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (runner, expected_repository) in [
+        ("test-import-e2e.sh", "BrokkAi/mjolnir"),
+        ("test-kimi-import-e2e.sh", "MoonshotAI/kimi-code"),
+        ("test-grok-import-e2e.sh", "BrokkAi/mjolnir"),
+        ("test-codex-import-e2e.sh", "BrokkAi/mjolnir"),
+    ] {
+        let script = fs::read_to_string(repository_root.join("scripts").join(runner)).unwrap();
+        assert!(script.contains("/mjolnir/import-e2e"), "{runner}");
+        assert!(script.contains("data/mjolnir"), "{runner}");
+        assert!(script.contains("debug/mj"), "{runner}");
+        assert!(
+            script.contains("localhost/mjolnir/agent-dev:latest"),
+            "{runner}"
+        );
+        assert!(script.contains(expected_repository), "{runner}");
+        for legacy_default in ["BrokkAi/hel", "localhost/hel", "data/hel", "debug/hel"] {
+            assert!(
+                !script.contains(legacy_default),
+                "{runner}: {legacy_default}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a signed-in Claude, Podman, and the Mjolnir agent-development image"]
 fn imported_claude_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -113,13 +151,13 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     config.save()?;
     HelState::default().save()?;
 
-    let output = Command::new(hel_binary())
+    let output = Command::new(mj_binary())
         .args(["import", "claude", "--latest", "--bundle", "scratch"])
         .env("CLAUDE_CONFIG_DIR", &config.profiles["claude-e2e"].home)
         .output()?;
     assert!(
         output.status.success(),
-        "hel import failed: {}",
+        "mj import failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -164,7 +202,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
 }
 
 #[test]
-#[ignore = "requires a signed-in Kimi Code, Podman, and the Hel agent-development image"]
+#[ignore = "requires a signed-in Kimi Code, Podman, and the Mjolnir agent-development image"]
 fn imported_kimi_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -222,7 +260,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     config.save()?;
     HelState::default().save()?;
 
-    let output = Command::new(hel_binary())
+    let output = Command::new(mj_binary())
         .args([
             "import",
             "kimi",
@@ -235,7 +273,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         .output()?;
     assert!(
         output.status.success(),
-        "hel import failed: {}",
+        "mj import failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -281,7 +319,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "requires a signed-in Grok Build, Podman, and the Hel agent-development image"]
+#[ignore = "requires a signed-in Grok Build, Podman, and the Mjolnir agent-development image"]
 fn imported_grok_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -339,7 +377,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     config.save()?;
     HelState::default().save()?;
 
-    let output = Command::new(hel_binary())
+    let output = Command::new(mj_binary())
         .args([
             "import",
             "grok",
@@ -352,7 +390,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         .output()?;
     assert!(
         output.status.success(),
-        "hel import failed: {}",
+        "mj import failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -505,7 +543,7 @@ fn run(command: &mut Command) -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "requires a signed-in Codex, Podman, and the Hel agent-development image"]
+#[ignore = "requires a signed-in Codex, Podman, and the Mjolnir agent-development image"]
 fn imported_codex_session_resumes_natively() {
     tokio::runtime::Runtime::new()
         .unwrap()
@@ -563,7 +601,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     config.save()?;
     HelState::default().save()?;
 
-    let output = Command::new(hel_binary())
+    let output = Command::new(mj_binary())
         .args([
             "import",
             "codex",
@@ -576,7 +614,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         .output()?;
     assert!(
         output.status.success(),
-        "hel import failed: {}",
+        "mj import failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
