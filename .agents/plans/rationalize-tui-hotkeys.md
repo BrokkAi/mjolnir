@@ -27,6 +27,9 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
 - [x] (2026-09-01 00:00Z) M3.5. Made resume a global chord (`Alt-S`, `Scope::Global`), deleted the plain-letter aliases `n`, `a`, and `s` so plain letters are pane-local only, gave `CommandSpec` a `footer_group` and `footer_rank`, rebuilt `combined_footer_text` as three groups separated by ` │ `, shortened the footer words (`read`, `palette`), rewrote the chat's four footer strings in the same shape, fixed the resume dialog's unreachable tab arrows, and updated `README.md`.
 - [x] (2026-09-01 00:00Z) M3.5 tests. `sessions_pane_n_and_a_still_work_as_aliases` became `plain_n_a_and_s_no_longer_act`; three tests added (`footer_groups_pane_alt_and_function_keys_in_that_order` and `footer_drops_pane_hints_before_alt_hints_and_never_function_keys` in `mj-tui/src/render.rs`, `arrow_keys_switch_tabs_even_while_the_search_field_has_focus` in `mj-tui/src/resume.rs`) plus `alt_s_opens_the_resume_dialog_from_the_composer` beside the M2 chord tests in `mj-cli/src/dashboard.rs`; the footer- and key-asserting tests in `render.rs`, `resume.rs`, `active.rs`, `help.rs`, `lib.rs`, and `wizards/tests.rs` moved to the new map.
 - [x] (2026-09-01 00:00Z) M3.5 validation. `cargo test -p brokk-mj-tui` 268 passed, `cargo test -p brokk-mjolnir` green, `cargo test --lib hel_chat` 249 passed, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
+- [x] (2026-09-01 00:00Z) M3.6. Replaced `CommandId::RefreshCapacity` and `CommandId::RefreshQuotas` with one global `CommandId::Refresh` on `F5`, collapsed `DashboardAction::RefreshQuotas`/`RefreshCapacity` into `DashboardAction::RefreshAll`, removed the plain `r` bindings, reworded detach (`Alt-Q detach`, "Detach from this terminal"), moved history search back to `Ctrl-R`, gave the chat footer the dashboard's width rule, and updated `README.md`.
+- [x] (2026-09-01 00:00Z) M3.6 tests. `plain_r_no_longer_refreshes` added in `mj-tui/src/lib.rs` and `f5_refreshes_targets_and_quotas_from_the_composer` beside the M2 chord tests in `mj-cli/src/dashboard.rs`; `pane_actions_follow_the_focused_pane` now proves the panes' `Enter` rather than their `r`; `alt_r_opens_history_search_and_alt_r_inside_it_cycles_scope` became `ctrl_r_opens_history_search_and_alt_r_inside_it_cycles_scope`; the footer- and key-asserting tests in `render.rs`, `active.rs`, `history.rs`, and `hel_chat.rs` moved to the new map.
+- [x] (2026-09-01 00:00Z) M3.6 validation. `cargo test -p brokk-mj-tui` 269 passed, `cargo test -p brokk-mjolnir` green, `cargo test --lib hel_chat` 249 passed, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
 - [ ] M4 (optional, to be proposed separately after M3). One shared vocabulary of built-in slash commands for the terminal surface and the web viewer.
 
 ## Surprises & Discoveries
@@ -114,6 +117,17 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   Evidence: `render_chat_footer` draws a `Paragraph` with no width argument;
   the two chat tests that asserted `Alt-G panes` at 100 columns now assert a
   hint from the first group instead.
+
+- Observation: the chat's footer really did overflow once `F5 refresh` was
+  added: at 200 columns the row lost `F1 help` entirely, which is the hint the
+  M3.5 note said must never be dropped. The chat footer now has the
+  dashboard's rule, as a small `fit_footer` in `src/hel_chat/active.rs` — whole
+  hints go from the composer's group first, then from the chords, never from
+  the function keys. It is a copy rather than a share, because `mj-tui` depends
+  on the root crate and not the other way round, so `combined_footer_text`'s
+  loop is unreachable from there; M4's shared vocabulary is where the two meet.
+  Evidence: `chat_footer_advertises_alt_keys_and_f1` failed at its 200-column
+  `TestBackend` with the row clipped after `F5 refresh `.
 
 ## Decision Log
 
@@ -258,6 +272,50 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   narrow row had to leave out.
   Date/Author: 2026-09-01, implementation of M3.5.
 
+- Decision: refreshing is one global key, `F5`, rather than a plain `r` on
+  each of the Targets and Quota panes. `CommandId::Refresh` replaces
+  `RefreshCapacity` and `RefreshQuotas`, and it refreshes both.
+  Rationale: the two panes each refreshed only themselves, so a user who
+  wanted current figures had to focus each pane in turn, and neither key was
+  reachable from the composer. One key from anywhere is fewer keys and more
+  reach. It also empties the plain-letter set down to what the Sessions list
+  needs — `Enter`, `Space`, `1`–`9` — plus `?`, `e`, and the list navigation,
+  which is as close to "plain letters are pane-local" as the surface gets.
+  `global_chord_allowed(Refresh)` is unconditionally true: asking the daemon
+  for fresh capacity and quota figures cannot disturb a dialog on screen.
+  Date/Author: 2026-09-01, implementation of M3.6.
+
+- Decision: `DashboardAction::RefreshQuotas` and `DashboardAction::RefreshCapacity`
+  were collapsed into one `DashboardAction::RefreshAll` rather than kept
+  beside it.
+  Rationale: the registry was their only producer, so keeping them would have
+  left two variants no key can reach — exactly the unowned code this plan
+  exists to remove. `RefreshAll`'s arm in `mj-cli/src/dashboard/actions.rs` is
+  the two old bodies run in order, and the notice it sets was reworded from
+  "Refreshing profile quotas…" to "Refreshing targets and quotas…" so the row
+  says what actually happened.
+  Date/Author: 2026-09-01, implementation of M3.6.
+
+- Decision: `Alt-Q` is described as detaching this terminal client, not as
+  quitting. The footer word is `detach`, the label "Detach from this terminal",
+  and the description says the daemon and its sessions keep running.
+  Rationale: nothing stops when the terminal client goes away, and a key
+  labelled "quit" invites the reader to believe their agents stopped with it.
+  The same wording now runs through the footer, the help overlay, the palette,
+  the chat's own footer row, and the README.
+  Date/Author: 2026-09-01, implementation of M3.6.
+
+- Decision: prompt-history search returns to `Ctrl-R`, reversing the M2 move to
+  `Alt-R`. Inside an open search, `Alt-R` still cycles the scope and `Ctrl-R`
+  still steps to the previous match.
+  Rationale: readline keys are exempt from the Ctrl-to-Alt move, and `Ctrl-R`
+  is the universal reverse-search key: a shell user reaches for it without
+  reading anything. M2's own decision log already granted the exemption to
+  `Ctrl-R` *inside* the search ("that binding is readline's, not the
+  surface's"); the same argument applies to the key that opens it. `Alt-T`
+  keeps the rendering toggle, which is not a readline key.
+  Date/Author: 2026-09-01, implementation of M3.6.
+
 ## Outcomes & Retrospective
 
 M1 is complete and shipped green. What exists now that did not before: one table (`mj-tui/src/actions.rs`) that key handling, the footer, and the help overlay all read; an `F1` key reference that opens over anything and restores it; and a footer that names only the keys that apply. The user-visible gain from M1 alone is real but modest — the mislabelled `Ctrl+X` advice is gone, `x cancel launch` only appears when it can be used, and `F1` finally answers.
@@ -365,7 +423,7 @@ could not be reached from the composer at all. Resume becomes `Alt-S` in
 `Scope::Global`, the three plain letters go, and the rule becomes: a plain
 letter is pane-local only. What is left on the panes is `Enter` (open a
 session, or a target's or profile's actions), `Space` and `1`–`9` (fold a
-project), `r` (refresh), and `?` (help). The resume dialog's own `a` and `s`
+project), `r` (refresh, removed in M3.6), and `?` (help). The resume dialog's own `a` and `s`
 are modal-local and stay exactly as they are.
 
 Second, the footer. It becomes three groups separated by ` │ `: the focused
@@ -376,6 +434,31 @@ so the placement is stated rather than inherited from the table's order, and
 the footer words shorten (`read`, `palette`). Width squeezes drop the pane
 group first, then the chords, and never the function keys. The chat's own
 footer strings take the same shape.
+
+### M3.6 — one refresh key, and the detach wording
+
+Two user decisions taken after M3.5 shipped.
+
+First, refreshing. The plain `r` on the Targets pane and the plain `r` on the
+Quota pane become one global function key, `F5`, that refreshes both from
+anywhere including the composer. `CommandId::RefreshCapacity` and
+`CommandId::RefreshQuotas` become one `CommandId::Refresh` in `Scope::Global`
+with `FooterGroup::Function`, placed before `F1`, so the function group reads
+`F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help`. It joins
+`GLOBAL_CHORDS` and is allowed over an open dialog, because asking for fresh
+figures disturbs nothing. `DashboardAction::RefreshQuotas` and
+`DashboardAction::RefreshCapacity` collapse into `RefreshAll`, whose arm in
+`mj-cli/src/dashboard/actions.rs` runs both requests. `Enter` on Targets and
+Quota is untouched.
+
+Second, the wording. `Ctrl-C` and `Alt-Q` detach this terminal client; the
+daemon and its workers keep running. The footer word for `CommandId::QuitDetach`
+becomes `detach`, its label "Detach from this terminal", and its description
+says so.
+
+Third, prompt-history search returns to `Ctrl-R`, reversing M2 for that one
+key: readline keys are exempt from the Ctrl-to-Alt move. `Alt-R` inside an
+open search still cycles the scope, and `Alt-T` keeps the rendering toggle.
 
 ### M4 — shared command vocabulary (optional, propose separately)
 
@@ -556,6 +639,24 @@ tab from that field — the arrows the dialog's own footer has always advertised
 and which used to move the text cursor instead. `Escape` put the dashboard back
 with its footer unchanged, and `Alt-Q` detached.
 
+The M3.6 live check, run the same way against an isolated `MJ_CONFIG_DIR` and
+`MJ_DATA_DIR`. The footer at 200 columns from the composer, with no session in
+the fresh workspace:
+
+    Tab pane │ Alt-N new · Alt-S resume · Alt-A read · Alt-G panes · Alt-Q detach │ F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help
+
+`F5` from the composer put `Targets and quotas refreshed.` in the notice bar,
+reset the Quota pane's title from `Quota (refreshed 32s ago)` to
+`Quota (refreshed 1s ago)`, and moved the Targets row for `local` from
+`30% CPU · 28% RAM` to `52% CPU · 30% RAM`, so both halves really ran. `F1`
+listed the new entries:
+
+      F5            Refresh targets and quotas  Re-probe every target's capacity and ask every profile for its quota again.
+      Alt-Q         Detach from this terminal  Leave this terminal client; the daemon and its sessions keep running.
+      Ctrl-R                    search prompt history
+
+`Escape` put the dashboard back and `Alt-Q` detached.
+
 The live check was run against an isolated configuration and data directory (`MJ_CONFIG_DIR` and `MJ_DATA_DIR`, read by `env_override_os` in `src/hel_config.rs`) rather than the real one, because the real workspace was already attached to another process and attaching a second time would have taken it away from its owner.
 
 The shape of the registry entry, from `mj-tui/src/actions.rs`:
@@ -645,6 +746,10 @@ Dropping the composer's arm from the footer is safe: whenever the composer has t
 
 ## Revision notes
 
+- 2026-09-01: Updated through the end of M3.6. The single global refresh key,
+  the collapsed refresh action, the detach wording, and the return of history
+  search to `Ctrl-R` are in the `Decision Log`; the chat footer's overflow and
+  its new width rule are in `Surprises & Discoveries`.
 - 2026-09-01: Updated through the end of M3.5. The single-spelling rule and
   the three-group footer are in the `Decision Log`; the resume dialog's
   unreachable tab arrows and the chat footer's missing width rule are in

@@ -2793,10 +2793,10 @@ mod tests {
         assert_eq!(
             combined_footer_text(&dashboard, 200),
             "Enter open · Tab pane │ Alt-N new · Alt-S resume · Alt-A read · Alt-G panes \
-             · Alt-Q quit │ F2 palette · F3 workspaces · F4 web · F1 help"
+             · Alt-Q detach │ F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help"
         );
 
-        // The cancel chord takes its fixed place before quit, and only while
+        // The cancel chord takes its fixed place before detach, and only while
         // there is something to cancel.
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.begin_session_operation_at(
@@ -2808,7 +2808,7 @@ mod tests {
         let footer = combined_footer_text(&dashboard, 200);
         assert!(footer.starts_with("Enter open · Tab pane │ "), "{footer}");
         assert!(
-            footer.contains("Alt-G panes · Alt-X cancel launch · Alt-Q quit"),
+            footer.contains("Alt-G panes · Alt-X cancel launch · Alt-Q detach"),
             "{footer}"
         );
     }
@@ -2821,7 +2821,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.focus_sessions();
-        const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F1 help";
+        const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help";
 
         let full = combined_footer_text(&dashboard, 200);
         assert!(
@@ -3019,7 +3019,7 @@ mod tests {
         // Every row the tables and the Sessions pane give up lands in the
         // transcript; the composer and footer are untouched.
         let tables_freed = (band(&before, "Targets", "Quota") - band(&after, "Targets", "Quota"))
-            + (band(&before, "Quota", "Alt-Q quit") - band(&after, "Quota", "Alt-Q quit"));
+            + (band(&before, "Quota", "Alt-Q detach") - band(&after, "Quota", "Alt-Q detach"));
         let sessions_freed =
             band(&before, "Sessions", "Conversation") - band(&after, "Sessions", "Conversation");
         let transcript_gain =
@@ -3028,7 +3028,7 @@ mod tests {
         assert_eq!(transcript_gain, tables_freed + sessions_freed);
         // Each collapsed pane really is one row.
         assert_eq!(band(&after, "Targets", "Quota"), 1);
-        assert_eq!(band(&after, "Quota", "Alt-Q quit"), 1);
+        assert_eq!(band(&after, "Quota", "Alt-Q detach"), 1);
     }
 
     fn now_seconds() -> u64 {

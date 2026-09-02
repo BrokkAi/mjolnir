@@ -2289,18 +2289,18 @@ pub(super) fn render_chat_footer(
     // The three groups are the dashboard's: what the composer answers, the
     // chords that answer from anywhere, then the function keys. Only the
     // first group changes with what the composer is doing.
-    const CHORDS: &str = " │ Alt-G panes · Alt-Q quit │ ";
-    const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F1 help";
+    const CHORDS: &[&str] = &["Alt-G panes", "Alt-Q detach"];
+    const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help";
     let composer_keys = if !prompt_focused {
         "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
         "Listening… Alt-V stop · PgUp/PgDn transcript"
     } else if !chat.queued_prompts.is_empty() {
-        "Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Esc cancel"
+        "Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Esc cancel"
     } else {
-        "Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Alt-T rendering · Esc cancel"
+        "Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Alt-T rendering · Esc cancel"
     };
-    let default_footer = format!("{composer_keys}{CHORDS}{FUNCTION_KEYS}");
+    let default_footer = fit_footer(composer_keys, CHORDS, FUNCTION_KEYS, footer_area.width);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
@@ -2327,6 +2327,29 @@ pub(super) fn render_chat_footer(
             footer_area.x + column.min(usize::from(footer_area.width.saturating_sub(1))) as u16,
             footer_area.y,
         ));
+    }
+}
+
+/// The composer's footer row, narrowed to `width` by the dashboard's rule:
+/// whole hints go from the composer's own group first, then from the chords,
+/// and the function keys are never taken, because they are the way to the
+/// palette and the key reference that can name whatever the row dropped.
+fn fit_footer(composer_keys: &str, chords: &[&str], functions: &str, width: u16) -> String {
+    const HINT: &str = " \u{b7} ";
+    const GROUP: &str = " \u{2502} ";
+    let mut pane = composer_keys.split(HINT).collect::<Vec<_>>();
+    let mut chords = chords.to_vec();
+    loop {
+        let text = [pane.join(HINT), chords.join(HINT), functions.to_owned()]
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .collect::<Vec<_>>()
+            .join(GROUP);
+        if text.chars().count() <= usize::from(width)
+            || (pane.pop().is_none() && chords.pop().is_none())
+        {
+            return text;
+        }
     }
 }
 
@@ -3200,15 +3223,15 @@ mod tests {
             .expect("draw chat");
         let footer = footer_of(&terminal);
         for hint in [
-            "Alt-R history",
+            "Ctrl-R history",
             "Alt-T rendering",
-            "│ Alt-G panes · Alt-Q quit │",
-            "F2 palette · F3 workspaces · F4 web · F1 help",
+            "│ Alt-G panes · Alt-Q detach │",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
         assert!(!footer.contains("Ctrl-G"), "{footer:?}");
-        assert!(!footer.contains("Ctrl-R"), "{footer:?}");
+
         assert!(!footer.contains("Ctrl-T"), "{footer:?}");
 
         // The queued-prompt variant is a different string and must say the
@@ -3219,9 +3242,9 @@ mod tests {
             .expect("draw chat with a queued prompt");
         let footer = footer_of(&terminal);
         for hint in [
-            "Alt-R history",
-            "│ Alt-G panes · Alt-Q quit │",
-            "F2 palette · F3 workspaces · F4 web · F1 help",
+            "Ctrl-R history",
+            "│ Alt-G panes · Alt-Q detach │",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }

@@ -27,10 +27,9 @@ pub enum CommandId {
     MarkAllRead,
     CancelOperation,
     ToggleProject,
-    RefreshCapacity,
     TargetActions,
-    RefreshQuotas,
     EditProfile,
+    Refresh,
     OpenConfig,
     CycleFocus,
     CyclePaneLayout,
@@ -372,17 +371,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: selected_session_ready,
     },
     CommandSpec {
-        id: CommandId::RefreshCapacity,
-        label: "Refresh capacity",
-        description: "Re-probe the targets and redraw their load.",
-        scope: Scope::Targets,
-        keys: &[KeyHint::plain(KeyCode::Char('r'), "r")],
-        footer: footer_word!("refresh"),
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: always_ready,
-    },
-    CommandSpec {
         id: CommandId::TargetActions,
         label: "Target actions",
         description: "Test or rename the selected target.",
@@ -392,17 +380,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
             KeyHint::plain(KeyCode::Char('e'), "e"),
         ],
         footer: footer_word!("actions"),
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: always_ready,
-    },
-    CommandSpec {
-        id: CommandId::RefreshQuotas,
-        label: "Refresh quotas",
-        description: "Ask every profile for its quota again.",
-        scope: Scope::Quota,
-        keys: &[KeyHint::plain(KeyCode::Char('r'), "r")],
-        footer: footer_word!("refresh"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: always_ready,
@@ -477,12 +454,23 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::Refresh,
+        label: "Refresh targets and quotas",
+        description: "Re-probe every target's capacity and ask every profile for its quota again.",
+        scope: Scope::Global,
+        keys: &[KeyHint::plain(KeyCode::F(5), "F5")],
+        footer: footer_word!("refresh"),
+        footer_group: FooterGroup::Function,
+        footer_rank: 3,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::QuitDetach,
-        label: "Detach",
-        description: "Leave the terminal surface; the sessions keep running.",
+        label: "Detach from this terminal",
+        description: "Leave this terminal client; the daemon and its sessions keep running.",
         scope: Scope::Global,
         keys: &[KeyHint::alt(KeyCode::Char('q'), "Alt-Q")],
-        footer: footer_word!("quit"),
+        footer: footer_word!("detach"),
         footer_group: FooterGroup::Chord,
         footer_rank: 5,
         available: always_ready,
@@ -509,7 +497,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         ],
         footer: footer_word!("help"),
         footer_group: FooterGroup::Function,
-        footer_rank: 3,
+        footer_rank: 4,
         available: always_ready,
     },
 ];
@@ -530,6 +518,7 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::Palette,
     CommandId::Workspaces,
     CommandId::WebViewer,
+    CommandId::Refresh,
     CommandId::NewSession,
     CommandId::ResumeDialog,
     CommandId::MarkAllRead,
@@ -639,7 +628,13 @@ impl DashboardState {
     /// reference rather than a decision.
     pub fn global_chord_allowed(&self, id: CommandId) -> bool {
         match id {
-            CommandId::Help | CommandId::QuitDetach | CommandId::CyclePaneLayout => true,
+            // Refreshing is harmless over a modal: it asks the daemon for
+            // fresh capacity and quota figures and changes nothing on screen
+            // the dialog owns.
+            CommandId::Help
+            | CommandId::QuitDetach
+            | CommandId::CyclePaneLayout
+            | CommandId::Refresh => true,
             // While the target-actions dialog is up, Alt-X belongs to the test
             // that dialog is running, so it must not be caught here; the
             // modal check is what leaves it to the dialog's own handler.
@@ -694,16 +689,15 @@ impl DashboardState {
                 self.toggle_selected_project();
                 DashboardAction::None
             }
-            CommandId::RefreshCapacity => DashboardAction::RefreshCapacity,
             CommandId::TargetActions => {
                 self.begin_target_actions();
                 DashboardAction::None
             }
-            CommandId::RefreshQuotas => DashboardAction::RefreshQuotas,
             CommandId::EditProfile => {
                 self.begin_profile_rename();
                 DashboardAction::None
             }
+            CommandId::Refresh => DashboardAction::RefreshAll,
             CommandId::OpenConfig => DashboardAction::OpenConfig,
             CommandId::CycleFocus => {
                 self.cycle_focus(false);

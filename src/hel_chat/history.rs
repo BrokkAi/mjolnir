@@ -454,7 +454,7 @@ mod tests {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.prompt_history = vec!["fix parser".into(), "fix renderer".into()];
         chat.set_input("unfinished".into());
-        chat.handle_key(alt('r'));
+        chat.handle_key(ctrl('r'));
         chat.handle_key(key(KeyCode::Char('f')));
         apply_pending_history_search(&mut chat);
         chat.handle_key(key(KeyCode::Char('i')));
@@ -467,7 +467,7 @@ mod tests {
         chat.handle_key(key(KeyCode::Esc));
         assert_eq!(chat.input, "unfinished");
 
-        chat.handle_key(alt('r'));
+        chat.handle_key(ctrl('r'));
         for character in "renderer".chars() {
             chat.handle_key(key(KeyCode::Char(character)));
             apply_pending_history_search(&mut chat);
@@ -483,7 +483,7 @@ mod tests {
         chat.prompt_history = vec!["fix parser".into(), "fix renderer".into()];
         chat.set_input("draft".into());
 
-        chat.handle_key(alt('r'));
+        chat.handle_key(ctrl('r'));
         chat.handle_key(key(KeyCode::Char('f')));
         let stale = chat
             .take_history_search_request()
@@ -581,16 +581,16 @@ mod tests {
         );
     }
 
-    /// Alt-R opens the reverse search; once it is open the same chord keeps
-    /// its older job of cycling which history the search reads.
+    /// Ctrl-R opens the reverse search, as readline does; once it is open
+    /// Alt-R keeps its older job of cycling which history the search reads.
     #[test]
-    fn alt_r_opens_history_search_and_alt_r_inside_it_cycles_scope() {
+    fn ctrl_r_opens_history_search_and_alt_r_inside_it_cycles_scope() {
         let mut chat = ChatState::new(&snapshot(), &[]);
-        // Ctrl-R is no longer bound, in the raw-control form or any other.
-        chat.handle_key(key(KeyCode::Char('\u{12}')));
+        // Alt-R does not open one: it belongs to the open search's scope.
+        chat.handle_key(alt('r'));
         assert!(chat.history_search.is_none());
 
-        chat.handle_key(alt('r'));
+        chat.handle_key(ctrl('r'));
         assert!(chat.history_search.is_some());
         chat.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
         assert_eq!(

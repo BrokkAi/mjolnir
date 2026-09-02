@@ -1570,6 +1570,11 @@ impl ChatState {
         }
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
+                // Reverse-i-search stays on readline's key. The block above
+                // hands every key to an open search first, which is what lets
+                // Ctrl-R step to the previous match and Alt-R cycle the
+                // search's scope once it is open.
+                KeyCode::Char('r') => self.begin_history_search(),
                 KeyCode::Char('a') => self.move_to_line_start(true),
                 KeyCode::Char('e') => self.move_to_line_end(true),
                 KeyCode::Char('b') => self.move_input_cursor(-1),
@@ -1631,11 +1636,9 @@ impl ChatState {
         }
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
-                // History search and the rendering toggle sit here rather
-                // than beside Alt-V because the block above hands every key
-                // to an open reverse-i-search first, which is what lets
-                // Alt-R keep cycling the search's scope once it is open.
-                KeyCode::Char('r') => self.begin_history_search(),
+                // The rendering toggle sits here rather than beside Alt-V
+                // because the block above hands every key to an open
+                // reverse-i-search first.
                 KeyCode::Char('t') => self.toggle_render_mode(),
                 KeyCode::Char('b') | KeyCode::Left => self.move_word(-1),
                 KeyCode::Char('f') | KeyCode::Right => self.move_word(1),
@@ -3321,7 +3324,7 @@ mod tests {
         chat.handle_key(key(KeyCode::Char('I')));
         assert_eq!(chat.input, "HI");
 
-        chat.handle_key(alt('r'));
+        chat.handle_key(ctrl('r'));
         chat.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
         assert_eq!(chat.history_search.as_ref().unwrap().query, "N");
         chat.handle_key(key(KeyCode::Esc));
@@ -3349,11 +3352,9 @@ mod tests {
         assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
         chat.handle_key(alt('t'));
         assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-        // The Control letters these two moved off are free for readline again.
+        // Ctrl-T stayed free for readline when the toggle moved to Alt-T.
         chat.handle_key(ctrl('t'));
         assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-        chat.handle_key(ctrl('r'));
-        assert!(chat.history_search.is_none());
     }
 
     #[test]

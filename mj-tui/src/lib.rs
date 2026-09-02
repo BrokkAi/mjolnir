@@ -155,8 +155,9 @@ pub enum DashboardAction {
         session_id: String,
         title: String,
     },
-    RefreshQuotas,
-    RefreshCapacity,
+    /// Re-probe every target's capacity and ask every profile for its quota
+    /// again. One key does both, so there is one action rather than two.
+    RefreshAll,
     RenameProfile {
         old_id: String,
         new_id: String,
@@ -1508,9 +1509,11 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(dashboard.focus, Focus::Targets);
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('r'))),
-            DashboardAction::RefreshCapacity
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
         );
+        assert!(matches!(dashboard.mode, Mode::TargetActions(_)));
+        dashboard.cancel_modal();
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('n'))),
             DashboardAction::None,
@@ -1520,14 +1523,37 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(dashboard.focus, Focus::Quota);
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('r'))),
-            DashboardAction::RefreshQuotas
-        );
-        assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('e'))),
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
+    }
+
+    /// Refreshing moved off the two panes onto one global key, so the letter
+    /// the panes used to answer must now do nothing at all.
+    #[test]
+    fn plain_r_no_longer_refreshes() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+
+        for wanted in [Focus::Targets, Focus::Quota] {
+            while dashboard.focus != wanted {
+                dashboard.cycle_focus(false);
+            }
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char('r'))),
+                DashboardAction::None,
+                "plain r still acts at {wanted:?}"
+            );
+            assert_eq!(dashboard.mode, Mode::Dashboard);
+        }
+
+        // F5 is the one refresh key, and it answers from every pane.
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::F(5))),
+            DashboardAction::RefreshAll
+        );
     }
 
     #[test]

@@ -204,8 +204,8 @@ fn startup_session_choice<'a>(
 const IMPORT_PROGRESS_TICK: Duration = Duration::from_millis(125);
 /// Scroll cadence while a drag is held past a scrollable surface's edge.
 const SELECTION_AUTOSCROLL_TICK: Duration = Duration::from_millis(80);
-pub(crate) const QUOTA_REFRESH_NOTICE: &str = "Refreshing profile quotas…";
-pub(crate) const QUOTA_REFRESHED_NOTICE: &str = "Profile quotas refreshed.";
+pub(crate) const QUOTA_REFRESH_NOTICE: &str = "Refreshing targets and quotas…";
+pub(crate) const QUOTA_REFRESHED_NOTICE: &str = "Targets and quotas refreshed.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DashboardExit {
@@ -3049,6 +3049,30 @@ mod tests {
         ));
         assert!(dashboard.modal_open(), "the new-session wizard is open");
         assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
+    }
+
+    /// One key refreshes both support panes, from wherever the keyboard is —
+    /// including the composer, and including over an open dialog, because
+    /// asking for fresh figures cannot disturb what is on screen.
+    #[test]
+    fn f5_refreshes_targets_and_quotas_from_the_composer() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_prompt();
+
+        let command = chord(&dashboard, function_key(5)).expect("F5 is a global chord");
+        assert_eq!(command, CommandId::Refresh);
+        assert!(matches!(
+            dashboard.dispatch_command(command),
+            DashboardAction::RefreshAll
+        ));
+
+        dashboard.dispatch_command(CommandId::Help);
+        assert!(dashboard.modal_open());
+        assert_eq!(
+            chord(&dashboard, function_key(5)),
+            Some(CommandId::Refresh),
+            "refreshing is allowed over a modal"
+        );
     }
 
     /// Resume is a chord like new session: the pane letter it used to answer

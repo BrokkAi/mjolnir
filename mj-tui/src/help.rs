@@ -49,7 +49,7 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
         "Up / Down",
         "walk prompt history, or move within the prompt",
     ),
-    ("Alt-R", "search prompt history"),
+    ("Ctrl-R", "search prompt history"),
     ("Alt-T", "toggle transcript rendering"),
     ("Alt-V", "start or stop dictation"),
     ("Ctrl-V", "paste from the system clipboard"),
@@ -71,6 +71,7 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("F2", "command palette"),
     ("F3", "workspaces"),
     ("F4", "web viewer"),
+    ("F5", "refresh targets and quotas"),
 ];
 
 impl DashboardState {

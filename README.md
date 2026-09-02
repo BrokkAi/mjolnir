@@ -193,11 +193,12 @@ Tab leaves the dial where you set it.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
 `F2` opens the command palette, `F3` the workspace picker, `F4` the web
-viewer, `Alt+N` creates a session, `Alt+S` resumes one, `Alt+A` marks
-everything read, `Alt+X` cancels whatever the selected session is in the middle
-of, `Alt+G` turns the pane dial, and `Alt+Q` detaches. Each of these has one
-spelling: a command you can reach from anywhere has no plain-letter alias as
-well.
+viewer, `F5` refreshes the Targets and Quota panes, `Alt+N` creates a session,
+`Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
+the selected session is in the middle of, `Alt+G` turns the pane dial, and
+`Alt+Q` detaches this terminal client — the daemon and the sessions it runs
+keep working. Each of these has one spelling: a command you can reach from
+anywhere has no plain-letter alias as well.
 
 `F2` is the way to reach a command you have no key for. It lists the selected
 session's own commands first — rename it, edit its container settings, stop it
@@ -207,8 +208,9 @@ to filter by name or description, `Up`/`Down` to move, `Enter` to run, `Escape`
 to close. Commands that cannot run right now stay in the list, greyed, with the
 reason.
 
-In Prompt, `Alt+R` searches your prompt history and `Alt+T` switches the
-transcript between rendered and raw. Every `Ctrl` key in Prompt is a text
+In Prompt, `Ctrl+R` searches your prompt history, as in a shell, and `Alt+T`
+switches the transcript between rendered and raw. Inside the search, `Alt+R`
+cycles which history it reads. Every other `Ctrl` key in Prompt is a text
 editing key, as in a shell.
 
 `Alt` chords need Option to act as Meta in macOS terminals (iTerm2:
@@ -234,12 +236,13 @@ The panes take plain keys, because the composer is a separate focus and never
 sees them. A plain letter is always pane-local: everything reachable from
 anywhere is a chord. On Sessions: `Enter` opens the selection, `Space` and
 `1`–`9` collapse and expand projects; a session's own commands are on `F2`. On
-Targets and Quota: `r` refreshes and `Enter` or `e` opens that row's actions.
+Targets and Quota: `Enter` or `e` opens that row's actions, and `F5` refreshes
+both panes from anywhere.
 Every list also takes the arrow keys, `j`/`k`, `Ctrl+N`/`Ctrl+P`, and
 `Home`/`End`.
 
 `Escape` belongs to the conversation: it cancels a running turn or a shell
-command, and closes a dialog. It never quits.
+command, and closes a dialog. It never detaches.
 
 In an attached TUI or the phone viewer, start a message with `!` to run the
 rest as `bash -lc` inside that session's target. Shell commands run in the
