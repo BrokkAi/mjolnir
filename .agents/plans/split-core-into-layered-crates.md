@@ -20,7 +20,7 @@ Ryan Svihla approved the split on 2026-09-02.
 - [x] (2026-09-02 15:45Z) Recorded the pre-split baseline timings (see `Artifacts and Notes`).
 - [x] (2026-09-02 21:05Z) M1a: text helpers and browser transcript types move out of `hel_chat`; reset-time helpers move out of `usage_format`; `hel_import` stops naming `ChatState`.
 - [x] (2026-09-02 18:35Z) M1b: launch-config and MCP types move out of `hel_worker_runtime`; `terminate_process_group` moves to `hel_subprocess`; `harness_authentication_marker` moves to `hel_config`.
-- [ ] M1 verification: the edge script reports zero escaping edges in non-test and test code; `cargo test` and clippy green; commit.
+- [x] (2026-09-02 21:40Z) M1 verification: the edge script reports zero escaping edges in non-test and test code (after switching `src/hel_review/host.rs` to `hel_transcript`); `cargo clippy --all-targets -- -D warnings` clean; `cargo test` green (1663 core, 270 tui, 111 cli); committed.
 - [ ] M2: create `mj-worker/`, `mj-controller/`, `mj-chat/` crates; move modules; `cargo check --workspace` green.
 - [ ] M3: rewrite `hel::` paths in `mj-tui`, `mj-cli`, `mj-desktop`; update CI, publish, coverage, release-version script, RELEASING.md, CONTRIBUTING.md; full `cargo test` and clippy green; commit.
 - [ ] M4: re-measure the three baseline timings and record them in `Outcomes & Retrospective`; push.
@@ -221,6 +221,20 @@ Per-file `crate::` imports of `src/hel_review/` (non-test), which justify splitt
     host.rs:    chat config controller database projection second_opinion session_manager state worker worker_runtime
     lanes.rs, verdict.rs, hel_review.rs: none
     mcp.rs:     project_memory
+
+External crates used per layer on 2026-09-02, computed by grepping each module's sources for `<crate>::` and `use <crate>` (rename hyphens to underscores). Use this to split the root `[dependencies]` in M2; `iana-time-zone`, `qrcode`, and `sysinfo` were not found by name in any module, so check `Cargo.toml` comments and `build.rs` before dropping them:
+
+    worker (mj-worker):        agent-client-protocol anyhow base64 libc serde serde_json tempfile tokio tracing
+    controller (mj-controller): agent-client-protocol anyhow axum axum-server base64 chrono dirs getrandom hmac
+                                http-body-util libc rayon reedline reqwest rusqlite serde serde_json sha2 tempfile
+                                tokio tokio-stream tokio-util tower tracing url
+    chat (mj-chat):            agent-client-protocol anyhow arboard chrono crossterm dirs pulldown-cmark ratatui
+                                serde serde_json sha2 textwrap tokio tracing unicode-segmentation unicode-width
+    foundation keeps:          agent-client-protocol anyhow base64 blake3 chrono dirs flate2 getrandom libc proptest
+                                rayon regex rusqlite serde serde_json serde_yaml sha2 signal-hook similar tar
+                                tempfile tokio tokio-util toml tracing url zip
+
+Release and coverage plumbing that hard-codes the crate list: `scripts/release-version.mjs` line 21 `const internalPackages = ["hel", "hel-tui"];` (add `mj-worker`, `mj-controller`, `mj-chat` as `[workspace.dependencies]` keys); `scripts/check-coverage.mjs` lists source roots (`src/`, `mj-cli/src/`, `mj-tui/src/`, `voice-worker/src/`) and validates `module_exceptions` keys in the coverage baseline against reported module paths, so every exception keyed on a moved file must be re-keyed; `.github/workflows/coverage.yml` passes `-p` per crate to `llvm-cov report`; `.github/workflows/publish.yml` publishes in dependency order; `.github/workflows/ci.yml` packages `brokk-mj-core` explicitly.
 
 Downstream `hel::` reference counts before M3 (module = count): mj-tui: hel_config 33, hel_targets 22, hel_state 15, hel_chat 12, usage_format 11, hel_selection 9, hel_worker 8, hel_text_input 7, hel_quota 6, hel_controller 3; mj-cli: hel_database 50, hel_server 45, hel_config 44, hel_chat 32, hel_state 29, hel_worker 21, hel_credentials 21, hel_targets 15, hel_session_manager 13, hel_controller 12, and a long tail; mj-desktop: hel_subprocess, hel_server, hel_desktop, hel_config once each.
 

@@ -189,7 +189,11 @@ fn visible_range(total: usize, selected: usize, visible: usize) -> std::ops::Ran
 }
 
 /// Draws the selector over the chat and reports the rows it owns.
-pub(super) fn render_config_picker(frame: &mut Frame, area: Rect, chat: &ChatState) -> Option<Rect> {
+pub(super) fn render_config_picker(
+    frame: &mut Frame,
+    area: Rect,
+    chat: &ChatState,
+) -> Option<Rect> {
     let picker = chat.config_picker.as_ref()?;
     let visible = picker.filtered.len().clamp(1, 8);
     let rect = super::active::centered(area, 72, visible as u16 + 6);

@@ -624,7 +624,7 @@ impl RoleTranscript {
                 let crate::hel_state::TranscriptBody::Agent { chunks, .. } = &item.body else {
                     return None;
                 };
-                Some(crate::hel_chat::materialized_chunks_text(chunks))
+                Some(crate::hel_transcript::materialized_chunks_text(chunks))
             })
             .filter(|text| !text.trim().is_empty())
     }
@@ -1992,7 +1992,7 @@ fn seed_from_session(
     for item in &session.transcript {
         match &item.body {
             crate::hel_state::TranscriptBody::User { content } => {
-                let text = crate::hel_chat::materialized_content_text(content);
+                let text = crate::hel_transcript::materialized_content_text(content);
                 let text = text.trim();
                 if text.is_empty() {
                     continue;
@@ -2015,7 +2015,7 @@ fn seed_from_session(
                 if !item.is_nonempty_agent_message() {
                     continue;
                 }
-                let text = crate::hel_chat::materialized_chunks_text(chunks);
+                let text = crate::hel_transcript::materialized_chunks_text(chunks);
                 let text = text.trim();
                 if text.is_empty() {
                     continue;

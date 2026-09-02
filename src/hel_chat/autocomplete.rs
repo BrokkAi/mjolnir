@@ -151,7 +151,11 @@ impl ChatState {
         // A fully typed command is ready to submit. Leaving its popup open
         // would make Enter re-complete the text instead of running it, which
         // matters most for the bare /model and /effort selectors.
-        if self.command_choices.iter().any(|command| command.name == query) {
+        if self
+            .command_choices
+            .iter()
+            .any(|command| command.name == query)
+        {
             self.autocomplete = None;
             return;
         }

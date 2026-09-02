@@ -2378,7 +2378,11 @@ fn remembered_value(stored: Option<&str>) -> Option<String> {
 }
 
 /// A box of at most `width` by `height`, centered in `area`.
-pub(super) fn centered(area: ratatui::layout::Rect, width: u16, height: u16) -> ratatui::layout::Rect {
+pub(super) fn centered(
+    area: ratatui::layout::Rect,
+    width: u16,
+    height: u16,
+) -> ratatui::layout::Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
     ratatui::layout::Rect::new(
