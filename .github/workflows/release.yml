@@ -134,8 +134,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
-      - name: Build release binary
-        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - name: Build controller and desktop binaries
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target x86_64-unknown-linux-gnu
 
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
@@ -152,10 +152,11 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
           mkdir "$name"
           cp "target/x86_64-unknown-linux-gnu/release/mj" "$name/"
+          cp "target/x86_64-unknown-linux-gnu/release/mj-desktop" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj "$name/mj-worker-aarch64-unknown-linux-musl"
-          chmod 0755 "$name/mj" "$name/mj-voice-worker" "$name"/mj-worker-*
+          chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -193,8 +194,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
-      - name: Build release binary
-        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+      - name: Build controller and desktop binaries
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target aarch64-unknown-linux-gnu
 
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
@@ -211,10 +212,11 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu"
           mkdir "$name"
           cp "target/aarch64-unknown-linux-gnu/release/mj" "$name/"
+          cp "target/aarch64-unknown-linux-gnu/release/mj-desktop" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj "$name/mj-worker-aarch64-unknown-linux-musl"
-          chmod 0755 "$name/mj" "$name/mj-voice-worker" "$name"/mj-worker-*
+          chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -243,14 +245,14 @@ jobs:
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
 
-      - name: Build x86_64 binary
-        run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Build x86_64 controller and desktop binaries
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target x86_64-apple-darwin
 
       - name: Build x86_64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-apple-darwin
 
-      - name: Build aarch64 binary
-        run: cargo build --release --locked --target aarch64-apple-darwin
+      - name: Build aarch64 controller and desktop binaries
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target aarch64-apple-darwin
 
       - name: Build aarch64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-apple-darwin
@@ -263,6 +265,11 @@ jobs:
             target/aarch64-apple-darwin/release/mj \
             -output target/universal-apple-darwin/release/mj
           lipo -info target/universal-apple-darwin/release/mj
+          lipo -create \
+            target/x86_64-apple-darwin/release/mj-desktop \
+            target/aarch64-apple-darwin/release/mj-desktop \
+            -output target/universal-apple-darwin/release/mj-desktop
+          lipo -info target/universal-apple-darwin/release/mj-desktop
           lipo -create \
             target/x86_64-apple-darwin/release/mj-voice-worker \
             target/aarch64-apple-darwin/release/mj-voice-worker \
@@ -280,10 +287,11 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-universal-apple-darwin"
           mkdir "$name"
           cp target/universal-apple-darwin/release/mj "$name/"
+          cp target/universal-apple-darwin/release/mj-desktop "$name/"
           cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj "$name/mj-worker-aarch64-unknown-linux-musl"
-          chmod 0755 "$name/mj" "$name/mj-voice-worker" "$name"/mj-worker-*
+          chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"

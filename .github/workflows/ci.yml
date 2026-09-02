@@ -61,10 +61,13 @@ jobs:
         grep -Fx LICENSE /tmp/voice-worker-package-files.txt
         diff -u LICENSE mj-tui/LICENSE
         diff -u LICENSE mj-cli/LICENSE
+        diff -u LICENSE mj-desktop/LICENSE
         cargo package --locked --allow-dirty --list -p brokk-mj-tui > /tmp/hel-tui-package-files.txt
         cargo package --locked --allow-dirty --list -p brokk-mjolnir > /tmp/hel-cli-package-files.txt
+        cargo package --locked --allow-dirty --list -p brokk-mj-desktop > /tmp/mj-desktop-package-files.txt
         grep -Fx LICENSE /tmp/hel-tui-package-files.txt
         grep -Fx LICENSE /tmp/hel-cli-package-files.txt
+        grep -Fx LICENSE /tmp/mj-desktop-package-files.txt
         cargo package --locked -p brokk-mj-core
 
   mjolnir:
@@ -116,8 +119,16 @@ jobs:
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
 
+    - name: Run desktop Clippy lints
+      if: runner.os != 'Linux'
+      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
+
     - name: Build Hel
       run: cargo build --release
+
+    - name: Build desktop application
+      if: runner.os != 'Linux'
+      run: cargo build --release --locked -p brokk-mj-desktop
 
     # The runtime suite exercises Unix target paths, directory fsync, and Git
     # worktree byte preservation. Clippy above still compiles every test target
@@ -126,9 +137,17 @@ jobs:
       if: runner.os != 'Windows'
       run: cargo test
 
+    - name: Run desktop tests
+      if: runner.os == 'macOS'
+      run: cargo test --locked -p brokk-mj-desktop
+
     - name: Compile tests on Windows
       if: runner.os == 'Windows'
       run: cargo test --no-run
+
+    - name: Compile desktop tests on Windows
+      if: runner.os == 'Windows'
+      run: cargo test --locked -p brokk-mj-desktop --no-run
 
   reliability-smoke:
     name: Three-client reliability smoke
@@ -165,9 +184,9 @@ jobs:
         retention-days: 14
 
   desktop-linux:
-    # The primary Linux jobs build for musl, where the desktop-app feature is
-    # deliberately inert, so this is the only pull-request compile-and-test
-    # gate for the Linux desktop shell path releases actually ship.
+    # The primary Linux jobs build the headless `mj` for musl. This is the
+    # pull-request compile-and-test gate for the separate GNU/Linux desktop
+    # executable that releases ship beside it.
     name: Desktop shell (x86_64-unknown-linux-gnu)
     runs-on: ubuntu-latest
     env:
@@ -186,14 +205,17 @@ jobs:
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-dev
 
-    - name: Clippy over the desktop path
-      run: cargo clippy --locked -p brokk-mjolnir -p brokk-mj-desktop -- -D warnings
+    - name: Clippy over the controller and desktop paths
+      run: cargo clippy --locked -p brokk-mjolnir -p brokk-mj-desktop --all-targets -- -D warnings
 
     - name: Build the desktop crate
       run: cargo check --locked -p brokk-mj-desktop
 
-    - name: Test the mj binary with the desktop feature active
+    - name: Test the headless mj binary
       run: cargo test --locked -p brokk-mjolnir --bin mj
+
+    - name: Test the desktop package
+      run: cargo test --locked -p brokk-mj-desktop
 
   voice-worker:
     name: Voice worker (ubuntu-latest)

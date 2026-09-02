@@ -105,9 +105,11 @@ curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh |
 ```
 
 This downloads a verified release into `~/.local/bin` — no Rust toolchain
-needed. Each release ships `mj`, the voice worker, and the static musl session
-workers that Mjolnir uploads into disposable targets. Run `mj doctor` next.
-The installer also supports `--prefix` and `--version`; see `--help`.
+needed. Each desktop release ships the headless `mj` controller, its separate
+`mj-desktop` application, the voice worker, and the static musl session workers
+that Mjolnir uploads into disposable targets. `mj` itself does not load native
+desktop libraries. Run `mj doctor` next. The installer also supports `--prefix`
+and `--version`; see `--help`.
 
 npm works too:
 
@@ -115,12 +117,25 @@ npm works too:
 npm install -g @brokkai/mjolnir
 ```
 
-As does building from source:
+As does building the static headless executable from source:
 
 ```console
 cargo build --release
-./target/release/mj
+./target/x86_64-unknown-linux-musl/release/mj
 ```
+
+The desktop application is a separate native build. On x86-64 GNU/Linux,
+install the WebKitGTK development package for your distribution and run:
+
+```console
+cargo build --release -p brokk-mjolnir -p brokk-mj-desktop \
+  --target x86_64-unknown-linux-gnu
+./target/x86_64-unknown-linux-gnu/release/mj app
+```
+
+Use the corresponding host target on ARM64 Linux or macOS. Installing from
+crates.io likewise requires both `brokk-mjolnir` and `brokk-mj-desktop` when
+you want `mj app`; headless installations need only `brokk-mjolnir`.
 
 For container targets, pull the published multi-arch agent image (public, no
 authentication):
@@ -315,6 +330,12 @@ Target prerequisites and full option lists are covered in
 The daemon starts the authenticated web viewer by default. Run
 `mj daemon status` for its URL and six-digit login code. Without Tailscale it
 serves HTTP only on `127.0.0.1:3765`.
+
+`mj app` opens that viewer in the sibling `mj-desktop` executable. The main
+`mj` process remains headless and works without GUI libraries. On Linux the
+desktop executable uses the system WebKitGTK runtime; install
+`libwebkit2gtk-4.1-0` on Debian/Ubuntu or the equivalent package for your
+distribution if it is not already present.
 
 When the local Tailscale node has MagicDNS and HTTPS Certificates enabled, Mjolnir
 automatically requests the node's trusted `ts.net` certificate and serves HTTPS

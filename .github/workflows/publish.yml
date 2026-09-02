@@ -24,6 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+      # Verify the voice and desktop packages against the native libraries
+      # installed below instead of inheriting the repository's musl default.
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
 
     steps:
       - uses: actions/checkout@v6
@@ -58,14 +61,14 @@ jobs:
 
       - name: Package crates
         run: |
-          # Packaging the whole workspace in one run lets cargo resolve the
-          # same-release sibling versions (brokk-mj-core, brokk-mj-tui,
-          # brokk-mj-desktop) against the crates packaged alongside them
-          # instead of against the registry, where this version does not exist
-          # until the publish job.
-          cargo package --locked --workspace
-          # Build the normal desktop CLI after package verification.
-          cargo build --locked -p brokk-mjolnir
+          # Assemble every source package now, but verify the current workspace
+          # directly below: before publication, extracted packages cannot
+          # resolve same-release path dependencies from crates.io.
+          cargo package --locked --workspace --no-verify
+          # Build both executables for the native GNU/Linux desktop target;
+          # the repository default is the headless musl target.
+          cargo build --locked -p brokk-mjolnir -p brokk-mj-desktop \
+            --target x86_64-unknown-linux-gnu
 
       - uses: actions/upload-artifact@v7
         with:
@@ -84,6 +87,9 @@ jobs:
       contents: read
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+      # `cargo publish` verifies each extracted package. Voice and desktop use
+      # the native dependencies installed by this job, not the musl default.
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
 
     steps:
       - uses: actions/checkout@v6
@@ -142,10 +148,9 @@ jobs:
             esac
           }
           # Dependency order: brokk-mj-core has no workspace dependencies;
-          # brokk-mj-tui needs it; and the root binary needs both plus
-          # brokk-mj-desktop. brokk-mj-voice-worker and brokk-mj-desktop are
-          # independent. Publishing out of this order fails on a missing
-          # registry dependency.
+          # brokk-mj-tui and brokk-mj-desktop need it; and the root binary
+          # needs core plus TUI. The voice worker is independent. Publishing
+          # out of this order fails on a missing registry dependency.
           for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-tui brokk-mj-desktop brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"

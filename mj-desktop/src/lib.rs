@@ -2,6 +2,11 @@
 //!
 //! The shell keeps its browser policy and TLS verification separate from the
 //! server runtime so both can remain security-reviewed interfaces.
+#![cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", target_env = "gnu")
+))]
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::net::TcpStream;

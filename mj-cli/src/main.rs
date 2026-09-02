@@ -7,14 +7,6 @@
 
 mod daemon;
 mod dashboard;
-#[cfg(all(
-    feature = "desktop-app",
-    any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", target_env = "gnu")
-    )
-))]
 mod desktop;
 mod import;
 mod logging;
@@ -70,15 +62,10 @@ enum Command {
     /// Open the workspace selector even when Mjolnir could auto-attach.
     Workspaces,
     /// Open the web viewer in a native desktop window.
-    #[cfg(all(
-        feature = "desktop-app",
-        any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", target_env = "gnu")
-        )
-    ))]
     App,
+    /// Mint the private launch document consumed by `mj-desktop`.
+    #[command(hide = true)]
+    DesktopBootstrap,
     /// Inspect or control the persistent per-user daemon.
     Daemon(DaemonArgs),
     /// Internal persistent controller process.
@@ -380,15 +367,8 @@ fn command_name(command: Option<&Command>) -> &'static str {
     match command {
         None => "dashboard",
         Some(Command::Workspaces) => "workspaces",
-        #[cfg(all(
-            feature = "desktop-app",
-            any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", target_env = "gnu")
-            )
-        ))]
         Some(Command::App) => "app",
+        Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::Doctor(_)) => "doctor",
@@ -415,15 +395,10 @@ async fn run_command(
         Some(Command::Workspaces) => {
             run_workspace_dashboard(requested_workspace.as_deref(), true, None).await
         }
-        #[cfg(all(
-            feature = "desktop-app",
-            any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", target_env = "gnu")
-            )
-        ))]
         Some(Command::App) => desktop::run_desktop_app()
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::DesktopBootstrap) => desktop::desktop_bootstrap()
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Daemon(args)) => daemon_command(args).await.map(|()| DashboardExit::Normal),
@@ -1111,6 +1086,12 @@ mod tests {
                 .get_subcommands()
                 .any(|sub| sub.get_name() == "setup")
         );
+        assert!(command.get_subcommands().any(|sub| sub.get_name() == "app"));
+        let bootstrap = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "desktop-bootstrap")
+            .expect("desktop-bootstrap is a parseable internal command");
+        assert!(bootstrap.is_hide_set());
         let login = command
             .get_subcommands()
             .find(|sub| sub.get_name() == "login")

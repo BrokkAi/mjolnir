@@ -18,6 +18,7 @@ pub mod hel_config;
 pub mod hel_controller;
 pub mod hel_credentials;
 pub mod hel_database;
+pub mod hel_desktop;
 pub mod hel_diff;
 pub mod hel_doctor;
 pub mod hel_elicitation;

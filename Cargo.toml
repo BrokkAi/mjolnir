@@ -33,14 +33,14 @@ default = []
 test-hooks = []
 
 [workspace]
-# mj-desktop stays out of the default set: its tests need native desktop
-# dependencies, and the primary Linux CI target is musl, where the desktop
-# shell does not build. Its own CI job and the macOS/Windows matrix carry it.
+# mj-desktop stays out of the default set: plain builds produce the headless
+# controller/worker, while its own GNU/Linux CI job and the macOS/Windows
+# matrix build the separate native application explicitly.
 members = [".", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
 default-members = [".", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
-# inherits it with `version.workspace = true`, so the four package versions
+# inherits it with `version.workspace = true`, so the five package versions
 # cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
 version = "2.0.0"
@@ -65,7 +65,6 @@ rust-version = "1.96"
 [workspace.dependencies]
 hel = { path = ".", package = "brokk-mj-core", version = "2.0.0" }
 hel-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.0.0" }
-mj-desktop = { path = "mj-desktop", package = "brokk-mj-desktop", version = "2.0.0" }
 
 [workspace.lints.clippy]
 disallowed_methods = "warn"

@@ -39,8 +39,9 @@ passed CI on master.
 
 The builds cover Linux x86-64 and ARM64 and a universal macOS archive; the
 controller supports Linux and macOS (Windows stays a CI compile gate only —
-use WSL2). Every archive contains `mj`, the voice worker, and the two static
-musl session workers (`mj-worker-x86_64-unknown-linux-musl` and
+use WSL2). Every archive contains the headless `mj` controller, the separate
+`mj-desktop` native application, the voice worker, and the two static musl
+session workers (`mj-worker-x86_64-unknown-linux-musl` and
 `mj-worker-aarch64-unknown-linux-musl`) that the controller uploads into
 disposable targets. Every archive includes the applicable licenses and notices
 and is published with a SHA-256 sidecar.
@@ -64,11 +65,12 @@ already-published release.
 `brokk-mj-tui`, `brokk-mj-desktop`, and `brokk-mjolnir` in dependency order:
 each library crate must reach the registry before anything that depends on it.
 It refuses to publish when the tag differs from any workspace crate version. It
-packages the whole workspace in one `cargo package --workspace` run — so the
-same-release sibling versions resolve against the crates packaged beside them
-rather than the registry, where they do not exist yet — and builds the root
-crate with `desktop-app` ahead of the `crates-io` environment gate so a failure
-surfaces without spending an approval.
+assembles the whole workspace in one `cargo package --workspace --no-verify`
+run, because extracted packages cannot resolve same-release path dependencies
+from the registry before publication, then builds both `mj` and `mj-desktop`
+directly for GNU/Linux ahead of the `crates-io` environment gate so a failure
+surfaces without spending an approval. Each `cargo publish` performs package
+verification again after the loop has published the dependencies it needs.
 
 Publishing runs automatically once the release workflow succeeds. The automated
 release job explicitly dispatches `publish.yml` after creating the GitHub

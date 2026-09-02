@@ -16,11 +16,7 @@ name = "mj"
 path = "src/main.rs"
 
 [features]
-default = ["desktop-app"]
-# The desktop dependencies are declared only for the platforms the shell
-# supports (glibc Linux, macOS, Windows), so the feature is inert on musl —
-# the primary CI target — and on any other platform.
-desktop-app = ["dep:mj-desktop", "dep:rcgen", "dep:axum", "dep:reqwest"]
+default = []
 test-hooks = ["hel/test-hooks"]
 
 [dependencies]
@@ -48,15 +44,6 @@ url = "2"
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 mimalloc = "0.1"
-
-# The native desktop shell and the pieces only `mj app` needs. Declared per
-# platform rather than unconditionally so the desktop-app feature stays inert
-# on musl and Android instead of dragging WebKit into static builds.
-[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", target_env = "gnu")))'.dependencies]
-mj-desktop = { workspace = true, optional = true }
-rcgen = { version = "0.13", optional = true }
-axum = { version = "0.8", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
 
 [dev-dependencies]
 libc = "0.2"

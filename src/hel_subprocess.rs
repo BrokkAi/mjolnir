@@ -20,7 +20,7 @@
 
 use std::io::{ErrorKind, Write};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -205,6 +205,20 @@ pub fn run_with_input(command: &mut Command, input: &[u8]) -> Result<Output> {
     }
 
     Ok(output)
+}
+
+/// Run a foreground child with no stdin and with its output inherited.
+///
+/// With no pipe to feed or drain, waiting synchronously cannot hit the pipe
+/// deadlock that [`run_with_input`] prevents. Long-running callers must invoke
+/// this helper from their supervised blocking-work facility.
+pub fn run_inherited(command: &mut Command) -> Result<ExitStatus> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("run child process")
 }
 
 /// Send `signal` to the process group led by `pid`.

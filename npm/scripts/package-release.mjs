@@ -155,6 +155,9 @@ async function stagePlatform(platform, version, source, stagingRoot) {
   }
   await cp(path.join(source, platform.binary), path.join(destination, "bin", platform.binary));
   if (platform.desktop) {
+    const desktop = platform.binary === "mj.exe" ? "mj-desktop.exe" : "mj-desktop";
+    await cp(path.join(source, desktop), path.join(destination, "bin", desktop));
+    await ensureBinary(path.join(destination, "bin", desktop), platform.binary !== "mj.exe");
     const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
     await cp(path.join(source, worker), path.join(destination, "bin", worker));
     await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");

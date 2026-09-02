@@ -3,7 +3,7 @@ name = "brokk-mj-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Native desktop shell for Mjolnir"
+description = "Native desktop application for Mjolnir"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -11,6 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 publish = true
+
+[lib]
+name = "mj_desktop"
+
+[[bin]]
+name = "mj-desktop"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -23,8 +30,15 @@ url = "2"
 [dev-dependencies]
 rcgen = "0.13"
 
-[target.'cfg(not(target_os = "android"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+hel.workspace = true
+axum = "0.8"
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde_json = "1"
 tao = { version = "0.35", default-features = false, features = ["rwh_06", "x11"] }
+tokio = { version = "1", features = ["full"] }
 webbrowser = "1.2"
 wry = "0.55.1"
 
@@ -34,7 +48,7 @@ objc2 = { version = "0.6.4", features = ["exception", "disable-encoding-assertio
 objc2-foundation = { version = "0.3.0", default-features = false, features = ["std", "NSData", "NSDictionary", "NSEnumerator", "NSHTTPCookie", "NSObject", "NSString", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLProtectionSpace", "NSURLRequest", "NSURLSession"] }
 objc2-web-kit = { version = "0.3.0", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKHTTPCookieStore", "WKNavigationAction", "WKNavigationDelegate", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore"] }
 
-[target.'cfg(all(target_os = "linux", not(target_os = "android")))'.dependencies]
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 gio = "0.18"
 soup = { package = "soup3", version = "0.5" }
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
