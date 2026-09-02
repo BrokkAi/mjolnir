@@ -2275,6 +2275,7 @@ mod tests {
                 materialized,
                 operational,
                 latest_credential_sync_signal: None,
+                worker_build: None,
             }),
             connected: true,
             error: None,

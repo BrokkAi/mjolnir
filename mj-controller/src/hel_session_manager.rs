@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::hel_worker_client::{
@@ -139,15 +138,6 @@ enum WorkerRecoveryOutcome {
     RestartedUnresponsive,
 }
 
-fn worker_binary_digest(path: &std::path::Path) -> Result<String> {
-    let mut binary = std::fs::File::open(path)
-        .with_context(|| format!("open worker binary {} for recovery", path.display()))?;
-    let mut digest = Sha256::new();
-    std::io::copy(&mut binary, &mut digest)
-        .with_context(|| format!("hash worker binary {} for recovery", path.display()))?;
-    Ok(format!("{:x}", digest.finalize()))
-}
-
 fn refresh_worker_binary_if_stale(
     executor: &impl CommandExecutor,
     plan: Option<&WorkerBinaryRefreshPlan>,
@@ -155,7 +145,7 @@ fn refresh_worker_binary_if_stale(
     let Some(plan) = plan else {
         return Ok(());
     };
-    let expected = worker_binary_digest(&plan.source)?;
+    let expected = hel::hel_worker_launch::worker_executable_digest(&plan.source)?;
     if installed_digest_matches(executor, &plan.installed_digest, &expected) {
         return Ok(());
     }
@@ -2585,6 +2575,7 @@ impl StandaloneSession {
             materialized: self.materialized.clone(),
             operational: self.operational.clone(),
             latest_credential_sync_signal: self.latest_credential_sync_signal.clone(),
+            worker_build: self.client.worker_build().map(str::to_owned),
         }
     }
 
@@ -2919,6 +2910,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+    use sha2::Digest;
 
     fn ordering_request(session_id: &str, command_id: &str) -> RemoteSessionRequest {
         let (reply, _response) = oneshot::channel();
@@ -3312,7 +3304,7 @@ mod tests {
         let refreshed = directory.path().join("worker-refreshed");
         let restarted = directory.path().join("worker-restarted");
         std::fs::write(&source, b"current worker binary").unwrap();
-        let current_digest = format!("{:x}", Sha256::digest(b"current worker binary"));
+        let current_digest = format!("{:x}", sha2::Sha256::digest(b"current worker binary"));
         let recovery = |installed_digest: &str, require_refresh: bool| {
             let mut restart = if require_refresh {
                 CommandSpec::new(
@@ -3615,6 +3607,7 @@ mod tests {
                     background_commands: Vec::new(),
                 },
                 latest_credential_sync_signal: None,
+                worker_build: None,
             }),
             connected: true,
             error: None,

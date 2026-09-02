@@ -30,11 +30,7 @@ use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec, Proces
 use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
 
 use super::backend::backend_locator;
-use super::readiness::{connect_started_worker_with_timeout, wait_for_native_session};
-use super::worker_binary::{
-    replace_installed_worker_binary, start_worker, stop_worker_after_target_recovery,
-    worker_binary_for, worker_probe_diagnosis,
-};
+use super::worker_restart::RESTART_FOR_CHECKPOINT;
 use super::{
     Controller, execute_checked, now, persist_session_record_transition_or_restore,
     scp_command_spec, ssh_command_spec, target_kind, target_profile_home,
@@ -1139,55 +1135,15 @@ impl Controller {
         worker_root: &str,
         reconnect: &hel_targets::CommandSpec,
     ) -> Result<StandaloneSession> {
-        stop_worker_after_target_recovery(executor, backend, session_id, worker_root)
-            .context("stop wedged Mjolnir worker before retrying checkpoint")?;
-        // Copy through hel.next and rename. scp/cp onto a still-mapped hel
-        // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
-        // and prepare_worker_files writes that path in place.
-        let binary = worker_binary_for(backend, executor)?;
-        replace_installed_worker_binary(executor, backend, session_id, &binary)
-            .context("replace Mjolnir worker binary before retrying checkpoint")?;
-        start_worker(executor, backend, worker_root)
-            .context("start Mjolnir worker after interrupting a wedged ACP turn")?;
-        // Journal recovery runs before the daemon binds control.sock. A long
-        // kimi session can take well over the ordinary 30s startup window.
-        let mut connection = match connect_started_worker_with_timeout(
-            reconnect,
+        self.restart_worker_with_installed_binary(
             session_id,
             executor,
             backend,
             worker_root,
-            CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART,
+            reconnect,
+            &RESTART_FOR_CHECKPOINT,
         )
         .await
-        {
-            Ok(connection) => connection,
-            Err(error) => {
-                return Err(
-                    worker_probe_diagnosis(executor, backend, worker_root, error)
-                        .context("connect to Mjolnir worker after restarting it for checkpoint"),
-                );
-            }
-        };
-        let project_memory = match self.project_memory_sync_target(session_id) {
-            Ok(target) => Some(target),
-            Err(error) => {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "project memory will not be synchronized after checkpoint worker restart"
-                );
-                None
-            }
-        };
-        connection.set_project_memory_target(project_memory);
-        wait_for_native_session(&mut connection, executor)
-            .await
-            .context("wait for ACP session after restarting the worker for checkpoint")?;
-        wait_for_idle_projection(&mut connection, CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART)
-            .await
-            .context("wait for ACP to go idle after worker restart")?;
-        Ok(connection)
     }
 }
 
@@ -1248,36 +1204,6 @@ async fn adopt_restarted_checkpoint_relay(
             );
             Ok(ControllerRelayLease::Standalone(connection))
         }
-    }
-}
-
-async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Duration) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut last_ordinal = None;
-    let mut stable_polls = 0_u8;
-    loop {
-        let snapshot = relay.sync().await?;
-        let ordinal = snapshot.operational.latest_ordinal;
-        let idle = snapshot.operational.execution == RelayExecutionState::Idle;
-        if idle && last_ordinal == Some(ordinal) {
-            stable_polls = stable_polls.saturating_add(1);
-            if stable_polls >= 3 {
-                return Ok(());
-            }
-        } else {
-            stable_polls = 0;
-        }
-        last_ordinal = Some(ordinal);
-        if snapshot.operational.execution == RelayExecutionState::Closed {
-            bail!("ACP runtime stopped before becoming idle");
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "ACP runtime did not become idle after worker restart (execution={:?}, ordinal={ordinal})",
-                snapshot.operational.execution
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -2124,6 +2050,7 @@ mod tests {
             window: hel::hel_state::ProjectionWindow::of(&materialized),
             materialized,
             latest_credential_sync_signal: None,
+            worker_build: None,
             operational: hel::hel_worker::RelayOperationalState {
                 session_id: "session-1".into(),
                 execution: RelayExecutionState::Idle,

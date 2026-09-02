@@ -12,6 +12,7 @@ mod reviewer;
 #[cfg(test)]
 mod test_support;
 mod worker_binary;
+mod worker_restart;
 mod worktree;
 
 use std::collections::BTreeMap;
@@ -64,6 +65,7 @@ pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
 };
 pub use worker_binary::{WorkerBinaryAvailability, worker_binary_prerequisite_for_arch};
+pub use worker_restart::WorkerUpgradeOutcome;
 pub use worktree::{ResumePlan, resume_compatibility};
 
 pub struct Controller {

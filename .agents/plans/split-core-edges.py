@@ -19,7 +19,7 @@ LAYERS = {
     'C': {'hel_controller','hel_session_manager','hel_server','hel_import','hel_worker_client',
           'hel_quota','claude_usage','codex_usage','grok_usage','hel_doctor','hel_setup',
           'hel_git_proxy','hel_recovery','hel_compaction','hel_tailscale','hel_desktop',
-          'hel_readline','hel_review_host'},
+          'hel_readline','hel_review_host','hel_worker_upgrade'},
     'CH': {'hel_chat','speech','hel_text_input','hel_selection','usage_format','hel_clipboard'},
 }
 LAYER = {m: l for l, ms in LAYERS.items() for m in ms}

@@ -355,6 +355,12 @@ pub enum RelayResponsePayload {
         negotiated: u32,
         relay_version: String,
         session_id: String,
+        /// Content address of the worker executable that answered. The crate
+        /// version cannot tell two builds apart, so this is what a controller
+        /// compares against the binary it would install. Absent from a worker
+        /// built before the field existed, which counts as outdated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_build: Option<String>,
     },
     Attached {
         state: RelayOperationalState,
@@ -633,6 +639,57 @@ mod tests {
             } => assert_eq!(negotiated, 1),
             other => panic!("expected a v1 hello, got {other:?}"),
         }
+    }
+
+    /// The controller decides whether to replace a worker from what hello
+    /// reports, so hello has to carry the build and a worker that was never
+    /// told one has to say so rather than guess.
+    #[test]
+    fn hello_reports_the_worker_build_when_the_worker_knows_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let hello = |relay: &mut DurableRelay| {
+            let response = relay.handle(RelayRequestEnvelope {
+                request_id: "hello-build".into(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::Hello {
+                    controller_version: "current".into(),
+                    supported: RelayVersionRange::CURRENT,
+                },
+            });
+            match response.body {
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::Hello { worker_build, .. },
+                } => worker_build,
+                other => panic!("expected a hello, got {other:?}"),
+            }
+        };
+        assert_eq!(hello(&mut relay), None);
+
+        relay.set_worker_build(Some("a".repeat(64)));
+        assert_eq!(hello(&mut relay), Some("a".repeat(64)));
+    }
+
+    /// A worker built before the field existed answers hello without it. That
+    /// hello must still parse, reporting no build.
+    #[test]
+    fn a_hello_without_a_worker_build_parses() {
+        let payload: RelayResponsePayload = serde_json::from_value(serde_json::json!({
+            "type": "hello",
+            "data": {
+                "negotiated": 1,
+                "relay_version": "2.0.0",
+                "session_id": SESSION,
+            },
+        }))
+        .expect("an old worker's hello must still parse");
+        assert!(matches!(
+            payload,
+            RelayResponsePayload::Hello {
+                worker_build: None,
+                ..
+            }
+        ));
     }
 
     #[test]

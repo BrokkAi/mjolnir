@@ -1209,6 +1209,8 @@ pub(crate) struct RemoteDashboardWorkerPoller {
     /// Reviews the daemon is running for this workspace's sessions.
     pub(crate) reviews:
         tokio::sync::watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>,
+    /// Background events the daemon wants reported once, oldest first.
+    pub(crate) notices: tokio::sync::watch::Receiver<Vec<daemon::RuntimeNotice>>,
     pub(crate) config: tokio::sync::watch::Receiver<hel::hel_config::HelConfig>,
     pub(crate) records: tokio::sync::watch::Receiver<Vec<SessionRecord>>,
 }
@@ -1296,6 +1298,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
     } = channels;
     let (lifecycle_tx, lifecycle_rx) = tokio::sync::watch::channel(Vec::new());
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
+    let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
     let (config_tx, config_rx) = tokio::sync::watch::channel(hel::hel_config::HelConfig::default());
     let (records_tx, records_rx) = tokio::sync::watch::channel(Vec::new());
     tokio::spawn(async move {
@@ -1345,6 +1348,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
                             });
                             lifecycle_tx.send_replace(snapshot.lifecycles);
                             reviews_tx.send_replace(snapshot.reviews);
+                            notices_tx.send_replace(snapshot.notices);
                             for runtime in snapshot.sessions {
                                 let session_id = runtime.session_id.clone();
                                 // Nothing about this session has moved, so
@@ -1385,6 +1389,12 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
                                                         operational,
                                                         latest_credential_sync_signal:
                                                             runtime.latest_credential_sync_signal,
+                                                        // Views rebuilt from a
+                                                        // daemon snapshot carry
+                                                        // no live connection,
+                                                        // so they report no
+                                                        // worker build.
+                                                        worker_build: None,
                                                     }),
                                                     connected: runtime.connected,
                                                     error: runtime.error,
@@ -1487,6 +1497,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
         shutdown,
         lifecycles: lifecycle_rx,
         reviews: reviews_rx,
+        notices: notices_rx,
         config: config_rx,
         records: records_rx,
     })

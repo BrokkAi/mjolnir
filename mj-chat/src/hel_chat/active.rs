@@ -2524,6 +2524,7 @@ mod tests {
                 window: hel::hel_state::ProjectionWindow::of(&session),
                 materialized: session,
                 latest_credential_sync_signal: None,
+                worker_build: None,
                 operational: hel::hel_worker::RelayOperationalState {
                     session_id,
                     execution: hel::hel_worker::RelayExecutionState::Idle,

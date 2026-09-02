@@ -392,6 +392,11 @@ pub(crate) struct DashboardContext {
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
     runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>>,
+    /// Background events the daemon reported. Only ones newer than
+    /// `reported_notice_id` reach the notice bar, so a surface that attaches
+    /// late does not replay a backlog.
+    runtime_notices: Feed<watch::Receiver<Vec<crate::daemon::RuntimeNotice>>>,
+    reported_notice_id: Option<u64>,
     /// Last complete review projection, retained even while the session list
     /// is on screen so a subsequently opened chat starts in the right state.
     runtime_review_views: BTreeMap<String, mj_controller::hel_review_host::RuntimeReviewView>,
@@ -642,6 +647,10 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             update = context.runtime_reviews.wait(), if context.runtime_reviews.is_open() => {
                 let woke = context.runtime_reviews.accept(update);
+                context.dirty |= woke;
+            }
+            update = context.runtime_notices.wait(), if context.runtime_notices.is_open() => {
+                let woke = context.runtime_notices.accept(update);
                 context.dirty |= woke;
             }
             update = context.runtime_config.wait(), if context.runtime_config.is_open() => {
@@ -919,6 +928,15 @@ impl DashboardContext {
             .cloned()
             .map(|review| (review.session_id.clone(), review))
             .collect();
+        let runtime_notices_rx = remote_worker.notices;
+        // Notices already queued when this surface attaches belong to whatever
+        // was on screen before it, so start after them rather than replaying
+        // them into the notice bar.
+        let reported_notice_id = runtime_notices_rx
+            .borrow()
+            .iter()
+            .map(|notice| notice.id)
+            .max();
         let runtime_config_rx = remote_worker.config;
         let runtime_records_rx = remote_worker.records;
         worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
@@ -979,6 +997,8 @@ impl DashboardContext {
             worker: Feed::new(worker_updates_rx),
             runtime_lifecycles: Feed::new(runtime_lifecycles_rx),
             runtime_reviews: Feed::new(runtime_reviews_rx),
+            runtime_notices: Feed::new(runtime_notices_rx),
+            reported_notice_id,
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
             runtime_records: Feed::new(runtime_records_rx),
@@ -1655,6 +1675,7 @@ impl DashboardContext {
         self.drain_worker_updates();
         self.drain_runtime_lifecycles();
         self.drain_runtime_reviews();
+        self.drain_runtime_notices();
         self.drain_runtime_config();
         schedule_due_credential_syncs(
             &mut self.credential_sync_signals,
@@ -1694,6 +1715,28 @@ impl DashboardContext {
             .map(|review| (review.session_id.clone(), review))
             .collect();
         self.apply_runtime_review_to_active_chat();
+    }
+
+    /// Report each background notice the daemon published since the last one
+    /// this surface showed.
+    fn drain_runtime_notices(&mut self) {
+        let mut latest = None;
+        while let Some(notices) = self.runtime_notices.next_ready() {
+            latest = Some(notices);
+        }
+        let Some(notices) = latest else {
+            return;
+        };
+        for notice in notices {
+            if self
+                .reported_notice_id
+                .is_some_and(|reported| notice.id <= reported)
+            {
+                continue;
+            }
+            self.reported_notice_id = Some(notice.id);
+            self.dashboard.set_notice(notice.text);
+        }
     }
 
     /// Applies the retained daemon projection whenever a chat becomes active.
