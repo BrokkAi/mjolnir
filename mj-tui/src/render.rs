@@ -2967,6 +2967,26 @@ mod tests {
         assert!(lines.contains("Prompt (no conversation open)"), "{lines}");
         assert!(lines.contains("Enter on the one to open"), "{lines}");
         assert!(!lines.contains("No live session"), "{lines}");
+        assert!(!lines.contains("Opening session"), "{lines}");
+    }
+
+    /// Attaching is asynchronous, and until it lands the chat still loaded
+    /// belongs to the row the selection has moved off. The band says the
+    /// session is opening rather than showing the previous transcript under
+    /// the new highlight.
+    #[test]
+    fn an_attach_in_flight_draws_an_empty_conversation_that_says_the_session_is_opening() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_opening_session(Some("session-1"));
+
+        let lines = drawn(&mut dashboard, 120, 44).join("\n");
+        assert!(lines.contains("Prompt (opening session)"), "{lines}");
+        assert!(lines.contains("Opening session"), "{lines}");
+        assert!(
+            lines.contains("The conversation appears when it attaches."),
+            "{lines}"
+        );
+        assert!(!lines.contains("No conversation open"), "{lines}");
     }
 
     /// The band order is the whole point of the surface: everything is on one

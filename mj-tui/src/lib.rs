@@ -413,6 +413,11 @@ pub struct DashboardState {
     /// The session whose conversation is on screen, or is being opened. It
     /// decides which project the compact Sessions list belongs to.
     pub(crate) current_session_id: Option<String>,
+    /// The session an attach is running for, while it is still in flight.
+    /// The conversation band draws as empty for as long as this is set to a
+    /// session other than the one on screen, so the transcript never belongs
+    /// to a different row than the highlight.
+    opening_session: Option<String>,
     pub(crate) pane_areas: Option<[Rect; DASHBOARD_PANE_COUNT]>,
     /// Where the conversation's transcript and composer sat on the last
     /// frame, so the controller can route a mouse event by what the pointer
@@ -472,6 +477,7 @@ impl DashboardState {
             layout: PaneLayout::default(),
             frame_size: None,
             current_session_id: None,
+            opening_session: None,
             pane_areas: None,
             chat_transcript_area: None,
             chat_prompt_area: None,
@@ -601,6 +607,17 @@ impl DashboardState {
 
     pub fn current_session_id(&self) -> Option<&str> {
         self.current_session_id.as_deref()
+    }
+
+    /// Records the session an attach is running for, or clears it when the
+    /// attach settles.
+    pub fn set_opening_session(&mut self, session_id: Option<&str>) {
+        self.opening_session = session_id.map(str::to_owned);
+    }
+
+    /// The session an attach is still running for, if any.
+    pub fn opening_session(&self) -> Option<&str> {
+        self.opening_session.as_deref()
     }
 
     /// The session the Sessions pane has selected. The conversation on screen

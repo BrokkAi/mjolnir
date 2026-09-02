@@ -1119,6 +1119,7 @@ impl DashboardContext {
                     return;
                 }
                 self.opening_chat_session = None;
+                self.dashboard.set_opening_session(None);
                 match *result {
                     Ok(chat) => {
                         self.active_chat = Some(chat);

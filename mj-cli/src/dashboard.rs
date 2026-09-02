@@ -580,7 +580,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                         // draft and the read cursor, which is the chat's own
                         // bookkeeping rather than the dashboard's.
                         if command == CommandId::QuitDetach
-                            && let Some(chat) = context.active_chat.as_mut()
+                            && let Some(chat) = context.visible_chat()
                         {
                             chat_outcome = chat.detach();
                         } else {
@@ -1194,6 +1194,25 @@ impl DashboardContext {
         self.open_chat_session(&selected);
     }
 
+    /// The warm chat when it belongs on screen.
+    ///
+    /// While an attach for a different session is in flight, the chat still
+    /// loaded is the one the selection has moved off. Drawing it under the new
+    /// row's highlight, or handing it the keyboard, would report the wrong
+    /// conversation, so it is hidden until its own attach settles. Its feeds
+    /// keep running either way: a failed attach brings it back current.
+    pub(crate) fn visible_chat(&mut self) -> Option<&mut mj_chat::hel_chat::ActiveChat> {
+        let Self {
+            active_chat,
+            opening_chat_session,
+            ..
+        } = self;
+        let opening = opening_chat_session.as_deref();
+        active_chat
+            .as_mut()
+            .filter(|chat| chat_is_visible(opening, chat.session_id()))
+    }
+
     /// The user took the choice into their own hands, so the surface stops
     /// trying to pick a conversation for them.
     fn cancel_startup_session(&mut self) {
@@ -1293,16 +1312,25 @@ impl DashboardContext {
             terminal,
             dashboard,
             active_chat,
+            opening_chat_session,
             selection,
             selection_text,
             ..
         } = self;
+        let opening = opening_chat_session.as_deref();
         let transcript_selected = selection.active_surface() == Some(SurfaceId::Transcript);
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
         terminal.terminal.draw(|frame| {
-            render_combined(frame, dashboard, active_chat.as_mut(), transcript_selected);
+            render_combined(
+                frame,
+                dashboard,
+                active_chat
+                    .as_mut()
+                    .filter(|chat| chat_is_visible(opening, chat.session_id())),
+                transcript_selected,
+            );
             *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
         })?;
         // The transcript reports a row space it can no longer measure the
@@ -1311,8 +1339,7 @@ impl DashboardContext {
         // history to rescue it is the full-transcript probe this design exists
         // to avoid.
         let invalidated = self
-            .active_chat
-            .as_mut()
+            .visible_chat()
             .is_some_and(mj_chat::hel_chat::ActiveChat::transcript_selection_invalidated);
         if invalidated && self.selection.active_surface() == Some(SurfaceId::Transcript) {
             self.selection.clear();
@@ -1610,6 +1637,7 @@ impl DashboardContext {
         });
         self.opening_chat_session = Some(session_id.clone());
         self.dashboard.set_current_session(Some(&session_id));
+        self.dashboard.set_opening_session(Some(&session_id));
         self.dashboard.set_notice("Opening session…");
         tokio::spawn(async move {
             let result = sessions
@@ -2412,6 +2440,16 @@ fn record_chat_detach_state(
     ))
 }
 
+/// Whether the warm chat belongs on screen, given the session an attach is
+/// running for.
+///
+/// Only an attach for a *different* session hides it. An attach for the chat
+/// already loaded is a reattach of the same conversation, and blanking the
+/// transcript for that would be a flicker rather than a correction.
+fn chat_is_visible(opening: Option<&str>, chat_session_id: &str) -> bool {
+    !matches!(opening, Some(opening) if opening != chat_session_id)
+}
+
 /// Hands one event to the part of the surface it belongs to, and reports
 /// whether the loop may keep batching, which it may while the event asked for
 /// no work.
@@ -2439,7 +2477,7 @@ fn dispatch_event(
         }
         _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
     };
-    match context.active_chat.as_mut().filter(|_| to_chat) {
+    match context.visible_chat().filter(|_| to_chat) {
         Some(chat) => {
             *chat_outcome = chat.handle_event(event);
             matches!(*chat_outcome, mj_chat::hel_chat::ChatEventOutcome::None)
@@ -2697,6 +2735,16 @@ mod tests {
             );
         }
         DashboardState::new(config, state, std::collections::BTreeMap::new())
+    }
+
+    /// The transcript on screen must belong to the row the selection is on.
+    /// An attach for another session hides the chat that is still loaded; a
+    /// reattach of the same one does not, because there is nothing to correct.
+    #[test]
+    fn only_an_attach_for_another_session_hides_the_warm_chat() {
+        assert!(chat_is_visible(None, "session-a"));
+        assert!(chat_is_visible(Some("session-a"), "session-a"));
+        assert!(!chat_is_visible(Some("session-b"), "session-a"));
     }
 
     #[test]

@@ -397,13 +397,14 @@ pub fn render_combined(
             prompt_focused
         }
         None => {
-            render_empty_conversation(
-                frame,
-                transcript_area,
-                prompt_area,
-                prompt_focused,
-                dashboard.ordered_sessions().is_empty(),
-            );
+            let reason = if dashboard.opening_session().is_some() {
+                EmptyConversation::Opening
+            } else if dashboard.ordered_sessions().is_empty() {
+                EmptyConversation::NoLiveSession
+            } else {
+                EmptyConversation::NoConversationOpen
+            };
+            render_empty_conversation(frame, transcript_area, prompt_area, prompt_focused, reason);
             false
         }
     };
@@ -454,20 +455,31 @@ pub fn render_combined(
     render_modal(frame, area, dashboard);
 }
 
-/// The bordered chrome that stands in for a conversation when none is open,
-/// and the thing the user can do about it.
+/// Why the conversation band is empty, which is what decides the advice it
+/// gives.
+enum EmptyConversation {
+    /// The workspace has no live session at all.
+    NoLiveSession,
+    /// The workspace has live sessions and none of them is open.
+    NoConversationOpen,
+    /// An attach is in flight, so a conversation is on its way.
+    Opening,
+}
+
+/// The bordered chrome that stands in for a conversation when none is on
+/// screen, and the thing the user can do about it.
 ///
-/// There are two reasons for an empty band, and they need different advice:
-/// a workspace with no live session needs one created or resumed, while a
-/// workspace that has live sessions just needs one opened. Telling the second
-/// user there is no live session would be a plain lie — the pane above is
-/// listing them.
+/// The three reasons for an empty band need different advice: a workspace
+/// with no live session needs one created or resumed, a workspace that has
+/// live sessions just needs one opened, and an attach that is still running
+/// needs nothing but a moment. Telling the second user there is no live
+/// session would be a plain lie — the pane above is listing them.
 fn render_empty_conversation(
     frame: &mut Frame,
     transcript_area: Rect,
     prompt_area: Rect,
     prompt_focused: bool,
-    no_live_session: bool,
+    reason: EmptyConversation,
 ) {
     frame.render_widget(
         Block::default()
@@ -480,22 +492,28 @@ fn render_empty_conversation(
     } else {
         BorderType::Plain
     };
-    let (title, lines) = if no_live_session {
-        (
+    let (title, lines) = match reason {
+        EmptyConversation::NoLiveSession => (
             " Prompt (no live session) ",
             [
                 "No live session in this workspace.",
                 "Press Alt-N to create one, or Alt-S to resume one.",
             ],
-        )
-    } else {
-        (
+        ),
+        EmptyConversation::NoConversationOpen => (
             " Prompt (no conversation open) ",
             [
                 "No conversation open.",
                 "Press Tab for Sessions, then Enter on the one to open.",
             ],
-        )
+        ),
+        EmptyConversation::Opening => (
+            " Prompt (opening session) ",
+            [
+                "Opening session…",
+                "The conversation appears when it attaches.",
+            ],
+        ),
     };
     frame.render_widget(
         Paragraph::new(lines.map(Line::raw).to_vec())
