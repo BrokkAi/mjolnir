@@ -53,7 +53,7 @@ jobs:
     - name: Install pinned coverage tool
       run: cargo install --locked cargo-llvm-cov --version 0.8.7
 
-    - name: Collect Hel coverage
+    - name: Collect Mjolnir coverage
       run: |
         cargo llvm-cov --workspace --exclude brokk-mj-voice-worker --exclude brokk-mj-desktop --no-report --locked
         cargo llvm-cov report -p brokk-mj-core -p brokk-mj-tui -p brokk-mjolnir --lcov --output-path coverage.lcov

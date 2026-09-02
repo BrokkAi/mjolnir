@@ -1,11 +1,6 @@
-# Default to the shipped static Linux target: the built controller doubles as
-# the same-architecture container worker, so plain `cargo run` is
-# self-consistent without a second build. Explicit `--target` flags (CI release
-# matrix, macOS builds) override this.
-# On non-x86_64-Linux hosts, pass your host triple explicitly, e.g.
-# `cargo build --target aarch64-apple-darwin`.
-[build]
-target = "x86_64-unknown-linux-musl"
+# Plain Cargo commands build for the current host so local development works
+# without a `--target` override. Release and worker builds select their static
+# musl target explicitly.
 
 # rust-lld ships with the toolchain and links the static musl binary in a
 # fraction of GNU ld's time (measured: edit-to-binary 13.6s -> 6.0s).

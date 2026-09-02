@@ -790,7 +790,12 @@ pub(crate) async fn run_server(
                     );
                     while let Some(result) = credential_sync.try_result() {
                         crate::pollers::log_credential_sync_actions(&result);
-                        if let Some(notice) = credential_sync_notices.notice(&result) {
+                        let harness = controller
+                            .config
+                            .profiles
+                            .get(&result.profile_id)
+                            .map(|profile| profile.kind);
+                        if let Some(notice) = credential_sync_notices.notice(&result, harness) {
                             eprintln!("Mjolnir: {notice}");
                         }
                     }

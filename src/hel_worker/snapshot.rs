@@ -843,7 +843,7 @@ fn truncate_with_marker(text: &mut String, keep: usize) {
     }
     let dropped = text.len() - end;
     text.truncate(end);
-    text.push_str(&format!("… [hel truncated {dropped} bytes]"));
+    text.push_str(&format!("… [mj truncated {dropped} bytes]"));
 }
 
 /// Keep at most the last `keep` bytes of `text` and describe what was dropped.
@@ -866,7 +866,7 @@ pub(crate) fn truncate_start_with_marker(text: &mut String, keep: usize) -> bool
     }
     let dropped = start;
     text.drain(..start);
-    text.insert_str(0, &format!("[hel dropped {dropped} earlier bytes]\n"));
+    text.insert_str(0, &format!("[mj dropped {dropped} earlier bytes]\n"));
     true
 }
 
@@ -2050,7 +2050,7 @@ mod tests {
         let mut long = "abcdefghij".to_owned();
         assert!(truncate_start_with_marker(&mut long, 4));
         assert!(
-            long.starts_with("[hel dropped "),
+            long.starts_with("[mj dropped "),
             "the drop must be disclosed: {long:?}"
         );
         assert!(long.ends_with("ghij"), "the tail must be kept: {long:?}");
@@ -2083,10 +2083,7 @@ mod tests {
             message.starts_with("xxxx"),
             "the head of the payload is kept"
         );
-        assert!(
-            message.contains("[hel truncated"),
-            "truncation is disclosed"
-        );
+        assert!(message.contains("[mj truncated"), "truncation is disclosed");
         assert!(serde_json::to_vec(recorded).unwrap().len() <= RELAY_EVENT_BYTE_BUDGET);
     }
 

@@ -13,7 +13,9 @@ use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
 use crate::hel_config::HarnessKind;
-use crate::hel_credentials::{MAX_CREDENTIAL_BYTES, credential_fingerprint};
+use crate::hel_credentials::{
+    MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
+};
 use crate::hel_setup::harness_authentication_marker;
 
 pub const API_LABEL: &str = "API";
@@ -281,6 +283,25 @@ async fn refresh_profile(
         .as_secs();
     let result = match harness {
         HarnessKind::Codex => {
+            if codex_login_is_near_expiry(&credential_path).await {
+                match codex_usage::refresh_login(
+                    &mut codex_client,
+                    cwd.clone(),
+                    environment.clone(),
+                )
+                .await
+                {
+                    Ok(()) => tracing::info!(
+                        profile_id = %profile_id,
+                        "refreshed Codex login ahead of expiry"
+                    ),
+                    Err(error) => tracing::warn!(
+                        profile_id = %profile_id,
+                        %error,
+                        "could not refresh the Codex login ahead of expiry"
+                    ),
+                }
+            }
             let status = codex_usage::refresh(&mut codex_client, cwd, environment).await;
             match status {
                 CodexUsageStatus::Available(report) => Ok(ProfileQuota {
@@ -408,6 +429,49 @@ async fn refresh_profile(
         },
         codex_client,
     )
+}
+
+/// Shortest gap to expiry Hel will leave a Codex login sitting at. A token with
+/// a long life gets a proportionally wider margin, because the poll interval
+/// buys nothing once the whole life is short.
+const CODEX_MINIMUM_REFRESH_MARGIN_MS: i64 = 60 * 60 * 1000;
+
+/// Whether the profile's Codex login is close enough to expiry that a container
+/// copy of it could reach the single-use refresh race before the next poll.
+async fn codex_login_is_near_expiry(marker: &Path) -> bool {
+    let Ok(bytes) = tokio::fs::read(marker).await else {
+        return false;
+    };
+    if bytes.len() > MAX_CREDENTIAL_BYTES {
+        return false;
+    }
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    codex_login_needs_refresh(
+        credential_expiry(HarnessKind::Codex, &bytes),
+        credential_freshness(HarnessKind::Codex, &bytes),
+        now,
+    )
+}
+
+/// The margin is the larger of one hour and a tenth of the token's life, where
+/// the life is what the last refresh bought. A credential that says nothing
+/// about its own age falls back to the flat hour.
+fn codex_login_needs_refresh(
+    expiry_millis: Option<i64>,
+    last_refresh_millis: Option<i64>,
+    now_millis: i64,
+) -> bool {
+    let Some(expiry) = expiry_millis else {
+        return false;
+    };
+    let lifetime = last_refresh_millis
+        .map(|refreshed| expiry.saturating_sub(refreshed))
+        .unwrap_or_default();
+    let margin = CODEX_MINIMUM_REFRESH_MARGIN_MS.max(lifetime / 10);
+    expiry.saturating_sub(now_millis) < margin
 }
 
 async fn credential_marker_fingerprint(path: &Path) -> Result<Option<String>> {
@@ -1445,6 +1509,255 @@ mod tests {
         // prove it is ignored.
         assert_eq!(report.extra, None);
         assert!(report.compact().starts_with("Week 75% left, resets "));
+    }
+
+    /// A `codex app-server` stand-in on `PATH` that logs every request line it
+    /// reads, so a test can assert the exact protocol exchange.
+    #[cfg(unix)]
+    fn fake_codex_app_server(
+        directory: &Path,
+        script: &str,
+    ) -> (BTreeMap<String, String>, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = directory.join("codex");
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let log = directory.join("requests.jsonl");
+        let environment = BTreeMap::from([
+            ("PATH".to_owned(), directory.to_string_lossy().into_owned()),
+            (
+                "CODEX_USAGE_TEST_LOG".to_owned(),
+                log.to_string_lossy().into_owned(),
+            ),
+            (
+                "CODEX_AUTH_FILE".to_owned(),
+                directory.join("auth.json").to_string_lossy().into_owned(),
+            ),
+        ]);
+        (environment, log)
+    }
+
+    /// A Codex `auth.json` whose access token is a JWT expiring `expires_in`
+    /// from now, last refreshed `refreshed_ago` before now.
+    #[cfg(unix)]
+    fn write_codex_auth(home: &Path, expires_in: Duration, refreshed_ago: Duration) {
+        use base64::Engine as _;
+
+        let now = chrono::Utc::now();
+        let expiry = (now + chrono::TimeDelta::from_std(expires_in).unwrap()).timestamp();
+        let segment = |value: Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).unwrap())
+        };
+        let access_token = format!(
+            "{}.{}.signature-is-never-checked",
+            segment(serde_json::json!({ "alg": "RS256", "typ": "JWT" })),
+            segment(serde_json::json!({ "exp": expiry })),
+        );
+        let body = serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": access_token,
+                "refresh_token": "refresh",
+                "id_token": "id",
+                "account_id": "account",
+            },
+            "last_refresh": (now - chrono::TimeDelta::from_std(refreshed_ago).unwrap())
+                .to_rfc3339(),
+        });
+        std::fs::write(home.join("auth.json"), serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn codex_request_log(log: &Path) -> Vec<Value> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    async fn poll_codex_profile(
+        directory: &Path,
+        environment: BTreeMap<String, String>,
+    ) -> QuotaRefreshOutcome {
+        let (outcome, client) = refresh_profile(
+            QuotaRefreshRequest {
+                profile_id: "codex".into(),
+                harness: HarnessKind::Codex,
+                source_home: directory.to_path_buf(),
+                executable: None,
+                environment,
+                cwd: directory.to_path_buf(),
+            },
+            None,
+        )
+        .await;
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+        outcome
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_codex_login_near_expiry_is_rotated_before_the_usage_query() {
+        let directory = tempfile::tempdir().unwrap();
+        // Ten minutes left on a one-hour token: inside the one-hour margin.
+        write_codex_auth(
+            directory.path(),
+            Duration::from_secs(600),
+            Duration::from_secs(3_000),
+        );
+        let (environment, log) = fake_codex_app_server(
+            directory.path(),
+            r#"#!/bin/sh
+read_and_log() {
+    IFS= read -r line || exit 1
+    printf '%s\n' "$line" >> "$CODEX_USAGE_TEST_LOG"
+}
+read_and_log
+printf '%s\n' '{"id":1,"result":{}}'
+read_and_log
+read_and_log
+printf '%s\n' '{"auth_mode":"chatgpt","tokens":{"access_token":"rotated"}}' > "$CODEX_AUTH_FILE"
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+read_and_log
+printf '%s\n' '{"id":3,"result":{"account":{"type":"chatgpt"}}}'
+read_and_log
+printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+"#,
+        );
+
+        let outcome = poll_codex_profile(directory.path(), environment).await;
+
+        assert_eq!(outcome.report.error, None);
+        assert_eq!(
+            outcome.report.five_hour_window().unwrap().remaining_percent,
+            Some(75)
+        );
+        // The rotated file has to reach live sessions, which is what the
+        // changed-credentials flag asks the daemon to do.
+        assert!(outcome.credentials_changed);
+
+        let messages = codex_request_log(&log);
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "initialized");
+        assert_eq!(messages[2]["method"], "account/read");
+        assert_eq!(messages[2]["params"]["refreshToken"], true);
+        assert_eq!(messages[3]["method"], "account/read");
+        assert_eq!(messages[3]["params"]["refreshToken"], false);
+        assert_eq!(messages[4]["method"], "account/rateLimits/read");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_codex_login_far_from_expiry_is_polled_without_a_rotation() {
+        let directory = tempfile::tempdir().unwrap();
+        // Ten hours left on an eleven-hour token: outside both margins.
+        write_codex_auth(
+            directory.path(),
+            Duration::from_secs(10 * 3_600),
+            Duration::from_secs(3_600),
+        );
+        let (environment, log) = fake_codex_app_server(
+            directory.path(),
+            r#"#!/bin/sh
+read_and_log() {
+    IFS= read -r line || exit 1
+    printf '%s\n' "$line" >> "$CODEX_USAGE_TEST_LOG"
+}
+read_and_log
+printf '%s\n' '{"id":1,"result":{}}'
+read_and_log
+read_and_log
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+read_and_log
+printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+"#,
+        );
+
+        let outcome = poll_codex_profile(directory.path(), environment).await;
+
+        assert_eq!(outcome.report.error, None);
+        assert!(!outcome.credentials_changed);
+
+        let messages = codex_request_log(&log);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "initialized");
+        assert_eq!(messages[2]["params"]["refreshToken"], false);
+        assert_eq!(messages[3]["method"], "account/rateLimits/read");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_codex_app_server_without_the_refresh_flag_still_reports_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        write_codex_auth(
+            directory.path(),
+            Duration::from_secs(600),
+            Duration::from_secs(3_000),
+        );
+        let (environment, _log) = fake_codex_app_server(
+            directory.path(),
+            r#"#!/bin/sh
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":2,"error":{"code":-32601,"message":"unknown parameter"}}'
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":3,"result":{"account":{"type":"chatgpt"}}}'
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300}}}}'
+"#,
+        );
+
+        let outcome = poll_codex_profile(directory.path(), environment).await;
+
+        assert_eq!(outcome.report.error, None);
+        assert_eq!(
+            outcome.report.five_hour_window().unwrap().remaining_percent,
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn a_codex_refresh_margin_is_an_hour_or_a_tenth_of_the_token_life() {
+        let hour = 3_600_000;
+        let now = 1_800_000_000_000;
+        // A short-lived token: the flat hour decides.
+        assert!(codex_login_needs_refresh(
+            Some(now + hour / 2),
+            Some(now - hour / 2),
+            now
+        ));
+        assert!(!codex_login_needs_refresh(
+            Some(now + 2 * hour),
+            Some(now - hour),
+            now
+        ));
+        // A long-lived token: a tenth of its life is wider than the hour.
+        assert!(codex_login_needs_refresh(
+            Some(now + 3 * hour),
+            Some(now - 40 * hour),
+            now
+        ));
+        // Without a last refresh, only the flat hour is known.
+        assert!(codex_login_needs_refresh(Some(now + hour / 2), None, now));
+        assert!(!codex_login_needs_refresh(Some(now + 3 * hour), None, now));
+        // An unreadable expiry is not a reason to spend the refresh token.
+        assert!(!codex_login_needs_refresh(None, Some(now - hour), now));
+    }
+
+    #[tokio::test]
+    async fn a_missing_codex_credential_file_asks_for_no_rotation() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(!codex_login_is_near_expiry(&directory.path().join("auth.json")).await);
     }
 
     #[tokio::test]

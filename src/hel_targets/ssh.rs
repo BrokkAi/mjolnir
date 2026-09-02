@@ -302,7 +302,7 @@ pub(super) fn validate_container_template(template: &ContainerTemplate) -> Resul
                 .iter()
                 .any(|label| arg.starts_with(&format!("--label={label}=")))
     }) {
-        bail!("container template may not override Hel ownership labels");
+        bail!("container template may not override Mjolnir ownership labels");
     }
     Ok(())
 }

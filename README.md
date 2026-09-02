@@ -120,9 +120,12 @@ npm install -g @brokkai/mjolnir
 As does building the static headless executable from source:
 
 ```console
-cargo build --release
+cargo build --release --target x86_64-unknown-linux-musl
 ./target/x86_64-unknown-linux-musl/release/mj
 ```
+
+Use `aarch64-unknown-linux-musl` instead on ARM64 Linux. For local development,
+plain `cargo run` builds and runs the controller for the current host.
 
 The desktop application is a separate native build. On x86-64 GNU/Linux,
 install the WebKitGTK development package for your distribution and run:
@@ -379,6 +382,16 @@ tailscale_detect = true
   controller's `gh` is authenticated, Mjolnir continuously pushes its active
   GitHub token to every live non-local session, including raw SSH targets.
   The token is not stored in archives.
+- Rotating OAuth logins are single use, so a container and the controller that
+  reach the same expiry instant both spend the same refresh token: one wins and
+  the other session's turn dies with an expired session. For Codex profiles the
+  daemon rotates the login ahead of expiry and pushes the new file, so container
+  copies never arrive at that instant. Claude Code has no early refresh, so
+  store a long-lived token instead with `mj login --profile <id> --setup-token`;
+  new and resumed sessions of that profile run with `CLAUDE_CODE_OAUTH_TOKEN`
+  set, and a token that does not rotate cannot lose the race. It covers model
+  requests only, not Remote Control or claude.ai connectors, which Mjolnir
+  sessions do not use.
 - A repository configured with `local` is served to workers through a
   per-session Git protocol bridge over the session's own transport: `git
   fetch` and fast-forward `git push origin` operate on your checkout with no

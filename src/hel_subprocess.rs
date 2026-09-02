@@ -207,6 +207,25 @@ pub fn run_with_input(command: &mut Command, input: &[u8]) -> Result<Output> {
     Ok(output)
 }
 
+/// Run a foreground child that talks to the terminal but whose stdout the
+/// caller needs to read.
+///
+/// An interactive login prints its prompts and progress on stderr and its one
+/// machine-readable answer on stdout. Inheriting stdin and stderr keeps the
+/// prompts and any typed reply on the real terminal, while stdout is captured.
+/// Only one pipe exists and this thread drains it, so there is no second
+/// stream to deadlock against. Long-running callers must invoke this helper
+/// from their supervised blocking-work facility.
+pub fn run_capturing_stdout(command: &mut Command) -> Result<Output> {
+    let child = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("spawn child process")?;
+    child.wait_with_output().context("wait for child process")
+}
+
 /// Run a foreground child with no stdin and with its output inherited.
 ///
 /// With no pipe to feed or drain, waiting synchronously cannot hit the pipe
@@ -292,6 +311,22 @@ mod tests {
             .expect("a broken pipe from an early exit must not be a hard error");
 
         assert_eq!(output.status.code(), Some(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_capturing_stdout_collects_more_than_one_pipe_buffer() {
+        // The child writes well past the 64KB pipe buffer, so a helper that
+        // waited before draining would deadlock here.
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("dd if=/dev/zero bs=1024 count=512 2>/dev/null | tr '\\0' 'x'");
+
+        let output = run_capturing_stdout(&mut command).expect("capture a large stdout");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 512 * 1024);
     }
 
     #[test]

@@ -66,29 +66,39 @@ impl GithubTokenSnapshot {
     }
 }
 
-pub fn validate_github_token(bytes: &[u8]) -> Result<&str> {
+/// One reading of an opaque single-line secret, shared by every token file Hel
+/// stores so the limits and the rejections cannot drift apart.
+fn validate_opaque_token<'a>(label: &str, limit: usize, bytes: &'a [u8]) -> Result<&'a str> {
     if bytes.is_empty() {
-        bail!("GitHub token is empty");
+        bail!("{label} is empty");
     }
-    if bytes.len() > MAX_GITHUB_TOKEN_BYTES {
-        bail!("GitHub token is above the {MAX_GITHUB_TOKEN_BYTES} byte limit");
+    if bytes.len() > limit {
+        bail!("{label} is above the {limit} byte limit");
     }
     let token = std::str::from_utf8(bytes)
-        .context("GitHub token is not valid UTF-8")?
+        .with_context(|| format!("{label} is not valid UTF-8"))?
         .trim();
     if token.is_empty() || token.chars().any(char::is_whitespace) {
-        bail!("GitHub token must be non-empty and contain no whitespace");
+        bail!("{label} must be non-empty and contain no whitespace");
     }
     Ok(token)
 }
 
-pub fn read_github_token(path: &Path) -> Result<(GithubTokenSnapshot, Option<String>)> {
+/// A token file must be a real file. Following a symbolic link would let
+/// whatever created it choose where the secret is read from or written to.
+fn refuse_symlinked_token(label: &str, path: &Path) -> Result<()> {
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        bail!(
-            "GitHub token destination {} is a symbolic link",
-            path.display()
-        );
+        bail!("{label} destination {} is a symbolic link", path.display());
     }
+    Ok(())
+}
+
+pub fn validate_github_token(bytes: &[u8]) -> Result<&str> {
+    validate_opaque_token("GitHub token", MAX_GITHUB_TOKEN_BYTES, bytes)
+}
+
+pub fn read_github_token(path: &Path) -> Result<(GithubTokenSnapshot, Option<String>)> {
+    refuse_symlinked_token("GitHub token", path)?;
     match std::fs::read(path) {
         Ok(bytes) => {
             let token = validate_github_token(&bytes)?.to_owned();
@@ -103,12 +113,7 @@ pub fn read_github_token(path: &Path) -> Result<(GithubTokenSnapshot, Option<Str
 
 pub fn write_github_token(path: &Path, bytes: &[u8]) -> Result<GithubTokenSnapshot> {
     let token = validate_github_token(bytes)?;
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        bail!(
-            "GitHub token destination {} is a symbolic link",
-            path.display()
-        );
-    }
+    refuse_symlinked_token("GitHub token", path)?;
     let mut body = token.as_bytes().to_vec();
     body.push(b'\n');
     crate::hel_config::atomic_write_existing(path, &body)?;
@@ -116,17 +121,74 @@ pub fn write_github_token(path: &Path, bytes: &[u8]) -> Result<GithubTokenSnapsh
 }
 
 pub fn remove_github_token(path: &Path) -> Result<()> {
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        bail!(
-            "GitHub token destination {} is a symbolic link",
-            path.display()
-        );
-    }
+    refuse_symlinked_token("GitHub token", path)?;
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove GitHub token {}", path.display())),
     }
+}
+
+/// Claude setup tokens are opaque and single-line, like the GitHub token.
+pub const MAX_CLAUDE_OAUTH_TOKEN_BYTES: usize = 4 * 1024;
+
+/// The variable Claude Code reads a long-lived OAuth token from. It takes
+/// precedence over the `/login` credentials file and is honoured by the Agent
+/// SDK, so a worker started with it never touches the rotating grant.
+pub const CLAUDE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// Where a profile's long-lived Claude setup token lives on the controller.
+///
+/// It sits beside the configuration rather than inside the profile home, so
+/// profile staging never copies it into a session home or a container.
+pub fn claude_oauth_token_path(profile_id: &str) -> PathBuf {
+    crate::hel_config::config_dir()
+        .join("profiles")
+        .join(profile_id)
+        .join("claude-oauth-token")
+}
+
+pub fn validate_claude_oauth_token(bytes: &[u8]) -> Result<&str> {
+    validate_opaque_token("Claude setup token", MAX_CLAUDE_OAUTH_TOKEN_BYTES, bytes)
+}
+
+/// The stored setup token, or `None` when the profile has none.
+pub fn read_claude_oauth_token(path: &Path) -> Result<Option<String>> {
+    refuse_symlinked_token("Claude setup token", path)?;
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(validate_claude_oauth_token(&bytes)?.to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read Claude setup token {}", path.display()))
+        }
+    }
+}
+
+pub fn write_claude_oauth_token(path: &Path, bytes: &[u8]) -> Result<()> {
+    let token = validate_claude_oauth_token(bytes)?;
+    refuse_symlinked_token("Claude setup token", path)?;
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("Claude setup token path has no directory")?;
+    create_owner_only_directory(directory)?;
+    let mut body = token.as_bytes().to_vec();
+    body.push(b'\n');
+    crate::hel_config::atomic_write_existing(path, &body)
+}
+
+/// Create `directory` and any missing parent reachable only by its owner.
+fn create_owner_only_directory(directory: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(directory)
+        .with_context(|| format!("create {}", directory.display()))
 }
 
 /// Epoch milliseconds describing how current a credential copy is. Higher wins
@@ -182,6 +244,50 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
             .max(),
         HarnessKind::Deepseek => unreachable!("handled before JSON parsing"),
     }
+}
+
+/// Epoch milliseconds at which the stored access token stops working, for the
+/// harnesses Hel can refresh ahead of that deadline.
+///
+/// This is not [`credential_freshness`]. Freshness orders two copies of the
+/// same grant; expiry says when the grant runs out. Claude states the same
+/// number for both, but Codex orders copies by `last_refresh` and expires by
+/// the `exp` claim of the access token in `tokens.access_token`. Grok and
+/// DeepSeek have no proactive-refresh path, so they report nothing here.
+///
+/// Anything unparseable is `None` rather than a guess.
+pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
+    if matches!(kind, HarnessKind::Grok | HarnessKind::Deepseek) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    match kind {
+        HarnessKind::Claude => value.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
+        HarnessKind::Codex => {
+            jwt_expiry_millis(value.get("tokens")?.get("access_token")?.as_str()?)
+        }
+        HarnessKind::Kimi => value
+            .get("expires_at")?
+            .as_i64()
+            .and_then(|seconds| seconds.checked_mul(1000)),
+        HarnessKind::Grok | HarnessKind::Deepseek => unreachable!("handled before JSON parsing"),
+    }
+}
+
+/// The `exp` claim of a JWT, in epoch milliseconds.
+///
+/// Only the payload is read, and only for its expiry. The signature is the
+/// issuer's business; Hel never accepts the token on anyone's behalf, so there
+/// is nothing here for a forged claim to unlock beyond an early refresh.
+fn jwt_expiry_millis(token: &str) -> Option<i64> {
+    use base64::Engine as _;
+
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims.get("exp")?.as_i64()?.checked_mul(1000)
 }
 
 /// Reject anything that is not a plausible credential document before it
@@ -756,11 +862,30 @@ mod tests {
         .unwrap()
     }
 
+    /// `exp` of the access token every Codex fixture carries.
+    const CODEX_FIXTURE_EXPIRY_SECONDS: i64 = 1_785_901_860;
+
+    /// A JWT shaped like a Codex access token: header, `exp` claim, and a
+    /// signature nothing here verifies.
+    fn codex_access_token(expiry_seconds: i64) -> String {
+        use base64::Engine as _;
+
+        let segment = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).unwrap())
+        };
+        format!(
+            "{}.{}.signature-is-never-checked",
+            segment(serde_json::json!({ "alg": "RS256", "typ": "JWT" })),
+            segment(serde_json::json!({ "exp": expiry_seconds, "sub": "account" })),
+        )
+    }
+
     fn codex_credentials(last_refresh: &str) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "auth_mode": "chatgpt",
             "tokens": {
-                "access_token": "access",
+                "access_token": codex_access_token(CODEX_FIXTURE_EXPIRY_SECONDS),
                 "refresh_token": "refresh",
                 "id_token": "id",
                 "account_id": "account",
@@ -894,6 +1019,78 @@ mod tests {
                 "{kind:?} freshness"
             );
         }
+    }
+
+    #[test]
+    fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
+        let fixtures = [
+            (
+                HarnessKind::Claude,
+                claude_credentials(1_755_000_000_000),
+                Some(1_755_000_000_000),
+            ),
+            (
+                HarnessKind::Codex,
+                codex_credentials("2026-08-05T02:51:00.864587231Z"),
+                Some(CODEX_FIXTURE_EXPIRY_SECONDS * 1_000),
+            ),
+            (
+                HarnessKind::Kimi,
+                kimi_credentials(1_755_000_000),
+                Some(1_755_000_000_000),
+            ),
+            (
+                HarnessKind::Grok,
+                grok_credentials(&["2026-08-17T02:19:01.724226598Z"]),
+                None,
+            ),
+            (HarnessKind::Deepseek, b"version: 1\n".to_vec(), None),
+        ];
+        for kind in HarnessKind::ALL {
+            let (_, bytes, expected) = fixtures
+                .iter()
+                .find(|(fixture, _, _)| *fixture == kind)
+                .unwrap_or_else(|| panic!("{kind:?} needs a credential fixture"));
+            assert_eq!(credential_expiry(kind, bytes), *expected, "{kind:?} expiry");
+        }
+    }
+
+    #[test]
+    fn codex_expiry_comes_from_the_access_token_rather_than_the_refresh_time() {
+        // `last_refresh` orders two copies; only the token itself says when the
+        // grant runs out, and the two are not the same number.
+        let bytes = codex_credentials("2026-08-05T02:51:00.864587231Z");
+        assert_eq!(
+            credential_freshness(HarnessKind::Codex, &bytes),
+            Some(1_785_898_260_864)
+        );
+        assert_eq!(
+            credential_expiry(HarnessKind::Codex, &bytes),
+            Some(CODEX_FIXTURE_EXPIRY_SECONDS * 1_000)
+        );
+    }
+
+    #[test]
+    fn unreadable_access_tokens_report_no_expiry() {
+        for access_token in [
+            serde_json::Value::from("not-a-jwt"),
+            serde_json::Value::from("header.not-base64!!.signature"),
+            serde_json::Value::from(format!("header.{}.signature", {
+                use base64::Engine as _;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"sub\":\"only\"}")
+            })),
+            serde_json::Value::Null,
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": { "access_token": access_token },
+                "last_refresh": "2026-08-05T02:51:00.864587231Z",
+            }))
+            .unwrap();
+            assert_eq!(credential_expiry(HarnessKind::Codex, &bytes), None);
+        }
+        assert_eq!(credential_expiry(HarnessKind::Codex, b"not json"), None);
+        assert_eq!(credential_expiry(HarnessKind::Claude, b"{}"), None);
     }
 
     #[test]
@@ -1310,6 +1507,66 @@ mod tests {
             read_github_token(&path).unwrap().0,
             GithubTokenSnapshot::absent()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_setup_tokens_round_trip_through_an_owner_only_profile_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert!(validate_claude_oauth_token(b"").is_err());
+        assert!(validate_claude_oauth_token(b"contains whitespace").is_err());
+        assert!(
+            validate_claude_oauth_token(&vec![b'x'; MAX_CLAUDE_OAUTH_TOKEN_BYTES + 1]).is_err()
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("profiles/claude");
+        let path = directory.join("claude-oauth-token");
+        assert_eq!(read_claude_oauth_token(&path).unwrap(), None);
+
+        write_claude_oauth_token(&path, b"sk-ant-oat01-example\n").unwrap();
+
+        assert_eq!(
+            read_claude_oauth_token(&path).unwrap().as_deref(),
+            Some("sk-ant-oat01-example")
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        // Rotating the token replaces the file in place.
+        write_claude_oauth_token(&path, b"sk-ant-oat01-second").unwrap();
+        assert_eq!(
+            read_claude_oauth_token(&path).unwrap().as_deref(),
+            Some("sk-ant-oat01-second")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_setup_token_reads_and_writes_refuse_symlink_destinations() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"keep").unwrap();
+        let path = root.path().join("claude-oauth-token");
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+
+        assert!(write_claude_oauth_token(&path, b"sk-ant-oat01-example").is_err());
+        assert!(read_claude_oauth_token(&path).is_err());
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_profile_setup_token_lives_beside_the_configuration_not_in_the_profile_home() {
+        let path = claude_oauth_token_path("claude-max");
+        assert!(path.ends_with("profiles/claude-max/claude-oauth-token"));
+        assert!(path.starts_with(crate::hel_config::config_dir()));
     }
 
     #[cfg(unix)]

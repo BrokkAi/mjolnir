@@ -47,8 +47,8 @@ pub(super) struct ModelPaths {
 }
 
 impl ModelPaths {
-    pub(super) fn in_cache(cache_root: PathBuf) -> Self {
-        let voice = cache_root.join("voice");
+    pub(super) fn in_user_cache(cache_root: PathBuf) -> Self {
+        let voice = cache_root.join("mjolnir").join("voice");
         let dir = voice.join(ASR_MODEL_DIR);
         Self {
             encoder: dir.join(ASR_ENCODER),
@@ -77,14 +77,11 @@ pub(super) fn has_model_data(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn hel_cache_dir() -> Result<PathBuf> {
-    dirs::cache_dir()
-        .map(|dir| dir.join("hel"))
-        .context("locate user cache directory")
-}
-
 pub(super) fn model_paths() -> Result<ModelPaths> {
-    Ok(ModelPaths::in_cache(hel_cache_dir()?))
+    let cache_root = dirs::cache_dir().context("locate user cache directory")?;
+    // Mjolnir 2.0 deliberately ignores legacy Hel voice models instead of
+    // silently sharing or migrating state from the old cache namespace.
+    Ok(ModelPaths::in_user_cache(cache_root))
 }
 
 /// Stream a URL to `dest`, reporting (downloaded, total) byte counts.
@@ -102,7 +99,7 @@ where
     let (progress_tx, progress_rx) = mpsc::channel::<(u64, Option<u64>)>();
     let worker = thread::spawn(move || -> Result<()> {
         let mut response = reqwest::blocking::Client::builder()
-            .user_agent("hel-voice-setup")
+            .user_agent("mjolnir-voice-setup")
             .build()
             .context("build download client")?
             .get(&url)
@@ -587,9 +584,10 @@ mod tests {
     }
 
     #[test]
-    fn model_paths_are_under_voice_cache() {
-        let paths = ModelPaths::in_cache(PathBuf::from("/cache/hel"));
-        let voice = PathBuf::from("/cache/hel").join("voice");
+    fn model_paths_use_the_mjolnir_voice_cache() {
+        let cache_root = PathBuf::from("test-user-cache");
+        let paths = ModelPaths::in_user_cache(cache_root.clone());
+        let voice = cache_root.join("mjolnir").join("voice");
         assert_eq!(
             paths.dir,
             voice.join("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
@@ -626,7 +624,7 @@ mod tests {
     #[test]
     fn zero_byte_model_files_are_not_installed() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = ModelPaths::in_cache(tmp.path().to_path_buf());
+        let paths = ModelPaths::in_user_cache(tmp.path().to_path_buf());
         std::fs::create_dir_all(&paths.dir).expect("create model dir");
         let files = [
             &paths.encoder,
