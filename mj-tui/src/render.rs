@@ -899,7 +899,8 @@ static EMPTY_ACTIVITY: std::sync::LazyLock<mj_chat::usage_format::SessionActivit
 
 /// The two column heads an expanded row puts in front of the agent's last
 /// lines: the turn and its step while a turn runs, the background work the
-/// agent left behind while it is idle, and otherwise the time it last spoke.
+/// agent left behind (with a blank beside it) while that runs, and otherwise
+/// the time it last spoke.
 fn dashboard_agent_prefixes(now_epoch_seconds: u64, detail: Option<&SessionDetail>) -> [String; 2] {
     let last_spoke = || {
         let time = detail
@@ -917,10 +918,14 @@ fn dashboard_agent_prefixes(now_epoch_seconds: u64, detail: Option<&SessionDetai
     );
     match columns.as_slice() {
         [turn, step] => [pad_dashboard_column(turn), pad_dashboard_column(step)],
-        // Background work takes the turn column and leaves the step column to
-        // the time the agent last spoke; `[idle]` says nothing worth a column.
+        // Background work takes the turn column. The turn is not over while
+        // it runs, so the time the agent last spoke stays off the row; the
+        // blank keeps the two excerpt lines aligned. `[idle]` says nothing
+        // worth a column.
         [background] if background.trim() != "[idle]" => {
-            [pad_dashboard_column(background), last_spoke()]
+            let background = pad_dashboard_column(background);
+            let blank = " ".repeat(background.len());
+            [background, blank]
         }
         _ => ["Agent:".into(), last_spoke()],
     }
@@ -2230,7 +2235,8 @@ mod tests {
         );
 
         // An idle agent with a command still running says so in the turn
-        // column and keeps the time it last spoke beside it.
+        // column and does not show the time it last spoke: the turn is not
+        // over while that work continues.
         let background = SessionDetail {
             last_activity_at_ms: Some(1_297_000),
             activity: mj_chat::usage_format::SessionActivity {
@@ -2244,7 +2250,7 @@ mod tests {
         };
         assert_eq!(
             dashboard_agent_prefixes(1_330, Some(&background)),
-            ["  BG  5m30s".to_owned(), format!("{activity_time:<6}")]
+            ["  BG  5m30s".to_owned(), " ".repeat("  BG  5m30s".len())]
         );
     }
 
