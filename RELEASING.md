@@ -62,8 +62,10 @@ already-published release.
 ## crates.io publishing
 
 `publish.yml` publishes `brokk-mj-voice-worker`, `brokk-mj-core`,
-`brokk-mj-tui`, `brokk-mj-desktop`, and `brokk-mjolnir` in dependency order:
-each library crate must reach the registry before anything that depends on it.
+`brokk-mj-worker`, `brokk-mj-controller`, `brokk-mj-chat`, `brokk-mj-tui`,
+`brokk-mj-desktop`, and `brokk-mjolnir` in that order, which is dependency
+order: each library crate must reach the registry before anything that depends
+on it.
 It refuses to publish when the tag differs from any workspace crate version. It
 assembles the whole workspace in one `cargo package --workspace --no-verify`
 run, because extracted packages cannot resolve same-release path dependencies

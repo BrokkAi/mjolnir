@@ -31,9 +31,14 @@ function projectPath(filename) {
     return relative;
   }
 
+  // Longer roots come first: every crate directory ends in `src/`, so the
+  // bare `src/` marker of the foundation crate has to be the last resort.
   for (const marker of [
     "mj-cli/src/",
     "mj-tui/src/",
+    "mj-worker/src/",
+    "mj-controller/src/",
+    "mj-chat/src/",
     "voice-worker/src/",
     "src/",
   ]) {
@@ -50,7 +55,7 @@ for (const file of data.files) {
   const modulePath = projectPath(file.filename);
   const percent = file.summary?.lines?.percent;
   if (
-    !/^(src|mj-(cli|tui)\/src|voice-worker\/src)\/.*\.rs$/.test(
+    !/^(src|mj-(cli|tui|worker|controller|chat)\/src|voice-worker\/src)\/.*\.rs$/.test(
       modulePath,
     ) ||
     !Number.isFinite(percent)

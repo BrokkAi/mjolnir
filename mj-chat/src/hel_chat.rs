@@ -210,6 +210,57 @@ struct QueuedPrompt {
     kind: QueuedCommandKind,
 }
 
+/// A submit the relay refused. The relay never saw it, so it is never
+/// journaled; the chat keeps the record beside the projected entries and
+/// draws it at the end of the transcript. The notice that reports the same
+/// failure is transient, and a user who was away would otherwise believe the
+/// prompt had been sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnsentPrompt {
+    kind: UnsentKind,
+    /// Exactly what was submitted, so accepting the same text later clears
+    /// this record.
+    text: String,
+    error: String,
+    recorded_at_ms: i64,
+}
+
+/// Which submit an [`UnsentPrompt`] stands for. A prompt and a shell command
+/// can carry the same text and are cleared independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnsentKind {
+    Prompt,
+    Shell,
+}
+
+impl UnsentKind {
+    /// The one wording both the notice and the transcript row use.
+    fn headline(self) -> &'static str {
+        match self {
+            Self::Prompt => "Prompt was not sent",
+            Self::Shell => "Shell command was not sent",
+        }
+    }
+}
+
+impl UnsentPrompt {
+    /// The transcript row for this record.
+    fn entry(&self, seq: u64) -> ChatEntry {
+        let mut entry = ChatEntry::plain(
+            seq,
+            ChatRole::System,
+            format!(
+                "{}: {}\n{}",
+                self.kind.headline(),
+                self.error,
+                queued_prompt_preview(&self.text)
+            ),
+        );
+        entry.recorded_at_ms = Some(self.recorded_at_ms);
+        entry
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanReviewFollowup {
     desired_active: bool,
@@ -294,6 +345,9 @@ pub struct ChatState {
     next_history_search_generation: u64,
     pending_history_search: Option<HistorySearchRequest>,
     queued_prompts: VecDeque<QueuedPrompt>,
+    /// Submits the relay refused, oldest first. Client-local: `apply_materialized`
+    /// rebuilds `entries` from the projection, which never saw these.
+    unsent_prompts: Vec<UnsentPrompt>,
     /// Queue entries optimistically moved back into the composer. A relay
     /// snapshot can still contain one until its removal command is projected,
     /// so keep its identity hidden across those stale snapshots.
@@ -405,6 +459,7 @@ impl ChatState {
             next_history_search_generation: 0,
             pending_history_search: None,
             queued_prompts: VecDeque::new(),
+            unsent_prompts: Vec::new(),
             pending_queue_removals: BTreeSet::new(),
             active_user_shells: Vec::new(),
             active_agent_terminals: Vec::new(),
@@ -1058,6 +1113,28 @@ impl ChatState {
             text: queued.text,
             kind: queued.kind,
         }
+    }
+
+    /// Keep a submit the relay refused, so the transcript still shows what was
+    /// lost once the notice has gone. Repeating the same failure replaces the
+    /// earlier record instead of stacking a second copy of it.
+    fn record_unsent_prompt(&mut self, kind: UnsentKind, text: String, error: String) {
+        self.unsent_prompts
+            .retain(|unsent| unsent.kind != kind || unsent.text != text);
+        self.unsent_prompts.push(UnsentPrompt {
+            kind,
+            text,
+            error,
+            recorded_at_ms: crate::clock::epoch_millis(),
+        });
+    }
+
+    /// Drop the record for a submit the relay has now accepted. Nothing else
+    /// clears one: a snapshot cannot, because the relay never saw the prompt,
+    /// and an unrelated prompt says nothing about this one.
+    fn clear_unsent_prompt(&mut self, kind: UnsentKind, text: &str) {
+        self.unsent_prompts
+            .retain(|unsent| unsent.kind != kind || unsent.text != text);
     }
 
     fn fail_queued_prompt_removal(&mut self, id: String, text: String, kind: QueuedCommandKind) {

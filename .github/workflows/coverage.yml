@@ -56,8 +56,10 @@ jobs:
     - name: Collect Mjolnir coverage
       run: |
         cargo llvm-cov --workspace --exclude brokk-mj-voice-worker --exclude brokk-mj-desktop --no-report --locked
-        cargo llvm-cov report -p brokk-mj-core -p brokk-mj-tui -p brokk-mjolnir --lcov --output-path coverage.lcov
-        cargo llvm-cov report -p brokk-mj-core -p brokk-mj-tui -p brokk-mjolnir --json --output-path coverage.json
+        # The four control-plane crates are one code base split by layer, so
+        # the report covers them together with the TUI and the `mj` binary.
+        cargo llvm-cov report -p brokk-mj-core -p brokk-mj-worker -p brokk-mj-controller -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir --lcov --output-path coverage.lcov
+        cargo llvm-cov report -p brokk-mj-core -p brokk-mj-worker -p brokk-mj-controller -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir --json --output-path coverage.json
 
     - name: Check coverage baseline
       run: node scripts/check-coverage.mjs coverage.json .github/coverage-baseline.json coverage-summary.md

@@ -8,7 +8,7 @@ use hel::hel_state::{QueuedCommandKind, config_command_text};
 use hel::hel_worker::RelayCommand;
 use mj_controller::hel_session_manager::{ManagedSessionHandle, SessionManagerControl};
 
-use super::{ChatState, PlanControl, PlanReviewFollowup, queued_prompt_preview};
+use super::{ChatState, PlanControl, PlanReviewFollowup, UnsentKind, queued_prompt_preview};
 
 const CHAT_REMOTE_QUEUE_CAPACITY: usize = 32;
 const SESSION_ACTOR_REPLACEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -701,30 +701,40 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         ChatRemoteResult::Prompt {
             text,
             result: Ok(ordinal),
-        } => chat.set_notice(format!(
-            "Prompt accepted by relay at {ordinal}: {}",
-            queued_prompt_preview(&text)
-        )),
+        } => {
+            // The same text has now reached the relay, so the record of the
+            // earlier refusal has nothing left to report.
+            chat.clear_unsent_prompt(UnsentKind::Prompt, &text);
+            chat.set_notice(format!(
+                "Prompt accepted by relay at {ordinal}: {}",
+                queued_prompt_preview(&text)
+            ));
+        }
         ChatRemoteResult::Prompt {
             text,
             result: Err(error),
         } => {
             restore_unsent_input(chat, &text);
-            chat.set_notice(format!("Prompt was not sent: {error}"));
+            chat.set_notice(format!("{}: {error}", UnsentKind::Prompt.headline()));
+            chat.record_unsent_prompt(UnsentKind::Prompt, text, error);
         }
         ChatRemoteResult::RunShell {
             command,
             result: Ok(ordinal),
-        } => chat.set_notice(format!(
-            "Shell command accepted by relay at {ordinal}: {}",
-            queued_prompt_preview(&command)
-        )),
+        } => {
+            chat.clear_unsent_prompt(UnsentKind::Shell, &command);
+            chat.set_notice(format!(
+                "Shell command accepted by relay at {ordinal}: {}",
+                queued_prompt_preview(&command)
+            ));
+        }
         ChatRemoteResult::RunShell {
             command,
             result: Err(error),
         } => {
             restore_unsent_input(chat, &format!("!{command}"));
-            chat.set_notice(format!("Shell command was not sent: {error}"));
+            chat.set_notice(format!("{}: {error}", UnsentKind::Shell.headline()));
+            chat.record_unsent_prompt(UnsentKind::Shell, command, error);
         }
         ChatRemoteResult::RemoveQueuedPrompt { result: Ok(()), .. } => {
             chat.set_notice("Queued prompt removed")
@@ -841,7 +851,16 @@ pub(super) fn queue_chat_remote_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hel_chat::test_support::snapshot;
+    use crate::hel_chat::test_support::{snapshot, transcript_text};
+    use crate::hel_state::MaterializedSession;
+
+    /// Whether any transcript row contains `text`, at a width wide enough that
+    /// nothing under test wraps.
+    fn transcript_shows(chat: &mut ChatState, text: &str) -> bool {
+        transcript_text(chat, 100)
+            .iter()
+            .any(|line| line.contains(text))
+    }
 
     #[tokio::test]
     async fn prompt_reacquires_replacement_actor_before_dispatch() {
@@ -970,6 +989,116 @@ mod tests {
         );
 
         assert_eq!(chat.input, "!cargo test");
+    }
+
+    #[test]
+    fn a_refused_prompt_stays_in_the_transcript_after_a_projection_rebuild() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("later draft".into());
+
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::Prompt {
+                text: "read the journal\nand summarise it".into(),
+                result: Err("relay attach failed".into()),
+            },
+        );
+
+        // The transient notice and the composer restore are unchanged.
+        assert_eq!(
+            chat.notice().as_deref(),
+            Some("Prompt was not sent: relay attach failed")
+        );
+        assert_eq!(
+            chat.input,
+            "read the journal\nand summarise it\n\nlater draft"
+        );
+        assert!(transcript_shows(
+            &mut chat,
+            "Prompt was not sent: relay attach failed"
+        ));
+        assert!(transcript_shows(
+            &mut chat,
+            "read the journal and summarise it"
+        ));
+        // The row is timestamped like the rest of the transcript.
+        assert!(transcript_shows(&mut chat, "Mjolnir · "));
+
+        // A newer projection rebuilds the entries; the record is client-local
+        // and the relay never saw the prompt, so it has to outlive that.
+        let mut session = MaterializedSession::empty("1234567890");
+        session.applied_event_ordinal = 9;
+        chat.apply_materialized(&session, &[], &[]);
+
+        assert!(transcript_shows(
+            &mut chat,
+            "Prompt was not sent: relay attach failed"
+        ));
+    }
+
+    #[test]
+    fn only_accepting_the_same_text_clears_a_refused_prompt() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::Prompt {
+                text: "read the journal".into(),
+                result: Err("relay attach failed".into()),
+            },
+        );
+
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::Prompt {
+                text: "something else entirely".into(),
+                result: Ok(11),
+            },
+        );
+        assert!(transcript_shows(
+            &mut chat,
+            "Prompt was not sent: relay attach failed"
+        ));
+
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::Prompt {
+                text: "read the journal".into(),
+                result: Ok(12),
+            },
+        );
+        assert!(!transcript_shows(&mut chat, "Prompt was not sent"));
+    }
+
+    #[test]
+    fn a_refused_shell_command_is_recorded_the_same_way() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::RunShell {
+                command: "cargo test".into(),
+                result: Err("relay attach failed".into()),
+            },
+        );
+
+        assert_eq!(chat.input, "!cargo test");
+        assert_eq!(
+            chat.notice().as_deref(),
+            Some("Shell command was not sent: relay attach failed")
+        );
+        assert!(transcript_shows(
+            &mut chat,
+            "Shell command was not sent: relay attach failed"
+        ));
+
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::RunShell {
+                command: "cargo test".into(),
+                result: Ok(4),
+            },
+        );
+        assert!(!transcript_shows(&mut chat, "Shell command was not sent"));
     }
 
     #[test]
