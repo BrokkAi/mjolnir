@@ -2447,9 +2447,9 @@ mod tests {
             executor.purposes.into_inner(),
             vec![
                 "export target checkpoint".to_owned(),
-                "stage replacement Hel worker".to_owned(),
-                "replace installed Hel worker".to_owned(),
-                "make replaced Hel worker executable".to_owned(),
+                "stage replacement Mjolnir worker".to_owned(),
+                "replace installed Mjolnir worker".to_owned(),
+                "make replaced Mjolnir worker executable".to_owned(),
                 "export target checkpoint".to_owned(),
             ]
         );
@@ -2534,9 +2534,9 @@ mod tests {
                 "export target checkpoint".to_owned(),
                 "upload checkpoint specification".to_owned(),
                 "export target checkpoint".to_owned(),
-                "stage replacement Hel worker".to_owned(),
-                "replace installed Hel worker".to_owned(),
-                "make replaced Hel worker executable".to_owned(),
+                "stage replacement Mjolnir worker".to_owned(),
+                "replace installed Mjolnir worker".to_owned(),
+                "make replaced Mjolnir worker executable".to_owned(),
                 "export target checkpoint".to_owned(),
             ]
         );

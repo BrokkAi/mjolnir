@@ -212,7 +212,7 @@ impl Controller {
             binary_refresh: worker_binary_refresh_plan(&backend, session_id)?,
             launch_refresh: Some(worker_launch_refresh_plan(&backend, session_id, &launch)?),
             restart: CommandPlan {
-                description: format!("restart Hel worker for session {session_id}"),
+                description: format!("restart Mjolnir worker for session {session_id}"),
                 commands: vec![
                     stop_worker_command(&backend, &worker_root),
                     start_worker_command(&backend, &worker_root),
@@ -626,14 +626,14 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
     {
         return Ok(WorkerBinaryAvailability::Local {
             path: stable_running_executable(&current)?,
-            source: "native musl Hel binary".into(),
+            source: "native musl mj binary".into(),
         });
     }
     let mut candidates = Vec::new();
     if let Some(directory) = current.parent() {
         candidates.push((
             packaged_worker_binary_path(directory, &triple),
-            "beside the Hel binary",
+            "beside the mj binary",
         ));
         candidates.push((directory.join("hel"), "beside the running executable"));
         // Development checkout: a controller at target/<profile>/hel finds its
@@ -661,7 +661,7 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
     {
         return Ok(WorkerBinaryAvailability::Local {
             path: stable_running_executable(&current)?,
-            source: "native Linux Hel binary".into(),
+            source: "native Linux mj binary".into(),
         });
     }
     if let Some(template) = crate::hel_config::env_override("WORKER_URL") {
@@ -692,7 +692,7 @@ fn stable_running_executable(current: &Path) -> Result<PathBuf> {
     }
     #[cfg(not(target_os = "linux"))]
     bail!(
-        "resolved Hel controller executable is no longer readable: {}",
+        "resolved Mjolnir controller executable is no longer readable: {}",
         current.display()
     )
 }
@@ -705,7 +705,7 @@ fn materialize_running_executable(
 ) -> Result<PathBuf> {
     if !proc_exe.is_file() {
         bail!(
-            "resolved Hel controller executable is no longer readable: {}",
+            "resolved Mjolnir controller executable is no longer readable: {}",
             current.display()
         );
     }
@@ -716,7 +716,7 @@ fn materialize_running_executable(
         .with_context(|| format!("create worker executable cache {}", parent.display()))?;
     std::fs::copy(proc_exe, cached).with_context(|| {
         format!(
-            "copy running Hel executable from {} after {} was replaced",
+            "copy running mj executable from {} after {} was replaced",
             proc_exe.display(),
             current.display()
         )
@@ -1125,7 +1125,7 @@ fn install_worker_files(
                         format!("{worker_root}/hel"),
                     ],
                 )
-                .purpose("install local Hel worker"),
+                .purpose("install local Mjolnir worker"),
                 CommandSpec::new(
                     "cp",
                     [
@@ -1143,7 +1143,7 @@ fn install_worker_files(
                 )
                 .purpose("install local worker ownership marker"),
                 CommandSpec::new("chmod", ["700", &format!("{worker_root}/hel")])
-                    .purpose("make local Hel worker executable"),
+                    .purpose("make local Mjolnir worker executable"),
             ] {
                 execute_checked(executor, command)?;
             }
@@ -1178,7 +1178,7 @@ fn install_worker_files(
                         format!("{container_id}:{worker_root}/hel"),
                     ],
                 )
-                .purpose("upload Hel worker"),
+                .purpose("upload Mjolnir worker"),
                 CommandSpec::new(
                     engine,
                     [
@@ -1216,7 +1216,7 @@ fn install_worker_files(
                         format!("{worker_root}/hel"),
                     ],
                 )
-                .purpose("make Hel worker executable"),
+                .purpose("make Mjolnir worker executable"),
                 CommandSpec::new(
                     engine,
                     [
@@ -1261,7 +1261,7 @@ fn install_worker_files(
             let cached = matches!(
                 executor.execute(
                     &ssh_command_spec(ssh, ["test", "-f", &cached_worker])
-                        .purpose("probe cached remote Hel worker"),
+                        .purpose("probe cached remote Mjolnir worker"),
                 ),
                 Ok(output) if output.status == 0
             );
@@ -1282,7 +1282,7 @@ fn install_worker_files(
                 execute_checked(
                     executor,
                     ssh_command_spec(ssh, ["mv", &partial, &cached_worker])
-                        .purpose("publish cached remote Hel worker"),
+                        .purpose("publish cached remote Mjolnir worker"),
                 )?;
             }
             let upload = format!(".cache/mjolnir/uploads/{session_id}");
@@ -1471,11 +1471,11 @@ fn installed_worker_binary_replacement_plan(
                 "cp",
                 [worker_binary.to_string_lossy().into_owned(), staged.clone()],
             )
-            .purpose("stage replacement Hel worker"),
+            .purpose("stage replacement Mjolnir worker"),
             CommandSpec::new("mv", ["-f", &staged, &installed])
-                .purpose("replace installed Hel worker"),
+                .purpose("replace installed Mjolnir worker"),
             CommandSpec::new("chmod", ["700", &installed])
-                .purpose("make replaced Hel worker executable"),
+                .purpose("make replaced Mjolnir worker executable"),
         ],
         hel_targets::TargetLocator::LocalPodman { container_id }
         | hel_targets::TargetLocator::LocalDocker { container_id }
@@ -1495,7 +1495,7 @@ fn installed_worker_binary_replacement_plan(
                         format!("{container_id}:{staged}"),
                     ],
                 )
-                .purpose("stage replacement Hel worker"),
+                .purpose("stage replacement Mjolnir worker"),
                 CommandSpec::new(
                     engine,
                     [
@@ -1507,7 +1507,7 @@ fn installed_worker_binary_replacement_plan(
                         installed.clone(),
                     ],
                 )
-                .purpose("replace installed Hel worker"),
+                .purpose("replace installed Mjolnir worker"),
                 CommandSpec::new(
                     engine,
                     [
@@ -1518,17 +1518,17 @@ fn installed_worker_binary_replacement_plan(
                         installed,
                     ],
                 )
-                .purpose("make replaced Hel worker executable"),
+                .purpose("make replaced Mjolnir worker executable"),
             ]
         }
         hel_targets::TargetLocator::AwsEc2 { ssh, .. }
         | hel_targets::TargetLocator::SshBare { ssh, .. } => vec![
             scp_command_spec(ssh, worker_binary, &staged, false)
-                .purpose("stage replacement Hel worker"),
+                .purpose("stage replacement Mjolnir worker"),
             ssh_command_spec(ssh, ["mv", "-f", "--", &staged, &installed])
-                .purpose("replace installed Hel worker"),
+                .purpose("replace installed Mjolnir worker"),
             ssh_command_spec(ssh, ["chmod", "700", &installed])
-                .purpose("make replaced Hel worker executable"),
+                .purpose("make replaced Mjolnir worker executable"),
         ],
         hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
             let upload = format!(".cache/mjolnir/uploads/{session_id}-hel.next");
@@ -1536,12 +1536,12 @@ fn installed_worker_binary_replacement_plan(
                 ssh_command_spec(ssh, ["mkdir", "-p", ".cache/mjolnir/uploads"])
                     .purpose("create remote replacement worker staging"),
                 scp_command_spec(ssh, worker_binary, &upload, false)
-                    .purpose("stage replacement Hel worker"),
+                    .purpose("stage replacement Mjolnir worker"),
                 ssh_command_spec(
                     ssh,
                     ["podman", "cp", &upload, &format!("{container_id}:{staged}")],
                 )
-                .purpose("stage replacement Hel worker"),
+                .purpose("stage replacement Mjolnir worker"),
                 ssh_command_spec(
                     ssh,
                     [
@@ -1555,19 +1555,19 @@ fn installed_worker_binary_replacement_plan(
                         &installed,
                     ],
                 )
-                .purpose("replace installed Hel worker"),
+                .purpose("replace installed Mjolnir worker"),
                 ssh_command_spec(
                     ssh,
                     ["podman", "exec", container_id, "chmod", "700", &installed],
                 )
-                .purpose("make replaced Hel worker executable"),
+                .purpose("make replaced Mjolnir worker executable"),
                 ssh_command_spec(ssh, ["rm", "-f", "--", &upload])
                     .purpose("remove remote replacement worker staging"),
             ]
         }
     };
     Ok(CommandPlan {
-        description: format!("replace stale Hel worker for session {session_id}"),
+        description: format!("replace stale Mjolnir worker for session {session_id}"),
         commands,
     })
 }
@@ -1633,17 +1633,17 @@ fn worker_launch_refresh_plan(
             ["podman", "exec", "-i", container_id, "sh", "-c", &script],
         ),
     }
-    .purpose("replace stale Hel worker launch config")
+    .purpose("replace stale Mjolnir worker launch config")
     .with_sensitive_stdin(body);
     Ok(WorkerLaunchRefreshPlan {
         expected_sha256,
         installed_digest: installed_file_digest_command(
             locator,
             &installed,
-            "identify installed Hel worker launch config",
+            "identify installed Mjolnir worker launch config",
         ),
         replace: CommandPlan {
-            description: format!("replace stale Hel launch config for session {session_id}"),
+            description: format!("replace stale Mjolnir launch config for session {session_id}"),
             commands: vec![replace],
         },
     })
@@ -1682,7 +1682,7 @@ fn worker_binary_refresh_plan(
         installed_digest: installed_file_digest_command(
             locator,
             &installed,
-            "identify installed Hel worker binary",
+            "identify installed Mjolnir worker binary",
         ),
     }))
 }
@@ -1710,7 +1710,7 @@ pub(super) fn stop_worker_after_target_recovery(
 ) -> Result<()> {
     let target = hel_targets::target_recovery_plan(locator, session_id)?;
     hel_targets::ensure_recovery_target_running(executor, target.as_ref())
-        .context("restore Hel worker target")?;
+        .context("restore Mjolnir worker target")?;
     stop_worker(executor, locator, worker_root)
 }
 
@@ -1735,7 +1735,7 @@ fn stop_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str) 
             ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
         }
     }
-    .purpose("stop Hel worker daemon")
+    .purpose("stop Mjolnir worker daemon")
 }
 
 fn worker_liveness_command(locator: &hel_targets::TargetLocator, worker_root: &str) -> CommandSpec {
@@ -1759,7 +1759,7 @@ fn worker_liveness_command(locator: &hel_targets::TargetLocator, worker_root: &s
             ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
         }
     }
-    .purpose("probe Hel worker daemon liveness")
+    .purpose("probe Mjolnir worker daemon liveness")
 }
 
 pub(super) fn start_worker(
@@ -2090,7 +2090,7 @@ mod tests {
 
         let commands = executor.commands.borrow();
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].purpose, "stop Hel worker daemon");
+        assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
         assert!(
             commands[0]
                 .args
@@ -2182,7 +2182,7 @@ mod tests {
                 "inspect Hel session container",
                 "start stopped Hel session container",
                 "inspect Hel session container",
-                "stop Hel worker daemon",
+                "stop Mjolnir worker daemon",
             ]
         );
     }
