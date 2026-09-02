@@ -192,9 +192,18 @@ conversation and asking to work in it are the same gesture.
 Tab leaves the dial where you set it.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
-`F3` opens the workspace picker, `F4` the web viewer, `Alt+N` creates a
-session, `Alt+A` marks everything read, `Alt+X` cancels whatever the selected
-session is in the middle of, `Alt+G` turns the pane dial, and `Alt+Q` detaches.
+`F2` opens the command palette, `F3` the workspace picker, `F4` the web
+viewer, `Alt+N` creates a session, `Alt+A` marks everything read, `Alt+X`
+cancels whatever the selected session is in the middle of, `Alt+G` turns the
+pane dial, and `Alt+Q` detaches.
+
+`F2` is the way to reach a command you have no key for. It lists the selected
+session's own commands first — rename it, edit its container settings, stop it
+— under a heading naming that session, then the commands for the pane you are
+in, then everything that works anywhere, each with the key that runs it. Type
+to filter by name or description, `Up`/`Down` to move, `Enter` to run, `Escape`
+to close. Commands that cannot run right now stay in the list, greyed, with the
+reason.
 
 In Prompt, `Alt+R` searches your prompt history and `Alt+T` switches the
 transcript between rendered and raw. Every `Ctrl` key in Prompt is a text
@@ -216,9 +225,9 @@ starting or stopping.
 
 The panes take plain keys, because the composer is a separate focus and never
 sees them. On Sessions: `Enter` opens the selection, `n` creates a session, `s`
-opens Resume, `e` edits, `a` marks everything read, `Space` and `1`–`9`
-collapse and expand projects. Cancelling an operation in flight is `Alt+X`,
-which works from any pane. On Targets and Quota:
+opens Resume, `a` marks everything read, `Space` and `1`–`9` collapse and
+expand projects; a session's own commands are on `F2`. Cancelling an operation
+in flight is `Alt+X`, which works from any pane. On Targets and Quota:
 `r` refreshes and `Enter` or `e` opens that row's actions. Every list also takes
 the arrow keys, `j`/`k`, `Ctrl+N`/`Ctrl+P`, and `Home`/`End`.
 

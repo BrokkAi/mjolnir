@@ -16,17 +16,11 @@ use crate::dialogs::{ConfirmDialog, Confirmation};
 use crate::{DashboardAction, DashboardState, Focus};
 
 /// One thing the surface can be asked to do.
-///
-/// The command palette (`F2`, a later milestone) will add its own id; until it
-/// exists there is deliberately no `Palette` entry, because the help overlay
-/// lists every entry in this enum and must not advertise a command that does
-/// nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
     OpenSession,
     NewSession,
     ResumeDialog,
-    SessionCommands,
     RenameSession,
     ContainerSettings,
     StopSession,
@@ -43,6 +37,7 @@ pub enum CommandId {
     Workspaces,
     WebViewer,
     QuitDetach,
+    Palette,
     Help,
 }
 
@@ -319,15 +314,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: selected_session_ready,
     },
     CommandSpec {
-        id: CommandId::SessionCommands,
-        label: "Session commands",
-        description: "Open the selected session's rename, container, and stop actions.",
-        scope: Scope::Session,
-        keys: &[KeyHint::plain(KeyCode::Char('e'), "e")],
-        footer: footer_word!("edit"),
-        available: session_idle,
-    },
-    CommandSpec {
         id: CommandId::RenameSession,
         label: "Rename session",
         description: "Give the selected session your own title.",
@@ -451,6 +437,15 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::Palette,
+        label: "Command palette",
+        description: "Search every command that applies right now and run one.",
+        scope: Scope::Global,
+        keys: &[KeyHint::plain(KeyCode::F(2), "F2")],
+        footer: footer_word!("commands"),
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::Help,
         label: "Help",
         description: "List every key this surface answers.",
@@ -472,11 +467,11 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 /// on the Sessions pane, `a`, `?`) stay pane keys, because the composer reads
 /// a bare letter as text.
 ///
-/// `F2` is deliberately absent: it opens the command palette, which arrives in
-/// its own milestone, and its old workspace-picker binding has already moved
-/// to `F3`.
+/// `F2` opens the command palette; its old workspace-picker binding moved to
+/// `F3`.
 const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::Help,
+    CommandId::Palette,
     CommandId::Workspaces,
     CommandId::WebViewer,
     CommandId::NewSession,
@@ -604,8 +599,8 @@ impl DashboardState {
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::NewSession => self.begin_new(),
             CommandId::ResumeDialog => DashboardAction::OpenResumeDialog,
-            CommandId::SessionCommands => {
-                self.begin_session_edit();
+            CommandId::Palette => {
+                self.begin_palette();
                 DashboardAction::None
             }
             CommandId::RenameSession => {

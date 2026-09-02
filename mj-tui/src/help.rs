@@ -242,6 +242,11 @@ mod tests {
                 );
             }
         }
+        // The palette is a command like any other, so the reference names it
+        // and its key: a user who cannot find F1 can still find F2 from here,
+        // and the other way round.
+        assert!(rendered.contains("Command palette"), "{rendered}");
+        assert!(rendered.contains("F2"), "{rendered}");
         assert!(rendered.contains("Composer"), "{rendered}");
     }
 

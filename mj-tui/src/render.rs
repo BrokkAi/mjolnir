@@ -22,7 +22,7 @@ use hel::hel_targets::DeploymentCapacityKind;
 use crate::dialogs::{
     render_config_id_editor, render_confirmation, render_container_editor,
     render_import_bundle_confirmation, render_import_progress, render_rename_editor,
-    render_repository_origin, render_session_edit, render_target_actions, render_web_dialog,
+    render_repository_origin, render_target_actions, render_web_dialog,
 };
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
@@ -78,7 +78,6 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::RepositoryOrigin(dialog) => {
             render_repository_origin(frame, area, dialog, &mut surfaces)
         }
-        Mode::SessionEdit(dialog) => render_session_edit(frame, area, dialog, &mut surfaces),
         Mode::ConfigId(editor) => render_config_id_editor(frame, area, editor, &mut surfaces),
         Mode::TargetActions(dialog) => {
             render_target_actions(frame, area, dashboard, dialog, &mut surfaces)
@@ -93,6 +92,9 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::Confirm(dialog) => render_confirmation(frame, area, dialog, &mut surfaces),
         Mode::Help(overlay) => {
             crate::help::render_help(frame, area, dashboard, overlay, &mut surfaces)
+        }
+        Mode::Palette(palette) => {
+            crate::palette::render_palette(frame, area, dashboard, palette, &mut surfaces)
         }
         Mode::Dashboard => {}
     }
@@ -2012,10 +2014,12 @@ mod tests {
     fn a_modal_overlays_the_dashboard_instead_of_replacing_it() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_workspace_name("UNDERLYING DASHBOARD SENTINEL".into());
-        assert_eq!(
-            dashboard.handle_key(crate::test_support::key(KeyCode::Char('e'))),
-            DashboardAction::None
-        );
+        // The rename editor is reached through the command palette now.
+        dashboard.focus_sessions();
+        dashboard.handle_key(crate::test_support::key(KeyCode::F(2)));
+        for character in "rename".chars() {
+            dashboard.handle_key(crate::test_support::key(KeyCode::Char(character)));
+        }
         assert_eq!(
             dashboard.handle_key(crate::test_support::key(KeyCode::Enter)),
             DashboardAction::None

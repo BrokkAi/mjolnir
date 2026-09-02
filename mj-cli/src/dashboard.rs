@@ -899,7 +899,7 @@ impl DashboardContext {
                     dashboard.set_config(controller.config.clone());
                     dashboard.set_state(controller.state.clone());
                     dashboard
-                        .set_notice("Setup complete. Press Ctrl+N to start your first session.");
+                        .set_notice("Setup complete. Press Alt-N to start your first session.");
                 }
                 SetupOutcome::Cancelled => return Ok(None),
             }

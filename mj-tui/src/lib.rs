@@ -29,10 +29,11 @@ use hel::hel_targets::AdditionalMount;
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
     ImportBundleConfirmation, ImportProgress, RenameEditor, RenameFocus, RepositoryOriginDialog,
-    SessionEditDialog, TargetActionsDialog, WebDialog,
+    TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
+use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
 use crate::wizards::{MountFocus, NewWizard, ResumeWizard, WizardStep};
 
@@ -41,6 +42,7 @@ mod combined;
 mod dialogs;
 mod help;
 mod ingest;
+mod palette;
 mod render;
 mod resume;
 mod widgets;
@@ -310,7 +312,6 @@ pub(crate) enum Mode {
     /// The unified picker for every session that is not live.
     ResumeDialog(ResumeDialog),
     RepositoryOrigin(RepositoryOriginDialog),
-    SessionEdit(SessionEditDialog),
     ConfigId(ConfigIdEditor),
     TargetActions(TargetActionsDialog),
     Web(WebDialog),
@@ -322,6 +323,8 @@ pub(crate) enum Mode {
     /// The `F1` key reference, drawn over the mode it opened on top of. It
     /// carries that mode so closing help puts it back untouched.
     Help(HelpOverlay),
+    /// The `F2` command palette: every command that applies right now.
+    Palette(CommandPalette),
 }
 
 /// What a key press means for a focusable button row.
@@ -668,13 +671,17 @@ impl DashboardState {
         if matches!(self.mode, Mode::ResumeDialog(_)) {
             return self.handle_resume_dialog_key(key);
         }
+        // The palette is edited where it lives too: its entry list is rebuilt
+        // on every keystroke and there is no reason to copy it first.
+        if matches!(self.mode, Mode::Palette(_)) {
+            return self.handle_palette_key(key);
+        }
         match self.mode.clone() {
             Mode::Dashboard => self.handle_dashboard_key(key),
             Mode::New(wizard) => self.handle_new_key(key, wizard),
             Mode::Resume(wizard) => self.handle_resume_key(key, wizard),
             Mode::ResumeDialog(_) => unreachable!("the resume dialog is handled in place"),
             Mode::RepositoryOrigin(dialog) => self.handle_repository_origin_key(key, dialog),
-            Mode::SessionEdit(dialog) => self.handle_session_edit_key(key, dialog),
             Mode::ConfigId(editor) => self.handle_config_id_key(key, editor),
             Mode::TargetActions(dialog) => self.handle_target_actions_key(key, dialog),
             Mode::Web(_) => match key.code {
@@ -696,6 +703,7 @@ impl DashboardState {
             }
             Mode::Confirm(dialog) => self.handle_confirmation_key(key, dialog),
             Mode::Help(overlay) => self.handle_help_key(key, overlay),
+            Mode::Palette(_) => unreachable!("the command palette is handled in place"),
         }
     }
 
@@ -705,6 +713,9 @@ impl DashboardState {
             Mode::RepositoryOrigin(dialog) => dialog.focus == dialogs::RepositoryOriginFocus::Field,
             Mode::EditContainer(editor) => editor.field().is_some(),
             Mode::ResumeDialog(dialog) => dialog.focus == crate::resume::ResumeFocus::Search,
+            // The palette's query is a text field, so Ctrl-C closes it and a
+            // paste lands in the query rather than on the dashboard.
+            Mode::Palette(_) => true,
             Mode::New(wizard) => wizard.text_input_focused(),
             Mode::Resume(wizard) => wizard.text_input_focused(),
             Mode::Confirm(ConfirmDialog {
@@ -718,6 +729,13 @@ impl DashboardState {
     pub fn handle_paste(&mut self, pasted: &str) {
         let pasted = single_line_paste(pasted);
         if pasted.is_empty() {
+            return;
+        }
+        // The palette rebuilds its list from the query, so its paste is
+        // handled before the borrow the match below takes.
+        if let Mode::Palette(palette) = &mut self.mode {
+            palette.query.push_str(&pasted);
+            self.rebuild_palette_entries();
             return;
         }
         match &mut self.mode {
@@ -963,23 +981,6 @@ impl DashboardState {
         }
     }
 
-    fn reject_selected_operation(&mut self) -> bool {
-        let operation = self.selected_session().and_then(|session| {
-            self.session_operations
-                .get(&session.id)
-                .map(|operation| operation.kind)
-        });
-        if let Some(operation) = operation {
-            self.notices.set(format!(
-                "{} is in progress; press x to cancel it.",
-                operation.label()
-            ));
-            true
-        } else {
-            false
-        }
-    }
-
     /// Opens the selected session's conversation and hands the keyboard to its
     /// composer.
     ///
@@ -996,7 +997,7 @@ impl DashboardState {
         };
         if let Some(operation) = self.session_operations.get(&session.id) {
             self.notices.set(format!(
-                "{} is in progress; press x to cancel it.",
+                "{} is in progress; press Alt-X to cancel it.",
                 operation.kind.label()
             ));
             return DashboardAction::None;
@@ -1434,6 +1435,25 @@ mod tests {
 
     use crate::render::render;
 
+    /// Opens the rename editor the way the surface offers it now: `F2`, type
+    /// enough of "rename" to pick it out, Enter. There is no `e` any more.
+    fn open_rename_through_the_palette(dashboard: &mut DashboardState) {
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::F(2)));
+        for character in "rename".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(
+            matches!(dashboard.mode, Mode::Rename(_)),
+            "{:?}",
+            dashboard.mode
+        );
+    }
+
     /// The composer is a separate focus, so a pane's actions are plain
     /// letters: nothing typed at a pane can be mistaken for prompt text.
     #[test]
@@ -1453,12 +1473,13 @@ mod tests {
         );
         assert!(matches!(dashboard.mode, Mode::New(_)));
         dashboard.cancel_modal();
+        // `e` was the session edit dialog's key. The command palette replaced
+        // that dialog, so nothing answers `e` on the Sessions pane now.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('e'))),
             DashboardAction::None
         );
-        assert!(matches!(dashboard.mode, Mode::SessionEdit(_)));
-        dashboard.cancel_modal();
+        assert_eq!(dashboard.mode, Mode::Dashboard);
         // A pane key that belongs to a different pane does nothing here.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('r'))),
@@ -1962,14 +1983,7 @@ mod tests {
         running.state = SessionState::Running;
         running.checkpoint = None;
         let mut rename = dashboard_with_session(running);
-        assert_eq!(
-            rename.handle_key(key(KeyCode::Char('e'))),
-            DashboardAction::None
-        );
-        assert_eq!(
-            rename.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
+        open_rename_through_the_palette(&mut rename);
 
         let mut importing = dashboard_with_session(stopped_session());
         importing.show_import_progress("Chosen session".into());
@@ -2167,8 +2181,7 @@ mod tests {
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
 
-        dashboard.handle_key(key(KeyCode::Char('e')));
-        dashboard.handle_key(key(KeyCode::Enter));
+        open_rename_through_the_palette(&mut dashboard);
         let Mode::Rename(editor) = &mut dashboard.mode else {
             panic!("expected rename editor")
         };

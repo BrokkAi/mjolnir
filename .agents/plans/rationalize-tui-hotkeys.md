@@ -21,7 +21,9 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
 - [x] (2026-09-01 00:00Z) M2. Added `global_chord()` and `DashboardState::global_chord_allowed()` to `mj-tui/src/actions.rs`, replaced `workspace_picker_event` in `mj-cli/src/dashboard.rs` with `global_chord_event` at the top of the batching loop, moved the F-keys (`F3` workspaces, `F4` web viewer, `F2` left unbound for the palette), turned `Ctrl-G`/`Ctrl-Q`/`Ctrl-R`/`Ctrl-T`/`Ctrl-X` into `Alt-G`/`Alt-Q`/`Alt-R`/`Alt-T`/`Alt-X`, added `Alt-N` and `Alt-A` from anywhere, extracted `ActiveChat::detach()`, and updated `README.md`.
 - [x] (2026-09-01 00:00Z) M2 tests. Twelve named tests added (eight in `mj-cli/src/dashboard.rs`, three in `mj-tui/src/lib.rs`, three in the root crate) plus one regression test for the empty-grid crash the move uncovered; the footer- and key-asserting tests in `render.rs`, `resume.rs`, `active.rs`, `history.rs`, `lib.rs`, and `termination_pty.rs` were updated to the new map.
 - [x] (2026-09-01 00:00Z) M2 validation. `cargo test -p brokk-mj-tui` 256 passed, `cargo test -p brokk-mjolnir` green (including the PTY detach test, now driven by `Alt-Q`), `cargo test --lib hel_chat` 249 passed, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
-- [ ] M3. The command palette (`mj-tui/src/palette.rs`, `Mode::Palette`), and removal of the session edit dialog and its `e` binding.
+- [x] (2026-09-01 00:00Z) M3. Added `mj-tui/src/palette.rs` (`Mode::Palette`, `begin_palette`, `handle_palette_key`, `palette_entries`, `render_palette`), added `CommandId::Palette` on `F2` as a global chord, deleted `SessionEditDialog` with its `begin_session_edit`/`handle_session_edit_key`/`render_session_edit` and `Mode::SessionEdit`, unbound `e`, and updated `README.md`.
+- [x] (2026-09-01 00:00Z) M3 tests. Nine named tests added in `mj-tui/src/palette.rs`; the M1 help test now asserts the palette entry and its key; the key-driven fixtures in `mj-tui/src/dialogs.rs` and the three tests in `mj-tui/src/lib.rs` and `mj-tui/src/render.rs` that pressed `e` now go through the palette.
+- [x] (2026-09-01 00:00Z) M3 validation. `cargo test -p brokk-mj-tui` 265 passed, `cargo test -p brokk-mjolnir` green, `cargo test --lib hel_chat` 249 passed, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
 - [ ] M4 (optional, to be proposed separately after M3). One shared vocabulary of built-in slash commands for the terminal surface and the web viewer.
 
 ## Surprises & Discoveries
@@ -66,6 +68,28 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   Prompt) did nothing.
   Evidence: `alt_g_cycles_the_pane_layout_and_ctrl_g_no_longer_does` failed on
   its second press before the guard was changed.
+
+- Observation: two notices still told the user to press keys that no longer
+  exist. `reject_selected_operation` and `open_selected_session` both said
+  "press x to cancel it" — the wording M1 corrected, which M2 then invalidated
+  by moving cancel to `Alt-X` — and the controller's first-run notice said
+  "Press Ctrl+N to start your first session", a key that has never been bound
+  in 2.x. Both are fixed here.
+  Evidence: `grep -rn "to cancel it" mj-tui/src` and the live first-run capture
+  under `Artifacts and Notes`, which printed the `Ctrl+N` advice on screen.
+
+- Observation: `reject_selected_operation` had exactly one caller,
+  `begin_session_edit`, so deleting the edit dialog left it dead. The gate it
+  performed now lives in the registry as `session_idle`, which is what greys
+  Rename, Container settings, and Stop in the palette and in the help overlay.
+  Evidence: `cargo build -p brokk-mj-tui` reported it as never used once the
+  dialog was gone.
+
+- Observation: `truncate_text` (`mj-tui/src/widgets.rs`) collapses runs of
+  spaces, so using it on a padded row destroys the padding. The palette's key
+  column came out as `› r Refresh capacity` rather than aligned. The palette
+  clips with its own `clip` instead.
+  Evidence: the first live capture of the palette, before the fix.
 
 ## Decision Log
 
@@ -146,6 +170,43 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   both cases, so no dialog has to be named in the pre-filter.
   Date/Author: 2026-09-01, implementation of M2.
 
+- Decision: the palette lists the Sessions pane's group when the composer has
+  the keyboard, rather than no pane group at all.
+  Rationale: the composer is not a pane, but every Sessions-pane command
+  answers from it as a chord (`Alt-N`, `Alt-A`). Listing nothing would hide
+  commands that do work from where the user is standing.
+  Date/Author: 2026-09-01, implementation of M3.
+
+- Decision: there is no separate "selected session" notion for the composer.
+  Rationale: the conversation on screen already follows
+  `selected_session_id`, and `open_selected_session` sets it before handing the
+  keyboard to the prompt. `selected_session()` is therefore already "the open
+  chat's session" whenever the composer has focus, and inventing a second
+  notion would give the surface two answers to one question.
+  Date/Author: 2026-09-01, implementation of M3.
+
+- Decision: `CommandId::Palette` carries the footer word `commands`, so the
+  footer ends `… · F2 commands · F1 help`.
+  Rationale: the palette is now the only way to reach rename, container
+  settings, and stop. The footer lost `e edit` in this milestone, and a
+  discovery path that is not named anywhere is not a discovery path.
+  Date/Author: 2026-09-01, implementation of M3.
+
+- Decision: Enter on a `Blocked` entry sets the reason as a notice and leaves
+  the palette open, while `Hidden` entries are not listed at all.
+  Rationale: "not now" and "not ever, here" are different answers. A blocked
+  command is worth showing with its reason and worth letting the user pick
+  something else without pressing `F2` again; a hidden one would only be noise
+  (container settings for a session that is not on a container).
+  Date/Author: 2026-09-01, implementation of M3.
+
+- Decision: the ranking rule is copied into `mj-tui/src/palette.rs` as a
+  private `rank`, not shared with `matching_indices` in
+  `src/hel_chat/autocomplete.rs`.
+  Rationale: the two live in different crates with no common home for it yet.
+  M4 proposes that home, and moving it there is one of M4's steps.
+  Date/Author: 2026-09-01, implementation of M3.
+
 ## Outcomes & Retrospective
 
 M1 is complete and shipped green. What exists now that did not before: one table (`mj-tui/src/actions.rs`) that key handling, the footer, and the help overlay all read; an `F1` key reference that opens over anything and restores it; and a footer that names only the keys that apply. The user-visible gain from M1 alone is real but modest — the mislabelled `Ctrl+X` advice is gone, `x cancel launch` only appears when it can be used, and `F1` finally answers.
@@ -165,6 +226,21 @@ documentation that name the keys — which is a fair measure of how well the M1
 tests were pinning the surface down.
 
 The lesson worth carrying: the old code was not wrong so much as unowned. The footer strings and the `match` arms were each individually correct when written and drifted apart afterwards, because nothing forced them to agree. The test `every_footer_hint_dispatches_the_command_it_names` is the thing that stops that happening again — it presses every key the footer advertises and asserts the surface lands where the registry says it should.
+
+M3 is complete and shipped green. The session edit dialog is gone, `e` is
+unbound, and everything that dialog offered is in the palette on `F2`, which
+also reaches every other command the surface has. The palette is what the
+design said it would be — a renderer over `available()` plus a query — and it
+cost about three hundred lines, most of them drawing.
+
+The two bugs M3 turned up were both of the kind this plan exists to remove: a
+notice naming a key that moved (`press x to cancel it`, correct in M1, wrong
+from M2 onward) and a notice naming a key that never existed in 2.x
+(`Press Ctrl+N to start your first session`). Neither is reachable from the
+registry, because both are free text in a `set_notice` call. That is the
+remaining seam: the registry now owns the keys the footer, the help overlay,
+and the palette name, but not the keys prose names. Deriving those is a
+candidate for M4 alongside the shared command vocabulary.
 
 ## Context and Orientation
 
@@ -353,6 +429,42 @@ collapsed layout and `F1` closed it again, `Ctrl-G` printed
 detached with the usual "Active sessions will continue working" message and
 exit status 0.
 
+The M3 live check, run the same way against an isolated `MJ_CONFIG_DIR` and
+`MJ_DATA_DIR`. The footer with the Sessions pane focused and no session
+created, `F2 commands` now sitting between quit and help:
+
+    Alt-N new · s resume · Alt-A mark read · Tab pane · Alt-G panes · F3 workspaces · F4 web · Alt-Q quit · F2 commands · F1 help
+
+The palette after `F2` from that pane. The query line is at the top, the
+focused pane's group leads because there is no session to head a group of its
+own, and the hint row closes it:
+
+    ┌ Commands ────────────────────────────────────────────────┐
+    │> ▏                                                       │
+    │  Sessions pane                                           │
+    │›   Alt-N / n   New session                               │
+    │    s           Resume a session                          │
+    │    Alt-A / a   Mark all read                             │
+    │  Panes                                                   │
+    │    Tab         Next pane                                 │
+    │    Alt-G       Pane layout                               │
+    │  Anywhere                                                │
+    │    F3          Workspaces                                │
+    │    F4          Web viewer                                │
+    │    Alt-Q       Detach                                    │
+    │    F1 / ?      Help                                      │
+    │type to filter · Up/Down · Enter runs · Esc closes        │
+    └──────────────────────────────────────────────────────────┘
+
+After typing `help`, the list is the one match and its group heading:
+
+    │> help▏                                                   │
+    │  Anywhere                                                │
+    │›   F1 / ?      Help                                      │
+
+`Escape` put the dashboard back with its footer unchanged, and `Alt-Q`
+detached.
+
 The live check was run against an isolated configuration and data directory (`MJ_CONFIG_DIR` and `MJ_DATA_DIR`, read by `env_override_os` in `src/hel_config.rs`) rather than the real one, because the real workspace was already attached to another process and attaching a second time would have taken it away from its owner.
 
 The shape of the registry entry, from `mj-tui/src/actions.rs`:
@@ -442,6 +554,11 @@ Dropping the composer's arm from the footer is safe: whenever the composer has t
 
 ## Revision notes
 
+- 2026-09-01: Updated through the end of M3. The palette's group order at the
+  composer, the treatment of `Blocked` versus `Hidden` entries, and the copied
+  ranking rule are in the `Decision Log`; the two notices naming keys that do
+  not exist, the now-dead `reject_selected_operation`, and the padding
+  `truncate_text` eats are in `Surprises & Discoveries`.
 - 2026-09-01: Updated through the end of M2. The composer's `Alt-R`/`Alt-T`
   placement, the `Help` toggle, and the crate-visibility change are recorded in
   the `Decision Log` because each is a place where the obvious reading of the
