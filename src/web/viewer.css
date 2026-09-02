@@ -1,8 +1,8 @@
-/* Hel's phone viewer, in the terminal surface's visual language.
+/* Mjolnir's phone viewer, in the terminal surface's visual language.
  *
  * The terminal is monospace, flat, and bordered, and it says what state a
  * thing is in with one colour drawn from a small semantic set. This stylesheet
- * follows it, so that reading a session on a phone and reading it in `hel`
+ * follows it, so that reading a session on a phone and reading it in `mj`
  * feel like the same product rather than two products that share a name.
  *
  * Two rules the content-security policy imposes, and which no rule here may

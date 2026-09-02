@@ -13,8 +13,8 @@
 // The same rule as everywhere else on this page: nodes and `textContent`, never
 // markup as a string.
 //
-// What is not ported is mjolnir's diff *computation*. It receives the old and
-// new text of every edit and diffs them in the browser; hel publishes only a
+// What is not ported is Mjolnir's diff *computation*. It receives the old and
+// new text of every edit and diffs them in the browser; Mjolnir publishes only a
 // counted summary, so those routines would have nothing to run on. A diff that
 // arrives as text is still tinted, just not recomputed.
 

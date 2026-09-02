@@ -1,4 +1,4 @@
-// Offline shell for the Hel viewer.
+// Offline shell for the Mjolnir viewer.
 //
 // Two rules matter here. Requests under /api/ are never touched: they carry
 // live session state and a cached answer would be a lie, so this worker does
@@ -10,7 +10,7 @@
 // CACHE_VERSION must change whenever any shell asset changes. Activation
 // deletes every cache that is not the current one, so an upgrade cannot leave
 // a previous version's assets behind.
-const CACHE_VERSION = 'hel-v2';
+const CACHE_VERSION = 'mjolnir-shell-v1';
 const SHELL = ['/', '/viewer.css', '/viewer.js', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', event => {

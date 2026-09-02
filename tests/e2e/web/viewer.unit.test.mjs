@@ -6,7 +6,11 @@ import vm from 'node:vm';
 const viewerPath = new URL('../../../src/web/viewer.js', import.meta.url);
 const htmlPath = new URL('../../../src/web/viewer.html', import.meta.url);
 const manifestPath = new URL('../../../src/web/manifest.webmanifest', import.meta.url);
+const serviceWorkerPath = new URL('../../../src/web/service-worker.js', import.meta.url);
+const viewerCssPath = new URL('../../../src/web/viewer.css', import.meta.url);
+const toolOutputPath = new URL('../../../src/web/tool-output.js', import.meta.url);
 const viewerSource = readFileSync(viewerPath, 'utf8');
+const serviceWorkerSource = readFileSync(serviceWorkerPath, 'utf8');
 
 function sourceBetween(from, to) {
   const start = viewerSource.indexOf(from);
@@ -274,4 +278,129 @@ test('viewer chrome and install metadata use Mjolnir branding', () => {
   assert.equal(manifest.name, 'Mjolnir');
   assert.equal(manifest.short_name, 'MJ');
   assert.match(viewerSource, /\}\[name\] \|\| 'MJ';/);
+});
+
+test('offline shell uses a Mjolnir cache without caching live requests', async () => {
+  const listeners = new Map();
+  const operations = [];
+  let fetchImplementation = async request => ({
+    ok: true,
+    request,
+    clone() {
+      return { clonedFrom: request.url };
+    },
+  });
+  let cachedFallback = null;
+  const caches = {
+    async open(name) {
+      operations.push(['open', name]);
+      return {
+        async addAll(paths) {
+          operations.push(['addAll', name, [...paths]]);
+        },
+        async put(request, response) {
+          operations.push(['put', name, request.url, response]);
+        },
+      };
+    },
+    async keys() {
+      return ['mjolnir-shell-v1', 'hel-v2', 'mjolnir-shell-v0'];
+    },
+    async delete(name) {
+      operations.push(['delete', name]);
+      return true;
+    },
+    async match(request) {
+      operations.push(['match', request.url]);
+      return cachedFallback;
+    },
+  };
+  const self = {
+    location: { origin: 'https://viewer.example' },
+    clients: {
+      async claim() {
+        operations.push(['claim']);
+      },
+    },
+    async skipWaiting() {
+      operations.push(['skipWaiting']);
+    },
+    addEventListener(name, listener) {
+      listeners.set(name, listener);
+    },
+  };
+  const context = vm.createContext({
+    URL,
+    caches,
+    self,
+    fetch(request) {
+      operations.push(['fetch', request.url]);
+      return fetchImplementation(request);
+    },
+  });
+  vm.runInContext(serviceWorkerSource, context);
+
+  let lifetime;
+  listeners.get('install')({ waitUntil(promise) { lifetime = promise; } });
+  await lifetime;
+  assert.deepEqual(operations.slice(0, 3), [
+    ['open', 'mjolnir-shell-v1'],
+    [
+      'addAll',
+      'mjolnir-shell-v1',
+      ['/', '/viewer.css', '/viewer.js', '/manifest.webmanifest', '/icon.svg'],
+    ],
+    ['skipWaiting'],
+  ]);
+
+  operations.length = 0;
+  listeners.get('activate')({ waitUntil(promise) { lifetime = promise; } });
+  await lifetime;
+  assert.deepEqual(operations, [
+    ['delete', 'hel-v2'],
+    ['delete', 'mjolnir-shell-v0'],
+    ['claim'],
+  ]);
+
+  function dispatchFetch(pathname) {
+    let response;
+    listeners.get('fetch')({
+      request: { method: 'GET', url: `https://viewer.example${pathname}` },
+      respondWith(promise) {
+        response = promise;
+      },
+    });
+    return response;
+  }
+
+  operations.length = 0;
+  assert.equal(dispatchFetch('/api/snapshot'), undefined);
+  assert.equal(dispatchFetch('/auth/login'), undefined);
+  assert.deepEqual(operations, []);
+
+  const networkResponse = { ok: true, clone: () => ({ cached: true }) };
+  fetchImplementation = async () => networkResponse;
+  const navigation = dispatchFetch('/session/one');
+  assert.ok(navigation, 'navigation was not intercepted');
+  assert.strictEqual(await navigation, networkResponse);
+  assert.deepEqual(operations.map(operation => operation[0]), ['fetch', 'open', 'put']);
+  assert.equal(operations[1][1], 'mjolnir-shell-v1');
+
+  operations.length = 0;
+  cachedFallback = { offline: true };
+  fetchImplementation = async () => {
+    throw new Error('offline');
+  };
+  assert.strictEqual(await dispatchFetch('/session/two'), cachedFallback);
+  assert.deepEqual(operations.map(operation => operation[0]), ['fetch', 'match']);
+});
+
+test('shipped viewer source comments use Mjolnir terminology', () => {
+  for (const source of [
+    serviceWorkerSource,
+    readFileSync(viewerCssPath, 'utf8'),
+    readFileSync(toolOutputPath, 'utf8'),
+  ]) {
+    assert.doesNotMatch(source, /\bHel\b|`hel`|\bhel publishes\b/);
+  }
 });
