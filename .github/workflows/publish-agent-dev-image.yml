@@ -66,8 +66,9 @@ jobs:
           pull: true
           provenance: false
           labels: |
+            org.opencontainers.image.title=Mjolnir agent development environment
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=Hel agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges
+            org.opencontainers.image.description=Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges
             org.opencontainers.image.licenses=GPL-3.0-only
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
 

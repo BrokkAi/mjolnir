@@ -23,8 +23,9 @@ RUN cargo install brokk-bifrost@${BIFROST_VERSION} --locked --bin bifrost --root
 
 FROM ${RUST_IMAGE}
 
-LABEL org.opencontainers.image.title="Hel agent development environment" \
-      org.opencontainers.image.source="https://github.com/BrokkAi/hel"
+LABEL org.opencontainers.image.title="Mjolnir agent development environment" \
+      org.opencontainers.image.source="https://github.com/BrokkAi/mjolnir" \
+      org.opencontainers.image.description="Mjolnir agent development environment with Node, Rust, cargo-nextest, OpenJDK, and the pinned ACP bridges"
 
 # The Node image and Rust image share the Trixie base. Copying /usr/local
 # brings in Node, npm, npx, Corepack, and the headers needed by native modules.
