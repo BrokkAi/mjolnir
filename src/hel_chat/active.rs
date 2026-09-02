@@ -2255,6 +2255,14 @@ pub(super) fn render_in(
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::AutocompletePopup, popup));
     }
+    if let Some(body) = super::config_picker::render_config_picker(frame, inner, chat) {
+        // The selector owns the frame's interaction, so the chat behind it
+        // stops being selectable. An elicitation dialog still draws over it,
+        // matching the key routing that lets the dialog win.
+        chat.frame_surfaces.clear();
+        chat.frame_surfaces
+            .push(SurfaceFrame::fixed(SurfaceId::ModalBody, body));
+    }
     if let Some(SecondOpinion::Setup { captured, setup }) = chat.second_opinion() {
         // The waterfall owns the frame's interaction, so the chat behind it
         // stops being selectable while a reviewer is being chosen.
@@ -2370,7 +2378,7 @@ fn remembered_value(stored: Option<&str>) -> Option<String> {
 }
 
 /// A box of at most `width` by `height`, centered in `area`.
-fn centered(area: ratatui::layout::Rect, width: u16, height: u16) -> ratatui::layout::Rect {
+pub(super) fn centered(area: ratatui::layout::Rect, width: u16, height: u16) -> ratatui::layout::Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
     ratatui::layout::Rect::new(
