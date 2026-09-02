@@ -1,4 +1,4 @@
-HEL SUPPLEMENTAL THIRD-PARTY NOTICES
+MJOLNIR SUPPLEMENTAL THIRD-PARTY NOTICES
 
 This file supplements THIRD_PARTY_LICENSES.html. Cargo package metadata
 does not enumerate standalone NOTICE files, embedded web fonts, or every
@@ -6,7 +6,7 @@ license in native source and prebuilt static-library payloads.
 
 The sections below are generated from Cargo.lock, exact installed crate
 sources, and a reviewed inventory of the non-Cargo assets shipped by
-official Hel archives.
+official Mjolnir archives.
 
 ================================================================================
 cfg_aliases third-party attribution
@@ -97,7 +97,7 @@ mimalloc native allocator
 ================================================================================
 
 Source: https://crates.io/crates/libmimalloc-sys/0.1.49 (c_src/mimalloc/v3/LICENSE)
-Inclusion: statically linked into the musl Linux hel controller and worker
+Inclusion: statically linked into the musl Linux Mjolnir controller and worker
 
 MIT License
 
@@ -126,7 +126,7 @@ SQLite 3.50.2 amalgamation
 ================================================================================
 
 Source: https://crates.io/crates/libsqlite3-sys/0.35.0 (sqlite3/sqlite3.c)
-Inclusion: statically linked into hel by libsqlite3-sys with its bundled feature
+Inclusion: statically linked into Mjolnir by libsqlite3-sys with its bundled feature
 
 SQLite is dedicated to the public domain.
 https://www.sqlite.org/copyright.html
@@ -167,7 +167,7 @@ Embedded web fonts
 ================================================================================
 
 Source: src/fonts/*.woff2
-Inclusion: embedded in the hel binary and served by the remote viewer
+Inclusion: embedded in the Mjolnir binary and served by the remote viewer
 
 The following font software is licensed under the SIL Open Font License 1.1. The complete terms are in OFL-1.1.md.
 

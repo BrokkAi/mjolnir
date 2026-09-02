@@ -228,7 +228,7 @@ async function sqliteNativePayload(metadata) {
   return {
     component: `SQLite ${sqliteVersion} amalgamation`,
     source: `${packageUrl(packageInfo)} (sqlite3/sqlite3.c)`,
-    scope: "statically linked into hel by libsqlite3-sys with its bundled feature",
+    scope: "statically linked into Mjolnir by libsqlite3-sys with its bundled feature",
     text: [
       "SQLite is dedicated to the public domain.",
       "https://www.sqlite.org/copyright.html",
@@ -241,7 +241,7 @@ async function embeddedFontsNotice() {
   return {
     component: "Embedded web fonts",
     source: "src/fonts/*.woff2",
-    scope: "embedded in the hel binary and served by the remote viewer",
+    scope: "embedded in the Mjolnir binary and served by the remote viewer",
     text: [
       "The following font software is licensed under the SIL Open Font License 1.1. The complete terms are in OFL-1.1.md.",
       "",
@@ -257,7 +257,7 @@ async function embeddedFontsNotice() {
 
 function render(sections) {
   const lines = [
-    "HEL SUPPLEMENTAL THIRD-PARTY NOTICES",
+    "MJOLNIR SUPPLEMENTAL THIRD-PARTY NOTICES",
     "",
     "This file supplements THIRD_PARTY_LICENSES.html. Cargo package metadata",
     "does not enumerate standalone NOTICE files, embedded web fonts, or every",
@@ -265,7 +265,7 @@ function render(sections) {
     "",
     "The sections below are generated from Cargo.lock, exact installed crate",
     "sources, and a reviewed inventory of the non-Cargo assets shipped by",
-    "official Hel archives.",
+    "official Mjolnir archives.",
   ];
 
   for (const section of sections) {
@@ -312,7 +312,7 @@ async function main() {
       "0.1.49",
       "c_src/mimalloc/v3/LICENSE",
       "mimalloc native allocator",
-      "statically linked into the musl Linux hel controller and worker",
+      "statically linked into the musl Linux Mjolnir controller and worker",
     ),
     await sqliteNativePayload(metadata),
     await sherpaNativePayload(metadata),
