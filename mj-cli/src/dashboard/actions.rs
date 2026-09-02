@@ -443,6 +443,7 @@ pub(crate) async fn apply_dashboard_action(
                 .set_notice(format!("Stopping {}…", short_id(&session_id)));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
+            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
             let runtime = tokio::runtime::Handle::current();
             spawn_lifecycle_operation(
                 request,
@@ -472,6 +473,7 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::ForceStop { session_id } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
+            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -489,6 +491,7 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::DestroyStopped { session_id } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
+            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -664,6 +667,18 @@ fn start_session_launch_with_repository_preflight(
     }
 }
 
+/// Tells the open chat, if it is this session's, that the session is being
+/// retired on purpose. The stop closes the relay feed, and the chat must read
+/// that as the expected end rather than a lost actor to chase.
+pub(crate) fn mark_active_chat_retiring(
+    active_chat: Option<&mut mj_chat::hel_chat::ActiveChat>,
+    session_id: &str,
+) {
+    if let Some(chat) = active_chat.filter(|chat| chat.session_id() == session_id) {
+        chat.set_session_retiring(true);
+    }
+}
+
 impl DashboardContext {
     /// Marks a session busy in the UI and hands back what runs its operation
     /// off the loop. The daemon owns lifecycle/recovery serialization.
@@ -705,5 +720,47 @@ impl DashboardContext {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mj_chat::hel_chat::{ActiveChat, Notices, SessionHeaderIdentity};
+
+    fn open_chat(session_id: &str) -> ActiveChat {
+        let fixture =
+            mj_controller::hel_session_manager::replacement_session_test_fixture(session_id, 1);
+        ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        )
+    }
+
+    /// Stopping a session retires its relay actor, which closes the open
+    /// chat's feed. The chat is told before that happens so it reads the
+    /// closure as the expected end of a deliberate stop.
+    #[tokio::test]
+    async fn stopping_the_open_chats_session_marks_that_chat_retiring() {
+        let mut chat = open_chat("session-open");
+        assert!(!chat.session_retiring());
+
+        mark_active_chat_retiring(Some(&mut chat), "session-open");
+
+        assert!(chat.session_retiring());
+    }
+
+    #[tokio::test]
+    async fn stopping_another_session_leaves_the_open_chat_alone() {
+        let mut chat = open_chat("session-open");
+
+        mark_active_chat_retiring(Some(&mut chat), "session-other");
+
+        assert!(!chat.session_retiring());
     }
 }

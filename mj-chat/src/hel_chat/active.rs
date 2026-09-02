@@ -398,6 +398,10 @@ pub struct ActiveChat {
     session_open: bool,
     session_reconnect_in_flight: bool,
     session_feed_expected: bool,
+    /// Whether this session is being retired on purpose: a stop or destroy is
+    /// in flight, or its record is no longer pollable. A closed feed is then
+    /// expected, so it starts no handoff attempt and reports no failure.
+    session_retiring: bool,
     /// Preserve the stronger reconnect result when the initial sync, which
     /// independently reacquires the same actor, finishes just afterwards.
     reconnect_notice_pending_sync: bool,
@@ -618,6 +622,7 @@ impl ActiveChat {
             session_open: true,
             session_reconnect_in_flight: false,
             session_feed_expected: false,
+            session_retiring: false,
             reconnect_notice_pending_sync: false,
             reviewer_generation,
             resuming_reviewer: None,
@@ -657,9 +662,27 @@ impl ActiveChat {
     /// retried until the actor appears or another record retires the session.
     pub fn set_session_feed_expected(&mut self, expected: bool) {
         self.session_feed_expected = expected;
-        if expected && !self.session_open {
-            self.begin_session_reconnect();
+        if expected {
+            // A session that is runnable again is no longer being retired.
+            self.session_retiring = false;
+            if !self.session_open {
+                self.begin_session_reconnect();
+            }
         }
+    }
+
+    /// Tells this chat that its session is being retired on purpose, so the
+    /// feed closing is the expected outcome rather than a lost actor: the chat
+    /// stays on screen as a transcript, attempts no handoff, and reports no
+    /// reconnect failure. An expected feed clears it: see
+    /// [`Self::set_session_feed_expected`].
+    pub fn set_session_retiring(&mut self, retiring: bool) {
+        self.session_retiring = retiring;
+    }
+
+    /// Whether this chat is treating a closed feed as a deliberate retirement.
+    pub fn session_retiring(&self) -> bool {
+        self.session_retiring
     }
 
     /// Takes the surface's newer view of the config and this session's record,
@@ -991,8 +1014,22 @@ impl ActiveChat {
     }
 
     fn apply_session_view(&mut self, view: Result<ManagedSessionView>) {
+        if self.session_retiring
+            && let Err(error) = &view
+        {
+            // The feed closing is the expected end of a deliberate stop or
+            // destroy, so it is neither a lost connection nor a reason to
+            // chase a replacement actor. The transcript stays readable.
+            tracing::debug!(
+                error = format!("{error:#}"),
+                session_id = %self.session.session_id(),
+                "session feed closed because the session is being retired"
+            );
+            self.session_open = false;
+            return;
+        }
         self.session_open = apply_session_view(&mut self.state, view);
-        if !self.session_open {
+        if !self.session_open && !self.session_retiring {
             self.begin_session_reconnect();
         }
         dispatch_diffstat_requests(
@@ -1055,6 +1092,16 @@ impl ActiveChat {
                 }
             }
             Err(error) => {
+                if self.session_retiring {
+                    // The session was stopped or destroyed on purpose, so
+                    // losing its actor is the expected outcome, not a failure.
+                    tracing::debug!(
+                        %error,
+                        session_id = %self.session.session_id(),
+                        "session relay handoff ended because the session is being retired"
+                    );
+                    return;
+                }
                 self.state
                     .set_notice(format!("Could not reconnect to session relay: {error}"));
                 if self.session_feed_expected {
@@ -3209,6 +3256,78 @@ mod tests {
             chat.state.notice().as_deref(),
             Some("Reconnected to session relay")
         );
+    }
+
+    #[tokio::test]
+    async fn a_retiring_session_does_not_reconnect_when_its_feed_closes() {
+        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "session-stop",
+            12,
+        );
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        chat.set_session_retiring(true);
+
+        chat.apply_session_view(Err(anyhow::anyhow!(
+            "session manager stopped: channel closed"
+        )));
+
+        assert!(!chat.session_feed_open());
+        assert!(
+            !chat.session_reconnect_in_flight,
+            "a deliberate stop starts no handoff"
+        );
+        assert!(
+            !chat.state.notice().is_some_and(|notice| {
+                notice.contains("Could not reconnect") || notice.contains("connection lost")
+            }),
+            "a deliberate stop reports neither a lost connection nor a failed handoff, but the notice was {:?}",
+            chat.state.notice()
+        );
+
+        // A session that becomes runnable again is expected once more, and the
+        // handoff comes back with it.
+        chat.set_session_feed_expected(true);
+        assert!(!chat.session_retiring());
+        assert!(chat.session_reconnect_in_flight);
+    }
+
+    #[tokio::test]
+    async fn a_retiring_sessions_reconnect_failure_is_not_reported() {
+        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "session-destroy",
+            13,
+        );
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        chat.session_open = false;
+        chat.set_session_retiring(true);
+
+        chat.finish_session_reconnect(Err("session session-destroy is not managed".into()));
+
+        assert!(
+            !chat
+                .state
+                .notice()
+                .is_some_and(|notice| notice.contains("Could not reconnect")),
+            "a deliberate stop reports no reconnect failure, but the notice was {:?}",
+            chat.state.notice()
+        );
+        assert!(!chat.session_reconnect_in_flight);
     }
 
     #[test]

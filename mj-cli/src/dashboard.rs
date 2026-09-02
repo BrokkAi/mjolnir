@@ -2018,6 +2018,16 @@ impl DashboardContext {
             let feed_expected = sessions
                 .get(chat.session_id())
                 .is_some_and(session_target_is_pollable);
+            // A session that is no longer pollable, or that any surface has
+            // asked to stop or destroy, is being retired on purpose: its feed
+            // will close and the chat must not chase a replacement actor.
+            let retiring = !feed_expected
+                || matches!(
+                    self.dashboard.session_operation_kind(chat.session_id()),
+                    Some(SessionOperationKind::Stopping | SessionOperationKind::Destroying)
+                );
+            chat.set_session_retiring(retiring);
+            // Order matters: an expected feed clears the retiring flag.
             chat.set_session_feed_expected(feed_expected);
         }
         if self.controller.state.sessions == sessions {
