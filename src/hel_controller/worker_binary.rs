@@ -1020,7 +1020,7 @@ fn append_hel_target_environment(
         | hel_targets::TargetLocator::AppleContainer { .. }
         | hel_targets::TargetLocator::SshPodman { .. } => MJ_CONTAINER_ENVIRONMENT.to_owned(),
         hel_targets::TargetLocator::AwsEc2 { workspace, .. } => format!(
-            "## Hel disposable environment\n\nThis session runs on a disposable Hel EC2 instance. When the session closes, Hel checkpoints everything in project workspace directories under `$HOME/{workspace}`, including committed work, staged and unstaged changes, and untracked files. Hel then terminates the instance.\n\nEverything outside `$HOME/{workspace}`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n"
+            "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/{workspace}`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/{workspace}`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n"
         ),
         hel_targets::TargetLocator::LocalBare { .. }
         | hel_targets::TargetLocator::SshBare { .. } => return Ok(()),
@@ -2886,11 +2886,14 @@ mod tests {
             stage_profile(&profile, staged.path()).unwrap();
             append_hel_target_environment(kind, staged.path(), &target).unwrap();
 
+            let guidance = std::fs::read_to_string(staged.path().join(instructions)).unwrap();
             assert_eq!(
-                std::fs::read_to_string(staged.path().join(instructions)).unwrap(),
+                guidance,
                 format!("{original}\n{MJ_CONTAINER_ENVIRONMENT}"),
                 "{instructions} receives the section in the staged profile"
             );
+            assert!(guidance.contains("## Mjolnir disposable environment"));
+            assert!(!guidance.contains("## Hel disposable environment"));
             assert_eq!(
                 std::fs::read_to_string(source_instructions).unwrap(),
                 original,
@@ -2956,10 +2959,11 @@ mod tests {
         )
         .unwrap();
         let guidance = std::fs::read_to_string(ec2.path().join("AGENTS.md")).unwrap();
-        assert!(guidance.contains("disposable Hel EC2 instance"));
-        assert!(guidance.contains("`$HOME/.local/share/hel/workspaces/session`"));
-        assert!(!guidance.contains("disposable Hel container"));
-        assert!(!guidance.contains("`/workspace`"));
+        assert_eq!(
+            guidance,
+            "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/.local/share/hel/workspaces/session`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/.local/share/hel/workspaces/session`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n"
+        );
+        assert!(!guidance.contains("## Hel disposable environment"));
 
         let ssh_bare = tempfile::tempdir().unwrap();
         append_hel_target_environment(
