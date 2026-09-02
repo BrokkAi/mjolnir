@@ -259,6 +259,11 @@ fn reserved_hidden_context_tag(tag: &str) -> bool {
 pub struct DurableRelay {
     root: PathBuf,
     relay_version: String,
+    /// Content address of the executable serving this relay, reported in
+    /// hello. The crate version cannot tell two builds of the same release
+    /// apart, and a controller has to know whether the worker it is talking to
+    /// is the binary it would install today.
+    worker_build: Option<String>,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -436,6 +441,7 @@ impl DurableRelay {
         let mut relay = Self {
             root,
             relay_version: relay_version.into(),
+            worker_build: None,
             snapshot,
             journal_spans,
             hot_events,
@@ -526,6 +532,12 @@ impl DurableRelay {
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.background_commands = self.background_commands();
         state
+    }
+
+    /// Record the content address of the executable serving this relay, so
+    /// hello can report which build a controller reached.
+    pub fn set_worker_build(&mut self, digest: Option<String>) {
+        self.worker_build = digest;
     }
 
     /// Choose whether agent output with no prompt in flight opens a turn.
@@ -779,6 +791,7 @@ impl DurableRelay {
                     negotiated,
                     relay_version: self.relay_version.clone(),
                     session_id: self.snapshot.session_id.clone(),
+                    worker_build: self.worker_build.clone(),
                 },
             });
         }

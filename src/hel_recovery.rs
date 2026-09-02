@@ -1,12 +1,12 @@
 //! Background recovery-copy policy and coordination.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use crate::hel_controller::{CheckpointArtifact, Controller, checkpoint_was_deferred};
 use crate::hel_database::record_recovery_failure;
@@ -70,7 +70,6 @@ impl RecoveryCoordinator {
             mpsc::unbounded_channel::<RecoveryObservation>();
         let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<RecoveryResult>();
         let (results_tx, results_rx) = mpsc::unbounded_channel();
-        let (busy_tx, busy_rx) = watch::channel(BTreeSet::new());
         let gate = Arc::new(RecoveryGate::default());
         let coordinator_gate = gate.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -93,7 +92,6 @@ impl RecoveryCoordinator {
                             && let Some(copy_cancelled) = coordinator_gate.try_start(&session_id)
                         {
                             policy.last_attempted_turn = Some(policy.latest_completed_turn);
-                            busy_tx.send_replace(coordinator_gate.busy_sessions());
                             let completed_tx = completed_tx.clone();
                             let session_manager = session_manager.clone();
                             let cancelled = copy_cancelled.clone();
@@ -158,7 +156,6 @@ impl RecoveryCoordinator {
                     completed = completed_rx.recv() => {
                         let Some(result) = completed else { break };
                         coordinator_gate.finish(&result.session_id);
-                        busy_tx.send_replace(coordinator_gate.busy_sessions());
                         let policy = policies.entry(result.session_id.clone()).or_default();
                         match &result.outcome {
                             Ok(artifact) => {
@@ -214,7 +211,6 @@ impl RecoveryCoordinator {
         Self {
             observer: RecoveryObserver {
                 observations: observations_tx,
-                busy: busy_rx,
                 gate,
             },
             results: results_rx,
@@ -257,11 +253,34 @@ struct PolicyState {
 /// checkpoint interval, doubling per consecutive failure up to
 /// [`MAX_AUTO_CHECKPOINT_RETRY_INTERVAL`].
 fn retry_delay(consecutive_failures: u32) -> Duration {
+    backoff_delay(
+        AUTO_CHECKPOINT_INTERVAL,
+        MAX_AUTO_CHECKPOINT_RETRY_INTERVAL,
+        consecutive_failures,
+    )
+}
+
+/// The retry shape every background session policy uses: `base` after the
+/// first failure, doubling per consecutive failure, never past `cap`.
+///
+/// Capped rather than unbounded because a target that is broken rather than
+/// blipping must keep being probed, just rarely enough to cost nothing.
+pub(crate) fn backoff_delay(base: Duration, cap: Duration, consecutive_failures: u32) -> Duration {
     let doublings = consecutive_failures.saturating_sub(1).min(u32::BITS - 1);
-    AUTO_CHECKPOINT_INTERVAL
-        .checked_mul(1 << doublings)
-        .unwrap_or(MAX_AUTO_CHECKPOINT_RETRY_INTERVAL)
-        .min(MAX_AUTO_CHECKPOINT_RETRY_INTERVAL)
+    base.checked_mul(1 << doublings).unwrap_or(cap).min(cap)
+}
+
+/// Whether `now` is at least `window` past `since`. A timestamp in the future -
+/// a clock that moved backwards, a target whose clock runs ahead - is not
+/// elapsed.
+pub(crate) fn elapsed_at_least(
+    since: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+    window: Duration,
+) -> bool {
+    now.signed_duration_since(since)
+        .to_std()
+        .is_ok_and(|elapsed| elapsed >= window)
 }
 
 impl PolicyState {
@@ -339,21 +358,10 @@ impl PolicyState {
     }
 }
 
-/// Whether `now` is at least `window` past `since`. A timestamp in the future -
-/// a clock that moved backwards, a target whose clock runs ahead - is not
-/// elapsed.
-fn elapsed_at_least(
-    since: chrono::DateTime<Utc>,
-    now: chrono::DateTime<Utc>,
-    window: Duration,
-) -> bool {
-    now.signed_duration_since(since)
-        .to_std()
-        .is_ok_and(|elapsed| elapsed >= window)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::hel_config::HelConfig;
     use crate::hel_state::{
@@ -424,10 +432,8 @@ mod tests {
     #[test]
     fn observing_hands_off_without_waiting_and_keeps_every_observation() {
         let (observations, mut queued) = mpsc::unbounded_channel();
-        let (busy_tx, busy) = watch::channel(BTreeSet::new());
         let observer = RecoveryObserver {
             observations,
-            busy,
             gate: Arc::new(RecoveryGate::default()),
         };
 
@@ -440,7 +446,6 @@ mod tests {
             .map(|observation| observation.latest_completed_turn_ordinal)
             .collect::<Vec<_>>();
         assert_eq!(received, (1..=64).map(Some).collect::<Vec<_>>());
-        drop(busy_tx);
     }
 
     /// A stopped coordinator leaves observing harmless rather than blocking a
@@ -448,16 +453,13 @@ mod tests {
     #[test]
     fn observing_a_stopped_coordinator_is_a_no_op() {
         let (observations, queued) = mpsc::unbounded_channel();
-        let (busy_tx, busy) = watch::channel(BTreeSet::new());
         let observer = RecoveryObserver {
             observations,
-            busy,
             gate: Arc::new(RecoveryGate::default()),
         };
         drop(queued);
 
         observer.observe(observation(1));
-        drop(busy_tx);
     }
 
     #[test]

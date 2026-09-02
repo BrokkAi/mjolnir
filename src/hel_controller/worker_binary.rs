@@ -1288,7 +1288,7 @@ fn install_worker_files(
             // The worker binary is 10-30 MB and identical across sessions, so
             // keep it in a content-addressed cache on the remote host and copy
             // it over the wire only once per unique binary.
-            let digest = worker_binary_digest(worker_binary)?;
+            let digest = crate::hel_worker_runtime::worker_executable_digest(worker_binary)?;
             // Home-relative, not "~/": ssh_command_spec single-quotes every
             // argument, so a tilde would stay literal in the remote shell
             // while scp expands it, and the two sides would disagree. Both
@@ -1406,17 +1406,6 @@ fn install_worker_files(
         }
     }
     Ok(())
-}
-
-/// Content address for the worker binary, used as the remote cache key.
-fn worker_binary_digest(worker_binary: &Path) -> Result<String> {
-    let bytes = std::fs::read(worker_binary).with_context(|| {
-        format!(
-            "failed to read worker binary {} for cache addressing",
-            worker_binary.display()
-        )
-    })?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
 #[allow(clippy::too_many_arguments)]

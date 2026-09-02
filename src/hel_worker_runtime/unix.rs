@@ -105,6 +105,9 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // failed startup must never leave a fresh endpoint that looks live.
     let mut durable_relay =
         DurableRelay::open(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?;
+    // Hashed once, at startup: the controller compares this against the binary
+    // it would install to decide whether this worker is the current build.
+    durable_relay.set_worker_build(super::running_executable_digest());
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.

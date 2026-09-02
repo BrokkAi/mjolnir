@@ -2520,6 +2520,7 @@ mod tests {
                 window: crate::hel_state::ProjectionWindow::of(&session),
                 materialized: session,
                 latest_credential_sync_signal: None,
+                worker_build: None,
                 operational: crate::hel_worker::RelayOperationalState {
                     session_id,
                     execution: crate::hel_worker::RelayExecutionState::Idle,

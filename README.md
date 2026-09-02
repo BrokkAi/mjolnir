@@ -425,6 +425,12 @@ If Mjolnir or its host crashes, workers and their queued prompts keep running.
 `mj recover scan` finds managed containers and instances that are no longer
 tracked; `mj recover adopt` reconnects one as a tracked session.
 
+After Mjolnir itself is upgraded, each running session's worker is replaced with
+the new one at the session's next quiet moment - no prompt running, no terminal
+or background command alive, nothing queued - because replacing a worker ends
+the agent process with it. A session that is never quiet keeps the worker it
+started with until it is stopped.
+
 ## License
 
 Mjolnir is licensed under `GPL-3.0-only`.

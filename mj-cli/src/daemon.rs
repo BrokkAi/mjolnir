@@ -1,11 +1,11 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -33,6 +33,7 @@ use hel::hel_targets::{
     ProcessExecutor, ProvisionStage, ProvisionStageGuard,
 };
 use hel::hel_worker::{RelayCommand, RelayOperationalState};
+use hel::hel_worker_upgrade::{WorkerUpgradeObservation, WorkerUpgradeObserver};
 use hel::hel_workspace::WorkspaceRecord;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,7 +45,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 5;
+pub(crate) const PROTOCOL_VERSION: u32 = 6;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -145,6 +146,19 @@ impl RuntimeSessionView {
     }
 }
 
+/// Something the daemon did on its own that a surface should report once.
+///
+/// Background work has no lifecycle entry to hang a message on, so notices
+/// travel with the snapshot and carry an id: a surface reports the ones newer
+/// than the last it saw and nothing else, however often it polls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeNotice {
+    pub id: u64,
+    pub session_id: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeSnapshot {
@@ -156,6 +170,9 @@ pub(crate) struct RuntimeSnapshot {
     /// Reviews the daemon is running, so every surface renders the same one.
     #[serde(default)]
     pub reviews: Vec<RuntimeReviewView>,
+    /// Recent background events for this workspace's sessions, oldest first.
+    #[serde(default)]
+    pub notices: Vec<RuntimeNotice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,6 +544,11 @@ pub(crate) struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
     recovery_observer: RecoveryObserver,
+    worker_upgrade_observer: WorkerUpgradeObserver,
+    /// Recent background notices, newest last, with the id of the next one.
+    /// Bounded: a surface that never attaches must not make this grow.
+    notices: Mutex<VecDeque<RuntimeNotice>>,
+    next_notice_id: AtomicU64,
     /// What `[review]` last said, republished by the target refresher.
     review_config: Arc<Mutex<hel::hel_config::ReviewConfig>>,
     /// Turn review runs here, in the process that owns every session, so a
@@ -633,12 +655,14 @@ impl RuntimeState {
         session_manager: SessionManagerControl,
         controller: Controller,
         recovery_observer: RecoveryObserver,
+        worker_upgrade_observer: WorkerUpgradeObserver,
         workspaces: Vec<WorkspaceRecord>,
     ) -> Self {
         Self::new_with_controller_loader(
             session_manager,
             controller,
             recovery_observer,
+            worker_upgrade_observer,
             workspaces,
             Controller::load,
         )
@@ -648,6 +672,7 @@ impl RuntimeState {
         session_manager: SessionManagerControl,
         controller: Controller,
         recovery_observer: RecoveryObserver,
+        worker_upgrade_observer: WorkerUpgradeObserver,
         workspaces: Vec<WorkspaceRecord>,
         controller_loader: fn() -> Result<Controller>,
     ) -> Self {
@@ -688,6 +713,9 @@ impl RuntimeState {
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(()),
             recovery_observer,
+            worker_upgrade_observer,
+            notices: Mutex::new(VecDeque::new()),
+            next_notice_id: AtomicU64::new(1),
             review_config,
             review_host,
         }
@@ -788,6 +816,20 @@ impl RuntimeState {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(session) = controller.state.sessions.get(&session_id).cloned() {
+                // An upgrade only ever runs on a quiet session, and a session
+                // in a turn publishes a view every 150 ms. Skipping those here
+                // keeps the config clone off the streaming path; the
+                // coordinator still decides, from `quiet`, whether to act.
+                let quiet = view.connected && snapshot.operational.is_quiet();
+                if quiet {
+                    self.worker_upgrade_observer
+                        .observe(WorkerUpgradeObservation {
+                            session: session.clone(),
+                            config: controller.config.clone(),
+                            worker_build: snapshot.worker_build.clone(),
+                            quiet,
+                        });
+                }
                 self.recovery_observer.observe(RecoveryObservation {
                     session,
                     config: controller.config.clone(),
@@ -860,6 +902,14 @@ impl RuntimeState {
             .into_iter()
             .filter(|review| session_ids.contains(&review.session_id))
             .collect();
+        let notices = self
+            .notices
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|notice| session_ids.contains(&notice.session_id))
+            .cloned()
+            .collect();
         let controller = self
             .controller
             .lock()
@@ -872,6 +922,7 @@ impl RuntimeState {
             sessions,
             lifecycles,
             reviews,
+            notices,
         })
     }
 
@@ -1413,6 +1464,26 @@ impl RuntimeState {
         }
     }
 
+    /// Record something the daemon did on its own, for every attached surface
+    /// to report once.
+    fn push_notice(&self, session_id: &str, text: impl Into<String>) {
+        const RETAINED_NOTICES: usize = 32;
+
+        let notice = RuntimeNotice {
+            id: self.next_notice_id.fetch_add(1, Ordering::AcqRel),
+            session_id: session_id.to_owned(),
+            text: text.into(),
+        };
+        {
+            let mut notices = self.notices.lock().unwrap_or_else(PoisonError::into_inner);
+            notices.push_back(notice);
+            while notices.len() > RETAINED_NOTICES {
+                notices.pop_front();
+            }
+        }
+        self.publish_revision();
+    }
+
     fn set_lifecycle_notice(&self, session_id: &str, notice: &str) {
         if let Some(active) = self
             .lifecycle
@@ -1422,6 +1493,47 @@ impl RuntimeState {
         {
             active.notice = Some(notice.to_owned());
             self.publish_revision();
+        }
+    }
+}
+
+/// Log one finished worker upgrade, and tell the surfaces about the one that
+/// changed something.
+fn report_worker_upgrade(
+    state: &RuntimeState,
+    result: &hel::hel_worker_upgrade::WorkerUpgradeResult,
+) {
+    use hel::hel_controller::WorkerUpgradeOutcome;
+
+    let session_id = &result.session_id;
+    if result.cancelled {
+        tracing::debug!(%session_id, "worker upgrade was preempted");
+        return;
+    }
+    match &result.outcome {
+        Ok(WorkerUpgradeOutcome::Upgraded { build }) => {
+            tracing::info!(%session_id, %build, "replaced the session worker with the current build");
+            let name = state
+                .controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .state
+                .sessions
+                .get(session_id)
+                .map_or_else(
+                    || session_id.clone(),
+                    |session| session.display_title().to_owned(),
+                );
+            state.push_notice(session_id, format!("Upgraded the worker for {name}."));
+        }
+        Ok(WorkerUpgradeOutcome::AlreadyCurrent { build }) => {
+            tracing::debug!(%session_id, %build, "session worker already runs the current build");
+        }
+        Ok(WorkerUpgradeOutcome::Deferred) => {
+            tracing::debug!(%session_id, "worker upgrade deferred: the session is working");
+        }
+        Err(error) => {
+            tracing::warn!(%session_id, %error, "could not upgrade the session worker");
         }
     }
 }
@@ -2540,6 +2652,12 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
     let manager_shutdown = manager.shutdown;
     let mut recovery = hel::hel_recovery::RecoveryCoordinator::spawn(manager_control.clone());
     let recovery_observer = recovery.observer();
+    // Shares the recovery gate, so a recovery copy and a worker upgrade never
+    // act on one session at the same time.
+    let mut worker_upgrades = hel::hel_worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        manager_control.clone(),
+        &recovery_observer,
+    );
     let state = Arc::new(RuntimeState::new(
         manager_control.clone(),
         Controller {
@@ -2547,6 +2665,7 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
             state: controller.state.clone(),
         },
         recovery_observer.clone(),
+        worker_upgrades.observer(),
         workspaces,
     ));
     let cancellation = hel::termination::Coordinator::install().token();
@@ -2633,6 +2752,9 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
                             }
                         }
                         refresh_runtime_controller(&state).await;
+                    }
+                    while let Some(result) = worker_upgrades.try_result() {
+                        report_worker_upgrade(&state, &result);
                     }
                 }
                 completed = interrupted_close_rx.recv() => {
@@ -3732,6 +3854,10 @@ mod tests {
     fn test_runtime_state() -> Arc<RuntimeState> {
         let remote = spawn_remote_session_manager().unwrap();
         let recovery = hel::hel_recovery::RecoveryCoordinator::spawn(remote.control.clone());
+        let upgrades = hel::hel_worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            remote.control.clone(),
+            &recovery.observer(),
+        );
         Arc::new(RuntimeState::new_with_controller_loader(
             remote.control,
             Controller {
@@ -3739,6 +3865,7 @@ mod tests {
                 state: hel::hel_state::HelState::default(),
             },
             recovery.observer(),
+            upgrades.observer(),
             Vec::new(),
             || {
                 Ok(Controller {
@@ -3952,7 +4079,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
         let state = test_runtime_state();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();

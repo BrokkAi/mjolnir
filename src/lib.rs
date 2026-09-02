@@ -51,4 +51,5 @@ pub mod hel_worker;
 pub mod hel_worker_client;
 pub mod hel_worker_protocol;
 pub mod hel_worker_runtime;
+pub mod hel_worker_upgrade;
 pub mod hel_workspace;

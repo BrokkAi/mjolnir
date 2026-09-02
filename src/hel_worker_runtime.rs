@@ -270,6 +270,53 @@ impl WorkerLaunchConfig {
     }
 }
 
+/// Content address of a worker executable.
+///
+/// One definition, because both sides of the upgrade decision compare it: the
+/// worker reports the digest of the file serving it, and the controller
+/// computes the digest of the file it would install. Streamed, because a
+/// worker binary is tens of megabytes.
+pub fn worker_executable_digest(path: &Path) -> Result<String> {
+    use sha2::Digest;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("open worker executable {}", path.display()))?;
+    let mut digest = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut digest)
+        .with_context(|| format!("hash worker executable {}", path.display()))?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Content address of the executable running this process, or `None` when it
+/// cannot be read.
+///
+/// Read through `/proc/self/exe` on Linux: a worker whose file was replaced
+/// under it - which is exactly what an upgrade does - still has its own image
+/// there, while the resolved path no longer names it.
+pub fn running_executable_digest() -> Option<String> {
+    let path = if cfg!(target_os = "linux") {
+        PathBuf::from("/proc/self/exe")
+    } else {
+        match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(%error, "could not resolve this executable to report its build");
+                return None;
+            }
+        }
+    };
+    match worker_executable_digest(&path) {
+        Ok(digest) => Some(digest),
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not hash this executable to report its build"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(unix)]
 pub(crate) mod reviewer;
 #[cfg(unix)]

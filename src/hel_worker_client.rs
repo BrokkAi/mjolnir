@@ -234,6 +234,9 @@ pub struct RelayClient {
     protocol_version: u32,
     session_id: String,
     relay_version: String,
+    /// Content address of the executable the worker is running, as reported in
+    /// hello. `None` from a worker built before the field existed.
+    worker_build: Option<String>,
     latest_ordinal: u64,
     latest_digest: String,
 }
@@ -345,6 +348,7 @@ impl RelayClient {
             // attributable even when Hello never returns a session ID.
             session_id: expected_session_id.to_owned(),
             relay_version: String::new(),
+            worker_build: None,
             latest_ordinal: 0,
             latest_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
         };
@@ -361,6 +365,7 @@ impl RelayClient {
             negotiated,
             relay_version,
             session_id,
+            worker_build,
         } = response
         else {
             let error = anyhow!("relay returned an unexpected hello response");
@@ -384,6 +389,7 @@ impl RelayClient {
         client.protocol_version = negotiated;
         client.session_id = session_id;
         client.relay_version = relay_version;
+        client.worker_build = worker_build;
         Ok(client)
     }
 
@@ -397,6 +403,13 @@ impl RelayClient {
 
     pub fn relay_version(&self) -> &str {
         &self.relay_version
+    }
+
+    /// Content address of the executable serving this connection, or `None`
+    /// from a worker too old to report one. A controller reads `None` as
+    /// outdated: it predates the field, so it predates this controller.
+    pub fn worker_build(&self) -> Option<&str> {
+        self.worker_build.as_deref()
     }
 
     pub fn protocol_version(&self) -> u32 {
@@ -2017,6 +2030,49 @@ sys.stdin.read()
             .expect("protocol v1 hello must be accepted");
         assert_eq!(client.protocol_version(), 1);
         assert_eq!(client.relay_version(), "v1-fixture");
+    }
+
+    /// The build a worker reports is what decides whether it is replaced, so a
+    /// controller has to read it from hello - and read a worker that reports
+    /// none as exactly that, rather than failing the handshake.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hello_reports_the_worker_build_or_none_from_an_older_worker() {
+        let hello = |build: Option<&str>| {
+            let data = match build {
+                Some(build) => format!(
+                    r#"{{"negotiated":1,"relay_version":"build-fixture","session_id":"%s","worker_build":"{build}"}}"#
+                ),
+                None => r#"{"negotiated":1,"relay_version":"build-fixture","session_id":"%s"}"#
+                    .to_owned(),
+            };
+            format!(
+                r#"
+IFS= read -r hello
+id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{data}}}}}
+' "$id" "$1"
+sh -c 'while :; do sleep 30; done'
+"#
+            )
+        };
+        for reported in [None, Some("a".repeat(64).as_str())] {
+            let spec = CommandSpec::new(
+                "sh",
+                [
+                    "-c".to_owned(),
+                    hello(reported),
+                    "hel-relay-build-fixture".to_owned(),
+                    SESSION_ID.to_owned(),
+                ],
+            )
+            .purpose("relay worker build fixture");
+            let client =
+                RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+                    .await
+                    .expect("hello must be accepted with and without a worker build");
+            assert_eq!(client.worker_build(), reported);
+        }
     }
 
     #[cfg(unix)]
