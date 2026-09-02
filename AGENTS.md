@@ -109,7 +109,9 @@ Use idiomatic Rust formatted by rustfmt. Prefer clear module boundaries that mat
 
 ## Testing Guidelines
 
-`.cargo/config.toml` defaults the build target to `x86_64-unknown-linux-musl` so the built controller doubles as the container worker. On non-x86_64-Linux hosts (for example macOS), pass your host triple explicitly: `cargo build --target aarch64-apple-darwin`.
+Plain Cargo commands build for the current host. Build a portable container
+worker explicitly with `--target x86_64-unknown-linux-musl` or
+`--target aarch64-unknown-linux-musl`.
 
 Run every `cargo test` invocation outside the restricted sandbox with elevated permissions. The suite exercises loopback TCP and Unix sockets; sandboxed runs can fail with `EPERM` or hang and do not provide a valid test result.
 

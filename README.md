@@ -120,9 +120,12 @@ npm install -g @brokkai/mjolnir
 As does building the static headless executable from source:
 
 ```console
-cargo build --release
+cargo build --release --target x86_64-unknown-linux-musl
 ./target/x86_64-unknown-linux-musl/release/mj
 ```
+
+Use `aarch64-unknown-linux-musl` instead on ARM64 Linux. For local development,
+plain `cargo run` builds and runs the controller for the current host.
 
 The desktop application is a separate native build. On x86-64 GNU/Linux,
 install the WebKitGTK development package for your distribution and run:
