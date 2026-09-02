@@ -590,6 +590,17 @@ impl DashboardState {
                 dialog.focus = ResumeFocus::Sessions;
                 DashboardAction::None
             }
+            // The tabs are advertised on the arrow keys, so they answer from
+            // every focus including the search field. A query short enough to
+            // type here does not need an in-field cursor.
+            KeyCode::Left => {
+                self.switch_resume_tab(ResumeTab::Hel);
+                DashboardAction::None
+            }
+            KeyCode::Right => {
+                self.switch_resume_tab(ResumeTab::Import);
+                DashboardAction::None
+            }
             _ if typing => {
                 if dialog.search.handle_key(key).changed() {
                     self.rebuild_resume_rows();
@@ -603,14 +614,6 @@ impl DashboardState {
             }
             KeyCode::Down | KeyCode::Char('j') if !typing => {
                 self.move_resume_selection(1);
-                DashboardAction::None
-            }
-            KeyCode::Left => {
-                self.switch_resume_tab(ResumeTab::Hel);
-                DashboardAction::None
-            }
-            KeyCode::Right => {
-                self.switch_resume_tab(ResumeTab::Import);
                 DashboardAction::None
             }
             // `/` jumps to search from anywhere, so the list keeps its
@@ -1610,6 +1613,49 @@ mod tests {
         assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
     }
 
+    /// The dialog's own footer advertises the arrows as the tab switch, so
+    /// they have to answer from the search field too: typing a query is the
+    /// most likely thing to be doing when the wrong tab is in front of you.
+    #[test]
+    fn arrow_keys_switch_tabs_even_while_the_search_field_has_focus() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.show_resume_dialog(
+            1,
+            vec![codex_profile(vec![native(
+                "native-2",
+                "Native",
+                NEWER_THAN_THE_CHECKPOINT,
+            )])],
+        );
+
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "nat".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.focus, ResumeFocus::Search);
+        assert_eq!(dialog.search.value(), "nat");
+
+        dashboard.handle_key(key(KeyCode::Right));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.tab, ResumeTab::Import);
+        assert_eq!(dialog.focus, ResumeFocus::Search, "the query is still open");
+
+        dashboard.handle_key(key(KeyCode::Left));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.tab, ResumeTab::Hel);
+    }
+
     /// Selecting a row dispatches to the flow that suits its source: the
     /// resume wizard for a Hel record, the import flow for a native session.
     #[test]
@@ -1805,13 +1851,13 @@ mod tests {
         assert!(rendered.contains("Search:"), "{rendered}");
     }
 
-    /// The dialog is the only surface for non-live sessions, and `s` on the
-    /// Sessions pane opens it.
+    /// The dialog is the only surface for non-live sessions, and `Alt-S`
+    /// opens it from anywhere.
     #[test]
     fn the_dashboard_opens_the_dialog_and_names_the_key_in_the_footer() {
         let mut dashboard = dashboard_with_session(running_session());
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('s'))),
+            dashboard.handle_key(alt_key('s')),
             DashboardAction::OpenResumeDialog
         );
         assert_eq!(dashboard.handle_key(ctrl_key('t')), DashboardAction::None);
@@ -1822,7 +1868,7 @@ mod tests {
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .expect("draw the dashboard");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("s resume"), "{rendered}");
+        assert!(rendered.contains("Alt-S resume"), "{rendered}");
         assert!(!rendered.contains("Import"), "{rendered}");
     }
 

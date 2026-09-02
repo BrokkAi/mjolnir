@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use qrcode::QrCode;
 use qrcode::types::{Color as QrColor, EcLevel};
 use ratatui::Frame;
@@ -65,13 +65,6 @@ pub(crate) struct RenameEditor {
     pub(crate) focus: RenameFocus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SessionEditDialog {
-    pub(crate) session_id: String,
-    pub(crate) container_backed: bool,
-    pub(crate) focus: usize,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigEntryKind {
     Profile,
@@ -129,20 +122,6 @@ impl WebDialog {
 }
 
 const TARGET_ACTION_BUTTONS: &[&str] = &["Rename", "Test", "Close"];
-
-impl SessionEditDialog {
-    fn actions(&self) -> &'static [&'static str] {
-        if self.container_backed {
-            &["Rename", "Container settings", "Stop", "Cancel"]
-        } else {
-            &["Rename", "Stop", "Cancel"]
-        }
-    }
-
-    fn stop_index(&self) -> usize {
-        usize::from(self.container_backed) + 1
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepositoryOriginDialog {
@@ -760,33 +739,6 @@ pub(crate) fn render_rename_editor(
     frame.render_widget(paragraph, popup);
 }
 
-pub(crate) fn render_session_edit(
-    frame: &mut Frame,
-    area: Rect,
-    dialog: &SessionEditDialog,
-    surfaces: &mut FrameSurfaces,
-) {
-    let actions = dialog.actions();
-    let paragraph = Paragraph::new(vec![
-        Line::raw(format!("Session: {}", dialog.session_id)),
-        Line::raw(""),
-        focused_buttons(actions, dialog.focus),
-        Line::raw(""),
-        Line::styled(
-            "Left/Right or Tab selects · Enter opens · Esc closes",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Edit session "),
-    );
-    let popup = centered_modal(surfaces, 72, popup_height(&paragraph, 72, 8, area), area);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(paragraph, popup);
-}
-
 pub(crate) fn render_config_id_editor(
     frame: &mut Frame,
     area: Rect,
@@ -862,7 +814,7 @@ pub(crate) fn render_target_actions(
     lines.push(Line::raw(""));
     if let Some(target_id) = &dialog.testing {
         lines.push(Line::styled(
-            format!("Testing {target_id}…"),
+            format!("Testing {target_id}… Alt-X cancels test"),
             Style::default().fg(Color::Yellow),
         ));
     } else if let Some((target_id, result)) = &dialog.result {
@@ -1343,8 +1295,11 @@ impl DashboardState {
         key: KeyEvent,
         mut dialog: TargetActionsDialog,
     ) -> DashboardAction {
+        // Alt-X is the surface's one cancel chord. The controller's chord
+        // pre-filter deliberately leaves it alone while a dialog is open, so
+        // here it cancels the test this dialog is running.
         if dialog.testing.is_some()
-            && crate::dashboard_accelerator(key.modifiers)
+            && key.modifiers.contains(KeyModifiers::ALT)
             && key.code == KeyCode::Char('x')
         {
             dialog.testing = None;
@@ -1481,58 +1436,6 @@ impl DashboardState {
             dialog.testing = None;
             dialog.result = Some((target_id, result));
         }
-    }
-
-    pub(crate) fn begin_session_edit(&mut self) {
-        if self.reject_selected_operation() {
-            return;
-        }
-        let Some(session) = self.selected_session() else {
-            return;
-        };
-        self.mode = Mode::SessionEdit(SessionEditDialog {
-            session_id: session.id.clone(),
-            container_backed: self.selected_container_session().is_some(),
-            focus: 0,
-        });
-    }
-
-    pub(crate) fn handle_session_edit_key(
-        &mut self,
-        key: KeyEvent,
-        mut dialog: SessionEditDialog,
-    ) -> DashboardAction {
-        let actions = dialog.actions();
-        match button_row_key(key.code, dialog.focus, actions.len()) {
-            ButtonKey::Focus(focus) => dialog.focus = focus,
-            ButtonKey::Cancel => {
-                self.cancel_modal();
-                return DashboardAction::None;
-            }
-            ButtonKey::Activate(0) => {
-                self.begin_rename();
-                return DashboardAction::None;
-            }
-            ButtonKey::Activate(index) if dialog.container_backed && index == 1 => {
-                self.begin_container_edit();
-                return DashboardAction::None;
-            }
-            ButtonKey::Activate(index) if index == dialog.stop_index() => {
-                let reviewer_conversation = self.sessions_with_review.contains(&dialog.session_id);
-                self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::Close {
-                    session_id: dialog.session_id,
-                    reviewer_conversation,
-                }));
-                return DashboardAction::None;
-            }
-            ButtonKey::Activate(_) => {
-                self.cancel_modal();
-                return DashboardAction::None;
-            }
-            ButtonKey::Ignored => {}
-        }
-        self.mode = Mode::SessionEdit(dialog);
-        DashboardAction::None
     }
 
     pub fn show_repository_origin_dialog(
@@ -2181,29 +2084,33 @@ mod tests {
         editor
     }
 
-    fn open_container_editor(dashboard: &mut DashboardState) {
-        dashboard.handle_key(key(KeyCode::Char('e')));
-        dashboard.handle_key(key(KeyCode::Right));
+    /// Reaches a session command the way the user does now: `F2`, type
+    /// enough of the name to pick it out, Enter. The session edit dialog
+    /// these fixtures used to press `e` for no longer exists.
+    fn through_the_palette(dashboard: &mut DashboardState, query: &str) {
+        dashboard.handle_key(key(KeyCode::F(2)));
+        assert!(
+            matches!(dashboard.mode, Mode::Palette(_)),
+            "F2 opens the palette"
+        );
+        for character in query.chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
         dashboard.handle_key(key(KeyCode::Enter));
+    }
+
+    fn open_container_editor(dashboard: &mut DashboardState) {
+        through_the_palette(dashboard, "container");
         assert!(matches!(dashboard.mode, Mode::EditContainer(_)));
     }
 
     fn open_rename_editor(dashboard: &mut DashboardState) {
-        dashboard.handle_key(key(KeyCode::Char('e')));
-        dashboard.handle_key(key(KeyCode::Enter));
+        through_the_palette(dashboard, "rename");
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
     }
 
     fn open_stop_dialog(dashboard: &mut DashboardState) {
-        dashboard.handle_key(key(KeyCode::Char('e')));
-        let stop_index = match &dashboard.mode {
-            Mode::SessionEdit(dialog) => dialog.stop_index(),
-            _ => panic!("expected session edit dialog"),
-        };
-        for _ in 0..stop_index {
-            dashboard.handle_key(key(KeyCode::Right));
-        }
-        dashboard.handle_key(key(KeyCode::Enter));
+        through_the_palette(dashboard, "stop");
         assert!(matches!(
             dashboard.mode,
             Mode::Confirm(ConfirmDialog {

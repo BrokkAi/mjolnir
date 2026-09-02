@@ -155,10 +155,11 @@ to build your own.
 2. Run `mj doctor` (or `mj doctor --json`) and fix what it reports, until it
    is clean. Log in to any profile that needs it with
    `mj login --profile <id>`.
-3. Press `Tab` to focus Sessions, then `n` to create a session: pick a
-   profile, a repository bundle, and a target. Focus returns to the prompt;
+3. Press `Alt+N` to create a session — that works from anywhere, including
+   the prompt — and pick a profile, a repository bundle, and a target. From
+   the Sessions pane, plain `n` does the same. Focus returns to the prompt;
    send your first message.
-4. Detach whenever you like (`Ctrl+Q`). The session keeps running and your
+4. Detach whenever you like (`Alt+Q`). The session keeps running and your
    queued prompts keep executing. Reattach by running `mj` again, or open the
    daemon-owned web viewer shown by `mj daemon status`.
 
@@ -166,7 +167,7 @@ to build your own.
 
 Mjolnir's TUI is one screen. From top to bottom: **Sessions**, the **transcript**
 of the conversation you are in, the **Prompt** composer, **Targets**, **Quota**,
-and a footer that names the keys for whatever has focus. Nothing is behind a
+and a footer that names the keys that apply right now. Nothing is behind a
 navigation step, so you can read an agent's output while seeing what your other
 agents are doing and how loaded your machines are.
 
@@ -178,29 +179,70 @@ and `Shift+Tab` reverses it. Once the support panes are collapsed the ring is
 the two panes that are still lists. The transcript is not a Tab stop: read it
 with the mouse wheel or `PageUp`/`PageDown` from wherever you are.
 
-`Ctrl+G` is a two-position dial: panes open, or panes collapsed for the
+`Alt+G` is a two-position dial: panes open, or panes collapsed for the
 conversation. Collapsed, Targets and Quota become one summary row each — host
 names with CPU load, EC2 fleets with how many machines they are running,
 profile names with weekly quota remaining — and the session list shrinks to a
 fixed grid, one line per session, unless your terminal has more rows than
 half its columns, in which case the list stays a list.
 
-`Ctrl+G` always leaves the keyboard in Prompt: asking for room around the
+`Alt+G` always leaves the keyboard in Prompt: asking for room around the
 conversation and asking to work in it are the same gesture.
 
 Tab leaves the dial where you set it.
 
-`F2` opens the workspace picker, `F3` the web viewer, and `Ctrl+Q` detaches.
+A few keys answer from everywhere, including while you are typing in Prompt:
+`F2` opens the command palette, `F3` the workspace picker, `F4` the web
+viewer, `F5` refreshes the Targets and Quota panes, `Alt+N` creates a session,
+`Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
+the selected session is in the middle of, `Alt+G` turns the pane dial, and
+`Alt+Q` detaches this terminal client — the daemon and the sessions it runs
+keep working. Each of these has one spelling: a command you can reach from
+anywhere has no plain-letter alias as well.
+
+`F2` is the way to reach a command you have no key for. It lists the selected
+session's own commands first — rename it, edit its container settings, stop it
+— under a heading naming that session, then the commands for the pane you are
+in, then everything that works anywhere, each with the key that runs it. Type
+to filter by name or description, `Up`/`Down` to move, `Enter` to run, `Escape`
+to close. Commands that cannot run right now stay in the list, greyed, with the
+reason.
+
+In Prompt, `Ctrl+R` searches your prompt history, as in a shell, and `Alt+T`
+switches the transcript between rendered and raw. Inside the search, `Alt+R`
+cycles which history it reads. Every other `Ctrl` key in Prompt is a text
+editing key, as in a shell.
+
+`Alt` chords need Option to act as Meta in macOS terminals (iTerm2:
+Preferences, Profiles, Keys, "Left Option key: Esc+"; Terminal.app: "Use Option
+as Meta key"), and inside tmux a short `escape-time`, for example
+`set -sg escape-time 10` in `~/.tmux.conf`. Without those the terminal reports
+`Alt+N` as `Escape` then `n`. The command palette on `F2` and the key reference
+below are the fallbacks: every chord is also a line in both.
+
+`F1` opens the key reference, and so does `?` from any pane. It lists every key
+this screen answers, greying the ones that do not apply where you are; `Escape`,
+`F1`, or `?` closes it and puts back whatever it opened over. The footer is
+generated from the same list, so it names only the keys that apply right now —
+`Alt-X cancel launch`, for instance, appears only while the selected session is
+starting or stopping.
+
+The footer reads in three groups, separated by a vertical bar: what the pane
+you are in answers, the `Alt` chords that answer anywhere, then the function
+keys. A narrow terminal drops hints from the left-hand groups first; the
+function keys stay, because they are the way to the palette and the reference.
 
 The panes take plain keys, because the composer is a separate focus and never
-sees them. On Sessions: `Enter` opens the selection, `n` creates a session, `s`
-opens Resume, `e` edits, `a` marks everything read, `x` cancels an operation in
-flight, `Space` and `1`–`9` collapse and expand projects. On Targets and Quota:
-`r` refreshes and `Enter` or `e` opens that row's actions. Every list also takes
-the arrow keys, `j`/`k`, `Ctrl+N`/`Ctrl+P`, and `Home`/`End`.
+sees them. A plain letter is always pane-local: everything reachable from
+anywhere is a chord. On Sessions: `Enter` opens the selection, `Space` and
+`1`–`9` collapse and expand projects; a session's own commands are on `F2`. On
+Targets and Quota: `Enter` or `e` opens that row's actions, and `F5` refreshes
+both panes from anywhere.
+Every list also takes the arrow keys, `j`/`k`, `Ctrl+N`/`Ctrl+P`, and
+`Home`/`End`.
 
 `Escape` belongs to the conversation: it cancels a running turn or a shell
-command, and closes a dialog. It never quits.
+command, and closes a dialog. It never detaches.
 
 In an attached TUI or the phone viewer, start a message with `!` to run the
 rest as `bash -lc` inside that session's target. Shell commands run in the

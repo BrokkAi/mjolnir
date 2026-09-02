@@ -385,9 +385,6 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
-            KeyCode::F(2) if wizard.mounts.focus == MountFocus::Source => {
-                self.complete_new_mount_source(wizard, target_template_id)
-            }
             KeyCode::Up
                 if wizard.mounts.focus == MountFocus::Source
                     && !wizard.mounts.completion_candidates.is_empty() =>
@@ -1160,9 +1157,6 @@ impl DashboardState {
                 );
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
-            }
-            KeyCode::F(2) if wizard.mounts.focus == MountFocus::Source => {
-                self.complete_resume_mount_source(wizard, target_template_id)
             }
             KeyCode::Up
                 if wizard.mounts.focus == MountFocus::Source

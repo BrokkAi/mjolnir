@@ -422,7 +422,7 @@ fn case_insensitive_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range
 mod tests {
     use super::*;
     use crate::hel_chat::ChatAction;
-    use crate::hel_chat::test_support::{ctrl, key, snapshot};
+    use crate::hel_chat::test_support::{alt, ctrl, key, snapshot};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn apply_pending_history_search(chat: &mut ChatState) {
@@ -581,10 +581,16 @@ mod tests {
         );
     }
 
+    /// Ctrl-R opens the reverse search, as readline does; once it is open
+    /// Alt-R keeps its older job of cycling which history the search reads.
     #[test]
-    fn reverse_search_accepts_raw_control_events_and_alt_r_cycles_scope() {
+    fn ctrl_r_opens_history_search_and_alt_r_inside_it_cycles_scope() {
         let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.handle_key(key(KeyCode::Char('\u{12}')));
+        // Alt-R does not open one: it belongs to the open search's scope.
+        chat.handle_key(alt('r'));
+        assert!(chat.history_search.is_none());
+
+        chat.handle_key(ctrl('r'));
         assert!(chat.history_search.is_some());
         chat.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
         assert_eq!(

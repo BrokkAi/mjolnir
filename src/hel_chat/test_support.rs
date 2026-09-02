@@ -40,6 +40,12 @@ pub(super) fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
 }
 
+/// An Alt chord. Alt is one modifier everywhere, so it never goes through
+/// [`ctrl`].
+pub(super) fn alt(character: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
+}
+
 /// A wheel event over `area`, which is what decides where it scrolls.
 pub(super) fn mouse_in(kind: MouseEventKind, area: Rect) -> MouseEvent {
     MouseEvent {

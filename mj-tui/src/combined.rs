@@ -485,7 +485,7 @@ fn render_empty_conversation(
             " Prompt (no live session) ",
             [
                 "No live session in this workspace.",
-                "Press Tab for Sessions, then n to create or s to resume.",
+                "Press Alt-N to create one, or Alt-S to resume one.",
             ],
         )
     } else {

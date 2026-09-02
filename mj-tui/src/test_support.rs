@@ -61,6 +61,12 @@ pub(crate) fn ctrl_key(character: char) -> KeyEvent {
     )
 }
 
+/// An Alt chord. Alt is the same modifier everywhere, so this must not go
+/// through [`ctrl_key`], which reports SUPER on macOS.
+pub(crate) fn alt_key(character: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
+}
+
 pub(crate) fn mouse_in(kind: MouseEventKind, area: Rect) -> MouseEvent {
     MouseEvent {
         kind,

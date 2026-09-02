@@ -1238,7 +1238,7 @@ impl DashboardContext {
                     self.request_quota_refresh();
                     self.refresh_poll_targets();
                     self.dashboard
-                        .set_notice("Setup complete. Press Ctrl+N to start your first session.");
+                        .set_notice("Setup complete. Press Alt-N to start your first session.");
                 }
                 Err(error) => {
                     self.dashboard

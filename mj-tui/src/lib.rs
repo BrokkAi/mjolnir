@@ -29,15 +29,20 @@ use hel::hel_targets::AdditionalMount;
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
     ImportBundleConfirmation, ImportProgress, RenameEditor, RenameFocus, RepositoryOriginDialog,
-    SessionEditDialog, TargetActionsDialog, WebDialog,
+    TargetActionsDialog, WebDialog,
 };
+use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
+use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
 use crate::wizards::{MountFocus, NewWizard, ResumeWizard, WizardStep};
 
+mod actions;
 mod combined;
 mod dialogs;
+mod help;
 mod ingest;
+mod palette;
 mod render;
 mod resume;
 mod widgets;
@@ -46,6 +51,7 @@ mod wizards;
 #[cfg(test)]
 mod test_support;
 
+pub use crate::actions::{CommandId, global_chord};
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::ingest::{
@@ -149,8 +155,9 @@ pub enum DashboardAction {
         session_id: String,
         title: String,
     },
-    RefreshQuotas,
-    RefreshCapacity,
+    /// Re-probe every target's capacity and ask every profile for its quota
+    /// again. One key does both, so there is one action rather than two.
+    RefreshAll,
     RenameProfile {
         old_id: String,
         new_id: String,
@@ -266,7 +273,7 @@ pub(crate) const COLLAPSED_FOCUS_ORDER: [Focus; 2] = [Focus::Sessions, Focus::Pr
 
 /// How much room the surface gives the conversation.
 ///
-/// Two positions - open, and collapsed - and `Ctrl-G` turns the dial between
+/// Two positions - open, and collapsed - and `Alt-G` turns the dial between
 /// them. What the collapsed position does to the session list is decided by
 /// the terminal's shape, not by another dial position; see
 /// [`DashboardState::sessions_compact`].
@@ -306,7 +313,6 @@ pub(crate) enum Mode {
     /// The unified picker for every session that is not live.
     ResumeDialog(ResumeDialog),
     RepositoryOrigin(RepositoryOriginDialog),
-    SessionEdit(SessionEditDialog),
     ConfigId(ConfigIdEditor),
     TargetActions(TargetActionsDialog),
     Web(WebDialog),
@@ -315,6 +321,11 @@ pub(crate) enum Mode {
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
     Confirm(ConfirmDialog),
+    /// The `F1` key reference, drawn over the mode it opened on top of. It
+    /// carries that mode so closing help puts it back untouched.
+    Help(HelpOverlay),
+    /// The `F2` command palette: every command that applies right now.
+    Palette(CommandPalette),
 }
 
 /// What a key press means for a focusable button row.
@@ -635,27 +646,36 @@ impl DashboardState {
             self.cancel_modal();
             return DashboardAction::None;
         }
-        if dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('q') {
-            return DashboardAction::QuitDetach;
-        }
         if !text_focused && dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
             return DashboardAction::QuitDetach;
-        }
-        // Workspaces moved off Ctrl-W and onto F2, because Ctrl-W is the
-        // composer's kill-previous-word and the composer is now always on
-        // screen. Like quit, it answers from every surface including a modal.
-        if key.code == KeyCode::F(2) {
-            return DashboardAction::OpenWorkspacePicker;
         }
 
         // Retire the notice this key press is stepping past, but only once it
         // has been on screen long enough to read: for a background failure
         // this bar is the only report there is.
         self.notices.dismiss(now);
+        // For one release, the two chords that moved off Control say where
+        // they went instead of doing nothing. Remove this arm in the release
+        // after the one that introduces Alt-G and Alt-Q.
+        if dashboard_accelerator(key.modifiers)
+            && let KeyCode::Char(moved @ ('g' | 'q')) = key.code
+        {
+            self.set_notice(if moved == 'g' {
+                "Ctrl-G moved to Alt-G"
+            } else {
+                "Ctrl-Q moved to Alt-Q"
+            });
+            return DashboardAction::None;
+        }
         // The resume dialog carries every scanned native session, so it is
         // handled where it lives rather than through a copy of the mode.
         if matches!(self.mode, Mode::ResumeDialog(_)) {
             return self.handle_resume_dialog_key(key);
+        }
+        // The palette is edited where it lives too: its entry list is rebuilt
+        // on every keystroke and there is no reason to copy it first.
+        if matches!(self.mode, Mode::Palette(_)) {
+            return self.handle_palette_key(key);
         }
         match self.mode.clone() {
             Mode::Dashboard => self.handle_dashboard_key(key),
@@ -663,7 +683,6 @@ impl DashboardState {
             Mode::Resume(wizard) => self.handle_resume_key(key, wizard),
             Mode::ResumeDialog(_) => unreachable!("the resume dialog is handled in place"),
             Mode::RepositoryOrigin(dialog) => self.handle_repository_origin_key(key, dialog),
-            Mode::SessionEdit(dialog) => self.handle_session_edit_key(key, dialog),
             Mode::ConfigId(editor) => self.handle_config_id_key(key, editor),
             Mode::TargetActions(dialog) => self.handle_target_actions_key(key, dialog),
             Mode::Web(_) => match key.code {
@@ -684,6 +703,8 @@ impl DashboardState {
                 self.handle_import_bundle_key(key.code, confirmation)
             }
             Mode::Confirm(dialog) => self.handle_confirmation_key(key, dialog),
+            Mode::Help(overlay) => self.handle_help_key(key, overlay),
+            Mode::Palette(_) => unreachable!("the command palette is handled in place"),
         }
     }
 
@@ -693,6 +714,9 @@ impl DashboardState {
             Mode::RepositoryOrigin(dialog) => dialog.focus == dialogs::RepositoryOriginFocus::Field,
             Mode::EditContainer(editor) => editor.field().is_some(),
             Mode::ResumeDialog(dialog) => dialog.focus == crate::resume::ResumeFocus::Search,
+            // The palette's query is a text field, so Ctrl-C closes it and a
+            // paste lands in the query rather than on the dashboard.
+            Mode::Palette(_) => true,
             Mode::New(wizard) => wizard.text_input_focused(),
             Mode::Resume(wizard) => wizard.text_input_focused(),
             Mode::Confirm(ConfirmDialog {
@@ -706,6 +730,13 @@ impl DashboardState {
     pub fn handle_paste(&mut self, pasted: &str) {
         let pasted = single_line_paste(pasted);
         if pasted.is_empty() {
+            return;
+        }
+        // The palette rebuilds its list from the query, so its paste is
+        // handled before the borrow the match below takes.
+        if let Mode::Palette(palette) = &mut self.mode {
+            palette.query.push_str(&pasted);
+            self.rebuild_palette_entries();
             return;
         }
         match &mut self.mode {
@@ -880,34 +911,34 @@ impl DashboardState {
     /// The composer is a separate focus and never reaches here, so the pane
     /// actions are plain letters rather than accelerated ones: no key typed at
     /// a pane can be mistaken for text.
+    ///
+    /// Everything that runs a named command is looked up in the action
+    /// registry ([`crate::actions`]) rather than matched here, so the keys, the
+    /// footer, and the help overlay are all reading one table. What stays as
+    /// hand-written arms is the input that is not a command: quitting, list
+    /// navigation, and the two keys whose meaning depends on state.
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> DashboardAction {
         let command = dashboard_accelerator(key.modifiers);
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-        // Keys that mean the same thing wherever the keyboard is.
         match (key.code, command) {
+            // Ctrl-C is quit's second key rather than a command of its own, so
+            // it is not in the registry and the footer never names it.
             (KeyCode::Char('c'), true) => return DashboardAction::QuitDetach,
-            (KeyCode::Char('g'), true) => {
-                self.cycle_pane_layout();
-                return DashboardAction::None;
-            }
-            (KeyCode::F(3), _) => return self.open_web_dialog(),
-            (KeyCode::Tab, _) => {
-                self.cycle_focus(false);
-                return DashboardAction::None;
-            }
+            // Shift-Tab is the reverse of the registry's Tab.
             (KeyCode::BackTab, _) => {
                 self.cycle_focus(true);
                 return DashboardAction::None;
             }
             // Escape belongs to the composer and to modals. On a pane it does
-            // nothing: the combined surface is quit with Ctrl-Q, and a stray
+            // nothing: the combined surface is quit with Alt-Q, and a stray
             // Escape must never take the whole screen away.
             (KeyCode::Esc, _) => return DashboardAction::None,
             _ => {}
         }
-        // List navigation, shared by all three panes.
+        // List navigation, shared by all three panes. It comes before the
+        // registry so `j`, `k`, Ctrl-N, and Ctrl-P keep moving the selection.
         match (key.code, command) {
             (KeyCode::Up | KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
                 self.move_selection(-1);
@@ -929,80 +960,25 @@ impl DashboardState {
             _ => {}
         }
         // Setup and the session editor never both apply: setup only opens
-        // while the config is empty, and an empty config has no sessions.
+        // while the config is empty, and an empty config has no sessions. The
+        // registry cannot resolve this on the key alone, because `e` is also
+        // the Sessions, Targets, and Quota panes' key, so the ambiguity is
+        // settled here and `Scope::Setup` is left out of `spec_for_key`.
         if plain && key.code == KeyCode::Char('e') && self.config_is_empty() {
-            return DashboardAction::OpenConfig;
+            return self.dispatch_command(CommandId::OpenConfig);
         }
-        match self.focus {
-            Focus::Sessions => self.handle_sessions_key(key.code, plain),
-            Focus::Targets => match (key.code, plain) {
-                (KeyCode::Char('r'), true) => DashboardAction::RefreshCapacity,
-                (KeyCode::Enter, _) | (KeyCode::Char('e'), true) => {
-                    self.begin_target_actions();
-                    DashboardAction::None
-                }
-                _ => DashboardAction::None,
-            },
-            Focus::Quota => match (key.code, plain) {
-                (KeyCode::Char('r'), true) => DashboardAction::RefreshQuotas,
-                (KeyCode::Enter, _) | (KeyCode::Char('e'), true) => {
-                    self.begin_profile_rename();
-                    DashboardAction::None
-                }
-                _ => DashboardAction::None,
-            },
-            Focus::Prompt => DashboardAction::None,
+        // A digit picks a project by its number, and a registry command
+        // carries no argument, so this one stays a hand-written arm.
+        if self.focus == Focus::Sessions
+            && plain
+            && let KeyCode::Char(digit @ '1'..='9') = key.code
+        {
+            self.toggle_project_number(digit.to_digit(10).unwrap_or(0) as usize);
+            return DashboardAction::None;
         }
-    }
-
-    /// Keys the Sessions pane owns. All plain, because the composer is
-    /// elsewhere.
-    fn handle_sessions_key(&mut self, code: KeyCode, plain: bool) -> DashboardAction {
-        match (code, plain) {
-            (KeyCode::Enter, _) => self.open_selected_session(),
-            (KeyCode::Char('n'), true) => self.begin_new(),
-            (KeyCode::Char('s'), true) => DashboardAction::OpenResumeDialog,
-            (KeyCode::Char('e'), true) => {
-                self.begin_session_edit();
-                DashboardAction::None
-            }
-            (KeyCode::Char('a'), true) => self.mark_all_read(),
-            (KeyCode::Char('x'), true) => {
-                let operation = self.selected_session().and_then(|session| {
-                    self.session_operations
-                        .get(&session.id)
-                        .map(|operation| (session.id.clone(), operation.kind))
-                });
-                operation.map_or(DashboardAction::None, |(session_id, kind)| {
-                    DashboardAction::CancelOperation { session_id, kind }
-                })
-            }
-            (KeyCode::Char(' '), true) => {
-                self.toggle_selected_project();
-                DashboardAction::None
-            }
-            (KeyCode::Char(digit @ '1'..='9'), true) => {
-                self.toggle_project_number(digit.to_digit(10).unwrap_or(0) as usize);
-                DashboardAction::None
-            }
-            _ => DashboardAction::None,
-        }
-    }
-
-    fn reject_selected_operation(&mut self) -> bool {
-        let operation = self.selected_session().and_then(|session| {
-            self.session_operations
-                .get(&session.id)
-                .map(|operation| operation.kind)
-        });
-        if let Some(operation) = operation {
-            self.notices.set(format!(
-                "{} is in progress; press Ctrl+X to cancel it.",
-                operation.label()
-            ));
-            true
-        } else {
-            false
+        match crate::actions::spec_for_key(key, self.focus) {
+            Some(id) => self.dispatch_command(id),
+            None => DashboardAction::None,
         }
     }
 
@@ -1022,7 +998,7 @@ impl DashboardState {
         };
         if let Some(operation) = self.session_operations.get(&session.id) {
             self.notices.set(format!(
-                "{} is in progress; press Ctrl+X to cancel it.",
+                "{} is in progress; press Alt-X to cancel it.",
                 operation.kind.label()
             ));
             return DashboardAction::None;
@@ -1460,6 +1436,25 @@ mod tests {
 
     use crate::render::render;
 
+    /// Opens the rename editor the way the surface offers it now: `F2`, type
+    /// enough of "rename" to pick it out, Enter. There is no `e` any more.
+    fn open_rename_through_the_palette(dashboard: &mut DashboardState) {
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::F(2)));
+        for character in "rename".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(
+            matches!(dashboard.mode, Mode::Rename(_)),
+            "{:?}",
+            dashboard.mode
+        );
+    }
+
     /// The composer is a separate focus, so a pane's actions are plain
     /// letters: nothing typed at a pane can be mistaken for prompt text.
     #[test]
@@ -1469,22 +1464,20 @@ mod tests {
         let mut dashboard = dashboard_with_session(session);
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('s'))),
+            dashboard.handle_key(alt_key('s')),
             DashboardAction::OpenResumeDialog
         );
         dashboard.cancel_modal();
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('n'))),
-            DashboardAction::None
-        );
+        assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
         assert!(matches!(dashboard.mode, Mode::New(_)));
         dashboard.cancel_modal();
+        // `e` was the session edit dialog's key. The command palette replaced
+        // that dialog, so nothing answers `e` on the Sessions pane now.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('e'))),
             DashboardAction::None
         );
-        assert!(matches!(dashboard.mode, Mode::SessionEdit(_)));
-        dashboard.cancel_modal();
+        assert_eq!(dashboard.mode, Mode::Dashboard);
         // A pane key that belongs to a different pane does nothing here.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('r'))),
@@ -1492,21 +1485,17 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::F(2))),
+            dashboard.handle_key(key(KeyCode::F(3))),
             DashboardAction::OpenWorkspacePicker
         );
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::F(3))),
+            dashboard.handle_key(key(KeyCode::F(4))),
             DashboardAction::LoadWebAccess
         );
         dashboard.cancel_modal();
         assert_eq!(
             dashboard.handle_key(ctrl_key('v')),
             DashboardAction::PasteFromClipboard
-        );
-        assert_eq!(
-            dashboard.handle_key(ctrl_key('q')),
-            DashboardAction::QuitDetach
         );
     }
 
@@ -1520,26 +1509,51 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(dashboard.focus, Focus::Targets);
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('r'))),
-            DashboardAction::RefreshCapacity
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
         );
+        assert!(matches!(dashboard.mode, Mode::TargetActions(_)));
+        dashboard.cancel_modal();
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('n'))),
             DashboardAction::None,
-            "n creates a session only from the Sessions pane"
+            "the plain letter creates nothing anywhere"
         );
 
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(dashboard.focus, Focus::Quota);
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('r'))),
-            DashboardAction::RefreshQuotas
-        );
-        assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('e'))),
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
+    }
+
+    /// Refreshing moved off the two panes onto one global key, so the letter
+    /// the panes used to answer must now do nothing at all.
+    #[test]
+    fn plain_r_no_longer_refreshes() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+
+        for wanted in [Focus::Targets, Focus::Quota] {
+            while dashboard.focus != wanted {
+                dashboard.cycle_focus(false);
+            }
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char('r'))),
+                DashboardAction::None,
+                "plain r still acts at {wanted:?}"
+            );
+            assert_eq!(dashboard.mode, Mode::Dashboard);
+        }
+
+        // F5 is the one refresh key, and it answers from every pane.
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::F(5))),
+            DashboardAction::RefreshAll
+        );
     }
 
     #[test]
@@ -1571,24 +1585,74 @@ mod tests {
         }
     }
 
-    /// The dial has two positions, and it wraps after two presses.
+    /// The dial has two positions, and it wraps after two presses. It moved
+    /// off Control, and for one release the old chord says so.
     #[test]
-    fn ctrl_g_turns_the_dial_one_position_at_a_time() {
+    fn alt_g_cycles_the_pane_layout_and_ctrl_g_no_longer_does() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
         assert_eq!(dashboard.pane_layout(), PaneLayout::Expanded);
 
         for expected in [PaneLayout::Collapsed, PaneLayout::Expanded] {
-            assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
+            assert_eq!(dashboard.handle_key(alt_key('g')), DashboardAction::None);
             assert_eq!(dashboard.pane_layout(), expected);
         }
+
+        assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
+        assert_eq!(dashboard.pane_layout(), PaneLayout::Expanded);
+        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-G moved to Alt-G"));
+    }
+
+    /// Plain letters are pane-local only. New session, resume, and mark read
+    /// answer from everywhere, so each has one spelling — its chord — and the
+    /// letters that used to alias them do nothing at all.
+    #[test]
+    fn plain_n_a_and_s_no_longer_act() {
+        for character in ['n', 'a', 's'] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.focus_sessions();
+
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char(character))),
+                DashboardAction::None,
+                "{character}"
+            );
+            assert_eq!(dashboard.mode, Mode::Dashboard, "{character}");
+            assert_eq!(dashboard.notice(), None, "{character}");
+        }
+
+        // The chords still do what the letters used to.
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
+        assert!(matches!(dashboard.mode, Mode::New(_)));
+        dashboard.cancel_modal();
+
+        assert_eq!(
+            dashboard.handle_key(alt_key('s')),
+            DashboardAction::OpenResumeDialog
+        );
+        assert_eq!(dashboard.handle_key(alt_key('a')), DashboardAction::None);
+        assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
+    }
+
+    /// Muscle memory for the old quit chord meets a sentence rather than
+    /// silence, for one release.
+    #[test]
+    fn ctrl_q_explains_the_move_instead_of_quitting() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+
+        assert_eq!(dashboard.handle_key(ctrl_key('q')), DashboardAction::None);
+        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-Q moved to Alt-Q"));
+        assert_eq!(dashboard.mode, Mode::Dashboard);
     }
 
     /// Asking for room around the conversation and asking to work in it are
     /// the same gesture, so the dial always lands in the composer.
     #[test]
-    fn ctrl_g_always_hands_the_keyboard_to_the_composer() {
+    fn alt_g_always_hands_the_keyboard_to_the_composer() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
 
@@ -1596,7 +1660,7 @@ mod tests {
             let mut dashboard = dashboard_with_session(session.clone());
             dashboard.focus = start;
             for _ in 0..2 {
-                assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
+                assert_eq!(dashboard.handle_key(alt_key('g')), DashboardAction::None);
                 assert_eq!(dashboard.focus, Focus::Prompt, "from {start:?}");
             }
             assert_eq!(dashboard.pane_layout(), PaneLayout::Expanded);
@@ -1611,7 +1675,7 @@ mod tests {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
-        dashboard.handle_key(ctrl_key('g'));
+        dashboard.handle_key(alt_key('g'));
         assert_eq!(dashboard.pane_layout(), PaneLayout::Collapsed);
         assert_eq!(dashboard.focus, Focus::Prompt);
 
@@ -1640,7 +1704,7 @@ mod tests {
 
         for (key_code, label) in [(KeyCode::Tab, "Tab"), (KeyCode::BackTab, "Shift-Tab")] {
             let mut dashboard = dashboard_with_session(session.clone());
-            dashboard.handle_key(ctrl_key('g'));
+            dashboard.handle_key(alt_key('g'));
             assert_eq!(dashboard.pane_layout(), PaneLayout::Collapsed);
             dashboard.focus_prompt();
 
@@ -1654,7 +1718,7 @@ mod tests {
         }
     }
 
-    /// The combined surface is quit with Ctrl-Q. A stray Escape must never
+    /// The combined surface is quit with Alt-Q. A stray Escape must never
     /// take the conversation off the screen.
     #[test]
     fn escape_never_quits_the_combined_surface() {
@@ -1882,7 +1946,7 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('x'))),
+            dashboard.handle_key(alt_key('x')),
             DashboardAction::CancelOperation {
                 session_id,
                 kind: SessionOperationKind::Launching,
@@ -1933,19 +1997,16 @@ mod tests {
         let shown_at = Instant::now();
 
         assert_eq!(
-            dashboard.handle_key_at(key(KeyCode::Char('a')), shown_at),
+            dashboard.handle_key_at(alt_key('a'), shown_at),
             DashboardAction::None
         );
         assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
     }
 
     #[test]
-    fn ctrl_q_quits_without_mutating_any_dashboard_modal() {
+    fn alt_q_quits_without_mutating_any_dashboard_modal() {
         let mut new_session = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-        assert_eq!(
-            new_session.handle_key(key(KeyCode::Char('n'))),
-            DashboardAction::None
-        );
+        assert_eq!(new_session.handle_key(alt_key('n')), DashboardAction::None);
 
         let mut resume = dashboard_with_session(stopped_session());
         assert_eq!(open_resume_wizard(&mut resume), DashboardAction::None);
@@ -1954,14 +2015,7 @@ mod tests {
         running.state = SessionState::Running;
         running.checkpoint = None;
         let mut rename = dashboard_with_session(running);
-        assert_eq!(
-            rename.handle_key(key(KeyCode::Char('e'))),
-            DashboardAction::None
-        );
-        assert_eq!(
-            rename.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
+        open_rename_through_the_palette(&mut rename);
 
         let mut importing = dashboard_with_session(stopped_session());
         importing.show_import_progress("Chosen session".into());
@@ -1987,8 +2041,13 @@ mod tests {
             assert!(!matches!(dashboard.mode, Mode::Dashboard), "{label}");
             let mode_before_quit = dashboard.mode.clone();
 
+            // Alt-Q is a global chord: the controller answers it before the
+            // surface sees the key, so this drives the same path the
+            // controller's pre-filter drives.
+            let command = crate::global_chord(&alt_key('q')).expect("Alt-Q is a global chord");
+            assert!(dashboard.global_chord_allowed(command), "{label}");
             assert_eq!(
-                dashboard.handle_key(ctrl_key('q')),
+                dashboard.dispatch_command(command),
                 DashboardAction::QuitDetach,
                 "{label}"
             );
@@ -2113,7 +2172,7 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
+            dashboard.handle_key(alt_key('a')),
             DashboardAction::MarkAllRead {
                 receipts: vec![("session-1".into(), 4)]
             }
@@ -2138,7 +2197,7 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
+            dashboard.handle_key(alt_key('a')),
             DashboardAction::MarkAllRead {
                 receipts: vec![("session-1".into(), 3)]
             }
@@ -2154,8 +2213,7 @@ mod tests {
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
 
-        dashboard.handle_key(key(KeyCode::Char('e')));
-        dashboard.handle_key(key(KeyCode::Enter));
+        open_rename_through_the_palette(&mut dashboard);
         let Mode::Rename(editor) = &mut dashboard.mode else {
             panic!("expected rename editor")
         };

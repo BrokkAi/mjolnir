@@ -1260,16 +1260,23 @@ impl ActiveChat {
             ChatAction::CycleFocus { reverse } => {
                 return ChatEventOutcome::CycleFocus { reverse };
             }
-            ChatAction::CyclePaneLayout => return ChatEventOutcome::CyclePaneLayout,
-            ChatAction::OpenWebDialog => return ChatEventOutcome::OpenWebDialog,
-            ChatAction::QuitDetach => {
-                self.cancel_dictation();
-                return ChatEventOutcome::QuitDetach {
-                    last_seen_event_ordinal: detach_chat(&mut self.state),
-                };
-            }
+            ChatAction::QuitDetach => return self.detach(),
         }
         ChatEventOutcome::Handled
+    }
+
+    /// Leaves the conversation: stops any dictation and reports how far the
+    /// transcript has been read, which the host turns into the session's read
+    /// receipt and its saved draft.
+    ///
+    /// `Alt-Q` is a global chord, so the host catches it before the composer
+    /// sees the key and calls this directly; `/detach` reaches it through
+    /// [`ChatAction::QuitDetach`]. Both paths must do the same bookkeeping.
+    pub fn detach(&mut self) -> ChatEventOutcome {
+        self.cancel_dictation();
+        ChatEventOutcome::QuitDetach {
+            last_seen_event_ordinal: detach_chat(&mut self.state),
+        }
     }
 
     /// Opens the reviewer waterfall for a captured plan.
@@ -2287,21 +2294,27 @@ pub(super) fn render_chat_footer(
     // The host only hands the footer to the chat while the composer has
     // focus, so `prompt_focused` is normally true here; the other arm keeps
     // the row honest if it ever is not.
-    let default_footer = if !prompt_focused {
-        "Ctrl-G panes · Tab pane · PgUp/PgDn transcript"
+    // The three groups are the dashboard's: what the composer answers, the
+    // chords that answer from anywhere, then the function keys. Only the
+    // first group changes with what the composer is doing.
+    const CHORDS: &[&str] = &["Alt-G panes", "Alt-Q detach"];
+    const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help";
+    let composer_keys = if !prompt_focused {
+        "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
-        "Ctrl-G panes · Listening… Alt-V stop · PgUp/PgDn transcript"
+        "Listening… Alt-V stop · PgUp/PgDn transcript"
     } else if !chat.queued_prompts.is_empty() {
-        "Ctrl-G panes · Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Esc cancel"
+        "Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Esc cancel"
     } else {
-        "Ctrl-G panes · Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Ctrl-T rendering · Esc cancel"
+        "Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Alt-T rendering · Esc cancel"
     };
+    let default_footer = fit_footer(composer_keys, CHORDS, FUNCTION_KEYS, footer_area.width);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
         .as_deref()
         .or(notice.as_deref())
-        .unwrap_or(default_footer);
+        .unwrap_or(&default_footer);
     // The shared notice bar is yellow wherever it shows; a search prompt or
     // the default hotkey hints stay the quieter dark gray.
     let footer_color = if search_footer.is_none() && notice.is_some() {
@@ -2322,6 +2335,29 @@ pub(super) fn render_chat_footer(
             footer_area.x + column.min(usize::from(footer_area.width.saturating_sub(1))) as u16,
             footer_area.y,
         ));
+    }
+}
+
+/// The composer's footer row, narrowed to `width` by the dashboard's rule:
+/// whole hints go from the composer's own group first, then from the chords,
+/// and the function keys are never taken, because they are the way to the
+/// palette and the key reference that can name whatever the row dropped.
+fn fit_footer(composer_keys: &str, chords: &[&str], functions: &str, width: u16) -> String {
+    const HINT: &str = " \u{b7} ";
+    const GROUP: &str = " \u{2502} ";
+    let mut pane = composer_keys.split(HINT).collect::<Vec<_>>();
+    let mut chords = chords.to_vec();
+    loop {
+        let text = [pane.join(HINT), chords.join(HINT), functions.to_owned()]
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .collect::<Vec<_>>()
+            .join(GROUP);
+        if text.chars().count() <= usize::from(width)
+            || (pane.pop().is_none() && chords.pop().is_none())
+        {
+            return text;
+        }
     }
 }
 
@@ -2581,7 +2617,7 @@ mod tests {
         // The chat underneath still shows through above and below the
         // dialog's centred popup.
         assert!(row_of("UNDERLYING CHAT SENTINEL") < popup_top);
-        assert!(row_of("Ctrl-G panes") > popup_top);
+        assert!(row_of("Tab pane") > popup_top);
     }
 
     #[test]
@@ -3202,8 +3238,55 @@ mod tests {
         let footer_text = (buffer.area.x..buffer.area.right())
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
-        assert!(footer_text.contains("Ctrl-G panes"));
+        assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
         assert_eq!(buffer[(buffer.area.x, footer_row)].fg, Color::DarkGray);
+    }
+
+    /// The composer's own row is where a user typing in it learns the keys,
+    /// so it carries the same three groups the dashboard's row does: the
+    /// composer's own keys, the chords, then the function keys.
+    #[test]
+    fn chat_footer_advertises_alt_keys_and_f1() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let mut terminal = Terminal::new(TestBackend::new(200, 24)).expect("terminal");
+        let footer_of = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            let row = buffer.area.bottom() - 1;
+            (buffer.area.x..buffer.area.right())
+                .map(|x| buffer[(x, row)].symbol())
+                .collect::<String>()
+        };
+
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, true))
+            .expect("draw chat");
+        let footer = footer_of(&terminal);
+        for hint in [
+            "Ctrl-R history",
+            "Alt-T rendering",
+            "│ Alt-G panes · Alt-Q detach │",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
+        ] {
+            assert!(footer.contains(hint), "{footer:?} omits {hint}");
+        }
+        assert!(!footer.contains("Ctrl-G"), "{footer:?}");
+
+        assert!(!footer.contains("Ctrl-T"), "{footer:?}");
+
+        // The queued-prompt variant is a different string and must say the
+        // same things about the keys it still names.
+        chat.queued_prompts.push_back(queued("queued-1", "next"));
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, true))
+            .expect("draw chat with a queued prompt");
+        let footer = footer_of(&terminal);
+        for hint in [
+            "Ctrl-R history",
+            "│ Alt-G panes · Alt-Q detach │",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
+        ] {
+            assert!(footer.contains(hint), "{footer:?} omits {hint}");
+        }
     }
 
     #[test]

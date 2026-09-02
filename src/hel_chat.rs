@@ -142,10 +142,6 @@ pub enum ChatEventOutcome {
     CycleFocus {
         reverse: bool,
     },
-    /// Ctrl-G: turn the pane dial one position.
-    CyclePaneLayout,
-    /// F3: open the web-access dialog.
-    OpenWebDialog,
     QuitDetach {
         last_seen_event_ordinal: u64,
     },
@@ -205,8 +201,6 @@ pub enum ChatAction {
     CycleFocus {
         reverse: bool,
     },
-    CyclePaneLayout,
-    OpenWebDialog,
     QuitDetach,
 }
 
@@ -1518,14 +1512,20 @@ impl ChatState {
         // projection state: it is rebuilt from `pending_elicitations` the next
         // time the session is opened, so stepping out loses nothing but field
         // text that was typed and not submitted.
-        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('g') {
-            return ChatAction::CyclePaneLayout;
-        }
-        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('q') {
-            return ChatAction::QuitDetach;
-        }
-        if code == KeyCode::F(3) {
-            return ChatAction::OpenWebDialog;
+        // The pane dial, detach, and the web viewer are global chords now
+        // (Alt-G, Alt-Q, F4). The host catches them before the composer sees
+        // them, so the composer has no escape hatch of its own left. For one
+        // release the two chords that moved off Control say where they went;
+        // remove this arm in the release after.
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char(moved @ ('g' | 'q')) = code
+        {
+            self.set_notice(if moved == 'g' {
+                "Ctrl-G moved to Alt-G"
+            } else {
+                "Ctrl-Q moved to Alt-Q"
+            });
+            return ChatAction::None;
         }
 
         // A reviewing harness that asked a question is blocked until it is
@@ -1605,14 +1605,11 @@ impl ChatState {
         }
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
-                KeyCode::Char('r') => {
-                    self.begin_history_search();
-                    return ChatAction::None;
-                }
-                KeyCode::Char('t') => {
-                    self.toggle_render_mode();
-                    return ChatAction::None;
-                }
+                // Reverse-i-search stays on readline's key. The block above
+                // hands every key to an open search first, which is what lets
+                // Ctrl-R step to the previous match and Alt-R cycle the
+                // search's scope once it is open.
+                KeyCode::Char('r') => self.begin_history_search(),
                 KeyCode::Char('a') => self.move_to_line_start(true),
                 KeyCode::Char('e') => self.move_to_line_end(true),
                 KeyCode::Char('b') => self.move_input_cursor(-1),
@@ -1674,6 +1671,10 @@ impl ChatState {
         }
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
+                // The rendering toggle sits here rather than beside Alt-V
+                // because the block above hands every key to an open
+                // reverse-i-search first.
+                KeyCode::Char('t') => self.toggle_render_mode(),
                 KeyCode::Char('b') | KeyCode::Left => self.move_word(-1),
                 KeyCode::Char('f') | KeyCode::Right => self.move_word(1),
                 KeyCode::Char('d') | KeyCode::Delete => {
@@ -2404,7 +2405,7 @@ fn turn_started_at_epoch_seconds(execution: MaterializedExecutionState) -> Optio
 mod tests {
     use super::*;
     use crate::hel_chat::test_support::{
-        advertise, ctrl, fast_mode_option, grok_chat, key, mode_config_option, queued,
+        advertise, alt, ctrl, fast_mode_option, grok_chat, key, mode_config_option, queued,
         select_config_option, snapshot,
     };
     use crate::hel_worker::ActivePrompt;
@@ -2460,20 +2461,24 @@ mod tests {
         assert_eq!(freshly_opened_chat("").input, "");
     }
 
-    /// Ctrl-G no longer leaves the conversation; it collapses the support
-    /// panes around it, and the host acts on that.
+    /// The pane dial and detach are global chords now, caught by the host
+    /// before the composer sees the key. For one release the old Control
+    /// chords say where they went rather than doing nothing.
     #[test]
-    fn control_g_asks_the_host_to_turn_the_pane_dial() {
+    fn control_g_and_control_q_say_where_they_moved() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let control_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        assert_eq!(chat.handle_key(control_g), ChatAction::CyclePaneLayout);
-    }
+        assert_eq!(chat.handle_key(control_g), ChatAction::None);
+        assert_eq!(
+            chat.notices.current().as_deref(),
+            Some("Ctrl-G moved to Alt-G")
+        );
 
-    #[test]
-    fn control_q_quits_from_conversation() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-
-        assert_eq!(chat.handle_key(ctrl('q')), ChatAction::QuitDetach);
+        assert_eq!(chat.handle_key(ctrl('q')), ChatAction::None);
+        assert_eq!(
+            chat.notices.current().as_deref(),
+            Some("Ctrl-Q moved to Alt-Q")
+        );
     }
 
     #[test]
@@ -2716,16 +2721,16 @@ mod tests {
 
     /// A pending elicitation is durable projection state, rebuilt from the
     /// session the next time it is opened, so leaving the view is a different
-    /// act from answering the agent. The same goes for collapsing the panes
-    /// around it: neither key is an answer to the form.
+    /// act from answering the agent. The moved-key notices are handled on the
+    /// same terms: they pass the open form without consuming it.
     #[test]
     fn control_g_and_control_q_pass_a_chat_whose_elicitation_is_still_open() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let request = text_elicitation();
         chat.restore_elicitation(request.clone());
 
-        assert_eq!(chat.handle_key(ctrl('g')), ChatAction::CyclePaneLayout);
-        assert_eq!(chat.handle_key(ctrl('q')), ChatAction::QuitDetach);
+        assert_eq!(chat.handle_key(ctrl('g')), ChatAction::None);
+        assert_eq!(chat.handle_key(ctrl('q')), ChatAction::None);
         assert_eq!(
             chat.materialized_session().pending_elicitations,
             vec![request.clone()]
@@ -2745,13 +2750,11 @@ mod tests {
     }
 
     #[test]
-    fn escape_only_cancels_an_active_turn_and_control_g_collapses_the_panes() {
+    fn escape_only_cancels_an_active_turn() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let control_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
         assert_eq!(chat.handle_key(control_c), ChatAction::None);
         assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
-        assert_eq!(chat.handle_key(control_g), ChatAction::CyclePaneLayout);
 
         // A turn the harness started on its own runs with no prompt of ours in
         // flight. The relay refuses to cancel that, so Esc must not offer to.
@@ -3373,7 +3376,7 @@ mod tests {
 
         chat.handle_key(KeyEvent::new(
             KeyCode::Char('T'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
         ));
         assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
     }
@@ -3387,13 +3390,16 @@ mod tests {
     }
 
     #[test]
-    fn control_t_replaces_control_r_as_raw_transcript_toggle() {
+    fn alt_t_toggles_rendering() {
         let mut chat = ChatState::new(&snapshot(), &[]);
+        assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
+        chat.handle_key(alt('t'));
+        assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
+        chat.handle_key(alt('t'));
+        assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
+        // Ctrl-T stayed free for readline when the toggle moved to Alt-T.
         chat.handle_key(ctrl('t'));
-        assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
-        chat.handle_key(ctrl('r'));
-        assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
-        assert!(chat.history_search.is_some());
+        assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
     }
 
     #[test]
