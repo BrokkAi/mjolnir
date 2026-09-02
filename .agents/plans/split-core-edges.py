@@ -58,7 +58,12 @@ for root in roots:
         for f in files_of(root, m):
             src_m = 'hel_review_host' if any(f.endswith(h) for h in HOST_FILES) else m
             for kind, text in zip(('non-test', 'test-only'), split_src(f)):
-                for crate, target, sym in re.findall(r'\b(crate|hel|mj_worker|mj_controller|mj_chat)::(\w+)((?:::\w+)+)', text):
+                refs = re.findall(r'\b(crate|hel|mj_worker|mj_controller|mj_chat)::(\w+)((?:::\w+)+)', text)
+                # Braced imports (`use crate::m::{a, b::c, ...}`), which may span lines.
+                for crate, target, body in re.findall(r'\b(crate|hel|mj_worker|mj_controller|mj_chat)::(\w+)::\{([^}]*)\}', text, re.S):
+                    for item in re.split(r'[,\s]+', body):
+                        if item: refs.append((crate, target, '::{' + item))
+                for crate, target, sym in refs:
                     if target not in LAYER or target == src_m: continue
                     if crate != 'crate' and target not in LAYERS[CRATE_PREFIX[crate]]: continue
                     if bad(src_m, target):
