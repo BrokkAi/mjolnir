@@ -166,7 +166,7 @@ to build your own.
 
 Mjolnir's TUI is one screen. From top to bottom: **Sessions**, the **transcript**
 of the conversation you are in, the **Prompt** composer, **Targets**, **Quota**,
-and a footer that names the keys for whatever has focus. Nothing is behind a
+and a footer that names the keys that apply right now. Nothing is behind a
 navigation step, so you can read an agent's output while seeing what your other
 agents are doing and how loaded your machines are.
 
@@ -191,6 +191,13 @@ conversation and asking to work in it are the same gesture.
 Tab leaves the dial where you set it.
 
 `F2` opens the workspace picker, `F3` the web viewer, and `Ctrl+Q` detaches.
+
+`F1` opens the key reference, and so does `?` from any pane. It lists every key
+this screen answers, greying the ones that do not apply where you are; `Escape`,
+`F1`, or `?` closes it and puts back whatever it opened over. The footer is
+generated from the same list, so it names only the keys that apply right now —
+`x cancel launch`, for instance, appears only while the selected session is
+starting or stopping.
 
 The panes take plain keys, because the composer is a separate focus and never
 sees them. On Sessions: `Enter` opens the selection, `n` creates a session, `s`

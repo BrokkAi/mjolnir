@@ -91,6 +91,9 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
             render_import_bundle_confirmation(frame, area, confirmation, &mut surfaces)
         }
         Mode::Confirm(dialog) => render_confirmation(frame, area, dialog, &mut surfaces),
+        Mode::Help(overlay) => {
+            crate::help::render_help(frame, area, dashboard, overlay, &mut surfaces)
+        }
         Mode::Dashboard => {}
     }
     dashboard.frame_surfaces = surfaces;
@@ -1858,22 +1861,46 @@ pub(crate) fn render_quotas(frame: &mut Frame, area: Rect, dashboard: &mut Dashb
     );
 }
 
-/// The hotkey hints for whichever pane owns the keyboard.
+/// The hotkey hints for whatever applies right now.
 ///
-/// The composer's hints come from the chat itself, because they depend on
-/// what it is doing (a queued prompt, dictation, a history search).
-pub(crate) fn combined_footer_text(dashboard: &DashboardState) -> &'static str {
-    match dashboard.focus {
-        Focus::Sessions => {
-            "Enter open · n new · s resume · e edit · a mark read · x cancel · Tab pane · Ctrl-G panes · F2 workspaces · F3 web · Ctrl-Q quit"
+/// Built from the action registry ([`crate::actions`]) rather than written out
+/// as a string per pane, so a hint can never name a key the surface does not
+/// answer, and a command can never be added without the footer knowing. Only
+/// commands that are ready and carry a footer word appear; `F1 help` always
+/// closes the row.
+///
+/// `width` is the row's width in cells. When the hints do not fit, whole
+/// segments are dropped from the right, never truncated mid-word: half a hint
+/// is worse than no hint.
+///
+/// The composer's own hints come from the chat itself, because they depend on
+/// what it is doing (a queued prompt, dictation, a history search); this text
+/// is only drawn when a pane has the keyboard.
+pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> String {
+    const HELP: &str = "F1 help";
+    const SEPARATOR: &str = " · ";
+
+    let mut segments = crate::actions::available(dashboard, None)
+        .into_iter()
+        .filter(|id| *id != crate::actions::CommandId::Help)
+        .filter_map(|id| {
+            let spec = crate::actions::spec(id);
+            let word = (spec.footer)(dashboard)?;
+            let hint = spec.keys.first()?;
+            Some(format!("{} {word}", hint.label))
+        })
+        .collect::<Vec<_>>();
+    loop {
+        let text = segments
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(HELP))
+            .collect::<Vec<_>>()
+            .join(SEPARATOR);
+        if segments.is_empty() || text.chars().count() <= usize::from(width) {
+            return text;
         }
-        Focus::Targets => {
-            "r refresh · Enter/e actions · Tab pane · Ctrl-G panes · F2 workspaces · F3 web · Ctrl-Q quit"
-        }
-        Focus::Quota => {
-            "r refresh · Enter/e edit profile · Tab pane · Ctrl-G panes · F2 workspaces · F3 web · Ctrl-Q quit"
-        }
-        Focus::Prompt => "Tab pane · Ctrl-G panes · F2 workspaces · F3 web · Ctrl-Q quit",
+        segments.pop();
     }
 }
 
@@ -1886,7 +1913,7 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
     let notice = dashboard.notices.current();
     let (text, color) = match notice.as_deref() {
         Some(notice) => (notice.to_owned(), Color::Yellow),
-        None => (combined_footer_text(dashboard).to_owned(), Color::DarkGray),
+        None => (combined_footer_text(dashboard, area.width), Color::DarkGray),
     };
     frame.render_widget(
         Paragraph::new(Line::styled(text, Style::default().fg(color))),
@@ -2647,6 +2674,149 @@ mod tests {
         assert!(hotkeys.contains("n new"), "{hotkeys:?}");
         assert!(hotkeys.contains("a mark read"), "{hotkeys:?}");
         assert!(!hotkeys.contains("[S]ort"));
+    }
+
+    /// The footer is the only place a beginner learns what `x` does, so it
+    /// must name the operation it would cancel — and must not offer the key at
+    /// all while there is nothing in flight.
+    #[test]
+    fn footer_lists_cancel_only_while_an_operation_is_in_flight() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(
+            !combined_footer_text(&dashboard, 200).contains("cancel"),
+            "{}",
+            combined_footer_text(&dashboard, 200)
+        );
+
+        dashboard.begin_session_operation_at(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+            1_000,
+        );
+        let footer = combined_footer_text(&dashboard, 200);
+        assert!(footer.contains("x cancel launch"), "{footer}");
+
+        dashboard.finish_session_operation("session-1");
+        assert!(
+            !combined_footer_text(&dashboard, 200).contains("cancel"),
+            "{}",
+            combined_footer_text(&dashboard, 200)
+        );
+    }
+
+    /// Help is the one hint that is worth more than any other, so it survives
+    /// every focus and every width squeeze.
+    #[test]
+    fn footer_ends_with_f1_help_at_every_focus() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+        for focus in [Focus::Sessions, Focus::Targets, Focus::Quota, Focus::Prompt] {
+            dashboard.focus = focus;
+            let footer = combined_footer_text(&dashboard, 200);
+            assert!(footer.ends_with("F1 help"), "{focus:?}: {footer}");
+        }
+    }
+
+    /// A hint cut in half names a key that does not exist. Narrow terminals
+    /// therefore lose whole hints from the right, and never part of one.
+    #[test]
+    fn footer_drops_whole_hints_when_the_width_runs_out() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        let full = combined_footer_text(&dashboard, 200);
+        assert!(full.chars().count() > 40, "{full}");
+
+        for width in [7_u16, 12, 20, 40, 60, 80] {
+            let footer = combined_footer_text(&dashboard, width);
+            assert!(footer.ends_with("F1 help"), "{width}: {footer}");
+            // Every segment that survived is a whole segment of the full text.
+            for segment in footer.split(" · ") {
+                assert!(
+                    full.split(" · ").any(|candidate| candidate == segment),
+                    "{width}: {segment:?} is not a whole hint of {full:?}"
+                );
+            }
+            // Only the last hint may overflow, because help always stays.
+            if width >= 7 {
+                assert!(
+                    footer == "F1 help" || footer.chars().count() <= usize::from(width),
+                    "{width}: {footer}"
+                );
+            }
+        }
+    }
+
+    /// The footer is generated from the same table the keyboard reads, so
+    /// pressing what it names must do what it says. This is the test that
+    /// makes the registry worth having.
+    #[test]
+    fn every_footer_hint_dispatches_the_command_it_names() {
+        for focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+            dashboard.begin_session_operation_at(
+                "session-1".into(),
+                SessionOperationKind::Launching,
+                None,
+                1_000,
+            );
+            dashboard.focus = focus;
+
+            for id in crate::actions::available(&dashboard, None) {
+                let spec = crate::actions::spec(id);
+                let Some(word) = (spec.footer)(&dashboard) else {
+                    continue;
+                };
+                let Some(hint) = spec.keys.first() else {
+                    continue;
+                };
+                let footer = combined_footer_text(&dashboard, 400);
+                assert!(
+                    footer.contains(&format!("{} {word}", hint.label)),
+                    "{focus:?}: {footer} omits {:?}",
+                    spec.label
+                );
+
+                // Pressing the advertised key and dispatching the command it
+                // names have to leave the surface in the same place.
+                let mut pressed = dashboard_with_session(running_session());
+                pressed.set_deployment_capacity_targets(vec![test_capacity_target()]);
+                pressed.begin_session_operation_at(
+                    "session-1".into(),
+                    SessionOperationKind::Launching,
+                    None,
+                    1_000,
+                );
+                pressed.focus = focus;
+                let mut dispatched = dashboard_with_session(running_session());
+                dispatched.set_deployment_capacity_targets(vec![test_capacity_target()]);
+                dispatched.begin_session_operation_at(
+                    "session-1".into(),
+                    SessionOperationKind::Launching,
+                    None,
+                    1_000,
+                );
+                dispatched.focus = focus;
+
+                // A hint that carries CONTROL means "the dashboard
+                // accelerator", which is Command on macOS.
+                let key_event = match (hint.modifiers.is_empty(), hint.code) {
+                    (false, KeyCode::Char(character)) => ctrl_key(character),
+                    _ => key(hint.code),
+                };
+                let by_key = pressed.handle_key(key_event);
+                let by_dispatch = dispatched.dispatch_command(id);
+                assert_eq!(by_key, by_dispatch, "{focus:?}: {:?}", spec.label);
+                assert_eq!(pressed.mode, dispatched.mode, "{focus:?}: {:?}", spec.label);
+                assert_eq!(
+                    pressed.focus, dispatched.focus,
+                    "{focus:?}: {:?}",
+                    spec.label
+                );
+            }
+        }
     }
 
     /// The expanded row draws its own `Agent:`/clock prefix, so the excerpt

@@ -26,17 +26,21 @@ use hel::hel_state::{
 };
 use hel::hel_targets::AdditionalMount;
 
+use crate::actions::CommandId;
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
     ImportBundleConfirmation, ImportProgress, RenameEditor, RenameFocus, RepositoryOriginDialog,
     SessionEditDialog, TargetActionsDialog, WebDialog,
 };
+use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::ResumeDialog;
 use crate::wizards::{MountFocus, NewWizard, ResumeWizard, WizardStep};
 
+mod actions;
 mod combined;
 mod dialogs;
+mod help;
 mod ingest;
 mod render;
 mod resume;
@@ -315,6 +319,9 @@ pub(crate) enum Mode {
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
     Confirm(ConfirmDialog),
+    /// The `F1` key reference, drawn over the mode it opened on top of. It
+    /// carries that mode so closing help puts it back untouched.
+    Help(HelpOverlay),
 }
 
 /// What a key press means for a focusable button row.
@@ -652,6 +659,18 @@ impl DashboardState {
         // has been on screen long enough to read: for a background failure
         // this bar is the only report there is.
         self.notices.dismiss(now);
+        // F1 answers from every surface, and toggles: it opens the key
+        // reference over whatever is on screen and closes it again. A later
+        // milestone moves this to the controller's chord pre-filter so it also
+        // answers while the composer has focus.
+        if key.code == KeyCode::F(1) {
+            if matches!(self.mode, Mode::Help(_)) {
+                self.close_help();
+            } else {
+                self.begin_help();
+            }
+            return DashboardAction::None;
+        }
         // The resume dialog carries every scanned native session, so it is
         // handled where it lives rather than through a copy of the mode.
         if matches!(self.mode, Mode::ResumeDialog(_)) {
@@ -684,6 +703,7 @@ impl DashboardState {
                 self.handle_import_bundle_key(key.code, confirmation)
             }
             Mode::Confirm(dialog) => self.handle_confirmation_key(key, dialog),
+            Mode::Help(overlay) => self.handle_help_key(key, overlay),
         }
     }
 
@@ -880,23 +900,22 @@ impl DashboardState {
     /// The composer is a separate focus and never reaches here, so the pane
     /// actions are plain letters rather than accelerated ones: no key typed at
     /// a pane can be mistaken for text.
+    ///
+    /// Everything that runs a named command is looked up in the action
+    /// registry ([`crate::actions`]) rather than matched here, so the keys, the
+    /// footer, and the help overlay are all reading one table. What stays as
+    /// hand-written arms is the input that is not a command: quitting, list
+    /// navigation, and the two keys whose meaning depends on state.
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> DashboardAction {
         let command = dashboard_accelerator(key.modifiers);
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-        // Keys that mean the same thing wherever the keyboard is.
         match (key.code, command) {
+            // Ctrl-C is quit's second key rather than a command of its own, so
+            // it is not in the registry and the footer never names it.
             (KeyCode::Char('c'), true) => return DashboardAction::QuitDetach,
-            (KeyCode::Char('g'), true) => {
-                self.cycle_pane_layout();
-                return DashboardAction::None;
-            }
-            (KeyCode::F(3), _) => return self.open_web_dialog(),
-            (KeyCode::Tab, _) => {
-                self.cycle_focus(false);
-                return DashboardAction::None;
-            }
+            // Shift-Tab is the reverse of the registry's Tab.
             (KeyCode::BackTab, _) => {
                 self.cycle_focus(true);
                 return DashboardAction::None;
@@ -907,7 +926,8 @@ impl DashboardState {
             (KeyCode::Esc, _) => return DashboardAction::None,
             _ => {}
         }
-        // List navigation, shared by all three panes.
+        // List navigation, shared by all three panes. It comes before the
+        // registry so `j`, `k`, Ctrl-N, and Ctrl-P keep moving the selection.
         match (key.code, command) {
             (KeyCode::Up | KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
                 self.move_selection(-1);
@@ -929,63 +949,25 @@ impl DashboardState {
             _ => {}
         }
         // Setup and the session editor never both apply: setup only opens
-        // while the config is empty, and an empty config has no sessions.
+        // while the config is empty, and an empty config has no sessions. The
+        // registry cannot resolve this on the key alone, because `e` is also
+        // the Sessions, Targets, and Quota panes' key, so the ambiguity is
+        // settled here and `Scope::Setup` is left out of `spec_for_key`.
         if plain && key.code == KeyCode::Char('e') && self.config_is_empty() {
-            return DashboardAction::OpenConfig;
+            return self.dispatch_command(CommandId::OpenConfig);
         }
-        match self.focus {
-            Focus::Sessions => self.handle_sessions_key(key.code, plain),
-            Focus::Targets => match (key.code, plain) {
-                (KeyCode::Char('r'), true) => DashboardAction::RefreshCapacity,
-                (KeyCode::Enter, _) | (KeyCode::Char('e'), true) => {
-                    self.begin_target_actions();
-                    DashboardAction::None
-                }
-                _ => DashboardAction::None,
-            },
-            Focus::Quota => match (key.code, plain) {
-                (KeyCode::Char('r'), true) => DashboardAction::RefreshQuotas,
-                (KeyCode::Enter, _) | (KeyCode::Char('e'), true) => {
-                    self.begin_profile_rename();
-                    DashboardAction::None
-                }
-                _ => DashboardAction::None,
-            },
-            Focus::Prompt => DashboardAction::None,
+        // A digit picks a project by its number, and a registry command
+        // carries no argument, so this one stays a hand-written arm.
+        if self.focus == Focus::Sessions
+            && plain
+            && let KeyCode::Char(digit @ '1'..='9') = key.code
+        {
+            self.toggle_project_number(digit.to_digit(10).unwrap_or(0) as usize);
+            return DashboardAction::None;
         }
-    }
-
-    /// Keys the Sessions pane owns. All plain, because the composer is
-    /// elsewhere.
-    fn handle_sessions_key(&mut self, code: KeyCode, plain: bool) -> DashboardAction {
-        match (code, plain) {
-            (KeyCode::Enter, _) => self.open_selected_session(),
-            (KeyCode::Char('n'), true) => self.begin_new(),
-            (KeyCode::Char('s'), true) => DashboardAction::OpenResumeDialog,
-            (KeyCode::Char('e'), true) => {
-                self.begin_session_edit();
-                DashboardAction::None
-            }
-            (KeyCode::Char('a'), true) => self.mark_all_read(),
-            (KeyCode::Char('x'), true) => {
-                let operation = self.selected_session().and_then(|session| {
-                    self.session_operations
-                        .get(&session.id)
-                        .map(|operation| (session.id.clone(), operation.kind))
-                });
-                operation.map_or(DashboardAction::None, |(session_id, kind)| {
-                    DashboardAction::CancelOperation { session_id, kind }
-                })
-            }
-            (KeyCode::Char(' '), true) => {
-                self.toggle_selected_project();
-                DashboardAction::None
-            }
-            (KeyCode::Char(digit @ '1'..='9'), true) => {
-                self.toggle_project_number(digit.to_digit(10).unwrap_or(0) as usize);
-                DashboardAction::None
-            }
-            _ => DashboardAction::None,
+        match crate::actions::spec_for_key(key, self.focus) {
+            Some(id) => self.dispatch_command(id),
+            None => DashboardAction::None,
         }
     }
 
@@ -997,7 +979,7 @@ impl DashboardState {
         });
         if let Some(operation) = operation {
             self.notices.set(format!(
-                "{} is in progress; press Ctrl+X to cancel it.",
+                "{} is in progress; press x to cancel it.",
                 operation.label()
             ));
             true
@@ -1022,7 +1004,7 @@ impl DashboardState {
         };
         if let Some(operation) = self.session_operations.get(&session.id) {
             self.notices.set(format!(
-                "{} is in progress; press Ctrl+X to cancel it.",
+                "{} is in progress; press x to cancel it.",
                 operation.kind.label()
             ));
             return DashboardAction::None;
