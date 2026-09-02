@@ -365,6 +365,10 @@ impl TurnReviewHost {
                 .snapshot
                 .as_ref()
                 .map(|snapshot| Box::new(snapshot.materialized.clone())),
+            prompt_driven: view
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.operational.active_prompt.is_some()),
         });
     }
 
@@ -452,6 +456,9 @@ enum HostEvent {
     View {
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
+        /// Whether this view had a prompt of ours in flight. Only a turn that
+        /// answered a prompt arms an automatic review.
+        prompt_driven: bool,
     },
     Start {
         session_id: String,
@@ -657,6 +664,8 @@ struct HostState {
 
 struct SessionWatch {
     execution: MaterializedExecutionState,
+    /// Whether the view had a prompt of ours in flight.
+    prompt_driven: bool,
     materialized: Option<Box<MaterializedSession>>,
 }
 
@@ -738,7 +747,8 @@ impl HostState {
             HostEvent::View {
                 session_id,
                 snapshot,
-            } => self.observe(session_id, snapshot).await,
+                prompt_driven,
+            } => self.observe(session_id, snapshot, prompt_driven).await,
             HostEvent::Start {
                 session_id,
                 manual,
@@ -872,7 +882,12 @@ impl HostState {
     }
 
     /// Watches one session for the edge that arms an automatic review.
-    async fn observe(&mut self, session_id: String, snapshot: Option<Box<MaterializedSession>>) {
+    async fn observe(
+        &mut self,
+        session_id: String,
+        snapshot: Option<Box<MaterializedSession>>,
+        prompt_driven: bool,
+    ) {
         let execution = snapshot
             .as_ref()
             .map_or(MaterializedExecutionState::Idle, |snapshot| {
@@ -882,13 +897,17 @@ impl HostState {
             session_id.clone(),
             SessionWatch {
                 execution,
+                prompt_driven,
                 materialized: snapshot,
             },
         );
-        let finished_turn = matches!(
-            previous.as_ref().map(|watch| watch.execution),
-            Some(MaterializedExecutionState::Running { .. })
-        ) && matches!(execution, MaterializedExecutionState::Idle);
+        // A turn the harness starts on its own also runs and then goes idle.
+        // Reviewing that is a separate decision, so the edge that arms a
+        // review is the end of a turn that answered a prompt.
+        let finished_turn = previous.as_ref().is_some_and(|watch| {
+            watch.prompt_driven
+                && matches!(watch.execution, MaterializedExecutionState::Running { .. })
+        }) && matches!(execution, MaterializedExecutionState::Idle);
         if !finished_turn || !(self.config)().enabled {
             return;
         }
@@ -2218,18 +2237,43 @@ mod tests {
         }
     }
 
+    /// A view of a turn that is answering a prompt, which is the kind an
+    /// automatic review is armed by.
     fn view(
         session: &str,
         execution: crate::hel_state::MaterializedExecutionState,
     ) -> ManagedSessionView {
+        view_of(session, execution, true)
+    }
+
+    /// `prompt_driven` false is a turn the harness started on its own: it runs
+    /// and goes idle with no prompt of ours in flight.
+    fn view_of(
+        session: &str,
+        execution: crate::hel_state::MaterializedExecutionState,
+        prompt_driven: bool,
+    ) -> ManagedSessionView {
         let mut materialized = MaterializedSession::empty(session);
         materialized.execution = execution;
         materialized.applied_event_ordinal = 12;
+        let mut operational = operational();
+        if prompt_driven
+            && matches!(
+                execution,
+                crate::hel_state::MaterializedExecutionState::Running { .. }
+            )
+        {
+            operational.active_prompt = Some(crate::hel_worker::ActiveRelayPrompt {
+                command_id: "prompt-1".to_owned(),
+                created_at_ms: 0,
+                started_at_ms: 0,
+            });
+        }
         ManagedSessionView {
             snapshot: Some(ManagedSessionSnapshot {
                 window: crate::hel_state::ProjectionWindow::of(&materialized),
                 materialized,
-                operational: operational(),
+                operational,
                 latest_credential_sync_signal: None,
             }),
             connected: true,
@@ -2495,6 +2539,41 @@ mod tests {
             "a second unreviewable turn is silent"
         );
         assert!(!host.refuses_prompt(session));
+    }
+
+    /// A turn the harness starts on its own also runs and then goes idle.
+    /// Reviewing those is a separate decision, so the automatic edge ignores
+    /// one and still arms on the next turn that answers a prompt.
+    #[tokio::test]
+    async fn a_self_started_turn_does_not_arm_an_automatic_review() {
+        let session = session_id("selfstarted0");
+        let session = session.as_str();
+        let mut manager = FakeManager::new(session).await;
+        let environment = FakeEnvironment::new();
+        let host =
+            TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment.clone());
+
+        for execution in [
+            MaterializedExecutionState::Running { started_at_ms: 0 },
+            MaterializedExecutionState::Idle,
+        ] {
+            host.observe(session, &view_of(session, execution, false));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+                .await
+                .is_err(),
+            "a turn the harness started on its own arms nothing"
+        );
+
+        // The very next prompt-driven turn still arms one, which for an
+        // unconfigured reviewer is the notice that says so.
+        finish_a_turn(&manager, &host).await;
+        assert!(
+            matches!(manager.next().await, RemoteSessionRequest::Submit { .. }),
+            "a prompt-driven turn still reaches the automatic edge"
+        );
+        host.shutdown().await.expect("shutdown the host");
     }
 
     /// A session nobody is attached to is reviewed: the daemon sees the turn

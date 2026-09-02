@@ -336,6 +336,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
             &snapshot.materialized,
         );
         state.set_last_acp_activity(snapshot.operational.last_acp_activity_at_ms);
+        state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
     }
     if let Some(error) = view.error {
         match error {
@@ -495,6 +496,7 @@ impl ActiveChat {
                     &snapshot.materialized,
                 );
                 state.set_last_acp_activity(snapshot.operational.last_acp_activity_at_ms);
+                state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
             }
             let pending = PendingPrefix::of(materialized, state.unconverted_prefix());
             (state, pending)
@@ -1180,7 +1182,7 @@ impl ActiveChat {
                     self.remote.operations(),
                     ChatRemoteOperation::Cancel {
                         command_id,
-                        cancel_agent: self.state.phase == crate::hel_worker::WorkerPhase::Running,
+                        cancel_agent: self.state.prompt_in_flight(),
                         shell_command_ids: self.state.active_user_shell_ids(),
                     },
                     &mut self.state,
@@ -2360,7 +2362,9 @@ fn prompt_title(chat: &ChatState, queued: usize) -> String {
     if queued > 0 {
         parts.push(format!("{queued} queued"));
     }
-    if chat.phase == WorkerPhase::Running {
+    // Esc cancels a prompt of ours. It cannot stop a turn the harness started
+    // on its own, so the hint follows the prompt rather than the phase.
+    if chat.prompt_in_flight() {
         parts.push("Esc cancels".into());
     }
     // Auto-review changes what happens when this turn ends, so the composer
@@ -3198,6 +3202,7 @@ mod tests {
         ];
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.phase = WorkerPhase::Running;
+        chat.set_prompt_in_flight(true);
         chat.set_config_options(&options);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
 
@@ -3229,6 +3234,20 @@ mod tests {
 
         chat.set_config_options(&[]);
         assert!(!prompt_title(&chat, 0).contains("Fast"));
+    }
+
+    /// A turn the harness starts on its own also reads as running, and the
+    /// relay refuses to cancel it, so the composer offers Esc only while a
+    /// prompt of ours is in flight.
+    #[test]
+    fn composer_title_offers_esc_only_while_a_prompt_of_ours_is_in_flight() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.phase = WorkerPhase::Running;
+        assert!(prompt_title(&chat, 0).contains("Running"));
+        assert!(!prompt_title(&chat, 0).contains("Esc cancels"));
+
+        chat.set_prompt_in_flight(true);
+        assert!(prompt_title(&chat, 0).contains("Esc cancels"));
     }
 
     #[test]

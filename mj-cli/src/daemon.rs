@@ -2623,7 +2623,14 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
                 _ = recovery_tick.tick() => {
                     while let Some(result) = recovery.try_result() {
                         if let Err(error) = &result.outcome {
-                            tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
+                            // A deferred copy found the agent working. That is
+                            // the normal state of a session in use, so it is
+                            // news, not a fault.
+                            if result.deferred {
+                                tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
+                            } else {
+                                tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
+                            }
                         }
                         refresh_runtime_controller(&state).await;
                     }

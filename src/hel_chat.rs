@@ -406,6 +406,10 @@ pub struct ChatState {
     header_target: String,
     header_profile: String,
     turn_started_at_epoch_seconds: Option<u64>,
+    /// Whether a prompt of ours is in flight. `phase` also goes Running for a
+    /// turn the harness started on its own, which the relay refuses to cancel,
+    /// so cancellation and the composer's cancel hint key on this instead.
+    prompt_in_flight: bool,
     last_acp_activity_at_ms: Option<u64>,
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
@@ -488,6 +492,7 @@ impl ChatState {
             header_target: String::new(),
             header_profile: String::new(),
             turn_started_at_epoch_seconds: None,
+            prompt_in_flight: snapshot.active_prompt.is_some(),
             last_acp_activity_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
             frame_surfaces_exclusive: false,
@@ -892,6 +897,17 @@ impl ChatState {
         self.header_profile = profile.into();
     }
 
+    /// Records whether the session has a prompt of ours in flight, which is
+    /// what the relay accepts a cancellation for.
+    pub(super) fn set_prompt_in_flight(&mut self, in_flight: bool) {
+        self.prompt_in_flight = in_flight;
+    }
+
+    #[must_use]
+    pub(super) fn prompt_in_flight(&self) -> bool {
+        self.prompt_in_flight
+    }
+
     fn set_last_acp_activity(&mut self, timestamp_ms: Option<i64>) {
         self.last_acp_activity_at_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
     }
@@ -930,6 +946,7 @@ impl ChatState {
 
     fn mark_prompt_submitted(&mut self, prompt: &str) {
         self.phase = WorkerPhase::Running;
+        self.prompt_in_flight = true;
         self.goal_prompt_active = prompt_invokes_command(prompt, "goal");
         self.notices.clear();
         // Local echo: start the clock now so the header moves with the send.
@@ -1562,7 +1579,10 @@ impl ChatState {
         }
 
         if code == KeyCode::Esc {
-            return if self.phase == WorkerPhase::Running || !self.active_user_shells.is_empty() {
+            // Only a prompt of ours can be cancelled. A turn the harness
+            // started on its own also reads as Running, and the relay refuses
+            // to cancel it, so Esc must not claim to.
+            return if self.prompt_in_flight || !self.active_user_shells.is_empty() {
                 ChatAction::Cancel
             } else {
                 ChatAction::None
@@ -1896,6 +1916,7 @@ impl ChatState {
             }
             WorkerEvent::TurnCompleted => {
                 self.phase = WorkerPhase::Idle;
+                self.prompt_in_flight = false;
                 self.goal_prompt_active = false;
                 self.turn_started_at_epoch_seconds = None;
             }
@@ -1906,7 +1927,10 @@ impl ChatState {
                 self.phase = WorkerPhase::Running;
             }
             WorkerEvent::Closing => self.phase = WorkerPhase::Closing,
-            WorkerEvent::Closed => self.phase = WorkerPhase::Closed,
+            WorkerEvent::Closed => {
+                self.phase = WorkerPhase::Closed;
+                self.prompt_in_flight = false;
+            }
             WorkerEvent::Checkpointed { .. } => {}
             WorkerEvent::Adapter { payload, .. } => {
                 if is_compaction_artifact(payload) {
@@ -1931,6 +1955,7 @@ impl ChatState {
                 self.queued_prompts.retain(|queued| queued.id != prompt.id);
                 self.pending_queue_removals.remove(&prompt.id);
                 self.phase = WorkerPhase::Running;
+                self.prompt_in_flight = true;
                 self.start_turn_clock(event.recorded_at_ms);
                 self.entries.push(
                     ChatEntry::plain(event.seq, ChatRole::User, &prompt.text)
@@ -2713,7 +2738,12 @@ mod tests {
         assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
         assert_eq!(chat.handle_key(control_g), ChatAction::CyclePaneLayout);
 
+        // A turn the harness started on its own runs with no prompt of ours in
+        // flight. The relay refuses to cancel that, so Esc must not offer to.
         chat.phase = WorkerPhase::Running;
+        assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+
+        chat.set_prompt_in_flight(true);
         assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::Cancel);
         assert_eq!(chat.handle_key(control_c), ChatAction::None);
     }

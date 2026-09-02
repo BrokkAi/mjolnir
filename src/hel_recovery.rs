@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::{mpsc, watch};
 
-use crate::hel_controller::{CheckpointArtifact, Controller};
+use crate::hel_controller::{CheckpointArtifact, Controller, checkpoint_was_deferred};
 use crate::hel_database::record_recovery_failure;
 use crate::hel_session_manager::SessionManagerControl;
 use crate::hel_state::{
@@ -42,6 +42,10 @@ pub struct RecoveryResult {
     /// preempted it or the coordinator shut down. A copy that ran past its
     /// deadline is not marked cancelled; it counts as a real failure.
     pub cancelled: bool,
+    /// The copy stood down because the session was working. Like `cancelled`
+    /// it judges nothing, but it is a separate fact: nobody preempted this
+    /// copy, and the next idle observation runs it.
+    pub deferred: bool,
 }
 
 pub struct RecoveryCoordinator {
@@ -117,20 +121,28 @@ impl RecoveryCoordinator {
                                                     &executor,
                                                 ),
                                         )
-                                        .map_err(|error| format!("{error:#}"))
+                                        // The deferral marker lives on the
+                                        // error, so read it before the error
+                                        // becomes a string.
+                                        .map_err(|error| {
+                                            (format!("{error:#}"), checkpoint_was_deferred(&error))
+                                        })
                                 })
                                 .await;
                                 let outcome = match joined {
                                     Ok(outcome) => outcome,
-                                    Err(error) => Err(format!(
-                                        "recovery checkpoint task failed: {error}"
+                                    Err(error) => Err((
+                                        format!("recovery checkpoint task failed: {error}"),
+                                        false,
                                     )),
                                 };
+                                let deferred = outcome.as_ref().err().is_some_and(|(_, deferred)| *deferred);
                                 let result = RecoveryResult {
                                     session_id,
                                     expected_target,
-                                    outcome,
+                                    outcome: outcome.map_err(|(detail, _)| detail),
                                     cancelled: copy_cancelled.load(Ordering::Acquire),
+                                    deferred,
                                 };
                                 let result_session_id = result.session_id.clone();
                                 if let Err(error) = completed_tx.send(result) {
@@ -153,18 +165,22 @@ impl RecoveryCoordinator {
                                 policy.record_success(artifact.metadata.clone());
                             }
                             Err(detail) => {
-                                if result.cancelled {
-                                    // A preempted copy says nothing about this
+                                if result.cancelled || result.deferred {
+                                    // An abandoned copy says nothing about this
                                     // turn: it must neither suppress the next
                                     // attempt nor be recorded as a checkpoint
-                                    // failure against the session.
-                                    policy.last_attempted_turn = None;
+                                    // failure against the session. A preempted
+                                    // copy was interrupted; a deferred one
+                                    // found the agent working, and the turn it
+                                    // is working through produces the next
+                                    // observation, which is idle.
+                                    policy.abandon_attempt();
                                     let result_session_id = result.session_id.clone();
                                     if let Err(error) = results_tx.send(result) {
                                         tracing::debug!(
                                             session_id = %result_session_id,
                                             %error,
-                                            "cancelled recovery result dropped because its consumer stopped"
+                                            "abandoned recovery result dropped because its consumer stopped"
                                         );
                                     }
                                     continue;
@@ -253,6 +269,15 @@ impl PolicyState {
         self.checkpoint = Some(checkpoint);
         self.failed_at = None;
         self.consecutive_failures = 0;
+    }
+
+    /// Forget that this boundary was attempted, so the next observation of the
+    /// same turn may try again. A copy that was abandoned rather than judged -
+    /// preempted, or deferred because the agent was working - leaves no
+    /// evidence about the turn, so it must not suppress the retry and must not
+    /// count as a failure.
+    fn abandon_attempt(&mut self) {
+        self.last_attempted_turn = None;
     }
 
     fn record_failure(&mut self, now: chrono::DateTime<Utc>) {
@@ -512,6 +537,34 @@ mod tests {
 
         policy.last_attempted_turn = None;
         assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
+    }
+
+    /// A copy that stood down because the agent was working judged nothing.
+    /// It records no failure, and the same turn is copied at the next idle
+    /// observation.
+    #[test]
+    fn a_deferred_copy_records_no_failure_and_leaves_the_turn_retryable() {
+        let deferred =
+            anyhow::Error::new(crate::hel_controller::CheckpointDeferred::harness_busy())
+                .context("create a recovery checkpoint");
+        assert!(checkpoint_was_deferred(&deferred), "{deferred:#}");
+        assert!(!checkpoint_was_deferred(&anyhow::anyhow!(
+            "export target checkpoint failed with status 1"
+        )));
+
+        let mut policy = PolicyState {
+            latest_completed_turn: 8,
+            last_attempted_turn: Some(8),
+            ..Default::default()
+        };
+        assert!(!policy.due(MaterializedExecutionState::Idle, Utc::now()));
+
+        policy.abandon_attempt();
+        assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        assert!(
+            policy.failed_at.is_none() && policy.consecutive_failures == 0,
+            "a deferral is not a failure"
+        );
     }
 
     #[tokio::test]

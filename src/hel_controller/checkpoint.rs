@@ -460,6 +460,11 @@ impl Controller {
                 Ok(artifact.metadata)
             }
             Err(error) => {
+                // A deferred checkpoint says the agent was working, not that
+                // anything failed. Recording it would leave a warning on the
+                // session row until the next successful copy, so the caller is
+                // told and the row is left alone.
+                let deferred = checkpoint_was_deferred(&error);
                 if let Some(record) = self.state.sessions.get_mut(session_id) {
                     record.state = if previous.state == SessionState::Checkpointing {
                         SessionState::Running
@@ -467,7 +472,9 @@ impl Controller {
                         previous.state
                     };
                     record.updated_at = now();
-                    record.last_checkpoint_error = Some(format!("{error:#}"));
+                    if !deferred {
+                        record.last_checkpoint_error = Some(format!("{error:#}"));
+                    }
                 }
                 Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error))
             }
@@ -751,7 +758,13 @@ impl Controller {
                         },
                     )
                     .await?;
-                wait_for_checkpoint_barrier(connection, &barrier_command_id, timeout).await
+                wait_for_checkpoint_barrier(
+                    connection,
+                    &barrier_command_id,
+                    timeout,
+                    BarrierBusyPolicy::of(exclusivity),
+                )
+                .await
             };
             match result {
                 Ok(barrier) => break (barrier, barrier_command_id),
@@ -803,10 +816,7 @@ impl Controller {
             expected_digest == barrier.operational.latest_digest,
             "checkpoint projection digest does not match the relay frontier digest"
         );
-        ensure!(
-            cursor.ordinal == expected_ordinal && cursor.digest == expected_digest,
-            "checkpoint-ready cursor does not match the latched controller projection"
-        );
+        ensure_exact_checkpoint_cut(&cursor, expected_ordinal, &expected_digest)?;
         let canonical_session = canonical_session_from_materialized(&materialized)?;
         let native_session_id = barrier
             .operational
@@ -1249,10 +1259,34 @@ async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Durati
     }
 }
 
+/// What waiting for a barrier does while the session is working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarrierBusyPolicy {
+    /// Give up as soon as the session is seen working. A checkpoint that can
+    /// run again later has nothing to gain from holding a barrier behind a
+    /// prompt or a turn the harness started on its own: the wait would only
+    /// end at the deadline, and the deadline means "wedged", which restarts
+    /// the worker and kills the work in flight.
+    DeferWhileRunning,
+    /// Wait the session out. Close seals the relay, so it has no later
+    /// attempt to defer to.
+    WaitThrough,
+}
+
+impl BarrierBusyPolicy {
+    fn of(exclusivity: LatchExclusivity) -> Self {
+        match exclusivity {
+            LatchExclusivity::ReleaseAfterLatch => Self::DeferWhileRunning,
+            LatchExclusivity::HoldThroughClose => Self::WaitThrough,
+        }
+    }
+}
+
 async fn wait_for_checkpoint_barrier(
     relay: &mut StandaloneSession,
     command_id: &str,
     timeout: Duration,
+    busy: BarrierBusyPolicy,
 ) -> Result<ManagedSessionSnapshot> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -1260,14 +1294,36 @@ async fn wait_for_checkpoint_barrier(
         if checkpoint_barrier_is_ready(&snapshot, command_id) {
             return Ok(snapshot);
         }
-        if snapshot.operational.execution == RelayExecutionState::Closed {
-            return Err(CheckpointBarrierUnreachable::runtime_stopped().into());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(CheckpointBarrierUnreachable::not_admitted(command_id).into());
+        let out_of_time = tokio::time::Instant::now() >= deadline;
+        if let Some(error) = checkpoint_barrier_wait_ended(&snapshot, command_id, busy, out_of_time)
+        {
+            return Err(error);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+/// Why one sync of a barrier that is not ready yet ends the wait, or `None` to
+/// keep waiting.
+///
+/// The deadline means "wedged": it restarts the worker, which kills whatever
+/// the harness had in flight. A session that is simply working is not wedged,
+/// so a caller that can try again later leaves rather than waits.
+fn checkpoint_barrier_wait_ended(
+    snapshot: &ManagedSessionSnapshot,
+    command_id: &str,
+    busy: BarrierBusyPolicy,
+    out_of_time: bool,
+) -> Option<anyhow::Error> {
+    if snapshot.operational.execution == RelayExecutionState::Closed {
+        return Some(CheckpointBarrierUnreachable::runtime_stopped().into());
+    }
+    if busy == BarrierBusyPolicy::DeferWhileRunning
+        && snapshot.operational.execution == RelayExecutionState::Running
+    {
+        return Some(CheckpointDeferred::harness_busy().into());
+    }
+    out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into())
 }
 
 /// The ACP runtime never admitted a checkpoint barrier: it stopped first, or it
@@ -1305,9 +1361,77 @@ fn checkpoint_barrier_needs_worker_restart(error: &anyhow::Error) -> bool {
         .is_some()
 }
 
+/// The session was working, so this checkpoint did not run. Nothing is wrong
+/// with the session, the target, or the last archive.
+///
+/// A busy session is the normal state of a session someone is using, including
+/// one working through a turn the harness started on its own after a
+/// background command. Treating that as a checkpoint failure would restart the
+/// worker, record a failure against the session, and back the next attempt off
+/// for hours. Callers that can try again later defer instead; the same work is
+/// copied at the next idle observation.
+#[derive(Debug)]
+pub struct CheckpointDeferred(String);
+
+impl CheckpointDeferred {
+    pub(crate) fn harness_busy() -> Self {
+        Self("the agent is working; try again when it is idle".to_owned())
+    }
+
+    fn frontier_moved() -> Self {
+        Self(
+            "the session moved past the checkpoint-ready cursor before the barrier latched, so this checkpoint was deferred"
+                .to_owned(),
+        )
+    }
+
+    fn harness_turn_during_capture() -> Self {
+        Self(
+            "the agent started a turn of its own while target state was captured, so this checkpoint was deferred"
+                .to_owned(),
+        )
+    }
+}
+
+impl std::fmt::Display for CheckpointDeferred {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CheckpointDeferred {}
+
+/// Whether a failed checkpoint only means the session was busy.
+///
+/// The marker is carried by the error, not by its text, and callers wrap
+/// checkpoint errors in context, so the whole chain is searched.
+pub fn checkpoint_was_deferred(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<CheckpointDeferred>().is_some())
+}
+
 fn checkpoint_barrier_is_ready(snapshot: &ManagedSessionSnapshot, command_id: &str) -> bool {
     snapshot.operational.checkpoint_barrier.as_deref() == Some(command_id)
         && snapshot.operational.checkpoint_ready.is_some()
+}
+
+/// The latched projection must sit exactly at the barrier's ready cursor.
+///
+/// The barrier was admitted, but the relay can record more events before the
+/// controller latches - the harness spoke again in the gap. The archive would
+/// not be an exact cut of the session, so the attempt is dropped and the next
+/// idle observation copies the settled session instead. This is not a fault in
+/// the session, the target, or the last archive.
+fn ensure_exact_checkpoint_cut(
+    cursor: &RelayCursor,
+    expected_ordinal: u64,
+    expected_digest: &str,
+) -> Result<()> {
+    if cursor.ordinal != expected_ordinal || cursor.digest != expected_digest {
+        bail!(CheckpointDeferred::frontier_moved());
+    }
+    Ok(())
 }
 
 /// Prove the barrier that latched an archive is still the same barrier, still
@@ -1319,6 +1443,11 @@ fn checkpoint_barrier_is_ready(snapshot: &ManagedSessionSnapshot, command_id: &s
 /// dispatch is frozen, so an advanced frontier does not invalidate the archive.
 /// Requiring frontier equality here would fail every checkpoint that overlapped
 /// a prompt.
+///
+/// A turn the harness starts on its own is the exception. The barrier freezes
+/// Hel's dispatch, not the harness, so a harness turn that opened after the
+/// cursor was captured means the agent may have been writing to the workspace
+/// while it was staged. That archive is abandoned rather than installed.
 fn validate_checkpoint_barrier_snapshot(
     snapshot: &ManagedSessionSnapshot,
     command_id: &str,
@@ -1332,6 +1461,13 @@ fn validate_checkpoint_barrier_snapshot(
         snapshot.operational.checkpoint_ready.as_ref() == Some(expected),
         "checkpoint barrier {command_id} has a different ready cursor"
     );
+    if snapshot
+        .operational
+        .last_harness_turn_started_ordinal
+        .is_some_and(|ordinal| ordinal > expected.ordinal)
+    {
+        bail!(CheckpointDeferred::harness_turn_during_capture());
+    }
     Ok(())
 }
 
@@ -2404,6 +2540,115 @@ mod tests {
             ]
         );
     }
+    /// A session that is working is busy, not wedged. A copy that can run
+    /// again later leaves at once instead of waiting out the deadline, which
+    /// would restart the worker and kill the turn in flight.
+    #[test]
+    fn a_working_session_defers_a_recovery_barrier_instead_of_wedging_it() {
+        let cursor = RelayCursor {
+            ordinal: 7,
+            digest: "a".repeat(64),
+        };
+        let mut snapshot = checkpoint_barrier_snapshot(&cursor);
+        snapshot.operational.execution = RelayExecutionState::Running;
+
+        let deferred = checkpoint_barrier_wait_ended(
+            &snapshot,
+            "checkpoint-1",
+            BarrierBusyPolicy::DeferWhileRunning,
+            false,
+        )
+        .expect("a working session ends the wait at once");
+        assert!(checkpoint_was_deferred(&deferred), "{deferred:#}");
+        assert!(
+            !checkpoint_barrier_needs_worker_restart(&deferred),
+            "a deferred copy must never restart the worker: {deferred:#}"
+        );
+
+        // Close cannot defer to a later attempt, so it waits the session out
+        // and only the deadline ends its wait.
+        assert!(
+            checkpoint_barrier_wait_ended(
+                &snapshot,
+                "checkpoint-1",
+                BarrierBusyPolicy::WaitThrough,
+                false,
+            )
+            .is_none()
+        );
+        let wedged = checkpoint_barrier_wait_ended(
+            &snapshot,
+            "checkpoint-1",
+            BarrierBusyPolicy::WaitThrough,
+            true,
+        )
+        .expect("the deadline ends the wait");
+        assert!(
+            checkpoint_barrier_needs_worker_restart(&wedged),
+            "{wedged:#}"
+        );
+
+        // An idle session that never admits the barrier is the real wedge,
+        // whatever the policy.
+        snapshot.operational.execution = RelayExecutionState::Idle;
+        let wedged = checkpoint_barrier_wait_ended(
+            &snapshot,
+            "checkpoint-1",
+            BarrierBusyPolicy::DeferWhileRunning,
+            true,
+        )
+        .expect("the deadline ends the wait");
+        assert!(
+            checkpoint_barrier_needs_worker_restart(&wedged),
+            "{wedged:#}"
+        );
+        assert!(!checkpoint_was_deferred(&wedged), "{wedged:#}");
+    }
+
+    /// The relay moved on before the controller latched, so the archive would
+    /// not be an exact cut. That is a deferral, not a failed checkpoint.
+    #[test]
+    fn a_frontier_that_moved_before_the_latch_defers_the_checkpoint() {
+        let cursor = RelayCursor {
+            ordinal: 220,
+            digest: "a".repeat(64),
+        };
+        ensure_exact_checkpoint_cut(&cursor, cursor.ordinal, &cursor.digest)
+            .expect("a projection latched at the ready cursor is an exact cut");
+
+        for (ordinal, digest) in [(223, "a".repeat(64)), (220, "b".repeat(64))] {
+            let error = ensure_exact_checkpoint_cut(&cursor, ordinal, &digest)
+                .expect_err("a projection past the ready cursor is not an exact cut");
+            assert!(checkpoint_was_deferred(&error), "{error:#}");
+            assert!(
+                !checkpoint_barrier_needs_worker_restart(&error),
+                "{error:#}"
+            );
+        }
+    }
+
+    /// The barrier freezes Hel's dispatch, not the harness. A turn the harness
+    /// started on its own after the cursor was captured may have written to
+    /// the workspace while it was staged, so that archive is abandoned.
+    #[test]
+    fn a_harness_turn_started_during_capture_abandons_the_archive() {
+        let cursor = RelayCursor {
+            ordinal: 220,
+            digest: "a".repeat(64),
+        };
+        let mut snapshot = checkpoint_barrier_snapshot(&cursor);
+        snapshot.operational.checkpoint_ready = Some(cursor.clone());
+
+        snapshot.operational.last_harness_turn_started_ordinal = Some(cursor.ordinal);
+        validate_checkpoint_barrier_snapshot(&snapshot, "checkpoint-1", &cursor)
+            .expect("a turn that started at or before the cursor is covered by the archive");
+
+        snapshot.operational.last_harness_turn_started_ordinal = Some(cursor.ordinal + 1);
+        let error = validate_checkpoint_barrier_snapshot(&snapshot, "checkpoint-1", &cursor)
+            .expect_err("a turn that started after the cursor invalidates the capture");
+        assert!(checkpoint_was_deferred(&error), "{error:#}");
+    }
+
     #[test]
     fn a_stuck_checkpoint_barrier_is_retried_by_restarting_the_worker() {
         // Both ways the wait can end without a barrier, each wrapped the way
@@ -2657,6 +2902,7 @@ mod tests {
             connection,
             &barrier_command_id,
             CHECKPOINT_BARRIER_TIMEOUT,
+            BarrierBusyPolicy::WaitThrough,
         )
         .await
         .unwrap();
