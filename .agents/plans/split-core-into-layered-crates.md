@@ -19,7 +19,7 @@ Ryan Svihla approved the split on 2026-09-02.
 - [x] (2026-09-02 15:30Z) Measured the module graph (script in `Artifacts and Notes`), chose the four layers, and listed every edge that crosses a layer boundary in the wrong direction (see `Context and Orientation`).
 - [x] (2026-09-02 15:45Z) Recorded the pre-split baseline timings (see `Artifacts and Notes`).
 - [ ] M1a: text helpers and browser transcript types move out of `hel_chat`; reset-time helpers move out of `usage_format`; `hel_import` stops naming `ChatState`.
-- [ ] M1b: launch-config and MCP types move out of `hel_worker_runtime`; `terminate_process_group` moves to `hel_subprocess`; `harness_authentication_marker` moves to `hel_config`.
+- [x] (2026-09-02 18:35Z) M1b: launch-config and MCP types move out of `hel_worker_runtime`; `terminate_process_group` moves to `hel_subprocess`; `harness_authentication_marker` moves to `hel_config`.
 - [ ] M1 verification: the edge script reports zero escaping edges in non-test and test code; `cargo test` and clippy green; commit.
 - [ ] M2: create `mj-worker/`, `mj-controller/`, `mj-chat/` crates; move modules; `cargo check --workspace` green.
 - [ ] M3: rewrite `hel::` paths in `mj-tui`, `mj-cli`, `mj-desktop`; update CI, publish, coverage, release-version script, RELEASING.md, CONTRIBUTING.md; full `cargo test` and clippy green; commit.
@@ -34,6 +34,10 @@ Ryan Svihla approved the split on 2026-09-02.
 
 - Observation: the review module is two things glued together. `host.rs` (3,238 lines) is the daemon-side review host and depends on the controller, session manager, and chat; `lanes.rs`, `delta.rs`, `driver.rs`, `verdict.rs`, and `mcp.rs` are protocol and target-side logic used by the worker runtime, and depend only on foundation modules.
   Evidence: per-file `crate::` imports listed in `Artifacts and Notes`.
+
+- Observation: the edge script cannot see multi-line braced imports, so it under-reports. Its regex needs `crate::<module>::<word>`, and a `use crate::hel_worker_runtime::{` line ends in a brace, so three controller imports were invisible to it: `hel_controller/worker_binary.rs` and `hel_controller/reviewer.rs` pulled in the launch types plus the constants `DISCOVER_LOGIN_PATH_ENV`, `REVIEWER_DIR`, and `REVIEWER_PROFILE_DIR`. Those constants describe the worker root's file layout that the controller stages into, so they moved to `hel_worker_launch` with the types. Treat the script as a floor, not a ceiling: grep for the module name as well.
+
+- Observation: `src/hel_review/bifrost.rs` also built `hel_worker_runtime::ReviewMcpServer`, which the layer table did not anticipate. It now names `hel_worker_launch`, so `bifrost.rs` no longer forces a foundation-to-worker edge and the M2 question of where it lands stays open.
 
 - Observation: clean-build parallelism is a small win; edit scope is the real win. The front end is serial per crate and the crates chain foundation, then controller, then chat, so the critical path only shrinks from ~152K to ~140K lines. But a chat edit recompiles 23K lines instead of 152K.
 
@@ -51,6 +55,10 @@ Ryan Svihla approved the split on 2026-09-02.
 
 - Decision: cut the cycle-forming edges inside the single crate first (M1), with the old paths kept as `pub use` re-exports where a caller in a not-yet-moved module still needs them, and only then create crates (M2).
   Rationale: M1 is safe, testable, and useful even if M2 stalls. Re-exports let M1a and M1b run in parallel on disjoint files.
+  Date/Author: 2026-09-02, Fable.
+
+- Decision: `WorkerLaunchConfig::enforce_execution_policy` stays in `hel_worker_runtime` as an inherent impl on a foundation type, rather than moving with the struct.
+  Rationale: it translates a target's execution policy into harness environment variables, which is worker behaviour, and it is private to the runtime module tree (`unix.rs` and `relay_tests.rs` are its only callers). Rust allows an inherent impl anywhere in the crate that defines the type, and M2 will turn it into a free function or extension trait when the two modules land in different crates. Its serde and file-IO impls (`read`, `write`) did move, because they only touch `std::fs` and `hel_config::atomic_write`.
   Date/Author: 2026-09-02, Fable.
 
 - Decision: the controller crate must not depend on the worker crate.
