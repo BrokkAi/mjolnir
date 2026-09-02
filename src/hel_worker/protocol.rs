@@ -151,7 +151,7 @@ pub enum ReviewerRequest {
     /// Start the reviewer, or report the running one when `config` matches it.
     /// The reviewer's profile must already be staged under the worker root.
     Start {
-        config: Box<crate::hel_worker_runtime::ReviewerLaunchConfig>,
+        config: Box<crate::hel_worker_launch::ReviewerLaunchConfig>,
     },
     /// Replay the reviewer's journal from a cursor, as `Attach` does for the
     /// primary.

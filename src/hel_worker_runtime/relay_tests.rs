@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::hel_acp::{CommandRequest, RuntimeEvent};
+use crate::hel_config::ExecutionPolicy;
 use crate::hel_worker::{
     DurableRelay, RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayErrorCode,
     RelayExecutionState, RelayObservation, RelayProtocolError, RelayRequest, RelayRequestEnvelope,

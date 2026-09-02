@@ -8,7 +8,7 @@ use crate::hel_config::{AwsAddressSource, SshConnection, TargetTemplate};
 use crate::hel_session_manager::StandaloneSession;
 use crate::hel_state::{SessionRecord, SessionState, TargetLocator, normalize_session_title};
 use crate::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
-use crate::hel_worker_runtime::WorkerOwnership;
+use crate::hel_worker_launch::WorkerOwnership;
 
 use super::backend::{ContainerOverrides, backend_locator, backend_target};
 use super::readiness::wait_for_native_session;

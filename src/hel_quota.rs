@@ -13,10 +13,10 @@ use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
 use crate::hel_config::HarnessKind;
+use crate::hel_config::harness_authentication_marker;
 use crate::hel_credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
 };
-use crate::hel_setup::harness_authentication_marker;
 
 pub const API_LABEL: &str = "API";
 

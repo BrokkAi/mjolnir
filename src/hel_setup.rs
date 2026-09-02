@@ -7,6 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
+/// The marker path moved down to `hel_config` beside `HarnessKind`; this
+/// re-export keeps the historical `hel_setup::` path working.
+pub use crate::hel_config::harness_authentication_marker;
 use crate::hel_config::{
     AwsAddressSource, ContainerTemplate, HarnessKind, HarnessProfile, HelConfig, PermissionMode,
     ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, validate_id,
@@ -366,16 +369,6 @@ fn claude_credentials_contain_login(credentials: &[u8]) -> bool {
             .pointer(pointer)
             .and_then(serde_json::Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
-    })
-}
-
-pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf {
-    home.join(match kind {
-        HarnessKind::Codex => "auth.json",
-        HarnessKind::Claude => ".credentials.json",
-        HarnessKind::Kimi => "credentials/kimi-code.json",
-        HarnessKind::Grok => "auth.json",
-        HarnessKind::Deepseek => ".credentials.yaml",
     })
 }
 

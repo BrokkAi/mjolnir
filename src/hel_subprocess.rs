@@ -262,6 +262,16 @@ pub fn signal_process_group(pid: i32, signal: i32) -> std::io::Result<()> {
     Err(error)
 }
 
+/// Signal a whole process group. Terminals reuse this so process-group
+/// termination lives in one place. A group that is already gone counts as
+/// success; anything else is reported rather than dropped.
+#[cfg(unix)]
+pub fn terminate_process_group(pid: i32, signal: i32) {
+    if let Err(error) = signal_process_group(pid, signal) {
+        tracing::warn!(pid, signal, %error, "could not signal process group");
+    }
+}
+
 #[cfg(unix)]
 fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
     if error.raw_os_error() == Some(libc::ESRCH) {

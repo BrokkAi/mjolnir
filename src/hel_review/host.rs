@@ -153,9 +153,9 @@ pub trait ReviewEnvironment: Send + Sync {
         session_id: &str,
         profile: &str,
         generation: u64,
-        mcp_servers: &[crate::hel_worker_runtime::ReviewMcpServer],
+        mcp_servers: &[crate::hel_worker_launch::ReviewMcpServer],
         dispatch_tool: bool,
-    ) -> Result<crate::hel_worker_runtime::ReviewerLaunchConfig, String>;
+    ) -> Result<crate::hel_worker_launch::ReviewerLaunchConfig, String>;
 
     /// How far this session has been reviewed. Blocking: it reads the
     /// controller's database.
@@ -202,9 +202,9 @@ impl ReviewEnvironment for ControllerEnvironment {
         session_id: &str,
         profile: &str,
         generation: u64,
-        mcp_servers: &[crate::hel_worker_runtime::ReviewMcpServer],
+        mcp_servers: &[crate::hel_worker_launch::ReviewMcpServer],
         dispatch_tool: bool,
-    ) -> Result<crate::hel_worker_runtime::ReviewerLaunchConfig, String> {
+    ) -> Result<crate::hel_worker_launch::ReviewerLaunchConfig, String> {
         let controller =
             crate::hel_controller::Controller::load().map_err(|error| format!("{error:#}"))?;
         controller
@@ -2385,14 +2385,14 @@ mod tests {
             _session_id: &str,
             profile: &str,
             generation: u64,
-            mcp_servers: &[crate::hel_worker_runtime::ReviewMcpServer],
+            mcp_servers: &[crate::hel_worker_launch::ReviewMcpServer],
             dispatch_tool: bool,
-        ) -> Result<crate::hel_worker_runtime::ReviewerLaunchConfig, String> {
+        ) -> Result<crate::hel_worker_launch::ReviewerLaunchConfig, String> {
             self.staged
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((profile.to_owned(), generation, dispatch_tool));
-            Ok(crate::hel_worker_runtime::ReviewerLaunchConfig {
+            Ok(crate::hel_worker_launch::ReviewerLaunchConfig {
                 profile_id: profile.to_owned(),
                 harness: crate::hel_config::HarnessKind::Claude,
                 bridge_command: std::path::PathBuf::from("/bin/false"),

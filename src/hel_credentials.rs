@@ -845,7 +845,7 @@ pub(crate) fn enqueue(queue: &mut VecDeque<SyncTrigger>, trigger: SyncTrigger) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hel_setup::harness_authentication_marker;
+    use crate::hel_config::harness_authentication_marker;
 
     fn claude_credentials(expires_at: i64) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({

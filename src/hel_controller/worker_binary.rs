@@ -17,7 +17,7 @@ use crate::hel_session_manager::{
 use crate::hel_targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
 };
-use crate::hel_worker_runtime::{
+use crate::hel_worker_launch::{
     DISCOVER_LOGIN_PATH_ENV, ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery,
     WorkerLaunchConfig, WorkerOwnership,
 };

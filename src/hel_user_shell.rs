@@ -371,7 +371,7 @@ impl ProcessGroupGuard {
     fn kill(&self) {
         #[cfg(unix)]
         if let Some(pid) = self.pid {
-            crate::hel_worker_runtime::terminate_process_group(pid, libc::SIGKILL);
+            crate::hel_subprocess::terminate_process_group(pid, libc::SIGKILL);
         }
         #[cfg(not(unix))]
         let _ = self.pid;

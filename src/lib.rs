@@ -49,6 +49,7 @@ pub mod hel_transcript;
 pub mod hel_user_shell;
 pub mod hel_worker;
 pub mod hel_worker_client;
+pub mod hel_worker_launch;
 pub mod hel_worker_protocol;
 pub mod hel_worker_runtime;
 pub mod hel_workspace;

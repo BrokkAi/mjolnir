@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use super::worker_binary::{bridge_launch, stage_profile};
 use super::{Controller, execute_checked, scp_command_spec, ssh_command_spec};
 use crate::hel_targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
-use crate::hel_worker_runtime::{
+use crate::hel_worker_launch::{
     REVIEWER_DIR, REVIEWER_PROFILE_DIR, ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig,
 };
 

@@ -1459,7 +1459,7 @@ fn stop_running_broker(pid_path: &Path) -> Result<()> {
 /// of leaving it attached to a target that is going away.
 #[cfg(unix)]
 fn stop_broker_process_group(pid: i32, escalate: bool) {
-    crate::hel_worker_runtime::terminate_process_group(
+    crate::hel_subprocess::terminate_process_group(
         pid,
         if escalate {
             libc::SIGKILL

@@ -219,6 +219,21 @@ impl ExecutionEnforcement {
     }
 }
 
+/// The file inside a harness home that proves the harness is logged in.
+///
+/// Setup, quota checks, credential sync, and the target-side worker all read
+/// the same path, so it is decided here beside [`HarnessKind`] rather than in
+/// any one of them.
+pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf {
+    home.join(match kind {
+        HarnessKind::Codex => "auth.json",
+        HarnessKind::Claude => ".credentials.json",
+        HarnessKind::Kimi => "credentials/kimi-code.json",
+        HarnessKind::Grok => "auth.json",
+        HarnessKind::Deepseek => ".credentials.yaml",
+    })
+}
+
 impl HarnessKind {
     pub const ALL: [Self; 5] = [
         Self::Codex,

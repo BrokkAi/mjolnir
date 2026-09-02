@@ -13,6 +13,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
+use crate::hel_config::harness_authentication_marker;
 use crate::hel_credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
     CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, SyncAction, SyncTrigger, enqueue,
@@ -20,7 +21,6 @@ use crate::hel_credentials::{
     write_credential_file,
 };
 use crate::hel_elicitation::ElicitationResponse;
-use crate::hel_setup::harness_authentication_marker;
 use crate::hel_targets::CommandSpec;
 use crate::hel_worker::{
     MAX_FRAME_BYTES, RELAY_EVENT_GENESIS_DIGEST, RELAY_MIN_PROTOCOL_VERSION,
@@ -29,7 +29,7 @@ use crate::hel_worker::{
     RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload, RelayVersionRange,
     ReviewerRequest, validate_relay_event,
 };
-use crate::hel_worker_runtime::ReviewerLaunchConfig;
+use crate::hel_worker_launch::ReviewerLaunchConfig;
 
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);

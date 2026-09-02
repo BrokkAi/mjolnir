@@ -15,6 +15,7 @@ pub(super) const PROXY_INITIAL_INPUT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
 use crate::hel_acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::hel_config::HarnessKind;
+use crate::hel_subprocess::terminate_process_group;
 use crate::hel_worker::{
     ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, RELAY_STATE_FILE,
     RESTORED_RELAY_SEED_FILE, RelayCommand, RelayCommandOutcome, RelayErrorCode, RelayObservation,
@@ -2494,15 +2495,6 @@ where
         bail!("supervised ACP bridge exited with {status}");
     }
     Ok(())
-}
-
-/// Signal a whole process group. Terminals reuse this so process-group
-/// termination lives in one place. A group that is already gone counts as
-/// success; anything else is reported rather than dropped.
-pub(crate) fn terminate_process_group(pid: i32, signal: i32) {
-    if let Err(error) = crate::hel_subprocess::signal_process_group(pid, signal) {
-        tracing::warn!(pid, signal, %error, "could not signal process group");
-    }
 }
 
 /// Make this process lead its own session, so session teardown can stop

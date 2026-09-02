@@ -30,7 +30,7 @@ use crate::hel_worker_client::{
     RelayAttachment, RelayClient, RelayEventPage, RelayRejected, RelayTransportDead,
     StartedReviewer,
 };
-use crate::hel_worker_runtime::ReviewerLaunchConfig;
+use crate::hel_worker_launch::ReviewerLaunchConfig;
 
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_millis(150);
 /// Release SQLite's single writer between bounded pieces of a large relay

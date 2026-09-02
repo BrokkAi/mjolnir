@@ -54,7 +54,7 @@ use crate::hel_terminal::{
     DEFAULT_TERMINAL_OUTPUT_BYTES, TerminalExit, TerminalRegistry, TerminalSpawn,
 };
 use crate::hel_worker::{AcpActivityClock, ClaimedSteeringPrompt};
-use crate::hel_worker_runtime::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};
+use crate::hel_worker_launch::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};
 
 pub(crate) fn plan_review_carries_native_feedback(id: &str) -> bool {
     grok::is_plan_review_id(id)
@@ -180,7 +180,7 @@ pub struct LaunchSpec {
     /// Extra stdio MCP servers this session gets, beyond project memory. A
     /// turn review's reviewing agents get Bifrost this way; the primary
     /// session gets none.
-    pub extra_mcp_servers: Vec<crate::hel_worker_runtime::ReviewMcpServer>,
+    pub extra_mcp_servers: Vec<crate::hel_worker_launch::ReviewMcpServer>,
     pub resume_session: Option<String>,
     pub harness: HarnessKind,
     pub execution_policy: ExecutionPolicy,
@@ -230,8 +230,8 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
 /// over ACP. Claude and Kimi read their staged profile instead, which the
 /// controller writes while staging the reviewer.
 fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
-    if crate::hel_worker_runtime::ReviewMcpDelivery::for_harness(spec.harness)
-        != crate::hel_worker_runtime::ReviewMcpDelivery::Acp
+    if crate::hel_worker_launch::ReviewMcpDelivery::for_harness(spec.harness)
+        != crate::hel_worker_launch::ReviewMcpDelivery::Acp
     {
         return Vec::new();
     }
