@@ -1,4 +1,4 @@
-//! Adopting a native coding-agent session as a stopped Hel session.
+//! Adopting a native coding-agent session as a stopped Mjolnir session.
 //!
 //! One implementation serves every harness: the `mj import <harness>`
 //! subcommands differ only in which agent home they read and what they call the
@@ -30,6 +30,11 @@ use hel::hel_import::{
 use hel::hel_projection::materialized_session_from_canonical;
 use hel::hel_state::{HelState, SessionRecord};
 use hel_tui::{ImportProfileOption, ImportSessionOption};
+
+const IMPORT_CANCELLED_MESSAGE: &str = "Import cancelled; no Mjolnir files were changed.";
+const DIRTY_IMPORT_WARNING: &str =
+    "These Git roots are dirty; Mjolnir will archive their complete current state:";
+const IMPORT_RUNTIME_CONTEXT: &str = "import persistence requires the Mjolnir async runtime";
 
 #[derive(Debug, Args)]
 pub(crate) struct ImportArgs {
@@ -67,7 +72,7 @@ pub(crate) struct NativeImportArgs {
     /// Existing configured bundle to associate with the imported session.
     #[arg(long)]
     bundle: Option<String>,
-    /// Title displayed in Hel's dashboard.
+    /// Title displayed in Mjolnir's dashboard.
     #[arg(long)]
     title: Option<String>,
     /// Proceed after acknowledging dirty detected Git roots.
@@ -106,7 +111,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
     }
 }
 
-/// Where a harness keeps the sessions Hel may read. Never modified.
+/// Where a harness keeps the sessions Mjolnir may read. Never modified.
 fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
     match harness {
         HarnessKind::Claude => claude_config_home(),
@@ -266,7 +271,7 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     let bundle_id =
         resolve_import_bundle(&mut config, &transcript, &targets, args.bundle.as_deref())?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
-        println!("Import cancelled; no Hel files were changed.");
+        println!("{IMPORT_CANCELLED_MESSAGE}");
         return Ok(());
     }
     let imported = (located.import)(
@@ -286,14 +291,18 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
     persist_imported_session(session)?;
-    println!(
-        "Imported {} as Hel session {} (bundle {}, archive {})",
+    println!("{}", import_success_message(&imported));
+    Ok(())
+}
+
+fn import_success_message(imported: &ImportedClaudeSession) -> String {
+    format!(
+        "Imported {} as Mjolnir session {} (bundle {}, archive {})",
         imported.native_session_id,
         imported.session_id,
         imported.bundle_id,
         imported.archive_path.display()
-    );
-    Ok(())
+    )
 }
 
 fn resolve_import_bundle(
@@ -324,7 +333,7 @@ fn confirm_import_safety(
         return Ok(true);
     }
     if needs_dirty {
-        eprintln!("These Git roots are dirty; Hel will archive their complete current state:");
+        eprintln!("{DIRTY_IMPORT_WARNING}");
         for (root, summary) in &issues.dirty_git_roots {
             eprintln!("  {} — {summary}", root.display());
         }
@@ -364,7 +373,7 @@ fn confirm_import_safety(
 pub(crate) fn persist_imported_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     tokio::runtime::Handle::try_current()
-        .context("import persistence requires the Hel async runtime")?
+        .context(IMPORT_RUNTIME_CONTEXT)?
         .block_on(async {
             crate::daemon::connect_or_start()
                 .await?
@@ -820,6 +829,45 @@ mod tests {
                 ])
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn import_help_uses_mjolnir_product_wording() {
+        use clap::CommandFactory;
+
+        let mut command = crate::Cli::command();
+        let help = command
+            .find_subcommand_mut("import")
+            .expect("import command")
+            .find_subcommand_mut("claude")
+            .expect("claude import command")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("Title displayed in Mjolnir's dashboard"));
+        assert!(!help.contains("Title displayed in Hel's dashboard"));
+    }
+
+    #[test]
+    fn import_status_messages_use_mjolnir_product_wording() {
+        let imported = ImportedClaudeSession {
+            session_id: "session".into(),
+            native_session_id: "native".into(),
+            source_jsonl: PathBuf::from("native.jsonl"),
+            source_cwd: PathBuf::from("workspace"),
+            bundle_id: "bundle".into(),
+            archive_path: PathBuf::from("checkpoint.zip"),
+        };
+        let messages = [
+            IMPORT_CANCELLED_MESSAGE.to_owned(),
+            DIRTY_IMPORT_WARNING.to_owned(),
+            IMPORT_RUNTIME_CONTEXT.to_owned(),
+            import_success_message(&imported),
+        ];
+
+        for message in messages {
+            assert!(message.contains("Mjolnir"), "{message}");
+            assert!(!message.contains("Hel"), "{message}");
         }
     }
 }

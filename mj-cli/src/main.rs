@@ -860,8 +860,14 @@ fn doctor(args: DoctorArgs) -> Result<()> {
     if hel::hel_doctor::all_ready(&checks) {
         Ok(())
     } else {
-        bail!("Hel has fixable prerequisites; run `mj doctor --json` and follow its remediations.")
+        Err(doctor_failure())
     }
+}
+
+fn doctor_failure() -> anyhow::Error {
+    anyhow::anyhow!(
+        "Mjolnir has fixable prerequisites; run `mj doctor --json` and follow its remediations."
+    )
 }
 
 /// The prefix every message uses when it names a session, so notices stay
@@ -1133,6 +1139,14 @@ mod tests {
                 })
             }))
         ));
+    }
+
+    #[test]
+    fn doctor_failure_uses_mjolnir_product_wording() {
+        let message = doctor_failure().to_string();
+        assert!(message.contains("Mjolnir"));
+        assert!(!message.contains("Hel"));
+        assert!(message.contains("mj doctor --json"));
     }
 
     #[test]
