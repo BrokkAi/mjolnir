@@ -25,13 +25,18 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
         2,
         "checkpoint starts the database-owning daemon"
     );
+    assert!(logs.iter().all(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("mj-") && name.ends_with(".log"))
+    }));
     let (command_log, _) = logs
         .iter()
         .map(|path| (path, fs::read_to_string(path).unwrap()))
         .find(|(_, contents)| contents.contains("command=\"checkpoint\""))
         .expect("one log belongs to the checkpoint client");
     let contents = fs::read_to_string(command_log).unwrap();
-    assert!(contents.contains("Hel started"));
+    assert!(contents.contains("Mjolnir started"));
     assert!(contents.contains("command=\"checkpoint\""));
     assert!(contents.contains("Mjolnir exited with an error"));
     assert!(contents.contains("unknown session definitely-missing"));

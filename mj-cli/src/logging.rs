@@ -1,4 +1,4 @@
-//! Durable, non-blocking diagnostics for controller-facing Hel processes.
+//! Durable, non-blocking diagnostics for controller-facing Mjolnir processes.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -95,7 +95,7 @@ impl Drop for ReliableWorkerGuard {
 fn reliable_non_blocking(file: File) -> Result<(ReliableWriter, ReliableWorkerGuard)> {
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()
-        .name("hel-log-writer".into())
+        .name("mj-log-writer".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 write_log_messages(file, receiver);
@@ -144,7 +144,7 @@ impl ControllerLog {
     pub(crate) fn start(command: &'static str) -> Result<Self> {
         let directory = hel::hel_config::data_dir().join("logs");
         fs::create_dir_all(&directory)
-            .with_context(|| format!("create Hel log directory {}", directory.display()))?;
+            .with_context(|| format!("create Mjolnir log directory {}", directory.display()))?;
         prune_logs(&directory, RETAINED_LOGS.saturating_sub(1))?;
 
         let path = directory.join(log_filename());
@@ -157,7 +157,7 @@ impl ControllerLog {
         }
         let file = options
             .open(&path)
-            .with_context(|| format!("create Hel log {}", path.display()))?;
+            .with_context(|| format!("create Mjolnir log {}", path.display()))?;
         let (writer, writer_guard) = reliable_non_blocking(file)?;
         let (filter, filter_error) = env_filter("info");
         tracing_subscriber::fmt()
@@ -165,14 +165,14 @@ impl ControllerLog {
             .with_env_filter(filter)
             .with_writer(writer)
             .try_init()
-            .map_err(|error| anyhow::anyhow!("install Hel log subscriber: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("install Mjolnir log subscriber: {error}"))?;
 
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),
             process_id = std::process::id(),
             command,
             log = %path.display(),
-            "Hel started"
+            "Mjolnir started"
         );
         if let Some(error) = filter_error {
             tracing::warn!(%error, "ignored invalid RUST_LOG filter");
@@ -190,7 +190,7 @@ pub(crate) fn start_stderr() -> Result<()> {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init()
-        .map_err(|error| anyhow::anyhow!("install Hel stderr subscriber: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("install Mjolnir stderr subscriber: {error}"))?;
     if let Some(error) = filter_error {
         tracing::warn!(%error, "ignored invalid RUST_LOG filter");
     }
@@ -212,7 +212,7 @@ fn env_filter(default: &str) -> (EnvFilter, Option<String>) {
 
 fn log_filename() -> String {
     format!(
-        "hel-{}-{}.log",
+        "mj-{}-{}.log",
         Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
         std::process::id()
     )
@@ -221,7 +221,7 @@ fn log_filename() -> String {
 fn prune_logs(directory: &Path, retain: usize) -> Result<()> {
     let mut logs = Vec::new();
     for entry in fs::read_dir(directory)
-        .with_context(|| format!("read Hel log directory {}", directory.display()))?
+        .with_context(|| format!("read Mjolnir log directory {}", directory.display()))?
     {
         let entry = entry.with_context(|| format!("read entry in {}", directory.display()))?;
         if let Some(path) = {
@@ -229,7 +229,7 @@ fn prune_logs(directory: &Path, retain: usize) -> Result<()> {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            (name.starts_with("hel-") && name.ends_with(".log")).then_some(entry.path())
+            (name.starts_with("mj-") && name.ends_with(".log")).then_some(entry.path())
         } {
             logs.push(path);
         }
@@ -238,7 +238,7 @@ fn prune_logs(directory: &Path, retain: usize) -> Result<()> {
     let remove = logs.len().saturating_sub(retain);
     for path in logs.into_iter().take(remove) {
         fs::remove_file(&path)
-            .with_context(|| format!("remove expired Hel log {}", path.display()))?;
+            .with_context(|| format!("remove expired Mjolnir log {}", path.display()))?;
     }
     Ok(())
 }
@@ -286,9 +286,10 @@ mod tests {
     fn prune_logs_keeps_newest_managed_logs_and_unrelated_files() {
         let directory = tempfile::tempdir().unwrap();
         for name in [
-            "hel-20260824T000000.000Z-1.log",
-            "hel-20260825T000000.000Z-2.log",
-            "hel-20260826T000000.000Z-3.log",
+            "mj-20260824T000000.000Z-1.log",
+            "mj-20260825T000000.000Z-2.log",
+            "mj-20260826T000000.000Z-3.log",
+            "hel-20260823T000000.000Z-4.log",
             "notes.log",
         ] {
             fs::write(directory.path().join(name), name).unwrap();
@@ -299,20 +300,27 @@ mod tests {
         assert!(
             !directory
                 .path()
-                .join("hel-20260824T000000.000Z-1.log")
+                .join("mj-20260824T000000.000Z-1.log")
                 .exists()
         );
         assert!(
             directory
                 .path()
-                .join("hel-20260825T000000.000Z-2.log")
+                .join("mj-20260825T000000.000Z-2.log")
                 .exists()
         );
         assert!(
             directory
                 .path()
-                .join("hel-20260826T000000.000Z-3.log")
+                .join("mj-20260826T000000.000Z-3.log")
                 .exists()
+        );
+        assert!(
+            directory
+                .path()
+                .join("hel-20260823T000000.000Z-4.log")
+                .exists(),
+            "legacy Hel logs are ignored rather than treated as Mjolnir state"
         );
         assert!(directory.path().join("notes.log").exists());
     }
