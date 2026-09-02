@@ -23,7 +23,7 @@ Ryan Svihla approved the split on 2026-09-02.
 - [x] (2026-09-02 21:40Z) M1 verification: the edge script reports zero escaping edges in non-test and test code (after switching `src/hel_review/host.rs` to `hel_transcript`); `cargo clippy --all-targets -- -D warnings` clean; `cargo test` green (1663 core, 270 tui, 111 cli); committed.
 - [x] (2026-09-02 18:04Z) M2: created `mj-worker/`, `mj-controller/`, `mj-chat/`; moved every module with `git mv`; `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings` and `cargo test` green over the default members; `--workspace` additionally builds `mj-desktop`, which this host cannot compile because the GTK development libraries are absent (a pre-existing environment limit, not a split effect); `cargo build --bin mj` and `cargo build --target x86_64-unknown-linux-musl --bin mj` link; the edge script prints two empty reports.
 - [ ] M3: update CI, publish, coverage, release-version script, RELEASING.md, CONTRIBUTING.md; commit. The downstream half (rewriting `hel::` paths in `mj-tui`, `mj-cli`, `mj-desktop` and adding the new workspace dependencies) was done inside M2, because the workspace has to compile at the end of M2.
-- [ ] M4: re-measure the three baseline timings and record them in `Outcomes & Retrospective`; push.
+- [x] (2026-09-02 23:20Z) M4: re-measured the baseline timings (see `Outcomes & Retrospective`); pushed to origin master.
 
 
 ## Surprises & Discoveries
@@ -118,7 +118,19 @@ Ryan Svihla approved the split on 2026-09-02.
 ## Outcomes & Retrospective
 
 
-To be written at M4 with the before/after timing table.
+Completed 2026-09-02. The control plane is four crates: `brokk-mj-core` (66,044 lines under `src/`), `brokk-mj-worker` (9,710 lines), `brokk-mj-controller` (56,310 lines), `brokk-mj-chat` (22,472 lines). The controller has no dependency on the worker (`cargo tree -p brokk-mj-controller -e normal,dev | grep -c mj-worker` prints 0). Every test kept its name and passes in its new crate: core 708, controller 570, chat 294 (291 moved plus 3 from the refused-prompt work merged during M3), worker 94, tui 270, cli 111. The edge script prints two empty reports. The musl worker build links.
+
+Timings on the same 120-core host, warm target directory, host target. Load average was 30 to 90 during the baseline and 75 to 100 during the re-measurement, so the after column is if anything pessimistic:
+
+    edit                                              before    after
+    touch hel_chat.rs, cargo build --bin mj            22.30 s   10.06 s
+    touch hel_chat.rs, chat test binary (--no-run)     15.03 s    2.52 s
+    touch hel_worker_runtime.rs, cargo build --bin mj  12.42 s    5.32 s
+    rlib on disk                                       235 MB    118 + 79 + 27 + 16 MB
+
+`cargo build --timings` after touching `src/hel_config.rs` shows `brokk-mj-worker` (start 3.0 s, 0.5 s) and `brokk-mj-controller` (start 3.1 s, 3.0 s) compiling concurrently once the foundation finishes.
+
+Gaps and lessons. The foundation is 66K lines, larger than the 40K estimate, because `hel_review` minus its host, `hel_checkpoint`, `hel_acp`, and `hel_terminal` all had to stay below the worker and controller; it remains the largest single crate and the serial floor for a clean build. `mj-desktop` was not compiled here because the host lacks GTK development libraries; its paths were updated by inspection. Agent worktrees created during this plan started from whatever commit the tool chose, not necessarily `master`'s tip, so one merge carried in unrelated newer work; check `git merge-base` before merging an agent branch. The edge script under-reported braced imports until fixed in commit ce1fef9; grep for the module name as well as running the script.
 
 
 ## Context and Orientation
