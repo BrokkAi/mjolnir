@@ -20,7 +20,7 @@ The separation is observable in three ways. `cargo tree -p brokk-mjolnir --targe
 - [x] (2026-09-02 09:51Z) Updated Cargo metadata, documentation, CI, release archives, installer, npm packaging, crates.io publishing, and release guidance for the sibling executable.
 - [x] (2026-09-02 09:53Z) Updated `Cargo.lock`; regenerated and compared both license reports, which required no checked-in report changes.
 - [x] (2026-09-02 10:05Z) Validated formatting, target dependency isolation, musl and GNU checks, focused behavior, the full test suite, Clippy, package assembly, npm tests, YAML/shell/JavaScript syntax, license policy, and release-version consistency.
-- [ ] Commit the validated implementation and push the current `master` branch to `origin/master`.
+- [x] (2026-09-02 10:11Z) Committed the validated implementation as `65ff6f6b` and pushed the current `master` branch to `origin/master`.
 
 ## Surprises & Discoveries
 
@@ -242,3 +242,5 @@ The desktop process owns `axum`, `reqwest`, `rcgen`, WRY, Tao, and GTK/WebKit de
 Plan revision note (2026-09-02 09:34Z): Created the plan after the user expanded the approved headless feature correction into a complete separate-executable boundary, including launch protocol and all build, release, installer, and npm consumers.
 
 Plan revision note (2026-09-02 10:05Z): Recorded the completed implementation and validation evidence, added the versioned credential protocol decision, and corrected crates.io package/publish targeting after package verification exposed musl and unpublished-sibling resolution failures.
+
+Plan revision note (2026-09-02 10:11Z): Recorded the implementation commit and confirmed it reached `origin/master`; this plan-only completion checkpoint follows it so the living plan reflects the repository's final state.
