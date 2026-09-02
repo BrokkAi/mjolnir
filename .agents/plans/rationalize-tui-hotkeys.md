@@ -8,7 +8,7 @@ The rules for this document are in `.agents/PLANS.md`, at the repository root. T
 
 Hel is a terminal program (`mj`) that runs several coding agents at once and shows them all on one screen. That screen is called the terminal surface. Today, learning what its keys do means reading the source, because the only documentation on screen is one of four fixed strings printed along the bottom row, and some of what those strings say is wrong: two error messages tell the user to press `Ctrl+X` to cancel something, and `Ctrl+X` is not bound to anything at all.
 
-After this work a person who has never used the program can learn every key from inside it. Pressing `F1` (or `?` while a pane has the keyboard) opens a scrollable list of every command the surface has, with its keys, what it does, and — when it cannot be run right now — why not. The bottom row stops being a fixed string and starts naming only the keys that apply at this moment: `x cancel launch` appears while the selected agent session is starting up and disappears when it finishes. A small set of chords works from everywhere including the text composer, so the user does not have to move the keyboard to a pane before acting. And the "edit session" dialog, which exists only because the bottom row ran out of room, goes away in favour of a searchable command list.
+After this work a person who has never used the program can learn every key from inside it. Pressing `F1` (or `?` while a pane has the keyboard) opens a scrollable list of every command the surface has, with its keys, what it does, and — when it cannot be run right now — why not. The bottom row stops being a fixed string and starts naming only the keys that apply at this moment: `Alt-X cancel launch` appears while the selected agent session is starting up and disappears when it finishes. A small set of chords works from everywhere including the text composer, so the user does not have to move the keyboard to a pane before acting. And the "edit session" dialog, which exists only because the bottom row ran out of room, goes away in favour of a searchable command list.
 
 The proof that it works is direct: run `mj`, read the bottom row, press `F1`, read the list, press `Escape`, and see the screen you were on come back exactly as you left it.
 
@@ -18,7 +18,9 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
 - [x] (2026-09-01 00:00Z) M1. Added `mj-tui/src/actions.rs` (the command registry), `mj-tui/src/help.rs` (the `F1` overlay and `Mode::Help`), rewrote `handle_dashboard_key` against the registry, made the footer contextual, fixed the two `Ctrl+X` notices, and updated `README.md`.
 - [x] (2026-09-01 00:00Z) M1 tests. Seven named tests added (four in `mj-tui/src/render.rs`, three in `mj-tui/src/help.rs`) plus three registry consistency tests in `mj-tui/src/actions.rs`.
 - [x] (2026-09-01 00:00Z) M1 validation. `cargo test -p brokk-mj-tui` 253 passed, `cargo test -p brokk-mjolnir` green, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
-- [ ] M2. Global chord pre-filter in `mj-cli/src/dashboard.rs`; the F-key moves (`F2` palette, `F3` workspaces, `F4` web viewer); `Ctrl-G`/`Ctrl-Q`/`Ctrl-R`/`Ctrl-T`/`Ctrl-X` become `Alt-G`/`Alt-Q`/`Alt-R`/`Alt-T`/`Alt-X`; `Alt-N` and `Alt-A` from anywhere.
+- [x] (2026-09-01 00:00Z) M2. Added `global_chord()` and `DashboardState::global_chord_allowed()` to `mj-tui/src/actions.rs`, replaced `workspace_picker_event` in `mj-cli/src/dashboard.rs` with `global_chord_event` at the top of the batching loop, moved the F-keys (`F3` workspaces, `F4` web viewer, `F2` left unbound for the palette), turned `Ctrl-G`/`Ctrl-Q`/`Ctrl-R`/`Ctrl-T`/`Ctrl-X` into `Alt-G`/`Alt-Q`/`Alt-R`/`Alt-T`/`Alt-X`, added `Alt-N` and `Alt-A` from anywhere, extracted `ActiveChat::detach()`, and updated `README.md`.
+- [x] (2026-09-01 00:00Z) M2 tests. Twelve named tests added (eight in `mj-cli/src/dashboard.rs`, three in `mj-tui/src/lib.rs`, three in the root crate) plus one regression test for the empty-grid crash the move uncovered; the footer- and key-asserting tests in `render.rs`, `resume.rs`, `active.rs`, `history.rs`, `lib.rs`, and `termination_pty.rs` were updated to the new map.
+- [x] (2026-09-01 00:00Z) M2 validation. `cargo test -p brokk-mj-tui` 256 passed, `cargo test -p brokk-mjolnir` green (including the PTY detach test, now driven by `Alt-Q`), `cargo test --lib hel_chat` 249 passed, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt` applied, live check in tmux captured under `Artifacts and Notes`.
 - [ ] M3. The command palette (`mj-tui/src/palette.rs`, `Mode::Palette`), and removal of the session edit dialog and its `e` binding.
 - [ ] M4 (optional, to be proposed separately after M3). One shared vocabulary of built-in slash commands for the terminal surface and the web viewer.
 
@@ -32,6 +34,38 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
 
 - Observation: `SessionOperationKind::label()` returns capitalized words ("Launch", "Stopping"), which read badly inside a footer sentence. The footer lowercases them so the hint reads `x cancel launch` rather than `x cancel Launch`.
   Evidence: `mj-tui/src/lib.rs`, `impl SessionOperationKind { pub const fn label(self) }`.
+
+- Observation: `ChatAction::QuitDetach` has a second producer, the `/detach`
+  slash command (`src/hel_chat.rs`, `LocalCommand::Detach`), so it and
+  `ChatEventOutcome::QuitDetach` had to stay. Only `CyclePaneLayout` and
+  `OpenWebDialog` were unproduced once the composer's escape hatches went, and
+  only those two were deleted.
+  Evidence: `grep -rn "ChatAction::QuitDetach" src/` returns the `/detach` arm
+  as well as the key handler.
+
+- Observation: the dead wizard `F2` arms were dead for the reason the design
+  guessed, but `CompleteMountSource` is very much alive. `Tab` on the mount
+  source field calls the same completion helper two lines above each `F2` arm,
+  so the arms could go while the action stayed.
+  Evidence: `mj-tui/src/wizards/dashboard.rs`, the `KeyCode::Tab if
+  wizard.mounts.focus == MountFocus::Source` arm.
+
+- Observation: turning the pane dial on a workspace with no sessions at all
+  crashed the program, and always had. `render.rs` built the "more sessions
+  than fit" marker with `then_some(viewport_end - 1)`, whose argument is
+  evaluated before the guard is read, so an empty grid underflowed. Moving the
+  dial off `Ctrl-G` is what made a first-run user likely to press it. Fixed
+  with `then(|| …)` and covered by `the_minimized_grid_draws_with_no_sessions`.
+  Evidence: `attempt to subtract with overflow` at `mj-tui/src/render.rs:705`
+  from a live run against an empty scratch workspace.
+
+- Observation: `spec_for_key` refused every chord while the composer had
+  focus, because its Prompt guard tested for CONTROL — the modifier the old
+  bindings used. With the bindings on Alt the guard had to test for ALT
+  instead, or a second `Alt-G` after the first (which lands the keyboard in
+  Prompt) did nothing.
+  Evidence: `alt_g_cycles_the_pane_layout_and_ctrl_g_no_longer_does` failed on
+  its second press before the guard was changed.
 
 ## Decision Log
 
@@ -67,11 +101,68 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   Rationale: the footer prints one key per command — the first in its list — so the format stays uniform as commands are added. Both keys are still bound and both are listed in the help overlay. `e` is removed entirely in M3 anyway.
   Date/Author: 2026-09-01, implementation of M1.
 
+- Decision: `global_chord()` matches against the registry's own `keys` lists
+  rather than a second hand-written key table. `GLOBAL_CHORDS` names only the
+  ids that answer from everywhere, and `KeyHint::is_chord()` picks out the
+  entry — a function key or an Alt letter — that carries the chord.
+  Rationale: a separate table would be exactly the drift M1 set out to remove.
+  This way the footer label, the help overlay line, and the chord are one fact.
+  Date/Author: 2026-09-01, implementation of M2.
+
+- Decision: `CommandId`, `global_chord`, `dispatch_command`, and
+  `global_chord_allowed` became `pub` and are re-exported from `mj-tui`.
+  Rationale: the pre-filter lives in `mj-cli`, a separate crate, so the
+  crate-private forms M1 used were unreachable there. The rest of the registry
+  — `CommandSpec`, `Availability`, `Scope`, `spec_for_key`, `available` — stays
+  crate-private.
+  Date/Author: 2026-09-01, implementation of M2.
+
+- Decision: `dispatch_command(CommandId::Help)` toggles rather than only
+  opening.
+  Rationale: the pre-filter catches `F1` before the help overlay's own key
+  handler can see it, so without a toggle here `F1` would open the reference
+  and then have no way to close it. `Esc` and `?` still close it through
+  `handle_help_key`.
+  Date/Author: 2026-09-01, implementation of M2.
+
+- Decision: `Alt-R` and `Alt-T` sit in the composer's Alt block, below the
+  open-reverse-search check, not beside `Alt-V` above it.
+  Rationale: an open reverse-i-search takes every key first, which is what
+  lets `Alt-R` keep its older job of cycling the search's scope
+  (`src/hel_chat/history.rs`). Putting the opener above that check would have
+  made the chord open a search it was already inside.
+  Date/Author: 2026-09-01, implementation of M2.
+
+- Decision: `Ctrl-R` inside an open reverse-i-search still steps to the
+  previous match, even though `Ctrl-R` no longer opens one.
+  Rationale: that binding is readline's, not the surface's, and the search
+  prompt is a readline context. `Alt-R` is the only key that changed hands.
+  Date/Author: 2026-09-01, implementation of M2.
+
+- Decision: `Alt-X` inside the target-actions dialog is handled by the dialog,
+  not by the pre-filter, and `global_chord_allowed` returns false for
+  `CancelOperation` whenever any modal is open.
+  Rationale: one rule ("cancel belongs to whatever is in front of you") covers
+  both cases, so no dialog has to be named in the pre-filter.
+  Date/Author: 2026-09-01, implementation of M2.
+
 ## Outcomes & Retrospective
 
 M1 is complete and shipped green. What exists now that did not before: one table (`mj-tui/src/actions.rs`) that key handling, the footer, and the help overlay all read; an `F1` key reference that opens over anything and restores it; and a footer that names only the keys that apply. The user-visible gain from M1 alone is real but modest — the mislabelled `Ctrl+X` advice is gone, `x cancel launch` only appears when it can be used, and `F1` finally answers.
 
 The larger gain is what M1 makes cheap. M2 rebinds a dozen keys; because every binding is now one line in one table, that milestone touches the table and the pre-filter rather than a dozen scattered `match` arms and four hand-written footer strings. M3's command palette is essentially a renderer over `available()`.
+
+M2 is complete and shipped green. Every key in the design's table has moved,
+and the chords answer from the composer as well as from the panes: the pane
+letters `n`, `a`, and `s` still work where they always did, and everything else
+is reachable without leaving the prompt. The one-release notices carry the two
+chords with the strongest muscle memory, `Ctrl-G` and `Ctrl-Q`.
+
+M2 cost far less than it would have before M1, which was the point: the
+rebinding itself was fifteen lines of the registry table, and the pre-filter is
+twelve lines in the controller. The work that remained was in the tests and the
+documentation that name the keys — which is a fair measure of how well the M1
+tests were pinning the surface down.
 
 The lesson worth carrying: the old code was not wrong so much as unowned. The footer strings and the `match` arms were each individually correct when written and drifted apart afterwards, because nothing forced them to agree. The test `every_footer_hint_dispatches_the_command_it_names` is the thing that stops that happening again — it presses every key the footer advertises and asserts the surface lands where the registry says it should.
 
@@ -178,7 +269,7 @@ Do not press Enter and do not type into any prompt during that check if a daemon
 
 Acceptance for M1 is what a person sees, not what the code contains.
 
-Start the program with no session starting or stopping. The bottom row reads, from the Sessions pane, `Enter open · n new · s resume · a mark read · e edit · Tab pane · Ctrl-G panes · F2 workspaces · F3 web · Ctrl-Q quit · F1 help`, and it contains no word "cancel". Start a session. While it is provisioning, the row gains `x cancel launch`. When provisioning ends, that hint disappears again. This is `footer_lists_cancel_only_while_an_operation_is_in_flight`, which fails against the old fixed strings and passes after.
+Start the program with no session starting or stopping. The bottom row reads, from the Sessions pane, `Enter open · Alt-N new · s resume · Alt-A mark read · e edit · Tab pane · Alt-G panes · F3 workspaces · F4 web · Alt-Q quit · F1 help` (M1 shipped this with the old key names; M2 moved them), and it contains no word "cancel". Start a session. While it is provisioning, the row gains `Alt-X cancel launch`. When provisioning ends, that hint disappears again. This is `footer_lists_cancel_only_while_an_operation_is_in_flight`, which fails against the old fixed strings and passes after.
 
 Press `F1`. A bordered list appears over the screen, headed "Keys", grouped into Sessions pane, Selected session, Targets pane, Quota pane, First-run setup, Panes, Anywhere, and Composer. Every command in the registry appears with its keys; the ones that cannot run where you are standing are dim and say why. `Up` and `Down` scroll it. Press `Escape` and the screen you were on returns. Press `n` to open the new-session wizard, then `F1`, then `Escape`: the wizard is still there with its selections intact, because help restores the mode it opened over instead of cancelling it. That is `help_overlay_returns_to_the_wizard_it_opened_over`.
 
@@ -225,6 +316,42 @@ The help overlay, captured after `tmux send-keys -t hk F1` in that same run, tri
     └──────────────────────────────────────────────────────────────────────────────┘
 
 `Escape` put the dashboard back with its footer unchanged.
+
+After M2, the same footer captured the same way. Every key in it moved except
+`s`, `Tab`, and `F1`:
+
+    Alt-N new · s resume · Alt-A mark read · Tab pane · Alt-G panes · F3 workspaces · F4 web · Alt-Q quit · F1 help
+
+With the support panes collapsed, from the composer:
+
+    Tab pane · Alt-G panes · F3 workspaces · F4 web · Alt-Q quit · F1 help
+
+The help overlay after M2, trimmed to the groups that changed. The chord and
+its plain-letter alias share one line, and cancel has moved into `Anywhere`:
+
+      Alt-N / n     New session  Start the wizard that picks a profile, a bundle, and a target.
+      s             Resume a session  Open the picker for every session that is not live.
+      Alt-A / a     Mark all read  Clear the unread marker on every session at once.
+    …
+    Panes
+      Tab           Next pane  Move the keyboard down the layout; Shift-Tab reverses it.
+      Alt-G         Pane layout  Turn the two-position dial: panes open, or collapsed for the conversation.
+
+    Anywhere
+      Alt-X         Cancel operation  Stop the launch, resume, or stop the selected session is in the middle of.
+      F3            Workspaces  Switch to another workspace.
+      F4            Web viewer  Show the address and code for the browser and phone viewer.
+      Alt-Q         Detach  Leave the terminal surface; the sessions keep running.
+      F1 / ?        Help  List every key this surface answers.
+
+The M2 live check, driven the same way against an isolated `MJ_CONFIG_DIR` and
+`MJ_DATA_DIR`: `Alt-N` opened the new-session wizard from the dashboard,
+`Escape` closed it, `F3` opened the workspace picker, `Alt-G` collapsed the
+support panes to their two summary rows, `F1` opened the reference over the
+collapsed layout and `F1` closed it again, `Ctrl-G` printed
+`Ctrl-G moved to Alt-G` in the notice bar and turned nothing, and `Alt-Q`
+detached with the usual "Active sessions will continue working" message and
+exit status 0.
 
 The live check was run against an isolated configuration and data directory (`MJ_CONFIG_DIR` and `MJ_DATA_DIR`, read by `env_override_os` in `src/hel_config.rs`) rather than the real one, because the real workspace was already attached to another process and attaching a second time would have taken it away from its owner.
 
@@ -315,4 +442,8 @@ Dropping the composer's arm from the footer is safe: whenever the composer has t
 
 ## Revision notes
 
+- 2026-09-01: Updated through the end of M2. The composer's `Alt-R`/`Alt-T`
+  placement, the `Help` toggle, and the crate-visibility change are recorded in
+  the `Decision Log` because each is a place where the obvious reading of the
+  design produces a surface that does not work.
 - 2026-09-01: Created from the approved design and updated through the end of M1. The design's `CommandId::Palette` and `global_chord()` were deferred to their own milestones, and the reasoning is recorded in the `Decision Log` rather than left implicit, because a later reader following this plan from scratch would otherwise add both and find the help overlay advertising a command that does nothing and clippy rejecting an uncalled function.

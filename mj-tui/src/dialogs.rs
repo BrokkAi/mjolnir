@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use qrcode::QrCode;
 use qrcode::types::{Color as QrColor, EcLevel};
 use ratatui::Frame;
@@ -862,7 +862,7 @@ pub(crate) fn render_target_actions(
     lines.push(Line::raw(""));
     if let Some(target_id) = &dialog.testing {
         lines.push(Line::styled(
-            format!("Testing {target_id}…"),
+            format!("Testing {target_id}… Alt-X cancels test"),
             Style::default().fg(Color::Yellow),
         ));
     } else if let Some((target_id, result)) = &dialog.result {
@@ -1343,8 +1343,11 @@ impl DashboardState {
         key: KeyEvent,
         mut dialog: TargetActionsDialog,
     ) -> DashboardAction {
+        // Alt-X is the surface's one cancel chord. The controller's chord
+        // pre-filter deliberately leaves it alone while a dialog is open, so
+        // here it cancels the test this dialog is running.
         if dialog.testing.is_some()
-            && crate::dashboard_accelerator(key.modifiers)
+            && key.modifiers.contains(KeyModifiers::ALT)
             && key.code == KeyCode::Char('x')
         {
             dialog.testing = None;

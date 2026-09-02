@@ -13,7 +13,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
-use crate::{DashboardAction, DashboardState, Focus, dashboard_accelerator};
+use crate::{DashboardAction, DashboardState, Focus};
 
 /// One thing the surface can be asked to do.
 ///
@@ -22,7 +22,7 @@ use crate::{DashboardAction, DashboardState, Focus, dashboard_accelerator};
 /// lists every entry in this enum and must not advertise a command that does
 /// nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandId {
+pub enum CommandId {
     OpenSession,
     NewSession,
     ResumeDialog,
@@ -104,11 +104,10 @@ pub(crate) enum Availability {
 
 /// One key that runs a command, with the text used to name it on screen.
 ///
-/// `modifiers` holds `KeyModifiers::CONTROL` to mean "the dashboard
-/// accelerator", which is Command on macOS and Control everywhere else; see
-/// [`dashboard_accelerator`]. `KeyModifiers::NONE` on a character means the
-/// plain letter, which only reaches a pane because the composer is a separate
-/// focus.
+/// `modifiers` holds `KeyModifiers::ALT` for a chord, which answers from every
+/// surface including the composer. `KeyModifiers::NONE` on a character means
+/// the plain letter, which only reaches a pane because the composer is a
+/// separate focus.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeyHint {
     pub(crate) code: KeyCode,
@@ -125,12 +124,19 @@ impl KeyHint {
         }
     }
 
-    const fn accelerated(code: KeyCode, label: &'static str) -> Self {
+    const fn alt(code: KeyCode, label: &'static str) -> Self {
         Self {
             code,
-            modifiers: KeyModifiers::CONTROL,
+            modifiers: KeyModifiers::ALT,
             label,
         }
+    }
+
+    /// Whether this hint is a chord: an Alt letter or a function key. Chords
+    /// are the keys [`global_chord`] answers from every surface, including
+    /// while the composer owns the keyboard.
+    const fn is_chord(self) -> bool {
+        matches!(self.code, KeyCode::F(_)) || self.modifiers.contains(KeyModifiers::ALT)
     }
 
     /// Whether a pressed key is this hint. `plain` is the caller's reading of
@@ -139,8 +145,8 @@ impl KeyHint {
         if self.code != key.code {
             return false;
         }
-        if self.modifiers.contains(KeyModifiers::CONTROL) {
-            dashboard_accelerator(key.modifiers)
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            key.modifiers.contains(KeyModifiers::ALT)
         } else if matches!(self.code, KeyCode::Char(_)) {
             // Plain letters are pane keys: a modifier means something else.
             plain
@@ -266,7 +272,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "New session",
         description: "Start the wizard that picks a profile, a bundle, and a target.",
         scope: Scope::Sessions,
-        keys: &[KeyHint::plain(KeyCode::Char('n'), "n")],
+        keys: &[
+            KeyHint::alt(KeyCode::Char('n'), "Alt-N"),
+            KeyHint::plain(KeyCode::Char('n'), "n"),
+        ],
         footer: footer_word!("new"),
         available: config_present,
     },
@@ -284,7 +293,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Mark all read",
         description: "Clear the unread marker on every session at once.",
         scope: Scope::Sessions,
-        keys: &[KeyHint::plain(KeyCode::Char('a'), "a")],
+        keys: &[
+            KeyHint::alt(KeyCode::Char('a'), "Alt-A"),
+            KeyHint::plain(KeyCode::Char('a'), "a"),
+        ],
         footer: footer_word!("mark read"),
         available: always_ready,
     },
@@ -292,8 +304,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         id: CommandId::CancelOperation,
         label: "Cancel operation",
         description: "Stop the launch, resume, or stop the selected session is in the middle of.",
-        scope: Scope::Sessions,
-        keys: &[KeyHint::plain(KeyCode::Char('x'), "x")],
+        scope: Scope::Global,
+        keys: &[KeyHint::alt(KeyCode::Char('x'), "Alt-X")],
         footer: cancel_footer,
         available: operation_in_flight,
     },
@@ -407,7 +419,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Pane layout",
         description: "Turn the two-position dial: panes open, or collapsed for the conversation.",
         scope: Scope::Pane,
-        keys: &[KeyHint::accelerated(KeyCode::Char('g'), "Ctrl-G")],
+        keys: &[KeyHint::alt(KeyCode::Char('g'), "Alt-G")],
         footer: footer_word!("panes"),
         available: always_ready,
     },
@@ -416,7 +428,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Workspaces",
         description: "Switch to another workspace.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(2), "F2")],
+        keys: &[KeyHint::plain(KeyCode::F(3), "F3")],
         footer: footer_word!("workspaces"),
         available: always_ready,
     },
@@ -425,7 +437,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Web viewer",
         description: "Show the address and code for the browser and phone viewer.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(3), "F3")],
+        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
         footer: footer_word!("web"),
         available: always_ready,
     },
@@ -434,7 +446,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Detach",
         description: "Leave the terminal surface; the sessions keep running.",
         scope: Scope::Global,
-        keys: &[KeyHint::accelerated(KeyCode::Char('q'), "Ctrl-Q")],
+        keys: &[KeyHint::alt(KeyCode::Char('q'), "Alt-Q")],
         footer: footer_word!("quit"),
         available: always_ready,
     },
@@ -451,6 +463,44 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
 ];
+
+/// The commands a chord runs from every surface, including while the composer
+/// owns the keyboard.
+///
+/// Each one's chord is the entry in its `keys` list that [`KeyHint::is_chord`]
+/// accepts — a function key or an Alt letter. The plain-letter aliases (`n`
+/// on the Sessions pane, `a`, `?`) stay pane keys, because the composer reads
+/// a bare letter as text.
+///
+/// `F2` is deliberately absent: it opens the command palette, which arrives in
+/// its own milestone, and its old workspace-picker binding has already moved
+/// to `F3`.
+const GLOBAL_CHORDS: &[CommandId] = &[
+    CommandId::Help,
+    CommandId::Workspaces,
+    CommandId::WebViewer,
+    CommandId::NewSession,
+    CommandId::MarkAllRead,
+    CommandId::CyclePaneLayout,
+    CommandId::QuitDetach,
+    CommandId::CancelOperation,
+];
+
+/// The command this key press runs from anywhere, or `None` if it is not a
+/// global chord.
+///
+/// The controller calls this before the event is routed to a pane or to the
+/// composer, so a chord answers even while the user is typing. Whether the
+/// chord survives an open dialog is a separate question, answered by
+/// [`DashboardState::global_chord_allowed`].
+pub fn global_chord(key: &KeyEvent) -> Option<CommandId> {
+    GLOBAL_CHORDS.iter().copied().find(|id| {
+        spec(*id)
+            .keys
+            .iter()
+            .any(|hint| hint.is_chord() && hint.matches(*key, false))
+    })
+}
 
 /// The specification for one command. Panics only if `COMMANDS` has lost an
 /// entry, which a unit test in this module rules out.
@@ -496,9 +546,11 @@ pub(crate) fn spec_for_key(key: KeyEvent, focus: Focus) -> Option<CommandId> {
             spec.scope != Scope::Setup
                 && scope_applies(spec.scope, focus)
                 && spec.keys.iter().any(|hint| {
+                    // At the composer a bare letter is text. Only a chord —
+                    // an Alt letter or a function key — reaches the panes.
                     if focus == Focus::Prompt
                         && matches!(hint.code, KeyCode::Char(_))
-                        && !hint.modifiers.contains(KeyModifiers::CONTROL)
+                        && !hint.modifiers.contains(KeyModifiers::ALT)
                     {
                         return false;
                     }
@@ -526,10 +578,28 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
 }
 
 impl DashboardState {
+    /// Whether a global chord still answers with the current dialog open.
+    ///
+    /// Help and detach have always answered from every surface, and the pane
+    /// dial only changes the layout underneath, so all three survive a modal.
+    /// The rest would act on a surface the user cannot see, so they wait for
+    /// the dialog to close — except over the help overlay, which is a
+    /// reference rather than a decision.
+    pub fn global_chord_allowed(&self, id: CommandId) -> bool {
+        match id {
+            CommandId::Help | CommandId::QuitDetach | CommandId::CyclePaneLayout => true,
+            // While the target-actions dialog is up, Alt-X belongs to the test
+            // that dialog is running, so it must not be caught here; the
+            // modal check is what leaves it to the dialog's own handler.
+            CommandId::CancelOperation => !self.modal_open(),
+            _ => !self.modal_open() || matches!(self.mode, crate::Mode::Help(_)),
+        }
+    }
+
     /// Runs one registry command. Every arm calls the same entry point the
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
-    pub(crate) fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+    pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
         match id {
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::NewSession => self.begin_new(),
@@ -594,8 +664,15 @@ impl DashboardState {
             CommandId::Workspaces => DashboardAction::OpenWorkspacePicker,
             CommandId::WebViewer => self.open_web_dialog(),
             CommandId::QuitDetach => DashboardAction::QuitDetach,
+            // Help toggles: the same key that opens the reference closes it
+            // again, which is what the overlay's own Esc/F1/? arm does when
+            // the key reaches it rather than the chord pre-filter.
             CommandId::Help => {
-                self.begin_help();
+                if matches!(self.mode, crate::Mode::Help(_)) {
+                    self.close_help();
+                } else {
+                    self.begin_help();
+                }
                 DashboardAction::None
             }
         }

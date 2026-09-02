@@ -331,7 +331,7 @@ pub struct ChatEntry {
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) leading_omitted: bool,
     /// Detail the decluttered feed leaves out: the entry renders only in the
-    /// raw transcript mode. Set once, when the entry is built, because Ctrl-T
+    /// raw transcript mode. Set once, when the entry is built, because Alt-T
     /// switches render mode without rebuilding entries.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) raw_only: bool,

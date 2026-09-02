@@ -37,8 +37,9 @@ use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocati
 use hel::hel_targets::DeploymentCapacityTarget;
 use hel::hel_worker_client::CredentialSyncCoordinator;
 use hel_tui::{
-    DashboardAction, DashboardState, ImportProfileOption, PreparedMaterializedSessionDetail,
-    SessionOperationKind, render_combined, resume_profile_placeholders,
+    CommandId, DashboardAction, DashboardState, ImportProfileOption,
+    PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
+    resume_profile_placeholders,
 };
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
@@ -567,8 +568,19 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // that asks for work ends the batch so that dispatch still
                 // follows input order.
                 loop {
-                    let batched = if workspace_picker_event(&event) {
-                        action = DashboardAction::OpenWorkspacePicker;
+                    let batched = if let Some(command) =
+                        global_chord_event(&context.dashboard, &event)
+                    {
+                        // Detaching from an open conversation has to save the
+                        // draft and the read cursor, which is the chat's own
+                        // bookkeeping rather than the dashboard's.
+                        if command == CommandId::QuitDetach
+                            && let Some(chat) = context.active_chat.as_mut()
+                        {
+                            chat_outcome = chat.detach();
+                        } else {
+                            action = context.dashboard.dispatch_command(command);
+                        }
                         false
                     } else {
                         // Selection sees mouse and Esc first: a drag inside a
@@ -2176,18 +2188,6 @@ impl DashboardContext {
                 self.dashboard.cycle_focus(reverse);
                 self.dirty = true;
             }
-            hel::hel_chat::ChatEventOutcome::CyclePaneLayout => {
-                self.dashboard.cycle_pane_layout();
-                self.dirty = true;
-            }
-            hel::hel_chat::ChatEventOutcome::OpenWebDialog => {
-                let action = self.dashboard.open_web_dialog();
-                if let Err(error) = actions::apply_dashboard_action(self, action).await {
-                    self.dashboard
-                        .set_failure_notice(format!("Could not load web access: {error:#}"));
-                }
-                self.dirty = true;
-            }
             hel::hel_chat::ChatEventOutcome::QuitDetach {
                 last_seen_event_ordinal,
             } => {
@@ -2502,17 +2502,21 @@ fn dashboard_event_action(dashboard: &mut DashboardState, event: Event) -> Dashb
     }
 }
 
-/// Workspaces answers from every surface, including a modal, so it is caught
-/// before the surface sees the key.
+/// The global chord this event runs, if any.
 ///
-/// It moved off Ctrl-W and onto F2 because Ctrl-W is the composer's
-/// kill-previous-word, and with the composer always on screen the accelerator
-/// could no longer be spent on a global.
-fn workspace_picker_event(event: &Event) -> bool {
+/// A handful of commands answer from every surface, including while the
+/// composer owns the keyboard, so they are caught here before the event is
+/// routed to a pane or to the chat. Which chords survive an open dialog is
+/// [`DashboardState::global_chord_allowed`]'s question, not this one's.
+fn global_chord_event(dashboard: &DashboardState, event: &Event) -> Option<CommandId> {
     let Event::Key(key) = event else {
-        return false;
+        return None;
     };
-    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) && key.code == KeyCode::F(2)
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return None;
+    }
+    let id = hel_tui::global_chord(key)?;
+    dashboard.global_chord_allowed(id).then_some(id)
 }
 
 pub(crate) fn resume_progress_notice(
@@ -2988,11 +2992,193 @@ mod tests {
             dashboard_event_action(
                 &mut dashboard,
                 Event::Key(crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::F(2),
+                    crossterm::event::KeyCode::F(3),
                     crossterm::event::KeyModifiers::NONE,
                 )),
             ),
             DashboardAction::OpenWorkspacePicker
+        ));
+    }
+
+    /// The global chords the controller answers before anything else sees
+    /// the key. These drive the same two calls the batching loop makes.
+    fn chord(dashboard: &DashboardState, key: crossterm::event::KeyEvent) -> Option<CommandId> {
+        global_chord_event(dashboard, &Event::Key(key))
+    }
+
+    fn alt(character: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(character),
+            crossterm::event::KeyModifiers::ALT,
+        )
+    }
+
+    fn function_key(number: u8) -> crossterm::event::KeyEvent {
+        plain_key(crossterm::event::KeyCode::F(number))
+    }
+
+    fn plain_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    /// Walks the focus ring to `wanted`, which is the only way in from
+    /// outside the crate that owns the panes.
+    fn focus_on(dashboard: &mut DashboardState, wanted: hel_tui::Focus) {
+        dashboard.focus_sessions();
+        for _ in 0..8 {
+            if dashboard.focus() == wanted {
+                return;
+            }
+            dashboard.cycle_focus(false);
+        }
+        panic!("{wanted:?} is not on the focus ring");
+    }
+
+    /// The point of the chord: the user does not have to leave the composer
+    /// to start a session.
+    #[test]
+    fn alt_n_opens_the_new_wizard_while_the_composer_has_focus() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_prompt();
+
+        let command = chord(&dashboard, alt('n')).expect("Alt-N is a global chord");
+        assert_eq!(command, CommandId::NewSession);
+        assert!(matches!(
+            dashboard.dispatch_command(command),
+            DashboardAction::None
+        ));
+        assert!(dashboard.modal_open(), "the new-session wizard is open");
+        assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
+    }
+
+    /// A chord that would act on a surface the user cannot see waits for the
+    /// dialog to close.
+    #[test]
+    fn alt_n_is_ignored_while_a_modal_is_open() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_prompt();
+        let command = chord(&dashboard, alt('n')).expect("Alt-N is a global chord");
+        dashboard.dispatch_command(command);
+        assert!(dashboard.modal_open());
+
+        assert_eq!(chord(&dashboard, alt('n')), None);
+    }
+
+    #[test]
+    fn f4_opens_the_web_dialog_from_the_composer() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_prompt();
+
+        let command = chord(&dashboard, function_key(4)).expect("F4 is a global chord");
+        assert_eq!(command, CommandId::WebViewer);
+        assert!(matches!(
+            dashboard.dispatch_command(command),
+            DashboardAction::LoadWebAccess
+        ));
+    }
+
+    #[test]
+    fn f3_opens_the_workspace_picker_from_any_pane() {
+        for focus in [
+            hel_tui::Focus::Sessions,
+            hel_tui::Focus::Prompt,
+            hel_tui::Focus::Targets,
+            hel_tui::Focus::Quota,
+        ] {
+            let mut dashboard = populated_dashboard();
+            focus_on(&mut dashboard, focus);
+            let command = chord(&dashboard, function_key(3)).expect("F3 is a global chord");
+            assert_eq!(command, CommandId::Workspaces, "{focus:?}");
+            assert!(matches!(
+                dashboard.dispatch_command(command),
+                DashboardAction::OpenWorkspacePicker
+            ));
+        }
+    }
+
+    #[test]
+    fn alt_a_marks_all_read_from_the_targets_pane() {
+        let mut dashboard = populated_dashboard();
+        focus_on(&mut dashboard, hel_tui::Focus::Targets);
+
+        let command = chord(&dashboard, alt('a')).expect("Alt-A is a global chord");
+        assert_eq!(command, CommandId::MarkAllRead);
+        dashboard.dispatch_command(command);
+        // Nothing here is unread, and saying so is how the command reports it
+        // ran from a pane that has no `a` of its own.
+        assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
+    }
+
+    #[test]
+    fn alt_x_cancels_the_selected_sessions_launch_from_the_composer() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_sessions();
+        let session_id = dashboard
+            .selected_session_id()
+            .expect("a session is selected")
+            .to_owned();
+        dashboard.begin_session_operation(
+            session_id.clone(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        dashboard.focus_prompt();
+
+        let command = chord(&dashboard, alt('x')).expect("Alt-X is a global chord");
+        assert_eq!(command, CommandId::CancelOperation);
+        assert_eq!(
+            dashboard.dispatch_command(command),
+            DashboardAction::CancelOperation {
+                session_id,
+                kind: SessionOperationKind::Launching,
+            }
+        );
+    }
+
+    /// Inside the target-actions dialog Alt-X belongs to the test that dialog
+    /// is running, so the pre-filter must leave the key alone.
+    #[test]
+    fn alt_x_inside_the_target_dialog_cancels_the_running_test() {
+        let mut dashboard = populated_dashboard();
+        focus_on(&mut dashboard, hel_tui::Focus::Targets);
+        assert!(matches!(
+            dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)),
+            DashboardAction::None
+        ));
+        assert!(dashboard.modal_open(), "the target actions dialog is open");
+        // Rename, Test, Close: one Tab lands on Test.
+        dashboard.handle_key(plain_key(crossterm::event::KeyCode::Tab));
+        assert!(matches!(
+            dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)),
+            DashboardAction::TestTarget { .. }
+        ));
+
+        assert_eq!(
+            chord(&dashboard, alt('x')),
+            None,
+            "the dialog keeps the key"
+        );
+        assert!(matches!(
+            dashboard.handle_key(alt('x')),
+            DashboardAction::CancelTargetTest
+        ));
+    }
+
+    #[test]
+    fn plain_x_no_longer_cancels_anything() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_sessions();
+        let session_id = dashboard
+            .selected_session_id()
+            .expect("a session is selected")
+            .to_owned();
+        dashboard.begin_session_operation(session_id, SessionOperationKind::Launching, None);
+
+        let plain_x = plain_key(crossterm::event::KeyCode::Char('x'));
+        assert_eq!(chord(&dashboard, plain_x), None);
+        assert!(matches!(
+            dashboard.handle_key(plain_x),
+            DashboardAction::None
         ));
     }
 

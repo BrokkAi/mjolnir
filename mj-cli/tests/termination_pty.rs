@@ -19,10 +19,10 @@ use std::{
 const READY_MARKER: &[u8] = b"Prompt (no live session)";
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-#[cfg(target_os = "macos")]
-const QUIT_KEY: &[u8] = b"\x1b[113;9u";
-#[cfg(not(target_os = "macos"))]
-const QUIT_KEY: &[u8] = b"\x11";
+/// Alt-Q, which a terminal sends as Escape followed by the letter. Alt is the
+/// same modifier on every platform, so unlike the old Ctrl-Q this needs no
+/// per-platform encoding.
+const QUIT_KEY: &[u8] = b"\x1bq";
 
 /// The DECSET pair crossterm 0.29 writes for `EnableMouseCapture` and
 /// `DisableMouseCapture`. Both are single writes, so any one sequence stands
@@ -371,9 +371,8 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
     );
 
     let quit_started = Instant::now();
-    // Command-Q on macOS, Ctrl-Q elsewhere. The macOS sequence is Kitty's
-    // CSI-u encoding for Super+q, which crossterm enables for the dashboard.
-    // Escape belongs to the composer and to modals now; it no longer quits.
+    // Alt-Q. Escape belongs to the composer and to modals now; it no longer
+    // quits, so the Escape in this sequence is only the Alt prefix.
     master.write_all(QUIT_KEY).expect("send the quit key");
     let status = wait_for_exit(
         child.child_mut(),

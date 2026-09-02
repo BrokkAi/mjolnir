@@ -26,7 +26,6 @@ use hel::hel_state::{
 };
 use hel::hel_targets::AdditionalMount;
 
-use crate::actions::CommandId;
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
     ImportBundleConfirmation, ImportProgress, RenameEditor, RenameFocus, RepositoryOriginDialog,
@@ -50,6 +49,7 @@ mod wizards;
 #[cfg(test)]
 mod test_support;
 
+pub use crate::actions::{CommandId, global_chord};
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::ingest::{
@@ -270,7 +270,7 @@ pub(crate) const COLLAPSED_FOCUS_ORDER: [Focus; 2] = [Focus::Sessions, Focus::Pr
 
 /// How much room the surface gives the conversation.
 ///
-/// Two positions - open, and collapsed - and `Ctrl-G` turns the dial between
+/// Two positions - open, and collapsed - and `Alt-G` turns the dial between
 /// them. What the collapsed position does to the session list is decided by
 /// the terminal's shape, not by another dial position; see
 /// [`DashboardState::sessions_compact`].
@@ -642,33 +642,25 @@ impl DashboardState {
             self.cancel_modal();
             return DashboardAction::None;
         }
-        if dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('q') {
-            return DashboardAction::QuitDetach;
-        }
         if !text_focused && dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
             return DashboardAction::QuitDetach;
-        }
-        // Workspaces moved off Ctrl-W and onto F2, because Ctrl-W is the
-        // composer's kill-previous-word and the composer is now always on
-        // screen. Like quit, it answers from every surface including a modal.
-        if key.code == KeyCode::F(2) {
-            return DashboardAction::OpenWorkspacePicker;
         }
 
         // Retire the notice this key press is stepping past, but only once it
         // has been on screen long enough to read: for a background failure
         // this bar is the only report there is.
         self.notices.dismiss(now);
-        // F1 answers from every surface, and toggles: it opens the key
-        // reference over whatever is on screen and closes it again. A later
-        // milestone moves this to the controller's chord pre-filter so it also
-        // answers while the composer has focus.
-        if key.code == KeyCode::F(1) {
-            if matches!(self.mode, Mode::Help(_)) {
-                self.close_help();
+        // For one release, the two chords that moved off Control say where
+        // they went instead of doing nothing. Remove this arm in the release
+        // after the one that introduces Alt-G and Alt-Q.
+        if dashboard_accelerator(key.modifiers)
+            && let KeyCode::Char(moved @ ('g' | 'q')) = key.code
+        {
+            self.set_notice(if moved == 'g' {
+                "Ctrl-G moved to Alt-G"
             } else {
-                self.begin_help();
-            }
+                "Ctrl-Q moved to Alt-Q"
+            });
             return DashboardAction::None;
         }
         // The resume dialog carries every scanned native session, so it is
@@ -921,7 +913,7 @@ impl DashboardState {
                 return DashboardAction::None;
             }
             // Escape belongs to the composer and to modals. On a pane it does
-            // nothing: the combined surface is quit with Ctrl-Q, and a stray
+            // nothing: the combined surface is quit with Alt-Q, and a stray
             // Escape must never take the whole screen away.
             (KeyCode::Esc, _) => return DashboardAction::None,
             _ => {}
@@ -1474,21 +1466,17 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::F(2))),
+            dashboard.handle_key(key(KeyCode::F(3))),
             DashboardAction::OpenWorkspacePicker
         );
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::F(3))),
+            dashboard.handle_key(key(KeyCode::F(4))),
             DashboardAction::LoadWebAccess
         );
         dashboard.cancel_modal();
         assert_eq!(
             dashboard.handle_key(ctrl_key('v')),
             DashboardAction::PasteFromClipboard
-        );
-        assert_eq!(
-            dashboard.handle_key(ctrl_key('q')),
-            DashboardAction::QuitDetach
         );
     }
 
@@ -1553,24 +1541,62 @@ mod tests {
         }
     }
 
-    /// The dial has two positions, and it wraps after two presses.
+    /// The dial has two positions, and it wraps after two presses. It moved
+    /// off Control, and for one release the old chord says so.
     #[test]
-    fn ctrl_g_turns_the_dial_one_position_at_a_time() {
+    fn alt_g_cycles_the_pane_layout_and_ctrl_g_no_longer_does() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
         assert_eq!(dashboard.pane_layout(), PaneLayout::Expanded);
 
         for expected in [PaneLayout::Collapsed, PaneLayout::Expanded] {
-            assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
+            assert_eq!(dashboard.handle_key(alt_key('g')), DashboardAction::None);
             assert_eq!(dashboard.pane_layout(), expected);
         }
+
+        assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
+        assert_eq!(dashboard.pane_layout(), PaneLayout::Expanded);
+        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-G moved to Alt-G"));
+    }
+
+    /// The Sessions pane keeps its plain letters: the chord is for reaching
+    /// the command from somewhere else, not a replacement.
+    #[test]
+    fn sessions_pane_n_and_a_still_work_as_aliases() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('n'))),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::New(_)));
+        dashboard.cancel_modal();
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('a'))),
+            DashboardAction::None
+        );
+        assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
+    }
+
+    /// Muscle memory for the old quit chord meets a sentence rather than
+    /// silence, for one release.
+    #[test]
+    fn ctrl_q_explains_the_move_instead_of_quitting() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+
+        assert_eq!(dashboard.handle_key(ctrl_key('q')), DashboardAction::None);
+        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-Q moved to Alt-Q"));
+        assert_eq!(dashboard.mode, Mode::Dashboard);
     }
 
     /// Asking for room around the conversation and asking to work in it are
     /// the same gesture, so the dial always lands in the composer.
     #[test]
-    fn ctrl_g_always_hands_the_keyboard_to_the_composer() {
+    fn alt_g_always_hands_the_keyboard_to_the_composer() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
 
@@ -1578,7 +1604,7 @@ mod tests {
             let mut dashboard = dashboard_with_session(session.clone());
             dashboard.focus = start;
             for _ in 0..2 {
-                assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
+                assert_eq!(dashboard.handle_key(alt_key('g')), DashboardAction::None);
                 assert_eq!(dashboard.focus, Focus::Prompt, "from {start:?}");
             }
             assert_eq!(dashboard.pane_layout(), PaneLayout::Expanded);
@@ -1593,7 +1619,7 @@ mod tests {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
-        dashboard.handle_key(ctrl_key('g'));
+        dashboard.handle_key(alt_key('g'));
         assert_eq!(dashboard.pane_layout(), PaneLayout::Collapsed);
         assert_eq!(dashboard.focus, Focus::Prompt);
 
@@ -1622,7 +1648,7 @@ mod tests {
 
         for (key_code, label) in [(KeyCode::Tab, "Tab"), (KeyCode::BackTab, "Shift-Tab")] {
             let mut dashboard = dashboard_with_session(session.clone());
-            dashboard.handle_key(ctrl_key('g'));
+            dashboard.handle_key(alt_key('g'));
             assert_eq!(dashboard.pane_layout(), PaneLayout::Collapsed);
             dashboard.focus_prompt();
 
@@ -1636,7 +1662,7 @@ mod tests {
         }
     }
 
-    /// The combined surface is quit with Ctrl-Q. A stray Escape must never
+    /// The combined surface is quit with Alt-Q. A stray Escape must never
     /// take the conversation off the screen.
     #[test]
     fn escape_never_quits_the_combined_surface() {
@@ -1864,7 +1890,7 @@ mod tests {
         );
 
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('x'))),
+            dashboard.handle_key(alt_key('x')),
             DashboardAction::CancelOperation {
                 session_id,
                 kind: SessionOperationKind::Launching,
@@ -1922,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_q_quits_without_mutating_any_dashboard_modal() {
+    fn alt_q_quits_without_mutating_any_dashboard_modal() {
         let mut new_session = DashboardState::new(config(), HelState::default(), BTreeMap::new());
         assert_eq!(
             new_session.handle_key(key(KeyCode::Char('n'))),
@@ -1969,8 +1995,13 @@ mod tests {
             assert!(!matches!(dashboard.mode, Mode::Dashboard), "{label}");
             let mode_before_quit = dashboard.mode.clone();
 
+            // Alt-Q is a global chord: the controller answers it before the
+            // surface sees the key, so this drives the same path the
+            // controller's pre-filter drives.
+            let command = crate::global_chord(&alt_key('q')).expect("Alt-Q is a global chord");
+            assert!(dashboard.global_chord_allowed(command), "{label}");
             assert_eq!(
-                dashboard.handle_key(ctrl_key('q')),
+                dashboard.dispatch_command(command),
                 DashboardAction::QuitDetach,
                 "{label}"
             );

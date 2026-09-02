@@ -523,7 +523,7 @@ pub(super) fn markdown_lines(
                 });
             }
             // Rich mode intentionally does not interpret or display raw HTML.
-            // Ctrl-R still exposes it as sanitized source when needed.
+            // Alt-T still exposes it as sanitized source when needed.
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::FootnoteReference(reference) => writer.push_text(&format!("[{reference}]")),
             Event::TaskListMarker(checked) => {

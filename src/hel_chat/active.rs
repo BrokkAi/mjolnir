@@ -1252,16 +1252,23 @@ impl ActiveChat {
             ChatAction::CycleFocus { reverse } => {
                 return ChatEventOutcome::CycleFocus { reverse };
             }
-            ChatAction::CyclePaneLayout => return ChatEventOutcome::CyclePaneLayout,
-            ChatAction::OpenWebDialog => return ChatEventOutcome::OpenWebDialog,
-            ChatAction::QuitDetach => {
-                self.cancel_dictation();
-                return ChatEventOutcome::QuitDetach {
-                    last_seen_event_ordinal: detach_chat(&mut self.state),
-                };
-            }
+            ChatAction::QuitDetach => return self.detach(),
         }
         ChatEventOutcome::Handled
+    }
+
+    /// Leaves the conversation: stops any dictation and reports how far the
+    /// transcript has been read, which the host turns into the session's read
+    /// receipt and its saved draft.
+    ///
+    /// `Alt-Q` is a global chord, so the host catches it before the composer
+    /// sees the key and calls this directly; `/detach` reaches it through
+    /// [`ChatAction::QuitDetach`]. Both paths must do the same bookkeeping.
+    pub fn detach(&mut self) -> ChatEventOutcome {
+        self.cancel_dictation();
+        ChatEventOutcome::QuitDetach {
+            last_seen_event_ordinal: detach_chat(&mut self.state),
+        }
     }
 
     /// Opens the reviewer waterfall for a captured plan.
@@ -2280,13 +2287,13 @@ pub(super) fn render_chat_footer(
     // focus, so `prompt_focused` is normally true here; the other arm keeps
     // the row honest if it ever is not.
     let default_footer = if !prompt_focused {
-        "Ctrl-G panes · Tab pane · PgUp/PgDn transcript"
+        "Alt-G panes · Tab pane · PgUp/PgDn transcript · F1 help"
     } else if chat.voice_active {
-        "Ctrl-G panes · Listening… Alt-V stop · PgUp/PgDn transcript"
+        "Alt-G panes · Listening… Alt-V stop · PgUp/PgDn transcript · F1 help"
     } else if !chat.queued_prompts.is_empty() {
-        "Ctrl-G panes · Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Esc cancel"
+        "Alt-G panes · Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Esc cancel · F1 help"
     } else {
-        "Ctrl-G panes · Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Ctrl-T rendering · Esc cancel"
+        "Alt-G panes · Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Alt-R history · Alt-T rendering · Esc cancel · F1 help"
     };
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
@@ -2542,7 +2549,7 @@ mod tests {
         // The chat underneath still shows through above and below the
         // dialog's centred popup.
         assert!(row_of("UNDERLYING CHAT SENTINEL") < popup_top);
-        assert!(row_of("Ctrl-G panes") > popup_top);
+        assert!(row_of("Alt-G panes") > popup_top);
     }
 
     #[test]
@@ -3163,8 +3170,45 @@ mod tests {
         let footer_text = (buffer.area.x..buffer.area.right())
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
-        assert!(footer_text.contains("Ctrl-G panes"));
+        assert!(footer_text.contains("Alt-G panes"));
         assert_eq!(buffer[(buffer.area.x, footer_row)].fg, Color::DarkGray);
+    }
+
+    /// The composer's own row is where a user typing in it learns the keys,
+    /// so it names the Alt chords and the way into the full reference.
+    #[test]
+    fn chat_footer_advertises_alt_keys_and_f1() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let mut terminal = Terminal::new(TestBackend::new(200, 24)).expect("terminal");
+        let footer_of = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            let row = buffer.area.bottom() - 1;
+            (buffer.area.x..buffer.area.right())
+                .map(|x| buffer[(x, row)].symbol())
+                .collect::<String>()
+        };
+
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, true))
+            .expect("draw chat");
+        let footer = footer_of(&terminal);
+        for hint in ["Alt-G panes", "Alt-R history", "Alt-T rendering", "F1 help"] {
+            assert!(footer.contains(hint), "{footer:?} omits {hint}");
+        }
+        assert!(!footer.contains("Ctrl-G"), "{footer:?}");
+        assert!(!footer.contains("Ctrl-R"), "{footer:?}");
+        assert!(!footer.contains("Ctrl-T"), "{footer:?}");
+
+        // The queued-prompt variant is a different string and must say the
+        // same things about the keys it still names.
+        chat.queued_prompts.push_back(queued("queued-1", "next"));
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, true))
+            .expect("draw chat with a queued prompt");
+        let footer = footer_of(&terminal);
+        for hint in ["Alt-G panes", "Alt-R history", "F1 help"] {
+            assert!(footer.contains(hint), "{footer:?} omits {hint}");
+        }
     }
 
     #[test]

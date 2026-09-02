@@ -49,8 +49,8 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
         "Up / Down",
         "walk prompt history, or move within the prompt",
     ),
-    ("Ctrl-R", "search prompt history"),
-    ("Ctrl-T", "toggle transcript rendering"),
+    ("Alt-R", "search prompt history"),
+    ("Alt-T", "toggle transcript rendering"),
     ("Alt-V", "start or stop dictation"),
     ("Ctrl-V", "paste from the system clipboard"),
     ("Ctrl-A / Ctrl-E", "start or end of the line"),
@@ -63,9 +63,9 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("Ctrl-Y", "yank what was killed"),
     ("Ctrl-C", "stash the prompt into history and clear it"),
     ("Ctrl-P / Ctrl-N", "previous or next line, or history"),
-    ("Ctrl-G", "pane layout"),
-    ("Ctrl-Q", "detach"),
-    ("F3", "web viewer"),
+    ("Alt-G", "pane layout"),
+    ("Alt-Q", "detach"),
+    ("F4", "web viewer"),
 ];
 
 impl DashboardState {
@@ -255,7 +255,11 @@ mod tests {
         let wizard = dashboard.mode.clone();
         assert!(matches!(wizard, Mode::New(_)), "{wizard:?}");
 
-        dashboard.handle_key(key(KeyCode::F(1)));
+        // F1 is a global chord: over an open wizard the controller's
+        // pre-filter answers it, so this drives that path.
+        let help = crate::global_chord(&key(KeyCode::F(1))).expect("F1 is a global chord");
+        assert!(dashboard.global_chord_allowed(help));
+        dashboard.dispatch_command(help);
         assert!(matches!(dashboard.mode, Mode::Help(_)));
         assert!(dashboard.modal_open());
 

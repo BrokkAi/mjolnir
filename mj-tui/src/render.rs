@@ -701,8 +701,10 @@ fn render_sessions_grid(
                 .count()
         })
         .unwrap_or(0);
+    // `then` rather than `then_some`: with no sessions at all the viewport is
+    // empty and `viewport_end - 1` would underflow before the guard is read.
     let more_marker = (sessions_shown < total_sessions && viewport_end > viewport_start)
-        .then_some(viewport_end - 1)
+        .then(|| viewport_end - 1)
         .filter(|&last| {
             !matches!(
                 cells.get(last),
@@ -2671,12 +2673,12 @@ mod tests {
         let hotkeys = (buffer.area.x..buffer.area.right())
             .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
             .collect::<String>();
-        assert!(hotkeys.contains("n new"), "{hotkeys:?}");
-        assert!(hotkeys.contains("a mark read"), "{hotkeys:?}");
+        assert!(hotkeys.contains("Alt-N new"), "{hotkeys:?}");
+        assert!(hotkeys.contains("Alt-A mark read"), "{hotkeys:?}");
         assert!(!hotkeys.contains("[S]ort"));
     }
 
-    /// The footer is the only place a beginner learns what `x` does, so it
+    /// The footer is the only place a beginner learns what `Alt-X` does, so it
     /// must name the operation it would cancel — and must not offer the key at
     /// all while there is nothing in flight.
     #[test]
@@ -2696,7 +2698,7 @@ mod tests {
             1_000,
         );
         let footer = combined_footer_text(&dashboard, 200);
-        assert!(footer.contains("x cancel launch"), "{footer}");
+        assert!(footer.contains("Alt-X cancel launch"), "{footer}");
 
         dashboard.finish_session_operation("session-1");
         assert!(
@@ -2800,10 +2802,9 @@ mod tests {
                 );
                 dispatched.focus = focus;
 
-                // A hint that carries CONTROL means "the dashboard
-                // accelerator", which is Command on macOS.
+                // A hint that carries a modifier on a letter is an Alt chord.
                 let key_event = match (hint.modifiers.is_empty(), hint.code) {
-                    (false, KeyCode::Char(character)) => ctrl_key(character),
+                    (false, KeyCode::Char(character)) => alt_key(character),
                     _ => key(hint.code),
                 };
                 let by_key = pressed.handle_key(key_event);
@@ -2925,7 +2926,7 @@ mod tests {
         // Every row the tables and the Sessions pane give up lands in the
         // transcript; the composer and footer are untouched.
         let tables_freed = (band(&before, "Targets", "Quota") - band(&after, "Targets", "Quota"))
-            + (band(&before, "Quota", "Ctrl-Q quit") - band(&after, "Quota", "Ctrl-Q quit"));
+            + (band(&before, "Quota", "Alt-Q quit") - band(&after, "Quota", "Alt-Q quit"));
         let sessions_freed =
             band(&before, "Sessions", "Conversation") - band(&after, "Sessions", "Conversation");
         let transcript_gain =
@@ -2934,7 +2935,7 @@ mod tests {
         assert_eq!(transcript_gain, tables_freed + sessions_freed);
         // Each collapsed pane really is one row.
         assert_eq!(band(&after, "Targets", "Quota"), 1);
-        assert_eq!(band(&after, "Quota", "Ctrl-Q quit"), 1);
+        assert_eq!(band(&after, "Quota", "Alt-Q quit"), 1);
     }
 
     fn now_seconds() -> u64 {
@@ -3388,6 +3389,20 @@ mod tests {
         assert_eq!(
             sessions_height,
             usize::from(crate::combined::minimized_grid_rows(40)) + 2,
+            "{lines:#?}"
+        );
+    }
+
+    /// A brand-new workspace has no sessions at all, and turning the pane
+    /// dial there must still draw rather than fall over on an empty grid.
+    #[test]
+    fn the_minimized_grid_draws_with_no_sessions() {
+        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        dashboard.cycle_pane_layout();
+
+        let lines = drawn(&mut dashboard, 200, 50);
+        assert!(
+            lines.iter().any(|line| line.contains("Conversation")),
             "{lines:#?}"
         );
     }
