@@ -1328,16 +1328,6 @@ pub(super) async fn serve_client_with_memory(
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }
-            if let RelayRequest::Compact { .. } = &envelope.request {
-                // A scratch compaction prompt is not session history, so
-                // it never reaches DurableRelay, its journal, or its
-                // command ledger. Awaiting the model turn stalls only this
-                // connection; the controller drives it as a single
-                // sequential RPC.
-                let response = compaction_response(envelope, commands.as_ref()).await;
-                write_logged_response(&mut writer, &response, &session_id, "compact").await?;
-                continue;
-            }
             if let RelayRequest::Reviewer { .. } = &envelope.request {
                 // The reviewer is a sidecar with its own relay and its own
                 // harness process. Both live on this connection's worker, so
@@ -1430,66 +1420,6 @@ pub(super) async fn serve_client_with_memory(
         );
     }
     outcome
-}
-
-/// Run a compaction prompt in a disposable ACP session on the connection.
-/// A compaction failure is never retryable: the transcript that produced
-/// it does not change between attempts.
-async fn compaction_response(
-    envelope: RelayRequestEnvelope,
-    commands: Option<&mpsc::Sender<CommandRequest>>,
-) -> RelayResponseEnvelope {
-    if !envelope.request.supported_at(envelope.protocol_version) {
-        return incompatible_request_protocol_response(
-            envelope.request_id,
-            envelope.protocol_version,
-        );
-    }
-    let RelayRequest::Compact { prompt } = envelope.request else {
-        unreachable!("compaction_response only serves compact requests");
-    };
-    let body = if prompt.trim().is_empty() {
-        compaction_error(RelayErrorCode::InvalidRequest, "compaction prompt is empty")
-    } else {
-        match commands {
-            None => compaction_error(
-                RelayErrorCode::InvalidState,
-                "session is closed; no ACP runtime can compact",
-            ),
-            Some(commands) => {
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                match commands
-                    .send(CommandRequest::Compact {
-                        prompt,
-                        response: response_tx,
-                    })
-                    .await
-                {
-                    Ok(()) => match response_rx.await {
-                        Ok(Ok(text)) => RelayResponseBody::Ok {
-                            payload: RelayResponsePayload::Compacted { text },
-                        },
-                        Ok(Err(message)) => {
-                            compaction_error(RelayErrorCode::InvalidState, &message)
-                        }
-                        Err(_) => compaction_error(
-                            RelayErrorCode::Internal,
-                            "ACP runtime stopped before it compacted",
-                        ),
-                    },
-                    Err(_) => compaction_error(
-                        RelayErrorCode::Internal,
-                        "ACP runtime stopped before accepting the compaction prompt",
-                    ),
-                }
-            }
-        }
-    };
-    RelayResponseEnvelope {
-        request_id: envelope.request_id,
-        protocol_version: envelope.protocol_version,
-        body,
-    }
 }
 
 /// Serves the review dispatch socket for as long as the returned guard lives.

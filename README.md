@@ -420,7 +420,13 @@ hatch.
 A stopped session resumes by provisioning a fresh target from its archive,
 with its pending prompt queue intact (resume asks whether to keep or discard
 it). A session recorded under one harness can be resumed under another; Mjolnir
-condenses the transcript into a size-bounded handoff for the new harness.
+condenses the transcript into a size-bounded handoff for the new harness. That
+compaction is direct, tool-free inference and does not create an ACP session.
+Mjolnir chooses a configured profile with usable quota and a current model in
+this precedence: Codex GPT Luna, Grok, Kimi, then DeepSeek Flash. Model versions
+come from each provider's live catalog. Claude profiles are never utility
+models; if Claude is the only configured harness, cross-harness compaction has
+no utility model and resume reports that error.
 
 If Mjolnir or its host crashes, workers and their queued prompts keep running.
 `mj recover scan` finds managed containers and instances that are no longer

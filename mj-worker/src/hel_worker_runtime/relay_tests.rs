@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use super::*;
 use hel::hel_acp::{CommandRequest, RuntimeEvent};
 use hel::hel_config::ExecutionPolicy;
+use hel::hel_elicitation::ElicitationResponse;
 use hel::hel_worker::{
     DurableRelay, RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayErrorCode,
     RelayExecutionState, RelayObservation, RelayProtocolError, RelayRequest, RelayRequestEnvelope,
@@ -517,202 +518,6 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
 }
 
 #[tokio::test]
-async fn compaction_reaches_the_acp_runtime_and_stays_out_of_relay_state() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay_root = temp.path().join("relay");
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let (wake_tx, _wake_rx) = mpsc::channel(1);
-    let (commands_tx, mut commands_rx) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
-        server,
-        relay.clone(),
-        wake_tx,
-        test_credentials(),
-        Some(commands_tx),
-        fatal_reports().0,
-    ));
-    let runtime = tokio::spawn(async move {
-        let Some(CommandRequest::Compact { prompt, response }) = commands_rx.recv().await else {
-            panic!("the relay must route compaction to the ACP runtime");
-        };
-        assert!(prompt.contains("summarize the history"));
-        let _ = response.send(Ok("<state_snapshot>kept</state_snapshot>".into()));
-    });
-
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let request = RelayRequestEnvelope {
-        request_id: "compact-request".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Compact {
-            prompt: "please summarize the history".into(),
-        },
-    };
-    let mut encoded = serde_json::to_vec(&request).unwrap();
-    encoded.push(b'\n');
-    writer.write_all(&encoded).await.unwrap();
-
-    let response: RelayResponseEnvelope =
-        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-    let RelayResponseBody::Ok {
-        payload: RelayResponsePayload::Compacted { text },
-    } = response.body
-    else {
-        panic!("compaction failed: {:?}", response.body);
-    };
-    assert_eq!(text, "<state_snapshot>kept</state_snapshot>");
-    runtime.await.unwrap();
-
-    {
-        let mut relay = relay.lock().unwrap();
-        assert_eq!(relay.latest_ordinal(), 0);
-        assert!(
-            relay
-                .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
-        let persisted = std::fs::read_to_string(relay_root.join("relay-state.json")).unwrap();
-        assert!(!persisted.contains("summarize the history"));
-    }
-
-    drop(writer);
-    drop(lines);
-    server_task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn compaction_fails_when_no_acp_runtime_can_serve_it() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let (wake_tx, _wake_rx) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
-        server,
-        relay.clone(),
-        wake_tx,
-        test_credentials(),
-        None,
-        fatal_reports().0,
-    ));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let request = RelayRequestEnvelope {
-        request_id: "compact-sealed".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Compact {
-            prompt: "summarize".into(),
-        },
-    };
-    let mut encoded = serde_json::to_vec(&request).unwrap();
-    encoded.push(b'\n');
-    writer.write_all(&encoded).await.unwrap();
-
-    let response: RelayResponseEnvelope =
-        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-    let RelayResponseBody::Error { error } = response.body else {
-        panic!("a sealed session cannot compact");
-    };
-    assert_eq!(error.code, RelayErrorCode::InvalidState);
-    assert!(!error.retryable);
-
-    drop(writer);
-    drop(lines);
-    server_task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn incompatible_protocol_cannot_compact() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let (wake_tx, _wake_rx) = mpsc::channel(1);
-    let (commands_tx, mut commands_rx) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
-        server,
-        relay.clone(),
-        wake_tx,
-        test_credentials(),
-        Some(commands_tx),
-        fatal_reports().0,
-    ));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let request = RelayRequestEnvelope {
-        request_id: "compact-old-protocol".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION + 1,
-        request: RelayRequest::Compact {
-            prompt: "summarize".into(),
-        },
-    };
-    let mut encoded = serde_json::to_vec(&request).unwrap();
-    encoded.push(b'\n');
-    writer.write_all(&encoded).await.unwrap();
-
-    let response: RelayResponseEnvelope =
-        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-    let RelayResponseBody::Error { error } = response.body else {
-        panic!("an incompatible protocol cannot compact");
-    };
-    assert_eq!(error.code, RelayErrorCode::IncompatibleProtocol);
-    assert!(commands_rx.try_recv().is_err());
-
-    drop(writer);
-    drop(lines);
-    server_task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn protocol_v1_can_compact() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let (wake_tx, _wake_rx) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
-        server,
-        relay,
-        wake_tx,
-        test_credentials(),
-        None,
-        fatal_reports().0,
-    ));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let request = RelayRequestEnvelope {
-        request_id: "compact-v1".into(),
-        protocol_version: 1,
-        request: RelayRequest::Compact {
-            prompt: "summarize".into(),
-        },
-    };
-    let mut encoded = serde_json::to_vec(&request).unwrap();
-    encoded.push(b'\n');
-    writer.write_all(&encoded).await.unwrap();
-
-    let response: RelayResponseEnvelope =
-        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-    let RelayResponseBody::Error { error } = response.body else {
-        panic!("expected a closed-session compact error, got {response:?}");
-    };
-    assert_eq!(error.code, RelayErrorCode::InvalidState);
-    assert!(error.message.contains("session is closed"), "{error:?}");
-
-    drop(writer);
-    drop(lines);
-    server_task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
 async fn protocol_v1_cannot_respond_to_elicitation() {
     let temp = tempfile::tempdir().unwrap();
     let relay = Arc::new(Mutex::new(
@@ -994,11 +799,12 @@ fn submit(relay: &mut DurableRelay, command_id: &str, command: RelayCommand) {
 
 /// An out-of-band ACP command: it shares the dispatch channel but never
 /// reaches durable relay state.
-fn compact_request() -> CommandRequest {
-    let (response, _answer) = tokio::sync::oneshot::channel();
-    CommandRequest::Compact {
-        prompt: "out of band".into(),
-        response,
+fn elicitation_request() -> CommandRequest {
+    let (resolved, _answer) = tokio::sync::oneshot::channel();
+    CommandRequest::ResolveElicitation {
+        elicitation_id: "out-of-band".into(),
+        response: ElicitationResponse::Decline,
+        resolved,
     }
 }
 
@@ -1431,8 +1237,8 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
     coordinator.await.unwrap().unwrap();
 }
 
-/// The ACP command channel is shared: compaction prompts and elicitation
-/// answers ride it beside dispatched commands. Dispatch therefore holds
+/// The ACP command channel is shared: elicitation answers ride it beside
+/// dispatched commands. Dispatch therefore holds
 /// the transport capacity it claims against instead of counting free
 /// slots, because a coordinator parked on a command send stops draining
 /// ACP events, which stops the runtime that would have made room for the
@@ -1520,8 +1326,8 @@ async fn out_of_band_sends_cannot_park_the_dispatching_coordinator() {
 
     // Out-of-band senders now compete for permits at reservation time.
     let out_of_band_attempts = [
-        out_of_band.try_send(compact_request()),
-        out_of_band.try_send(compact_request()),
+        out_of_band.try_send(elicitation_request()),
+        out_of_band.try_send(elicitation_request()),
     ];
     release_tx.send(()).unwrap();
     holder.await.unwrap();
@@ -1550,88 +1356,6 @@ async fn out_of_band_sends_cannot_park_the_dispatching_coordinator() {
     assert!(matches!(
         next_command(&mut command_rx).await,
         CommandRequest::Cancel { request_id, .. } if request_id == "cancel-batched"
-    ));
-
-    event_tx.send(RuntimeEvent::Stopped).unwrap();
-    drop(event_tx);
-    drop(wake_tx);
-    coordinator.await.unwrap().unwrap();
-}
-
-/// Capacity another sender already holds shrinks the durable batch instead
-/// of queueing behind it, and dispatch resumes once that sender's message
-/// is drained.
-#[tokio::test]
-async fn out_of_band_traffic_shrinks_the_durable_dispatch_batch() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    // The prompt and the cancel that targets it are both claimable at
-    // once, so only the transport limits the durable batch.
-    submit(&mut durable, "prompt-first", prompt("running"));
-    submit(&mut durable, "cancel-second", RelayCommand::Cancel);
-    let relay = Arc::new(Mutex::new(durable));
-    let (event_tx, event_rx) = runtime_event_channel();
-    let (wake_tx, wake_rx) = mpsc::channel(1);
-    let (command_tx, mut command_rx) = mpsc::channel(2);
-    let out_of_band = command_tx.clone();
-    // A compaction prompt occupies one of the two slots throughout.
-    out_of_band.try_send(compact_request()).unwrap();
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
-        relay.clone(),
-        event_rx,
-        wake_rx,
-        command_tx,
-    ));
-    event_tx
-        .send(RuntimeEvent::SessionConfigured {
-            config_options: Vec::new(),
-        })
-        .unwrap();
-
-    wait_until(
-        || {
-            relay
-                .lock()
-                .unwrap()
-                .operational_state()
-                .active_prompt
-                .is_some()
-        },
-        "the queued prompt never reached the ACP runtime",
-    )
-    .await;
-    // The coordinator keeps draining events with the cancel undispatched,
-    // and only the prompt joined the compaction message on the transport.
-    event_tx
-        .send(RuntimeEvent::Warning {
-            message: "still draining".into(),
-        })
-        .unwrap();
-    wait_until(
-        || recorded_warning(&relay, "still draining"),
-        "dispatch parked on a transport slot the compaction prompt already held",
-    )
-    .await;
-    assert_eq!(
-        command_rx.len(),
-        2,
-        "the cancel was claimed beyond the capacity dispatch reserved"
-    );
-
-    assert!(matches!(
-        next_command(&mut command_rx).await,
-        CommandRequest::Compact { .. }
-    ));
-    assert_prompt(
-        next_command(&mut command_rx).await,
-        "prompt-first",
-        "running",
-    );
-    // The compaction message is drained, so the retried batch fits.
-    unix::wake_dispatch(&relay, &wake_tx).unwrap();
-    assert!(matches!(
-        next_command(&mut command_rx).await,
-        CommandRequest::Cancel { request_id, .. } if request_id == "cancel-second"
     ));
 
     event_tx.send(RuntimeEvent::Stopped).unwrap();

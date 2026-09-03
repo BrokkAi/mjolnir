@@ -113,13 +113,6 @@ pub enum RelayRequest {
     },
     /// Remove the worker's synchronized GitHub CLI token.
     RemoveGithubToken,
-    /// Run a prompt in a disposable ACP session and return its text. The
-    /// runtime answers this on the connection: a scratch prompt is not session
-    /// history, so it never reaches the durable relay, its journal, or its
-    /// command ledger.
-    Compact {
-        prompt: String,
-    },
     /// Resolve one in-flight form without journaling its answer.
     RespondElicitation {
         elicitation_id: String,
@@ -273,7 +266,6 @@ impl RelayRequest {
             Self::GithubTokenState => "github_token_state",
             Self::InstallGithubToken { .. } => "install_github_token",
             Self::RemoveGithubToken => "remove_github_token",
-            Self::Compact { .. } => "compact",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::Reviewer { request, .. } => request.action_name(),
         }
@@ -404,10 +396,6 @@ pub enum RelayResponsePayload {
     GithubTokenState {
         present: bool,
         fingerprint: String,
-    },
-    /// Agent text from a disposable ACP compaction session.
-    Compacted {
-        text: String,
     },
     ElicitationResolved {
         elicitation_id: String,

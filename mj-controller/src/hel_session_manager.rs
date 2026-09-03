@@ -2613,12 +2613,6 @@ impl StandaloneSession {
         Ok(())
     }
 
-    /// Run a prompt in a disposable ACP session. The result is not session
-    /// history, so nothing is projected and no sync is needed.
-    pub async fn compact(&mut self, prompt: String) -> Result<String> {
-        self.client.compact(prompt).await
-    }
-
     /// Persist relay-private context for the next real prompt. It never
     /// contributes an event to the canonical projection.
     pub async fn install_prompt_context(&mut self, text: String) -> Result<()> {
@@ -2783,15 +2777,6 @@ impl StandaloneSession {
                 .await?;
         }
         Ok(())
-    }
-}
-
-impl crate::hel_compaction::CompactionBackend for StandaloneSession {
-    fn compact<'a>(
-        &'a mut self,
-        prompt: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
-        Box::pin(Self::compact(self, prompt))
     }
 }
 
