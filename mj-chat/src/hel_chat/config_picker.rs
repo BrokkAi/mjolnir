@@ -196,7 +196,7 @@ pub(super) fn render_config_picker(
 ) -> Option<Rect> {
     let picker = chat.config_picker.as_ref()?;
     let visible = picker.filtered.len().clamp(1, 8);
-    let rect = super::active::centered(area, 72, visible as u16 + 6);
+    let rect = crate::hel_modal::centered_rect_fixed(72, visible as u16 + 6, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Choose a {} ", picker.key))
@@ -259,6 +259,7 @@ mod tests {
     use crate::hel_chat::ChatAction;
     use crate::hel_chat::ChatState;
     use crate::hel_chat::test_support::{drawn_transcript, key, snapshot};
+    use crate::hel_modal::MODAL_SCREEN_MARGIN;
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
         SessionConfigSelectOptions,
@@ -432,5 +433,37 @@ mod tests {
         assert!(body.contains("Choose a model"), "modal title is drawn");
         assert!(body.contains("Luna (gpt-5.6-luna)  (current)"));
         assert!(body.contains("Terra (gpt-5.6-terra)"));
+    }
+
+    #[test]
+    fn the_selector_keeps_blank_cells_beside_it_on_a_terminal_narrower_than_its_box() {
+        const WIDTH: u16 = 70;
+        let mut chat = chat_with_models();
+        assert!(chat.open_config_picker("model"));
+        // The box wants 72 cells, so without a margin rule it would clamp to the
+        // full width and sit flush against the chat behind it.
+        let rows = drawn_transcript(&mut chat, WIDTH, 24);
+        let title = rows
+            .iter()
+            .find(|row| row.contains("Choose a model"))
+            .expect("the selector draws a titled border");
+
+        // Columns, not byte offsets: the border glyphs are multi-byte.
+        let column_of = |corner: char| {
+            title
+                .chars()
+                .position(|character| character == corner)
+                .unwrap_or_else(|| panic!("no {corner} in {title:?}"))
+        };
+        let left = column_of('┌');
+        let right = column_of('┐');
+        assert!(
+            left >= usize::from(MODAL_SCREEN_MARGIN),
+            "selector starts at column {left} in {title:?}"
+        );
+        assert!(
+            usize::from(WIDTH) - (right + 1) >= usize::from(MODAL_SCREEN_MARGIN),
+            "selector ends at column {right} of {WIDTH} in {title:?}"
+        );
     }
 }

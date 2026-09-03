@@ -626,7 +626,7 @@ pub(super) fn render_elicitation(
     dialog: &ElicitationDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let area = centered_rect(frame.area(), 82, 78);
+    let area = crate::hel_modal::centered_rect_percent(82, 78, frame.area());
     frame.render_widget(Clear, area);
     let title = dialog.request.title.as_deref().unwrap_or("Agent question");
     let block = Block::default()
@@ -968,25 +968,6 @@ fn render_custom_text(
         Style::default().fg(Color::Cyan),
     ));
     *text_cursor = Some((input_line, value.value()[..value.cursor()].chars().count()));
-}
-
-fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - height_percent) / 2),
-            Constraint::Percentage(height_percent),
-            Constraint::Percentage((100 - height_percent) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - width_percent) / 2),
-            Constraint::Percentage(width_percent),
-            Constraint::Percentage((100 - width_percent) / 2),
-        ])
-        .split(vertical[1])[1]
 }
 
 #[cfg(test)]

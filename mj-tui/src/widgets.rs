@@ -1,10 +1,15 @@
 //! Small drawing primitives shared by the dashboard, dialogs, and wizards.
 
-use mj_chat::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{BorderType, Paragraph};
+
+// Modal geometry is shared with the chat view, so it lives in `mj-chat`. These
+// re-exports keep `crate::widgets` the single import site for dashboard code.
+pub(crate) use mj_chat::hel_modal::{
+    bordered_content, centered_modal, centered_modal_fixed, centered_rect, modal_area,
+};
 
 pub(crate) fn truncate_text(text: &str, width: usize) -> String {
     let text = collapse_whitespace(text);
@@ -104,104 +109,6 @@ pub(crate) fn focused_buttons(labels: &[&'static str], focus: usize) -> Line<'st
         .map(|(index, label)| (*label, index == focus))
         .collect::<Vec<_>>();
     action_buttons(&buttons)
-}
-
-/// The drawn text inside a full border, which is the part of a widget a
-/// selection may cover.
-pub(crate) fn bordered_content(area: Rect) -> Rect {
-    area.inner(Margin {
-        vertical: 1,
-        horizontal: 1,
-    })
-}
-
-/// Centers a modal popup and registers its body as a selectable surface.
-///
-/// Modals draw over the dashboard, and the registry is z-ordered by render
-/// order, so registering here makes the body win the cells it covers.
-pub(crate) fn centered_modal(
-    surfaces: &mut FrameSurfaces,
-    width_percent: u16,
-    height: u16,
-    area: Rect,
-) -> Rect {
-    let popup = centered_rect(width_percent, height, area);
-    surfaces.push(SurfaceFrame::fixed(
-        SurfaceId::ModalBody,
-        bordered_content(popup),
-    ));
-    popup
-}
-
-/// Empty cells kept between any modal and the screen edge on every side.
-pub(crate) const MODAL_SCREEN_MARGIN: u16 = 2;
-
-/// The region a modal may occupy: `area` inset by [`MODAL_SCREEN_MARGIN`] on
-/// every side, so dialogs never butt against the terminal border. On a terminal
-/// too small to hold the margin it degrades to the full area rather than vanish.
-pub(crate) fn modal_area(area: Rect) -> Rect {
-    let margin = MODAL_SCREEN_MARGIN;
-    if area.width > margin * 2 && area.height > margin * 2 {
-        Rect::new(
-            area.x + margin,
-            area.y + margin,
-            area.width - margin * 2,
-            area.height - margin * 2,
-        )
-    } else {
-        area
-    }
-}
-
-/// Centers a modal of an absolute cell width and registers its body as a
-/// selectable surface. Use when the content has a natural width — a QR code, a
-/// fixed table — that should hug its content instead of scaling with the
-/// terminal. `width` and `height` include the border and are clamped to `area`.
-pub(crate) fn centered_modal_fixed(
-    surfaces: &mut FrameSurfaces,
-    width: u16,
-    height: u16,
-    area: Rect,
-) -> Rect {
-    let popup = centered_rect_fixed(width, height, area);
-    surfaces.push(SurfaceFrame::fixed(
-        SurfaceId::ModalBody,
-        bordered_content(popup),
-    ));
-    popup
-}
-
-/// Centers a rectangle of an absolute cell size within `area`, clamped to fit
-/// inside the [`modal_area`] margin.
-pub(crate) fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
-    let area = modal_area(area);
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    Rect::new(x, y, width, height)
-}
-
-pub(crate) fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
-    let area = modal_area(area);
-    let vertical_margin = area.height.saturating_sub(height) / 2;
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(vertical_margin),
-            Constraint::Length(height.min(area.height)),
-            Constraint::Min(0),
-        ])
-        .split(area);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - width_percent) / 2),
-            Constraint::Percentage(width_percent),
-            Constraint::Min(0),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
 }
 
 #[cfg(test)]

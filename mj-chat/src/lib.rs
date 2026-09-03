@@ -6,5 +6,6 @@ pub mod usage_format;
 
 pub mod hel_chat;
 pub mod hel_clipboard;
+pub mod hel_modal;
 pub mod hel_selection;
 pub mod hel_text_input;
