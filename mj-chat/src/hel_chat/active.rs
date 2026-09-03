@@ -2313,7 +2313,7 @@ pub(super) fn render_in(
     if let Some(SecondOpinion::Setup { captured, setup }) = chat.second_opinion() {
         // The waterfall owns the frame's interaction, so the chat behind it
         // stops being selectable while a reviewer is being chosen.
-        let area = crate::hel_modal::centered_rect_fixed(60, 16, inner);
+        let area = crate::hel_modal::centered_modal_rect_fixed(frame, 60, 16, inner);
         let body = render_setup(
             frame,
             area,
@@ -2660,9 +2660,15 @@ mod tests {
 
         let popup_top = row_of("Overlaid dialog");
         row_of("Visible dialog message");
-        // The chat underneath still shows through above and below the
-        // dialog's centred popup.
-        assert!(row_of("UNDERLYING CHAT SENTINEL") < popup_top);
+        // The chat underneath still shows through beyond the modal's blank
+        // halo, but content beneath that halo is deliberately obscured.
+        assert!(row_of("Conversation") < popup_top);
+        assert!(row_of("│ UNDER") < popup_top);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("UNDERLYING CHAT SENTINEL"))
+        );
         assert!(row_of("Tab pane") > popup_top);
     }
 

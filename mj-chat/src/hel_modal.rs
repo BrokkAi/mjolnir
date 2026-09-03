@@ -1,17 +1,17 @@
-//! Geometry every modal shares: where a dialog sits on screen and how much
-//! empty space it keeps around itself.
+//! Geometry and background clearing every modal shares: where a dialog sits
+//! on screen and how much empty space it keeps around itself.
 //!
 //! The dashboard and the chat view both draw dialogs, so the rule lives here,
-//! in the crate they both depend on, rather than once per view. Centering is
-//! the only way to obtain a modal rectangle, and centering applies
-//! [`MODAL_SCREEN_MARGIN`], so a new dialog cannot forget the margin.
+//! in the crate they both depend on, rather than once per view. The rendering
+//! helpers clear the same margin that the geometry reserves.
 
+use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
+use ratatui::widgets::Clear;
 
 use crate::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 
-/// Empty cells kept between any modal and the edge of the area it is centered
-/// in, on every side.
+/// Blank cells kept outside every modal border, on every side.
 pub const MODAL_SCREEN_MARGIN: u16 = 2;
 
 /// The region a modal may occupy: `area` inset by [`MODAL_SCREEN_MARGIN`] on
@@ -40,6 +40,24 @@ pub fn bordered_content(area: Rect) -> Rect {
     })
 }
 
+/// Clears a modal and the empty cells it keeps around its border.
+///
+/// `bounds` is the area the modal overlays. Clipping the expanded rectangle to
+/// it keeps a pane-local modal from erasing a neighboring pane and keeps tiny
+/// terminal coordinates valid.
+fn clear_modal(frame: &mut Frame, popup: Rect, bounds: Rect) {
+    frame.render_widget(Clear, modal_clear_area(popup, bounds));
+}
+
+fn modal_clear_area(popup: Rect, bounds: Rect) -> Rect {
+    popup
+        .outer(Margin {
+            vertical: MODAL_SCREEN_MARGIN,
+            horizontal: MODAL_SCREEN_MARGIN,
+        })
+        .intersection(bounds)
+}
+
 /// Centers a rectangle whose width is a percentage of `area` and whose height
 /// is an absolute row count, keeping the [`MODAL_SCREEN_MARGIN`] floor.
 pub fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
@@ -62,6 +80,42 @@ pub fn centered_rect_percent(width_percent: u16, height_percent: u16, area: Rect
 /// code, a fixed table — that should hug its content instead of scaling.
 pub fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
     place(width, height, area)
+}
+
+/// Centers a percentage-width modal and clears its exterior halo.
+pub(crate) fn centered_modal_rect(
+    frame: &mut Frame,
+    width_percent: u16,
+    height: u16,
+    area: Rect,
+) -> Rect {
+    let popup = centered_rect(width_percent, height, area);
+    clear_modal(frame, popup, area);
+    popup
+}
+
+/// Centers a percentage-sized modal and clears its exterior halo.
+pub(crate) fn centered_modal_rect_percent(
+    frame: &mut Frame,
+    width_percent: u16,
+    height_percent: u16,
+    area: Rect,
+) -> Rect {
+    let popup = centered_rect_percent(width_percent, height_percent, area);
+    clear_modal(frame, popup, area);
+    popup
+}
+
+/// Centers a fixed-size modal and clears its exterior halo.
+pub(crate) fn centered_modal_rect_fixed(
+    frame: &mut Frame,
+    width: u16,
+    height: u16,
+    area: Rect,
+) -> Rect {
+    let popup = centered_rect_fixed(width, height, area);
+    clear_modal(frame, popup, area);
+    popup
 }
 
 /// Centers a modal of the requested size in `area`, shrinking it only as far as
@@ -87,17 +141,18 @@ fn percent_of(cells: u16, percent: u16) -> u16 {
     u16::try_from(u32::from(cells) * u32::from(percent) / 100).unwrap_or(u16::MAX)
 }
 
-/// Centers a modal popup and registers its body as a selectable surface.
+/// Centers and clears a modal popup, then registers its body as selectable.
 ///
 /// Modals draw over the view beneath them, and the registry is z-ordered by
 /// render order, so registering here makes the body win the cells it covers.
 pub fn centered_modal(
+    frame: &mut Frame,
     surfaces: &mut FrameSurfaces,
     width_percent: u16,
     height: u16,
     area: Rect,
 ) -> Rect {
-    let popup = centered_rect(width_percent, height, area);
+    let popup = centered_modal_rect(frame, width_percent, height, area);
     surfaces.push(SurfaceFrame::fixed(
         SurfaceId::ModalBody,
         bordered_content(popup),
@@ -105,17 +160,18 @@ pub fn centered_modal(
     popup
 }
 
-/// Centers a modal of an absolute cell width and registers its body as a
-/// selectable surface. Use when the content has a natural width — a QR code, a
+/// Centers and clears a modal of an absolute cell width, then registers its
+/// body as selectable. Use when the content has a natural width — a QR code, a
 /// fixed table — that should hug its content instead of scaling with the
 /// terminal. `width` and `height` include the border and are clamped to `area`.
 pub fn centered_modal_fixed(
+    frame: &mut Frame,
     surfaces: &mut FrameSurfaces,
     width: u16,
     height: u16,
     area: Rect,
 ) -> Rect {
-    let popup = centered_rect_fixed(width, height, area);
+    let popup = centered_modal_rect_fixed(frame, width, height, area);
     surfaces.push(SurfaceFrame::fixed(
         SurfaceId::ModalBody,
         bordered_content(popup),
@@ -126,6 +182,12 @@ pub fn centered_modal_fixed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
 
     const SCREEN: Rect = Rect {
         x: 0,
@@ -176,6 +238,48 @@ mod tests {
             centered_rect_fixed(4, 3, tiny),
         ] {
             assert!(popup.width > 0 && popup.height > 0, "{popup:?} vanished");
+        }
+    }
+
+    #[test]
+    fn clearing_a_modal_blanks_its_two_cell_halo_and_nothing_beyond_it() {
+        const WIDTH: u16 = 30;
+        const HEIGHT: u16 = 15;
+        let bounds = Rect::new(3, 2, 20, 10);
+        let popup = Rect::new(8, 5, 6, 3);
+        let expected_clear = Rect::new(6, 3, 10, 7);
+        assert_eq!(modal_clear_area(popup, bounds), expected_clear);
+
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let rows = (0..HEIGHT)
+                    .map(|_| Line::raw("X".repeat(usize::from(WIDTH))))
+                    .collect::<Vec<_>>();
+                frame.render_widget(
+                    Paragraph::new(rows).style(Style::default().fg(Color::Cyan).bg(Color::Blue)),
+                    frame.area(),
+                );
+                clear_modal(frame, popup, bounds);
+            })
+            .expect("draw modal clear");
+
+        let buffer = terminal.backend().buffer();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let cell = &buffer[(x, y)];
+                if expected_clear.contains(Position::new(x, y)) {
+                    assert_eq!(cell.symbol(), " ", "cell ({x}, {y}) was not blank");
+                    assert_eq!(cell.fg, Color::Reset, "cell ({x}, {y}) kept its foreground");
+                    assert_eq!(cell.bg, Color::Reset, "cell ({x}, {y}) kept its background");
+                } else {
+                    assert_eq!(
+                        cell.symbol(),
+                        "X",
+                        "cell ({x}, {y}) outside the halo changed"
+                    );
+                }
+            }
         }
     }
 }

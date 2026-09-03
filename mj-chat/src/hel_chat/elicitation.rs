@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use crate::hel_selection::{
     ContentPos, FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId, extract_rows,
@@ -626,8 +626,8 @@ pub(super) fn render_elicitation(
     dialog: &ElicitationDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let area = crate::hel_modal::centered_rect_percent(82, 78, frame.area());
-    frame.render_widget(Clear, area);
+    let bounds = frame.area();
+    let area = crate::hel_modal::centered_modal_rect_percent(frame, 82, 78, bounds);
     let title = dialog.request.title.as_deref().unwrap_or("Agent question");
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1150,6 +1150,53 @@ mod tests {
             start: ContentPos::new(start.0, start.1),
             end: ContentPos::new(end.0, end.1),
         }
+    }
+
+    #[test]
+    fn plan_review_blanks_two_cells_outside_every_border() {
+        const WIDTH: u16 = 100;
+        const HEIGHT: u16 = 30;
+        let dialog = plan_review(20);
+        let screen = Rect::new(0, 0, WIDTH, HEIGHT);
+        let popup = crate::hel_modal::centered_rect_percent(82, 78, screen);
+        let halo = popup
+            .outer(ratatui::layout::Margin {
+                vertical: crate::hel_modal::MODAL_SCREEN_MARGIN,
+                horizontal: crate::hel_modal::MODAL_SCREEN_MARGIN,
+            })
+            .intersection(screen);
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                let background = (0..HEIGHT)
+                    .map(|_| Line::raw("X".repeat(usize::from(WIDTH))))
+                    .collect::<Vec<_>>();
+                frame.render_widget(Paragraph::new(background), frame.area());
+                render_elicitation(frame, &dialog, &mut FrameSurfaces::new());
+            })
+            .expect("render plan review over background");
+
+        let buffer = terminal.backend().buffer();
+        for y in halo.y..halo.bottom() {
+            for x in halo.x..halo.right() {
+                let position = Position::new(x, y);
+                if !popup.contains(position) {
+                    assert_eq!(
+                        buffer[(x, y)].symbol(),
+                        " ",
+                        "plan review left background visible at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            buffer[(0, 0)].symbol(),
+            "X",
+            "content beyond the halo changed"
+        );
+        assert_eq!(buffer[(popup.x, popup.y)].symbol(), "┌");
+        assert_eq!(buffer[(popup.right() - 1, popup.y)].symbol(), "┐");
     }
 
     /// The extractor maps a selection through per-line row counts, so those

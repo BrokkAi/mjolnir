@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use hel::hel_acp::SessionConfigChoice;
 use hel::hel_worker::WorkerPhase;
@@ -196,13 +196,12 @@ pub(super) fn render_config_picker(
 ) -> Option<Rect> {
     let picker = chat.config_picker.as_ref()?;
     let visible = picker.filtered.len().clamp(1, 8);
-    let rect = crate::hel_modal::centered_rect_fixed(72, visible as u16 + 6, area);
+    let rect = crate::hel_modal::centered_modal_rect_fixed(frame, 72, visible as u16 + 6, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Choose a {} ", picker.key))
         .border_style(Style::default().fg(Color::LightMagenta));
     let inner = block.inner(rect);
-    frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
 
     let dim = Style::default().fg(Color::DarkGray);
