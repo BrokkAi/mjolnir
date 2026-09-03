@@ -1913,7 +1913,7 @@ fn viewer_operation(
             .active_stages
             .iter()
             .map(|(stage, started_at)| ViewerOperationStage {
-                label: stage.label().to_owned(),
+                label: stage.label(),
                 started_at_epoch_seconds: *started_at,
             })
             .collect(),

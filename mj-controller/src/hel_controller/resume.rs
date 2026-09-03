@@ -30,8 +30,8 @@ use super::provisioning::{
     LocalBootstrap, ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
 };
-use super::readiness::{connect_started_worker, wait_for_native_session};
-use super::worker_binary::{start_worker, worker_probe_diagnosis};
+use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
+use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_diagnosis};
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
@@ -1098,14 +1098,17 @@ impl Controller {
                 }
                 None => {}
             }
-            let executor = &StagedExecutor::new(executor, ProvisionStage::Starting);
-            start_worker(executor, &backend, &worker_root)?;
+            let readiness_stage = bridge_readiness_stage(&profile);
             let spec = self.reconnect_command(session_id)?;
             let readiness = async {
-                let mut relay =
+                let mut relay = {
+                    let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+                    start_worker(executor, &backend, &worker_root)?;
                     connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
-                        .await?;
-                let native_session_id = wait_for_native_session(&mut relay, executor).await?;
+                        .await?
+                };
+                let native_session_id =
+                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
                 Ok::<_, anyhow::Error>((relay, native_session_id))
             }
             .await;

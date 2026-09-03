@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 
 use crate::hel_session_manager::StandaloneSession;
-use hel::hel_targets::{self, CommandExecutor, CommandSpec};
+use hel::hel_targets::{self, CommandExecutor, CommandSpec, ProvisionStage, ProvisionStageGuard};
 use hel::hel_worker::RelayExecutionState;
 
 use super::worker_binary::worker_last_words;
@@ -116,6 +116,17 @@ pub(super) async fn wait_for_native_session(
             }
         }
     }
+}
+
+/// Wait for the ACP-native session while exposing the part of launch that is
+/// currently blocking. The guard is balanced on success, error, and cancel.
+pub(super) async fn wait_for_native_session_in_stage(
+    relay: &mut impl NativeSessionProbe,
+    executor: &impl CommandExecutor,
+    stage: ProvisionStage,
+) -> Result<String> {
+    let _stage = ProvisionStageGuard::new(executor, stage);
+    wait_for_native_session(relay, executor).await
 }
 
 /// One connection attempt against a worker that was started moments ago, plus
@@ -271,11 +282,58 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use anyhow::{Result, bail};
 
-    use hel::hel_targets::CancellableProcessExecutor;
+    use hel::hel_config::HarnessKind;
+    use hel::hel_targets::{CancellableProcessExecutor, CommandOutput};
 
     use super::*;
+
+    #[tokio::test]
+    async fn native_session_readiness_stage_is_balanced() {
+        struct ReadyProbe;
+
+        impl NativeSessionProbe for ReadyProbe {
+            async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
+                Ok(NativeSessionReadiness::Ready("native-1".into()))
+            }
+        }
+
+        struct RecordingExecutor {
+            transitions: RefCell<Vec<(ProvisionStage, bool)>>,
+        }
+
+        impl CommandExecutor for RecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                panic!("readiness must not execute {}", command.program)
+            }
+
+            fn stage_started(&self, stage: ProvisionStage) {
+                self.transitions.borrow_mut().push((stage, true));
+            }
+
+            fn stage_finished(&self, stage: ProvisionStage) {
+                self.transitions.borrow_mut().push((stage, false));
+            }
+        }
+
+        let executor = RecordingExecutor {
+            transitions: RefCell::new(Vec::new()),
+        };
+        let stage = ProvisionStage::Installing(HarnessKind::Codex);
+
+        let native_session_id = wait_for_native_session_in_stage(&mut ReadyProbe, &executor, stage)
+            .await
+            .unwrap();
+
+        assert_eq!(native_session_id, "native-1");
+        assert_eq!(
+            executor.transitions.into_inner(),
+            vec![(stage, true), (stage, false)]
+        );
+    }
 
     #[tokio::test]
     async fn native_session_wait_stops_as_soon_as_cancellation_is_observed() {

@@ -29,8 +29,8 @@ use super::backend::{
 };
 use super::checkpoint::upload_checkpoint_spec;
 use super::git_cache;
-use super::readiness::{connect_started_worker, wait_for_native_session};
-use super::worker_binary::{start_worker, worker_probe_diagnosis};
+use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
+use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_diagnosis};
 use super::{Controller, execute_checked, now, target_kind};
 
 const INHERITED_GIT_SETTINGS: &[&str] = &[
@@ -513,14 +513,27 @@ impl Controller {
                 LocalBootstrap::Seed,
             )?;
         }
-        let executor = &StagedExecutor::new(executor, ProvisionStage::Starting);
-        start_worker(executor, backend, worker_root)?;
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let profile = self
+            .config
+            .profiles
+            .get(&session.last_profile)
+            .with_context(|| format!("unknown profile {}", session.last_profile))?;
+        let readiness_stage = bridge_readiness_stage(profile);
         let reconnect = &hel_targets::reconnect_plan(backend, session_id)?.commands[0];
         let readiness = async {
-            let mut relay =
+            let mut relay = {
+                let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+                start_worker(executor, backend, worker_root)?;
                 connect_started_worker(reconnect, session_id, executor, backend, worker_root)
-                    .await?;
-            let native_session_id = wait_for_native_session(&mut relay, executor).await?;
+                    .await?
+            };
+            let native_session_id =
+                wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
             Ok(Some(native_session_id))
         }
         .await;

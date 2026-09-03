@@ -4843,6 +4843,22 @@ mod tests {
     }
 
     #[test]
+    fn install_stage_names_the_harness_not_the_profile() {
+        let session = stopped_session();
+        assert_eq!(session.last_profile, "codex-1");
+        let operation = operation(
+            SessionOperationKind::Launching,
+            Some(ProvisionStage::Installing(HarnessKind::Codex)),
+        );
+
+        let (clock, profile_id, _, _, _) =
+            session_values(&session, None, Some(&operation), 1_012, &config());
+
+        assert_eq!(clock, "Installing Codex 12s");
+        assert_eq!(profile_id, "codex-1");
+    }
+
+    #[test]
     fn launch_clock_names_concurrent_stages_in_lifecycle_order() {
         let session = stopped_session();
         let mut operation = operation(SessionOperationKind::Launching, None);

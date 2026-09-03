@@ -1582,7 +1582,7 @@ impl RuntimeState {
                         .keys()
                         .next_back()
                         .map(|stage| stage.label())
-                        .unwrap_or("container cleanup");
+                        .unwrap_or_else(|| "container cleanup".to_owned());
                     (
                         session_id.clone(),
                         active.kind,
@@ -1847,7 +1847,10 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         let result = self.inner.execute(command);
         tracing::info!(
             session_id = %self.session_id,
-            stage = command.stage.map(ProvisionStage::label).unwrap_or("command"),
+            stage = command
+                .stage
+                .map(ProvisionStage::label)
+                .unwrap_or_else(|| "command".to_owned()),
             purpose = %command.purpose,
             duration_ms = started.elapsed().as_millis(),
             succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
@@ -1868,7 +1871,10 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         let result = self.inner.execute_with_stdin(command, input);
         tracing::info!(
             session_id = %self.session_id,
-            stage = command.stage.map(ProvisionStage::label).unwrap_or("command"),
+            stage = command
+                .stage
+                .map(ProvisionStage::label)
+                .unwrap_or_else(|| "command".to_owned()),
             purpose = %command.purpose,
             duration_ms = started.elapsed().as_millis(),
             succeeded = result.as_ref().is_ok_and(|output| output.status == 0),

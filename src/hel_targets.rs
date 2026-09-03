@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::hel_config::ImagePullPolicy;
+use crate::hel_config::{HarnessKind, ImagePullPolicy};
 
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
@@ -72,6 +72,7 @@ pub enum ProvisionStage {
     Syncing,
     Restoring,
     Starting,
+    Installing(HarnessKind),
     Compacting,
     StoppingTarget,
     RemovingContainer,
@@ -80,19 +81,20 @@ pub enum ProvisionStage {
 }
 
 impl ProvisionStage {
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Provisioning => "Provision",
-            Self::Booting => "Boot",
-            Self::Cloning => "Clone",
-            Self::Syncing => "Sync",
-            Self::Restoring => "Restore",
-            Self::Starting => "Start",
-            Self::Compacting => "Compact",
-            Self::StoppingTarget => "Stop target",
-            Self::RemovingContainer => "Remove container",
-            Self::RemovingStorage => "Remove container storage",
-            Self::CleaningCache => "Clean cache",
+            Self::Provisioning => "Provision".into(),
+            Self::Booting => "Boot".into(),
+            Self::Cloning => "Clone".into(),
+            Self::Syncing => "Sync".into(),
+            Self::Restoring => "Restore".into(),
+            Self::Starting => "Start".into(),
+            Self::Installing(harness) => format!("Installing {}", harness.display_name()),
+            Self::Compacting => "Compact".into(),
+            Self::StoppingTarget => "Stop target".into(),
+            Self::RemovingContainer => "Remove container".into(),
+            Self::RemovingStorage => "Remove container storage".into(),
+            Self::CleaningCache => "Clean cache".into(),
         }
     }
 }

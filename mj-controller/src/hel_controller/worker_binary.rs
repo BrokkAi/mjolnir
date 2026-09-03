@@ -11,7 +11,10 @@ use crate::hel_session_manager::{
     ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh,
     WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
 };
-use hel::hel_config::{ExecutionPolicy, ProjectBundle, ProjectRepository, atomic_write, data_dir};
+use hel::hel_config::{
+    ExecutionPolicy, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write,
+    data_dir,
+};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
 use hel::hel_targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
@@ -1100,6 +1103,22 @@ const CLAUDE_AGENT_ACP_FALLBACK_VERSION: &str = "0.73.0";
 const DEEPSEEK_HARNESS_FALLBACK_VERSION: &str = "0.1.1-rc.2";
 
 const DEEPSEEK_ACP_FALLBACK_VERSION: &str = "0.10.0";
+
+/// Stage shown after the worker is reachable and while its ACP bridge becomes
+/// ready. Default launchers that can fetch their own harness name that work;
+/// explicit executables and DSH only have a process to start.
+pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage {
+    if profile.executable.is_none()
+        && matches!(
+            profile.kind,
+            HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Grok
+        )
+    {
+        ProvisionStage::Installing(profile.kind)
+    } else {
+        ProvisionStage::Starting
+    }
+}
 
 pub(super) fn bridge_launch(
     harness: hel::hel_config::HarnessKind,
@@ -3152,6 +3171,40 @@ mod tests {
         assert!(deepseek_arguments[1].contains("exec dsh-acp-server"));
         assert!(deepseek_arguments[1].contains("Mjolnir needs @deepseek-ai/dsh"));
         assert!(!deepseek_arguments[1].contains("Hel"));
+    }
+
+    #[test]
+    fn readiness_stage_names_only_install_capable_default_harnesses() {
+        let profile = |kind, executable| hel::hel_config::HarnessProfile {
+            kind,
+            home: PathBuf::from("/profiles/test"),
+            executable,
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+
+        for harness in [
+            HarnessKind::Codex,
+            HarnessKind::Claude,
+            HarnessKind::Kimi,
+            HarnessKind::Grok,
+        ] {
+            assert_eq!(
+                bridge_readiness_stage(&profile(harness, None)),
+                ProvisionStage::Installing(harness)
+            );
+        }
+        assert_eq!(
+            bridge_readiness_stage(&profile(HarnessKind::Deepseek, None)),
+            ProvisionStage::Starting
+        );
+        assert_eq!(
+            bridge_readiness_stage(&profile(
+                HarnessKind::Codex,
+                Some(PathBuf::from("/opt/bin/codex-acp")),
+            )),
+            ProvisionStage::Starting
+        );
     }
     #[test]
     fn codex_execution_environment_follows_the_target_policy() {
