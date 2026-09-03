@@ -378,6 +378,12 @@ pub struct RelayOperationalState {
     /// the step clock falls back to the turn it belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_step_started_at_ms: Option<i64>,
+    /// When the newest tool call still reporting pending or in-progress
+    /// started its current status. Unlike the general step clock, this is
+    /// positive evidence of foreground work even when the harness exposes no
+    /// turn boundary of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_tool_started_at_ms: Option<i64>,
     /// The turn the harness started on its own, while it is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_turn: Option<HarnessTurn>,
@@ -767,6 +773,7 @@ impl RelaySnapshot {
                 }),
             last_acp_activity_at_ms: None,
             current_step_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
             harness_turn: self.harness_turn.map(|turn| HarnessTurn {
                 started_at_ms: turn.started_at_ms,
             }),

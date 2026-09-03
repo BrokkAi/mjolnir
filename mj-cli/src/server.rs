@@ -2261,7 +2261,7 @@ fn viewer_snapshot(
                 now,
                 turn_started_at,
                 state
-                    .last_acp_activity_at_ms
+                    .current_step_started_at_ms
                     .and_then(|value| u64::try_from(value).ok()),
                 &mj_chat::usage_format::SessionActivity::of(state),
             )
@@ -2431,6 +2431,7 @@ mod tests {
             checkpoint_ready: None,
             last_acp_activity_at_ms: None,
             current_step_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
@@ -2500,6 +2501,7 @@ mod tests {
             checkpoint_ready: None,
             last_acp_activity_at_ms: None,
             current_step_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),

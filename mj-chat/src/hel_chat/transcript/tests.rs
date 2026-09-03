@@ -180,6 +180,7 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(crate::usage_format::SessionActivity {
         harness_turn_started_at_ms: None,
+        foreground_tool_started_at_ms: None,
         background_commands: vec![hel::hel_worker::BackgroundCommand {
             started_at_ms: 17_384_000,
             command: "cargo test".into(),
@@ -188,6 +189,16 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
     assert_eq!(
         transcript_title(&chat, 20_000),
         " precision-3260/bifrost-fuzz    BG 43m36s  kimi "
+    );
+
+    let previous_activity = chat.session_activity().clone();
+    chat.set_session_activity(crate::usage_format::SessionActivity {
+        foreground_tool_started_at_ms: Some(19_988_000),
+        ..previous_activity
+    });
+    assert_eq!(
+        transcript_title(&chat, 20_000),
+        " precision-3260/bifrost-fuzz  Step 12s  kimi "
     );
 }
 

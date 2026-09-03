@@ -293,6 +293,10 @@ pub struct DurableRelay {
     harness_turns: HarnessTurnPolicy,
     /// Where commands the agent left running are read from.
     background_work: BackgroundWorkPolicy,
+    /// Tool calls that still report pending or in-progress, with the start of
+    /// their current status. This is stronger foreground evidence than a
+    /// harness-neutral step clock, whose prose steps have no portable ending.
+    foreground_tools: BTreeMap<String, (agent_client_protocol::schema::v1::ToolCallStatus, i64)>,
     /// Commands a Codex exec card reported without an exit code, keyed by the
     /// tool call id so a later card for the same call clears it. In memory,
     /// like the terminals: it describes processes that are alive now.
@@ -453,6 +457,7 @@ impl DurableRelay {
             step_clock: crate::hel_acp::StepClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
             background_work: BackgroundWorkPolicy::default(),
+            foreground_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
@@ -532,6 +537,11 @@ impl DurableRelay {
         let mut state = self.snapshot.operational_state();
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
+        state.foreground_tool_started_at_ms = self
+            .foreground_tools
+            .values()
+            .map(|(_, started_at_ms)| *started_at_ms)
+            .max();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.background_commands = self.background_commands();
         state
@@ -597,6 +607,8 @@ impl DurableRelay {
 
     pub fn agent_terminal_closed(&mut self, terminal_id: &str) {
         self.active_agent_terminals.remove(terminal_id);
+        self.foreground_tools
+            .remove(&crate::hel_acp::fallback_terminal_tool_call_id(terminal_id));
         self.closed_agent_terminals.insert(terminal_id.to_owned());
     }
 
@@ -606,6 +618,7 @@ impl DurableRelay {
         // The harness that owned those processes is gone, and so is whatever
         // it left running: a restart cannot poll a process it no longer has.
         self.background_exec_cards.clear();
+        self.foreground_tools.clear();
     }
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {
@@ -1638,6 +1651,7 @@ impl DurableRelay {
                 | RelayObservation::Closed
         ) {
             self.background_exec_cards.clear();
+            self.foreground_tools.clear();
         }
         self.append_relay_event(None, observation)
     }
@@ -1668,6 +1682,7 @@ impl DurableRelay {
             )?;
         }
         let settles = claude.then(|| claude_turn_origin(&update)).flatten();
+        self.track_foreground_tool(&update);
         if self.background_work == BackgroundWorkPolicy::CodexExecCards {
             self.track_codex_exec_card(&update);
         }
@@ -1690,6 +1705,41 @@ impl DurableRelay {
             )?;
         }
         Ok(ordinal)
+    }
+
+    /// Track tool statuses that prove the agent is still doing foreground
+    /// work. Pending and in-progress have portable ACP meanings across every
+    /// harness; prose and plan updates do not carry a corresponding end, so
+    /// they cannot safely override known background work on their own.
+    fn track_foreground_tool(&mut self, update: &SessionUpdate) {
+        let (tool_call_id, status) = match update {
+            SessionUpdate::ToolCall(call) => (call.tool_call_id.0.as_ref(), Some(call.status)),
+            SessionUpdate::ToolCallUpdate(call) => {
+                (call.tool_call_id.0.as_ref(), call.fields.status)
+            }
+            _ => return,
+        };
+        let Some(status) = status else {
+            return;
+        };
+        if matches!(
+            status,
+            agent_client_protocol::schema::v1::ToolCallStatus::Pending
+                | agent_client_protocol::schema::v1::ToolCallStatus::InProgress
+        ) {
+            let started_at_ms = self.step_clock.started_at_ms().unwrap_or_else(epoch_millis);
+            self.foreground_tools
+                .entry(tool_call_id.to_owned())
+                .and_modify(|(previous, previous_started_at_ms)| {
+                    if *previous != status {
+                        *previous = status;
+                        *previous_started_at_ms = started_at_ms;
+                    }
+                })
+                .or_insert((status, started_at_ms));
+        } else {
+            self.foreground_tools.remove(tool_call_id);
+        }
     }
 
     /// Follow a Codex `exec_command` card: a result with no exit code is a
@@ -3881,6 +3931,30 @@ mod tests {
             .record_session_update(exec_card("call-1", &["bash", "-lc", "sleep 600"], Some(0)))
             .unwrap();
         assert!(relay.operational_state().background_commands.is_empty());
+    }
+
+    #[test]
+    fn an_unsettled_tool_call_is_foreground_work_even_without_a_turn_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+
+        relay.record_session_update(tool_call_update()).unwrap();
+        assert!(
+            relay
+                .operational_state()
+                .foreground_tool_started_at_ms
+                .is_some(),
+            "a pending tool is positive foreground-work evidence"
+        );
+
+        relay
+            .record_session_update(exec_card("call-1", &["true"], Some(0)))
+            .unwrap();
+        assert_eq!(
+            relay.operational_state().foreground_tool_started_at_ms,
+            None,
+            "a settled tool no longer overrides background work"
+        );
     }
 
     #[test]

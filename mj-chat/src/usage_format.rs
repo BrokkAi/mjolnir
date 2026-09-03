@@ -36,6 +36,10 @@ pub struct SessionActivity {
     /// milliseconds, while that turn is open. A session with one open is
     /// working even if the projection has not caught up yet.
     pub harness_turn_started_at_ms: Option<i64>,
+    /// Start of the newest pending or in-progress tool call when no explicit
+    /// turn is open. This is foreground work the relay can prove from ACP
+    /// status, even for a harness that publishes no autonomous-turn boundary.
+    pub foreground_tool_started_at_ms: Option<i64>,
     /// Commands the agent left running with nothing waiting on them.
     pub background_commands: Vec<hel::hel_worker::BackgroundCommand>,
 }
@@ -45,8 +49,17 @@ impl SessionActivity {
     pub fn of(operational: &hel::hel_worker::RelayOperationalState) -> Self {
         Self {
             harness_turn_started_at_ms: operational.harness_turn.map(|turn| turn.started_at_ms),
+            foreground_tool_started_at_ms: operational.foreground_tool_started_at_ms,
             background_commands: operational.background_commands.clone(),
         }
+    }
+
+    fn foreground_tool_since(&self, current_turn_started_at: Option<u64>) -> Option<u64> {
+        if current_turn_started_at.is_some() || self.harness_turn_started_at_ms.is_some() {
+            return None;
+        }
+        self.foreground_tool_started_at_ms
+            .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok())
     }
 
     /// Epoch seconds the oldest background command started, while the session
@@ -93,6 +106,12 @@ pub fn format_activity_columns(
             ),
         ];
     }
+    if let Some(since) = activity.foreground_tool_since(current_turn_started_at) {
+        return vec![format!(
+            "Step {}",
+            format_clock(now_epoch_seconds.saturating_sub(since))
+        )];
+    }
     match activity.background_since(current_turn_started_at) {
         // The two leading spaces hold the width `Turn` takes, so the clocks
         // stay in one column whichever state a row is in.
@@ -110,6 +129,12 @@ pub fn format_activity_clock(
     current_turn_started_at: Option<u64>,
     activity: &SessionActivity,
 ) -> String {
+    if let Some(since) = activity.foreground_tool_since(current_turn_started_at) {
+        return format!(
+            "[Step {}]",
+            format_clock(now_epoch_seconds.saturating_sub(since))
+        );
+    }
     match activity.background_since(current_turn_started_at) {
         Some(since) => format!(
             "[BG {}]",
@@ -177,11 +202,27 @@ mod tests {
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
             harness_turn_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 started_at_ms,
                 command: command.to_owned(),
             }],
         }
+    }
+
+    #[test]
+    fn a_foreground_tool_takes_precedence_over_older_background_work() {
+        let mut activity = background(17_384_000, "cargo test --old");
+        activity.foreground_tool_started_at_ms = Some(19_900_000);
+
+        assert_eq!(
+            format_activity_columns(20_000, None, None, &activity),
+            vec!["Step 1m40s".to_owned()]
+        );
+        assert_eq!(
+            format_activity_clock(20_000, None, &activity),
+            "[Step 1m40s]"
+        );
     }
 
     #[test]

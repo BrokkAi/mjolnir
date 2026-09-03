@@ -1005,14 +1005,13 @@ fn dashboard_agent_prefixes(now_epoch_seconds: u64, detail: Option<&SessionDetai
     );
     match columns.as_slice() {
         [turn, step] => [pad_dashboard_column(turn), pad_dashboard_column(step)],
-        // Background work takes the turn column. The turn is not over while
-        // it runs, so the time the agent last spoke stays off the row; the
-        // blank keeps the two excerpt lines aligned. `[idle]` says nothing
-        // worth a column.
-        [background] if background.trim() != "[idle]" => {
-            let background = pad_dashboard_column(background);
-            let blank = " ".repeat(background.len());
-            [background, blank]
+        // Foreground tools without a harness turn marker and background work
+        // each take one clock column. The blank keeps the two excerpt lines
+        // aligned; `[idle]` says nothing worth a column.
+        [activity] if activity.trim() != "[idle]" => {
+            let activity = pad_dashboard_column(activity);
+            let blank = " ".repeat(activity.len());
+            [activity, blank]
         }
         _ => ["Agent:".into(), last_spoke()],
     }
@@ -1240,7 +1239,13 @@ fn session_band_color(
     }
     match detail {
         Some(detail) if detail.has_unread() && detail.current_turn_started_at.is_none() => {
-            Color::LightBlue
+            if detail.activity.background_commands.is_empty()
+                && detail.activity.foreground_tool_started_at_ms.is_none()
+            {
+                Color::LightBlue
+            } else {
+                Color::LightYellow
+            }
         }
         Some(detail) if detail.has_unread() => Color::LightYellow,
         // ANSI yellow is the orange/amber ink in common terminal palettes;
@@ -2396,6 +2401,7 @@ mod tests {
             last_activity_at_ms: Some(1_297_000),
             activity: mj_chat::usage_format::SessionActivity {
                 harness_turn_started_at_ms: None,
+                foreground_tool_started_at_ms: None,
                 background_commands: vec![hel::hel_worker::BackgroundCommand {
                     started_at_ms: 1_000_000,
                     command: "cargo test".into(),
@@ -2406,6 +2412,20 @@ mod tests {
         assert_eq!(
             dashboard_agent_prefixes(1_330, Some(&background)),
             ["  BG  5m30s".to_owned(), " ".repeat("  BG  5m30s".len())]
+        );
+
+        let foreground = SessionDetail {
+            activity: mj_chat::usage_format::SessionActivity {
+                foreground_tool_started_at_ms: Some(1_297_000),
+                background_commands: background.activity.background_commands.clone(),
+                ..mj_chat::usage_format::SessionActivity::default()
+            },
+            ..SessionDetail::default()
+        };
+        assert_eq!(
+            dashboard_agent_prefixes(1_330, Some(&foreground)),
+            ["Step    33s".to_owned(), " ".repeat("Step    33s".len())],
+            "a live foreground tool takes the clock column from older background work"
         );
     }
 
@@ -2702,6 +2722,23 @@ mod tests {
             None,
         );
         assert_eq!(collapsed.style.fg, Some(Color::LightBlue));
+
+        let unread_background = SessionDetail {
+            unread_agent_messages: 1,
+            activity: mj_chat::usage_format::SessionActivity {
+                background_commands: vec![hel::hel_worker::BackgroundCommand {
+                    started_at_ms: 1,
+                    command: "cargo test".into(),
+                }],
+                ..mj_chat::usage_format::SessionActivity::default()
+            },
+            ..SessionDetail::default()
+        };
+        assert_eq!(
+            session_band_color(Some(&unread_background), false, SessionState::Running),
+            Color::LightYellow,
+            "background work does not use the blue idle-unread band"
+        );
 
         let restarted_idle = SessionDetail {
             unread_session_restarts: 1,
@@ -3320,6 +3357,7 @@ mod tests {
         let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
         let activity = mj_chat::usage_format::SessionActivity {
             harness_turn_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 started_at_ms,
                 command: "cargo test".into(),

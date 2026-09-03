@@ -2596,6 +2596,7 @@ mod tests {
                     checkpoint_ready: None,
                     last_acp_activity_at_ms: None,
                     current_step_started_at_ms: None,
+                    foreground_tool_started_at_ms: None,
                     harness_turn: None,
                     last_harness_turn_started_ordinal: None,
                     background_commands: Vec::new(),
@@ -3529,6 +3530,7 @@ mod tests {
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
             harness_turn_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 started_at_ms,
                 command: "cargo   test".into(),
@@ -3542,6 +3544,7 @@ mod tests {
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
             harness_turn_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
             background_commands: vec![
                 hel::hel_worker::BackgroundCommand {
                     started_at_ms,
