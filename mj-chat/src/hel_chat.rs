@@ -29,7 +29,8 @@ use agent_client_protocol::schema::v1::{
     AvailableCommand, SessionConfigOption, SessionModeState, SessionUpdate,
 };
 use crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
@@ -1383,6 +1384,7 @@ impl ChatState {
         }
         // Any key breaks a Ctrl-K chain; only the Ctrl-K arm sets it again.
         let chained = std::mem::take(&mut self.chain_kill);
+        let keypad = key.state.contains(KeyEventState::KEYPAD);
         let (code, modifiers) = normalize_key(key.code, key.modifiers);
 
         // Leaving the view is never an answer to the agent, so these two come
@@ -1486,6 +1488,22 @@ impl ChatState {
             } else {
                 ChatAction::None
             };
+        }
+        // With Num Lock off, the keypad's corner keys are transcript
+        // navigation. Enhanced keyboard reporting distinguishes them from the
+        // dedicated Home and End keys, which keep editing the prompt line.
+        if keypad {
+            match code {
+                KeyCode::Home => {
+                    self.anchor = TranscriptAnchor::Row { entry: 0, row: 0 };
+                    return ChatAction::None;
+                }
+                KeyCode::End => {
+                    self.anchor = TranscriptAnchor::Bottom;
+                    return ChatAction::None;
+                }
+                _ => {}
+            }
         }
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {

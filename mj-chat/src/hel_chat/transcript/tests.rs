@@ -4,12 +4,23 @@ use crate::hel_chat::test_support::{
     line_text, mouse_in, queued, snapshot, transcript_text,
 };
 use crate::hel_selection::SelectionState;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use hel::hel_acp::RuntimeEvent;
 use hel::hel_worker::{SequencedEvent, WorkerEvent};
 
 fn completed_tool(seq: u64, title: &str) -> ChatEntry {
     ChatEntry::tool(seq, title, None, ToolStatus::Completed)
+}
+
+fn keypad_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new_with_kind_and_state(
+        code,
+        KeyModifiers::NONE,
+        KeyEventKind::Press,
+        KeyEventState::KEYPAD,
+    )
 }
 
 /// A wheel event clear of the conversations pane, which is the hitbox hover
@@ -1655,6 +1666,36 @@ fn control_home_and_end_reach_both_ends_of_a_long_transcript() {
     chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
     let rows = drawn_transcript(&mut chat, 40, 24);
     assert!(shows(&rows, "message 199"), "Ctrl-End reaches the last row");
+}
+
+#[test]
+fn keypad_home_and_end_reach_both_ends_without_editing_the_prompt() {
+    let mut chat = numbered_chat(200);
+    chat.set_input("draft prompt".into());
+    let _ = drawn_transcript(&mut chat, 40, 24);
+
+    chat.handle_key(keypad_key(KeyCode::Home));
+    let rows = drawn_transcript(&mut chat, 40, 24);
+    assert!(
+        shows(&rows, "message 0"),
+        "keypad Home reaches the first row"
+    );
+    assert!(!shows(&rows, "message 199"));
+    assert_eq!(chat.input_cursor, "draft prompt".len());
+
+    chat.handle_key(keypad_key(KeyCode::End));
+    let rows = drawn_transcript(&mut chat, 40, 24);
+    assert!(shows(&rows, "message 199"), "keypad End follows the tail");
+    assert_eq!(chat.input_cursor, "draft prompt".len());
+
+    chat.handle_key(key(KeyCode::Home));
+    assert_eq!(chat.input_cursor, 0, "plain Home still edits the prompt");
+    chat.handle_key(key(KeyCode::End));
+    assert_eq!(
+        chat.input_cursor,
+        "draft prompt".len(),
+        "plain End still edits the prompt"
+    );
 }
 
 #[test]
