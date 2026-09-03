@@ -8,7 +8,8 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::hel_session_manager::{
-    ProjectMemorySyncTarget, WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
+    ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh, WorkerBinaryRefreshPlan,
+    WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
 };
 use hel::hel_config::{ExecutionPolicy, ProjectBundle, ProjectRepository, atomic_write, data_dir};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
@@ -1715,19 +1716,33 @@ fn worker_launch_refresh_plan(
 fn worker_binary_refresh_plan(
     locator: &hel_targets::TargetLocator,
     session_id: &str,
-) -> Result<Option<WorkerBinaryRefreshPlan>> {
+) -> Result<Option<WorkerBinaryRefresh>> {
+    let worker_root = hel_targets::worker_root(locator, session_id)?;
+    let installed = format!("{worker_root}/hel");
+    // Remote targets defer source selection to the recovery task: choosing the
+    // binary needs the target's architecture, and probing it (plus hashing the
+    // remote binary) is blocking ssh work that must not run on this UI/event
+    // path. Building the refresh here stays cheap.
     if matches!(
         locator,
         hel_targets::TargetLocator::AwsEc2 { .. }
             | hel_targets::TargetLocator::SshBare { .. }
             | hel_targets::TargetLocator::SshPodman { .. }
     ) {
-        return Ok(None);
+        return Ok(Some(WorkerBinaryRefresh::Remote(RemoteWorkerBinaryRefresh {
+            locator: locator.clone(),
+            session_id: session_id.to_owned(),
+            installed_digest: installed_file_digest_command(
+                locator,
+                &installed,
+                "identify installed Mjolnir worker binary",
+            ),
+        })));
     }
-    // Resolving a deleted running executable materializes /proc/self/exe and
-    // can copy hundreds of megabytes. Target lists are assembled on UI/event
-    // loops, so leave refresh disabled until the next controller start rather
-    // than doing that work here.
+    // Local: resolve the source now. Resolving a deleted running executable
+    // materializes /proc/self/exe and can copy hundreds of megabytes; target
+    // lists are assembled on UI/event loops, so leave refresh disabled until
+    // the next controller start rather than doing that work here.
     if !std::env::current_exe().is_ok_and(|path| path.is_file()) {
         return Ok(None);
     }
@@ -1735,9 +1750,7 @@ fn worker_binary_refresh_plan(
         Ok(WorkerBinaryAvailability::Local { path, .. }) => path,
         Ok(WorkerBinaryAvailability::Remote { .. }) | Err(_) => return Ok(None),
     };
-    let worker_root = hel_targets::worker_root(locator, session_id)?;
-    let installed = format!("{worker_root}/hel");
-    Ok(Some(WorkerBinaryRefreshPlan {
+    Ok(Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
         replace: installed_worker_binary_replacement_plan(locator, session_id, &source)?,
         source,
         installed_digest: installed_file_digest_command(
@@ -1745,7 +1758,60 @@ fn worker_binary_refresh_plan(
             &installed,
             "identify installed Mjolnir worker binary",
         ),
-    }))
+    })))
+}
+
+/// Refresh a remote worker binary during recovery: pick the worker binary for
+/// the target's own architecture, and copy it over the installed one only when
+/// their digests differ. This runs inside the recovery task, where blocking
+/// ssh work is allowed; it must never be called from a UI/event loop.
+///
+/// The digest gate is what stops a redeploy loop: once the right binary is
+/// installed, its digest matches the source and nothing is copied again, even
+/// though recovery may still restart the worker.
+pub(crate) fn refresh_remote_worker_binary_if_stale(
+    executor: &impl CommandExecutor,
+    refresh: &RemoteWorkerBinaryRefresh,
+) -> Result<()> {
+    let source = worker_binary_for(&refresh.locator, executor)
+        .context("resolve the worker binary for the recovering target")?;
+    replace_remote_worker_binary_if_stale(
+        executor,
+        &refresh.locator,
+        &refresh.session_id,
+        &refresh.installed_digest,
+        &source,
+    )
+    .map(|_| ())
+}
+
+/// Copy `source` over the installed remote worker only when the installed
+/// digest differs from `source`'s. Returns whether a copy ran. Split from the
+/// resolver above so the digest gate is testable without resolving a real
+/// worker binary for a target architecture.
+fn replace_remote_worker_binary_if_stale(
+    executor: &impl CommandExecutor,
+    locator: &hel_targets::TargetLocator,
+    session_id: &str,
+    installed_digest: &CommandSpec,
+    source: &Path,
+) -> Result<bool> {
+    let expected = hel::hel_worker_launch::worker_executable_digest(source)?;
+    let installed = executor
+        .execute(installed_digest)
+        .context("read the installed remote worker digest")?;
+    let matches = installed.status == 0
+        && String::from_utf8_lossy(&installed.stdout)
+            .split_whitespace()
+            .next()
+            .is_some_and(|digest| digest.eq_ignore_ascii_case(&expected));
+    if matches {
+        return Ok(false);
+    }
+    installed_worker_binary_replacement_plan(locator, session_id, source)?
+        .execute(executor)
+        .context("replace stale remote relay worker binary")?;
+    Ok(true)
 }
 
 /// Stop the detached worker daemon at `worker_root` without deleting its files.
@@ -3134,5 +3200,102 @@ mod tests {
             project_memory_replica_slug(key, "session-a"),
             project_memory_replica_slug(key, "session-b")
         );
+    }
+
+    /// Returns a fixed digest line for every command and records what it ran,
+    /// so a remote refresh can be driven without a real ssh host.
+    struct DigestExecutor {
+        installed_line: String,
+        commands: RefCell<Vec<CommandSpec>>,
+    }
+
+    impl CommandExecutor for DigestExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.borrow_mut().push(command.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: self.installed_line.clone().into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    // The SshBare worker_root guard requires the workspace to end in the exact
+    // session ID, so build the locator around the session under test.
+    fn ssh_bare_locator(session_id: &str) -> hel_targets::TargetLocator {
+        hel_targets::TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "user@host.test".into(),
+                ssh_args: Vec::new(),
+            },
+            workspace: format!("/srv/mj/{session_id}"),
+        }
+    }
+
+    #[test]
+    fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("worker");
+        std::fs::write(&source, b"fresh musl worker").unwrap();
+        let executor = DigestExecutor {
+            installed_line: format!("{}  /root/hel\n", "0".repeat(64)),
+            commands: RefCell::new(Vec::new()),
+        };
+        let replaced = replace_remote_worker_binary_if_stale(
+            &executor,
+            &ssh_bare_locator("session-remote"),
+            "session-remote",
+            &CommandSpec::new("true", Vec::<String>::new()),
+            &source,
+        )
+        .unwrap();
+        assert!(replaced, "a stale remote binary must be replaced");
+        assert!(
+            executor.commands.borrow().len() > 1,
+            "the digest probe must be followed by replacement commands"
+        );
+    }
+
+    #[test]
+    fn a_remote_worker_already_current_is_restarted_without_recopying() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("worker");
+        std::fs::write(&source, b"fresh musl worker").unwrap();
+        let current = hel::hel_worker_launch::worker_executable_digest(&source).unwrap();
+        let executor = DigestExecutor {
+            installed_line: format!("{current}  /root/hel\n"),
+            commands: RefCell::new(Vec::new()),
+        };
+        let replaced = replace_remote_worker_binary_if_stale(
+            &executor,
+            &ssh_bare_locator("session-remote"),
+            "session-remote",
+            &CommandSpec::new("true", Vec::<String>::new()),
+            &source,
+        )
+        .unwrap();
+        assert!(!replaced, "a current remote binary must not be recopied");
+        assert_eq!(
+            executor.commands.borrow().len(),
+            1,
+            "only the digest probe runs when the binary is already current"
+        );
+    }
+
+    #[test]
+    fn a_remote_recovery_plan_defers_binary_refresh_to_the_recovery_task() {
+        let locator = ssh_bare_locator("session-remote");
+        let refresh = worker_binary_refresh_plan(&locator, "session-remote")
+            .unwrap()
+            .expect("a remote target now gets a binary refresh");
+        match refresh {
+            WorkerBinaryRefresh::Remote(remote) => {
+                assert_eq!(remote.session_id, "session-remote");
+                assert_eq!(remote.locator, locator);
+            }
+            WorkerBinaryRefresh::Prepared(_) => {
+                panic!("a remote target must defer, not prepare, its binary refresh")
+            }
+        }
     }
 }
