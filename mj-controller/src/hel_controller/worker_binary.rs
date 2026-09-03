@@ -133,9 +133,9 @@ impl Controller {
         )
     }
 
-    /// Collect the dead worker's exit record and log tail for a session whose
-    /// worker has become unreachable. Best-effort; returns None when the
-    /// target no longer exists or has no diagnostics.
+    /// Probe the installed binary and collect the dead worker's exit record
+    /// and log tail after a session becomes unreachable. Best-effort; returns
+    /// `None` when the target no longer exists or has no diagnostics.
     pub fn diagnose_worker(&self, session_id: &str) -> Option<String> {
         self.diagnose_worker_controlled(session_id, &ProcessExecutor)
     }
@@ -169,7 +169,15 @@ impl Controller {
                 return None;
             }
         };
-        worker_last_words(executor, &backend, &worker_root)
+        let binary_failure = worker_binary_probe_failure(executor, &backend, &worker_root);
+        let last_words = worker_last_words(executor, &backend, &worker_root);
+        match (binary_failure, last_words) {
+            (Some(binary_failure), Some(last_words)) => {
+                Some(format!("{binary_failure}; {last_words}"))
+            }
+            (Some(binary_failure), None) => Some(binary_failure),
+            (None, last_words) => last_words,
+        }
     }
 
     /// A non-destructive liveness probe plus commands that replace a confirmed
@@ -624,6 +632,23 @@ fn packaged_worker_binary_path(directory: &Path, triple: &str) -> PathBuf {
     directory.join(format!("mj-worker-{triple}"))
 }
 
+/// Linux exposes an unlinked running executable through `/proc` with a
+/// ` (deleted)` suffix. `current_exe` preserves that suffix, but it is not
+/// part of the executable's real file name and must not leak into sibling
+/// lookup after `cargo` or a package upgrade replaces the controller.
+fn running_executable_file_name(controller: &Path) -> Option<std::ffi::OsString> {
+    let name = controller.file_name()?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        if let Some(name) = name.as_bytes().strip_suffix(b" (deleted)") {
+            return Some(std::ffi::OsString::from_vec(name.to_vec()));
+        }
+    }
+    Some(name.to_os_string())
+}
+
 /// File names a worker binary may carry when it sits beside the controller or
 /// in a development sibling directory. The controller's own file name comes
 /// first (after the 2.0 rename that is `mj`), then the legacy `hel` name that
@@ -631,8 +656,8 @@ fn packaged_worker_binary_path(directory: &Path, triple: &str) -> PathBuf {
 fn worker_sibling_names(controller: &Path) -> Vec<std::ffi::OsString> {
     use std::ffi::OsString;
     let mut names = Vec::new();
-    if let Some(own) = controller.file_name() {
-        names.push(own.to_os_string());
+    if let Some(own) = running_executable_file_name(controller) {
+        names.push(own);
     }
     let legacy = OsString::from("hel");
     if !names.contains(&legacy) {
@@ -673,12 +698,24 @@ fn select_sibling_worker(
             ));
         }
     }
-    // Worker installed in the controller's own directory (released layout,
-    // including the legacy `hel` name).
-    for name in &names {
+    // A legacy package may put an `hel`-named worker beside an `mj`
+    // controller. Never select the controller's own same-directory path: on
+    // glibc Linux that is not a portable worker, and after an upgrade it is
+    // the replacement controller rather than the still-running executable.
+    let controller_name = running_executable_file_name(controller);
+    for name in names
+        .iter()
+        .filter(|name| Some(name.as_os_str()) != controller_name.as_deref())
+    {
         candidates.push((directory.join(name), "beside the running executable"));
     }
     candidates.into_iter().find(|(path, _)| is_file(path))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerBinaryRequirement {
+    PortableLinux,
+    LocalHost,
 }
 
 /// Find a worker source without downloading it.
@@ -688,6 +725,13 @@ fn select_sibling_worker(
 /// expected architecture, so it can recommend a fix without creating a
 /// container or making a network request.
 pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAvailability> {
+    worker_binary_for_arch(arch, WorkerBinaryRequirement::PortableLinux)
+}
+
+fn worker_binary_for_arch(
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+) -> Result<WorkerBinaryAvailability> {
     let triple = format!("{arch}-unknown-linux-musl");
     if let Some(path) = hel::hel_config::env_override_os("WORKER_BINARY").map(PathBuf::from) {
         if !path.is_file() {
@@ -728,7 +772,8 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
             source: source.into(),
         });
     }
-    if cfg!(target_os = "linux")
+    if requirement == WorkerBinaryRequirement::LocalHost
+        && cfg!(target_os = "linux")
         && ((arch == "x86_64" && cfg!(target_arch = "x86_64"))
             || (arch == "aarch64" && cfg!(target_arch = "aarch64")))
     {
@@ -807,7 +852,12 @@ pub(super) fn worker_binary_for(
     executor: &impl CommandExecutor,
 ) -> Result<PathBuf> {
     let arch = target_architecture(locator, executor)?;
-    match worker_binary_prerequisite_for_arch(arch)? {
+    let requirement = if matches!(locator, hel_targets::TargetLocator::LocalBare { .. }) {
+        WorkerBinaryRequirement::LocalHost
+    } else {
+        WorkerBinaryRequirement::PortableLinux
+    };
+    match worker_binary_for_arch(arch, requirement)? {
         WorkerBinaryAvailability::Local { path, .. } => Ok(path),
         WorkerBinaryAvailability::Remote {
             url,
@@ -1746,7 +1796,12 @@ fn worker_binary_refresh_plan(
     if !std::env::current_exe().is_ok_and(|path| path.is_file()) {
         return Ok(None);
     }
-    let source = match worker_binary_prerequisite_for_arch(std::env::consts::ARCH) {
+    let requirement = if matches!(locator, hel_targets::TargetLocator::LocalBare { .. }) {
+        WorkerBinaryRequirement::LocalHost
+    } else {
+        WorkerBinaryRequirement::PortableLinux
+    };
+    let source = match worker_binary_for_arch(std::env::consts::ARCH, requirement) {
         Ok(WorkerBinaryAvailability::Local { path, .. }) => path,
         Ok(WorkerBinaryAvailability::Remote { .. }) | Err(_) => return Ok(None),
     };
@@ -1987,6 +2042,21 @@ pub(super) fn worker_probe_diagnosis(
     worker_root: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    let error = match worker_binary_probe_failure(executor, locator, worker_root) {
+        Some(failure) => error.context(failure),
+        None => error,
+    };
+    match worker_last_words(executor, locator, worker_root) {
+        Some(last_words) => error.context(last_words),
+        None => error,
+    }
+}
+
+fn worker_binary_probe_failure(
+    executor: &impl CommandExecutor,
+    locator: &hel_targets::TargetLocator,
+    worker_root: &str,
+) -> Option<String> {
     let binary = format!("{worker_root}/hel");
     let command = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => {
@@ -2011,22 +2081,26 @@ pub(super) fn worker_probe_diagnosis(
         ),
     }
     .purpose("probe installed worker binary");
-    let error = match executor.execute(&command) {
-        Ok(output) if output.status == 0 => error,
+    match executor.execute(&command) {
+        Ok(output) if output.status == 0 => None,
         Ok(output) => {
-            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            error.context(format!(
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim()
+            } else {
+                "the process exited unsuccessfully without output"
+            };
+            Some(format!(
                 "worker binary {binary} fails to run in the target: {detail}; \
                  if this is a loader/glibc error, provide a musl worker \
                  (cargo build --release --target <arch>-unknown-linux-musl, \
                  or set MJ_WORKER_BINARY/MJ_WORKER_DIR)"
             ))
         }
-        Err(probe_error) => error.context(format!("worker probe failed: {probe_error:#}")),
-    };
-    match worker_last_words(executor, locator, worker_root) {
-        Some(last_words) => error.context(last_words),
-        None => error,
+        Err(probe_error) => Some(format!("worker probe failed: {probe_error:#}")),
     }
 }
 
@@ -2173,6 +2247,32 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replaced_dev_controller_still_finds_its_musl_sibling() {
+        let controller = PathBuf::from("target/debug/mj (deleted)");
+        let musl = PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj");
+        let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
+            path == musl
+        });
+
+        assert_eq!(selected, Some((musl, "development musl sibling")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replaced_dev_controller_never_selects_the_new_glibc_controller_as_its_worker() {
+        let controller = PathBuf::from("target/debug/mj (deleted)");
+        let replacement = PathBuf::from("target/debug/mj");
+        let selected = select_sibling_worker(
+            &controller,
+            "x86_64-unknown-linux-musl",
+            |path| path == replacement,
+        );
+
+        assert_eq!(selected, None);
+    }
+
     #[test]
     fn dev_checkout_still_finds_a_hel_named_sibling() {
         let controller = PathBuf::from("target/debug/hel");
@@ -2193,6 +2293,34 @@ mod tests {
         });
         assert_eq!(selected, Some((legacy, "beside the running executable")));
     }
+
+    #[test]
+    fn worker_diagnosis_surfaces_a_loader_failure_from_the_installed_binary() {
+        struct FailedProbe;
+
+        impl CommandExecutor for FailedProbe {
+            fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+                Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"libc.so.6: version `GLIBC_2.39' not found\n".to_vec(),
+                })
+            }
+        }
+
+        let failure = worker_binary_probe_failure(
+            &FailedProbe,
+            &hel_targets::TargetLocator::LocalBare {
+                worker_root: "/worker/root".into(),
+            },
+            "/worker/root",
+        )
+        .expect("an unsuccessful --version probe should explain the dead worker");
+
+        assert!(failure.contains("GLIBC_2.39"), "{failure}");
+        assert!(failure.contains("provide a musl worker"), "{failure}");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn replaced_running_executable_is_materialized_for_worker_upload() {
