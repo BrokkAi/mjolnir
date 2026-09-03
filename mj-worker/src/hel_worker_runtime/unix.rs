@@ -2357,13 +2357,41 @@ pub async fn proxy(root: PathBuf) -> Result<()> {
         .await
         .with_context(|| format!("connect worker at {}", root.display()))?;
     let (socket_read, socket_write) = stream.into_split();
-    forward_proxy_streams(
+    let outcome = forward_proxy_streams(
         tokio::io::stdin(),
         tokio::io::stdout(),
         socket_read,
         socket_write,
     )
-    .await
+    .await;
+
+    // Leave now instead of returning into runtime shutdown. Tokio's global
+    // stdin reader holds a blocking pool thread in a read that cannot be
+    // cancelled, and a client that is waiting for a response keeps the
+    // proxy's stdin open, so dropping the runtime would wait forever. A
+    // proxy whose worker socket is gone has nothing left to carry: the
+    // client must see this process exit and its stdout close, not a live
+    // proxy with no worker behind it.
+    let mut stdout = tokio::io::stdout();
+    if let Err(error) = stdout.flush().await {
+        tracing::debug!(
+            operation = "proxy_flush",
+            %error,
+            "could not flush proxy stdout before exit"
+        );
+    }
+    match outcome {
+        Ok(()) => std::process::exit(0),
+        Err(error) => {
+            // The client reads this proxy's stderr into its own log.
+            tracing::error!(
+                operation = "proxy",
+                error = format!("{error:#}"),
+                "relay proxy stopped with an error"
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Own the ACP bridge's process group.  The daemon communicates only with
