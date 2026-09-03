@@ -8,6 +8,7 @@ fn container_template() -> hel::hel_config::ContainerTemplate {
         cpus: None,
         memory: None,
         environment: BTreeMap::new(),
+        workspace_storage: Default::default(),
     }
 }
 

@@ -1966,6 +1966,7 @@ pub(crate) enum LifecycleSuccess {
 pub(crate) struct LifecycleUpdate {
     pub(crate) session_id: String,
     pub(crate) result: std::result::Result<LifecycleSuccess, String>,
+    pub(crate) deferred_cleanup: bool,
 }
 
 pub(crate) fn interrupted_close_session_ids(controller: &Controller) -> Vec<String> {
@@ -2001,7 +2002,7 @@ pub(crate) fn spawn_interrupted_close_recovery(
     tokio::spawn(async move {
         let operation_session_id = session_id.clone();
         let joined = tokio::task::spawn_blocking(move || {
-            (|| -> Result<()> {
+            (|| -> Result<bool> {
                 let _recovery_reservation = reserve_recovery_or_cancel(
                     &recovery_observer,
                     &operation_session_id,
@@ -2015,17 +2016,21 @@ pub(crate) fn spawn_interrupted_close_recovery(
                     &session_manager,
                 ))
             })()
-            .map(|()| LifecycleSuccess::Closed)
             .map_err(|error| format!("{error:#}"))
         })
         .await;
-        let result = match joined {
-            Ok(result) => result,
-            Err(error) => Err(format!("interrupted close recovery task failed: {error}")),
+        let (result, deferred_cleanup) = match joined {
+            Ok(Ok(deferred_cleanup)) => (Ok(LifecycleSuccess::Closed), deferred_cleanup),
+            Ok(Err(error)) => (Err(error), false),
+            Err(error) => (
+                Err(format!("interrupted close recovery task failed: {error}")),
+                false,
+            ),
         };
         if let Err(error) = updates.send(LifecycleUpdate {
             session_id: session_id.clone(),
             result,
+            deferred_cleanup,
         }) {
             tracing::debug!(%session_id, %error, "interrupted close result dropped after dashboard shutdown");
         }
@@ -2124,6 +2129,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: std::collections::BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );
@@ -2148,6 +2154,7 @@ mod tests {
                 state,
                 target: Some(hel::hel_state::TargetLocator::LocalPodman {
                     container_id: "a".repeat(64),
+                    workspace_storage: Default::default(),
                 }),
                 native_session_id: None,
                 acp_session_title: None,
@@ -2454,6 +2461,7 @@ mod tests {
         let remotes = [
             TargetLocator::LocalPodman {
                 container_id: "podman".into(),
+                workspace_storage: Default::default(),
             },
             TargetLocator::AppleContainer {
                 container_id: "apple".into(),
@@ -2470,6 +2478,7 @@ mod tests {
             TargetLocator::SshPodman {
                 host: "ssh.example".into(),
                 container_id: "remote-podman".into(),
+                workspace_storage: Default::default(),
             },
         ];
         for target in &remotes {

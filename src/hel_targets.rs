@@ -91,7 +91,7 @@ impl ProvisionStage {
             Self::Compacting => "Compact",
             Self::StoppingTarget => "Stop target",
             Self::RemovingContainer => "Remove container",
-            Self::RemovingStorage => "Remove storage",
+            Self::RemovingStorage => "Remove container storage",
             Self::CleaningCache => "Clean cache",
         }
     }
@@ -3242,7 +3242,7 @@ pub fn cleanup_target_is_confirmed_absent(
     executor: &impl CommandExecutor,
 ) -> Result<bool> {
     verify_locator(locator, session_id)?;
-    let (command, is_docker) = match locator {
+    let (command, status_is_answer) = match locator {
         TargetLocator::AppleContainer { .. } => (
             CommandSpec::new("container", ["list", "--all", "--quiet"])
                 .purpose("confirm exact Apple session container is absent"),
@@ -3262,10 +3262,25 @@ pub fn cleanup_target_is_confirmed_absent(
             .purpose("confirm exact Docker session resources are absent"),
             true,
         ),
+        TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage,
+        } => (
+            podman_absence_command(None, container_id, workspace_storage, session_id),
+            true,
+        ),
+        TargetLocator::SshPodman {
+            ssh,
+            container_id,
+            workspace_storage,
+        } => (
+            podman_absence_command(Some(ssh), container_id, workspace_storage, session_id),
+            true,
+        ),
         _ => return Ok(false),
     };
     let output = executor.execute(&command)?;
-    if is_docker {
+    if status_is_answer {
         return match output.status {
             0 => Ok(true),
             1 => Ok(false),
@@ -3290,6 +3305,63 @@ pub fn cleanup_target_is_confirmed_absent(
         unreachable!("engine selected from locator")
     };
     Ok(!listed.lines().any(|id| id.trim() == container_id))
+}
+
+fn podman_absence_command(
+    ssh: Option<&SshTarget>,
+    container_id: &str,
+    workspace_storage: &PodmanWorkspaceLocator,
+    session_id: &str,
+) -> CommandSpec {
+    let storage_check = match workspace_storage {
+        PodmanWorkspaceLocator::ContainerLayer => "exit 0".to_owned(),
+        PodmanWorkspaceLocator::Volume { .. } => r#"podman volume exists "$3"
+case $? in
+    0) exit 1 ;;
+    1) exit 0 ;;
+    *) exit 2 ;;
+esac"#
+            .to_owned(),
+        PodmanWorkspaceLocator::HostPath { helper, .. } => {
+            let helper = join_remote_command(helper);
+            format!(
+                r#"state=$({helper} status "$3") || exit 2
+case $state in
+    absent) exit 0 ;;
+    present) exit 1 ;;
+    *) exit 2 ;;
+esac"#
+            )
+        }
+    };
+    let script = format!(
+        r#"podman container exists "$1"
+case $? in
+    0) exit 1 ;;
+    1) ;;
+    *) exit 2 ;;
+esac
+{storage_check}"#
+    );
+    let storage = match workspace_storage {
+        PodmanWorkspaceLocator::ContainerLayer => "-",
+        PodmanWorkspaceLocator::Volume { name } => name,
+        PodmanWorkspaceLocator::HostPath { resource, .. } => resource,
+    };
+    let args = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        script,
+        "mj-confirm-podman-absent".to_owned(),
+        container_id.to_owned(),
+        session_id.to_owned(),
+        storage.to_owned(),
+    ];
+    match ssh {
+        Some(ssh) => ssh_command_owned(ssh, args),
+        None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+    }
+    .purpose("confirm exact Podman session resources are absent")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3456,7 +3528,8 @@ cleanup() {
     fi
     exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 if identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null); then
     [ "$identity" = "true|$session" ] || {
         echo "refusing foreign Podman volume $volume" >&2
@@ -3493,7 +3566,8 @@ cleanup() {{
     fi
     exit "$status"
 }}
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 state=$({helper} status "$resource")
 case $state in
     absent) {helper} create "$resource" ;;
@@ -3744,7 +3818,7 @@ fn container_run_args(
             PodmanWorkspaceLocator::ContainerLayer => {}
             PodmanWorkspaceLocator::Volume { name } => args.extend([
                 "--volume".to_owned(),
-                format!("{name}:{CONTAINER_WORKSPACE}:rw,U,nocopy"),
+                format!("{name}:{CONTAINER_WORKSPACE}:rw,U"),
             ]),
             PodmanWorkspaceLocator::HostPath { path, .. } => args.extend([
                 "--volume".to_owned(),

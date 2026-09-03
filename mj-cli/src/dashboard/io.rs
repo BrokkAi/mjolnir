@@ -456,7 +456,11 @@ pub(crate) fn spawn_lifecycle_operation(
             work(&mut controller, cancelled)
         })()
         .map_err(|error| format!("{error:#}"));
-        if let Err(error) = updates.send(LifecycleUpdate { session_id, result }) {
+        if let Err(error) = updates.send(LifecycleUpdate {
+            session_id,
+            result,
+            deferred_cleanup: false,
+        }) {
             tracing::debug!(%error, "lifecycle result dropped after dashboard shutdown");
         }
         drop(guard);
@@ -963,7 +967,11 @@ pub(crate) fn spawn_dashboard_create_session(
             })
             .map(|()| LifecycleSuccess::Created)
             .map_err(|error| format!("{error:#}"));
-        if let Err(error) = lifecycle_updates.send(LifecycleUpdate { session_id, result }) {
+        if let Err(error) = lifecycle_updates.send(LifecycleUpdate {
+            session_id,
+            result,
+            deferred_cleanup: false,
+        }) {
             tracing::debug!(%error, "session creation lifecycle result dropped after dashboard shutdown");
         }
         drop(guard);

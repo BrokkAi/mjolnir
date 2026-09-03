@@ -562,6 +562,7 @@ mod tests {
             (
                 hel::hel_state::TargetLocator::LocalPodman {
                     container_id: container_id.clone(),
+                    workspace_storage: Default::default(),
                 },
                 "podman",
             ),

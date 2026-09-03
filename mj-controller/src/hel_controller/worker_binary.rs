@@ -2404,6 +2404,7 @@ mod tests {
             cpus: None,
             memory: None,
             environment: BTreeMap::new(),
+            workspace_storage: Default::default(),
         }
     }
 
@@ -2745,6 +2746,7 @@ mod tests {
             },
             hel_targets::TargetLocator::LocalPodman {
                 container_id: "container-1".into(),
+                workspace_storage: Default::default(),
             },
         ] {
             let executor = RecordingExecutor {
@@ -2879,7 +2881,10 @@ mod tests {
                 },
             ]),
         };
-        let locator = hel_targets::TargetLocator::LocalPodman { container_id };
+        let locator = hel_targets::TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage: Default::default(),
+        };
 
         stop_worker_after_target_recovery(&executor, &locator, session, "/worker/root").unwrap();
 
@@ -2955,6 +2960,7 @@ mod tests {
                     ssh_args: Vec::new(),
                 },
                 container_id: "container-1".into(),
+                workspace_storage: Default::default(),
             },
             digest,
         }
@@ -3090,6 +3096,7 @@ mod tests {
         let container_id = hel_targets::resource_name(session).unwrap();
         let locator = hel_targets::TargetLocator::LocalPodman {
             container_id: container_id.clone(),
+            workspace_storage: Default::default(),
         };
         let executor = RecordingExecutor {
             commands: RefCell::new(Vec::new()),
@@ -3182,6 +3189,7 @@ mod tests {
         };
         let managed = hel_targets::TargetLocator::LocalPodman {
             container_id: "container".into(),
+            workspace_storage: Default::default(),
         };
 
         let mut environment = BTreeMap::new();
@@ -3343,6 +3351,7 @@ mod tests {
         };
         let podman = hel_targets::TargetLocator::LocalPodman {
             container_id: "container".into(),
+            workspace_storage: Default::default(),
         };
 
         assert_eq!(
@@ -3575,6 +3584,7 @@ mod tests {
     fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
         let target = hel_targets::TargetLocator::LocalPodman {
             container_id: "container".into(),
+            workspace_storage: Default::default(),
         };
         for (kind, instructions) in [
             (hel::hel_config::HarnessKind::Codex, "AGENTS.md"),
@@ -3634,6 +3644,7 @@ mod tests {
             staged.path(),
             &hel_targets::TargetLocator::LocalPodman {
                 container_id: "container".into(),
+                workspace_storage: Default::default(),
             },
         )
         .unwrap();

@@ -954,6 +954,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );
@@ -1326,6 +1327,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );

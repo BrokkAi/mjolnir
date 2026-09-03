@@ -742,7 +742,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
     assert!(
         create
             .args
-            .contains(&format!("{volume}:{CONTAINER_WORKSPACE}:rw,U,nocopy"))
+            .contains(&format!("{volume}:{CONTAINER_WORKSPACE}:rw,U"))
     );
 
     let other =
@@ -767,7 +767,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
     let remote = remote.commands[0].args.last().unwrap();
     assert!(remote.contains("podman volume create"));
     assert!(remote.contains(&volume));
-    assert!(remote.contains("/workspace:rw,U,nocopy"));
+    assert!(remote.contains("/workspace:rw,U"));
 }
 
 #[test]
@@ -1481,6 +1481,63 @@ fn docker_cleanup_confirmation_distinguishes_live_absent_and_unreachable() {
         stderr: b"daemon unavailable".to_vec(),
     }]);
     assert!(cleanup_target_is_confirmed_absent(&locator, SESSION, &unreachable).is_err());
+}
+
+#[test]
+fn podman_cleanup_confirmation_checks_container_and_workspace_storage() {
+    let name = resource_name(SESSION).unwrap();
+    let volume = format!("{name}-workspace");
+    let locator = TargetLocator::LocalPodman {
+        container_id: name,
+        workspace_storage: PodmanWorkspaceLocator::Volume {
+            name: volume.clone(),
+        },
+    };
+    let live = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 1,
+        stdout: vec![],
+        stderr: vec![],
+    }]);
+    assert!(!cleanup_target_is_confirmed_absent(&locator, SESSION, &live).unwrap());
+    let command = &live.seen.borrow()[0];
+    assert_eq!(command.program, "sh");
+    assert!(command.args[1].contains("podman container exists"));
+    assert!(command.args[1].contains("podman volume exists"));
+    assert!(command.args.contains(&volume));
+
+    let absent = PodmanPreflightExecutor::with_outputs([podman_output("")]);
+    assert!(cleanup_target_is_confirmed_absent(&locator, SESSION, &absent).unwrap());
+
+    let unreachable = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 2,
+        stdout: vec![],
+        stderr: b"daemon unavailable".to_vec(),
+    }]);
+    assert!(cleanup_target_is_confirmed_absent(&locator, SESSION, &unreachable).is_err());
+}
+
+#[test]
+fn remote_podman_cleanup_confirmation_uses_the_recorded_helper_resource() {
+    let name = resource_name(SESSION).unwrap();
+    let resource = format!("{name}-workspace");
+    let locator = TargetLocator::SshPodman {
+        ssh: ssh(),
+        container_id: name,
+        workspace_storage: PodmanWorkspaceLocator::HostPath {
+            path: format!("/srv/mj-workspaces/{resource}"),
+            helper: vec!["sudo".into(), "-n".into(), "/opt/mj-helper".into()],
+            resource: resource.clone(),
+        },
+    };
+    let absent = PodmanPreflightExecutor::with_outputs([podman_output("")]);
+
+    assert!(cleanup_target_is_confirmed_absent(&locator, SESSION, &absent).unwrap());
+    let command = &absent.seen.borrow()[0];
+    assert_eq!(command.program, "ssh");
+    let remote = command.args.last().unwrap();
+    assert!(remote.contains("'/opt/mj-helper'"));
+    assert!(remote.contains("status"));
+    assert!(remote.contains(&resource));
 }
 
 #[test]

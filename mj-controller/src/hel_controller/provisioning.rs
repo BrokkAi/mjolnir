@@ -2149,6 +2149,7 @@ mod tests {
         let ephemeral = [
             hel_targets::TargetLocator::LocalPodman {
                 container_id: "abcdef012345".into(),
+                workspace_storage: Default::default(),
             },
             hel_targets::TargetLocator::AppleContainer {
                 container_id: "abcdef012346".into(),
@@ -2164,6 +2165,7 @@ mod tests {
             hel_targets::TargetLocator::SshPodman {
                 ssh: ssh.clone(),
                 container_id: "abcdef012347".into(),
+                workspace_storage: Default::default(),
             },
         ];
         for locator in &ephemeral {
@@ -2231,6 +2233,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let yolo = TargetTemplate::SshBare {
@@ -2355,6 +2358,7 @@ mod tests {
             provision_target_creation(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
                 Ok(TargetLocator::LocalPodman {
                     container_id: hel_targets::resource_name(PROVISIONED_SESSION)?,
+                    workspace_storage: Default::default(),
                 })
             })
             .unwrap();

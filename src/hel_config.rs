@@ -1727,6 +1727,53 @@ mod tests {
     }
 
     #[test]
+    fn version_one_podman_config_upgrades_to_isolated_workspace_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "version = 1\n\n[targets.podman]\nkind = \"local-podman\"\nimage = \"ubuntu:24.04\"\n",
+        )
+        .unwrap();
+
+        let config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.version, CONFIG_VERSION);
+        let TargetTemplate::LocalPodman { container } = &config.targets["podman"] else {
+            panic!("version-one Podman target changed kind")
+        };
+        assert_eq!(
+            container.workspace_storage,
+            PodmanWorkspaceStorage::PodmanVolume
+        );
+        assert!(fs::read_to_string(path).unwrap().starts_with("version = 1"));
+    }
+
+    #[test]
+    fn explicit_container_layer_and_host_helper_storage_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = sample_config();
+        if let TargetTemplate::LocalPodman { container } =
+            config.targets.get_mut("podman-default").unwrap()
+        {
+            container.workspace_storage = PodmanWorkspaceStorage::HostHelper {
+                root: PathBuf::from("/srv/mj-workspaces"),
+                helper: vec!["sudo".into(), "-n".into(), "/opt/mj-helper".into()],
+            };
+        }
+        config.save_to(&path).unwrap();
+        assert_eq!(HelConfig::load_from(&path).unwrap(), config);
+
+        if let TargetTemplate::LocalPodman { container } =
+            config.targets.get_mut("podman-default").unwrap()
+        {
+            container.workspace_storage = PodmanWorkspaceStorage::ContainerLayer;
+        }
+        config.save_to(&path).unwrap();
+        assert_eq!(HelConfig::load_from(&path).unwrap(), config);
+    }
+
+    #[test]
     fn local_docker_target_round_trips_with_its_public_kind() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");

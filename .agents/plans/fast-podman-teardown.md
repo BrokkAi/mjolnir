@@ -12,7 +12,7 @@ Stopping a Podman-backed session currently blocks until Podman deletes the conta
 - [x] (2026-09-03 18:00Z) Chose one full-workspace Podman named volume per session as the portable default and a generic host-helper override for ZFS.
 - [x] (2026-09-03 21:10Z) Added version-2 configuration, runtime/durable locators, and schema-22 persistence for Podman workspace storage.
 - [x] (2026-09-03 21:35Z) Provisioned isolated storage for local and SSH Podman targets, including exact identity validation and failed-launch rollback.
-- [ ] Split Podman quiescence from supervised asynchronous storage cleanup and report stages.
+- [x] (2026-09-03 22:35Z) Split Podman quiescence from supervised asynchronous storage cleanup, including restart recovery, visible stages, and bounded shutdown draining.
 - [x] (2026-09-03 21:42Z) Added the optional root-owned ZFS helper example and target planning coverage.
 - [ ] Run focused tests, the full test suite, and clippy; commit coherent validated checkpoints.
 
@@ -26,6 +26,8 @@ Stopping a Podman-backed session currently blocks until Podman deletes the conta
   Evidence: `workspace_for`, clone planning, worker startup, checkpoint export, and restore all use the same container workspace constant.
 - Observation: An mbx build that overlaps source edits can leave stale metadata newer than the edited source even though mbx refuses to cache it.
   Evidence: the core compile began at 15:26:26, source changed at 15:27, and stale `.rmeta` landed at 15:28; reported upstream as mr-boxington discussion 325. This was a build-tool diagnosis only and did not change the storage design.
+- Observation: Podman 4.0 supports the `U` volume option but does not advertise `nocopy`, which appears in current Podman documentation.
+  Evidence: the versioned 4.0 `podman-run(1)` option list includes `U` but not `[no]copy`; the fresh named volume needs no copy suppression.
 
 ## Decision Log
 
@@ -44,7 +46,7 @@ Stopping a Podman-backed session currently blocks until Podman deletes the conta
 
 ## Outcomes & Retrospective
 
-Configuration, persistence, provisioning, rollback, decomposed cleanup plans, and the example helper are implemented. The controller still executes cleanup synchronously, so completion still requires the daemon handoff, observable fast transition to `Stopped`, and full repository validation.
+Configuration, persistence, provisioning, rollback, decomposed cleanup plans, the daemon handoff, and the example helper are implemented. Focused configuration, database, target-planning, controller-lifecycle, and daemon tests pass. Full repository validation and a host-level Podman smoke check remain.
 
 ## Context and Orientation
 
@@ -56,7 +58,7 @@ A quiesced target is a container that is absent or confirmed not running. Deferr
 
 Add a user-facing `PodmanWorkspaceStorage` enum with `podman-volume` as the default, `host-helper { root, helper }`, and explicit `container-layer`. It belongs only to local and SSH Podman target variants. Raise config version to 2 while accepting version 1 and upgrading it in memory. Add a matching runtime storage specification and a durable locator describing the actual volume name or host path. Raise the database schema to 22 and store the locator in a nullable JSON column; null decodes as the legacy container-layer mode.
 
-For default provisioning, derive `<container-resource-name>-workspace`, create it explicitly with Mj ownership/session labels, and mount it at `/workspace` with `rw,U,nocopy`. Wrap storage creation and `podman run` in one guarded target-creation command so existing provisioning rollback semantics remain valid; if `podman run` fails, remove the newly created empty storage before returning failure. Do the equivalent for the host-helper mode. Never fall back silently to the container layer.
+For default provisioning, derive `<container-resource-name>-workspace`, create it explicitly with Mj ownership/session labels, and mount it at `/workspace` with `rw,U`. Wrap storage creation and `podman run` in one guarded target-creation command so existing provisioning rollback semantics remain valid; if `podman run` fails, remove the newly created empty storage before returning failure. Do the equivalent for the host-helper mode. Never fall back silently to the container layer.
 
 Split target close planning into synchronous quiescence and deferred cleanup. Podman quiescence verifies ownership labels, stops the exact container immediately, and verifies it is absent or not running. After the controller persists `Stopped`, the daemon owns the cleanup plan in a supervised task keyed by session ID. Cleanup removes the container before the volume/helper storage, reports each stage and duration, and then removes Git cache state. Resume and permanent deletion wait for same-session cleanup; deterministic labels and names permit idempotent reconciliation after interruption. Non-Podman targets retain their current synchronous close behavior.
 

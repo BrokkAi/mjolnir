@@ -515,6 +515,89 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
 }
 
 #[test]
+fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_layer() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.target = Some(TargetLocator::LocalPodman {
+        container_id: "hel-session-1".into(),
+        workspace_storage: crate::hel_state::PodmanWorkspaceLocator::Volume {
+            name: "hel-session-1-workspace".into(),
+        },
+    });
+
+    save_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"],
+        record
+    );
+
+    let connection = open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE session_targets SET workspace_storage = NULL WHERE session_id = 'session-1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let loaded = load_state_from(&database).unwrap();
+    let Some(TargetLocator::LocalPodman {
+        workspace_storage, ..
+    }) = loaded.sessions["session-1"].target.as_ref()
+    else {
+        panic!("Podman locator changed kind")
+    };
+    assert_eq!(
+        workspace_storage,
+        &crate::hel_state::PodmanWorkspaceLocator::ContainerLayer
+    );
+}
+
+#[test]
+fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.target = Some(TargetLocator::LocalPodman {
+        container_id: "hel-session-1".into(),
+        workspace_storage: crate::hel_state::PodmanWorkspaceLocator::Volume {
+            name: "hel-session-1-workspace".into(),
+        },
+    });
+    save_session_to(&database, &record).unwrap();
+
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE session_targets DROP COLUMN workspace_storage;
+             DELETE FROM schema_migrations WHERE version > 21;
+             PRAGMA user_version = 21;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+
+    let loaded = load_state_from(&database).unwrap();
+    let Some(TargetLocator::LocalPodman {
+        workspace_storage, ..
+    }) = loaded.sessions["session-1"].target.as_ref()
+    else {
+        panic!("Podman locator changed kind")
+    };
+    assert_eq!(
+        workspace_storage,
+        &crate::hel_state::PodmanWorkspaceLocator::ContainerLayer
+    );
+    assert_eq!(
+        open(&database)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn session_and_host_container_size_commit_together_and_latest_wins() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

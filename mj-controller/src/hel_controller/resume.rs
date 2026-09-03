@@ -2033,6 +2033,7 @@ mod tests {
         let syncing = StagedExecutor::new(&executor, ProvisionStage::Syncing);
         let backend = hel_targets::TargetLocator::LocalPodman {
             container_id: "abcdef0123456789".into(),
+            workspace_storage: Default::default(),
         };
 
         upload_checkpoint_spec(
@@ -2188,6 +2189,7 @@ mod tests {
         };
         let partial_target = TargetLocator::LocalPodman {
             container_id: "partial-container".into(),
+            workspace_storage: Default::default(),
         };
         let mut cleaned = previous.clone();
         cleaned.state = SessionState::Error;
@@ -2370,6 +2372,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );

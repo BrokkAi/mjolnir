@@ -1271,6 +1271,7 @@ mod tests {
                 cpus: Some("4".into()),
                 memory: Some("8g".into()),
                 environment: std::collections::BTreeMap::from([("A".into(), "b c".into())]),
+                workspace_storage: Default::default(),
             },
         };
         let hel_targets::TargetTemplate::LocalPodman(container) =
@@ -1295,6 +1296,7 @@ mod tests {
                 cpus: Some("4".into()),
                 memory: Some("8g".into()),
                 environment: std::collections::BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let mut session =
@@ -1378,6 +1380,7 @@ mod tests {
             cpus: None,
             memory: None,
             environment: BTreeMap::new(),
+            workspace_storage: Default::default(),
         }
     }
 
@@ -1551,6 +1554,7 @@ mod tests {
             cpus: None,
             memory: None,
             environment: BTreeMap::new(),
+            workspace_storage: Default::default(),
         };
         let ssh = |host: &str| SshConnection {
             host: host.into(),
@@ -1648,6 +1652,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: std::collections::BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let executor = PreflightExecutor {
@@ -1681,6 +1686,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: std::collections::BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let executor = PreflightExecutor {
@@ -1715,6 +1721,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: std::collections::BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let executor = PreflightExecutor {
@@ -1760,6 +1767,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: std::collections::BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let executor = PreflightExecutor {

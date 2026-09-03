@@ -1905,7 +1905,8 @@ fn viewer_operation(
             // how much the controller tears down behind it.
             crate::daemon::RuntimeLifecycleKind::Close
             | crate::daemon::RuntimeLifecycleKind::ForceStop
-            | crate::daemon::RuntimeLifecycleKind::DestroyStopped => ViewerOperationKind::Stop,
+            | crate::daemon::RuntimeLifecycleKind::DestroyStopped
+            | crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Stop,
         },
         started_at_epoch_seconds: view.started_at_epoch_seconds,
         stages: view

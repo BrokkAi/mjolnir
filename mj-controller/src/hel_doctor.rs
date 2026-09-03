@@ -1504,6 +1504,7 @@ mod tests {
             cpus: None,
             memory: None,
             environment: std::collections::BTreeMap::new(),
+            workspace_storage: Default::default(),
         }
     }
 

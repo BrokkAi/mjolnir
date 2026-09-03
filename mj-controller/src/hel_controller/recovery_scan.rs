@@ -977,6 +977,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let json = serde_json::json!([
@@ -1004,6 +1005,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let session = "0123456789abcdef0123456789abcdef";
