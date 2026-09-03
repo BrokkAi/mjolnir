@@ -55,9 +55,9 @@ the pre-installed Chromium headless shell in
 privileged install and no run-time browser download, and the profiling tools
 `perf`, `cargo-flamegraph`, `samply`, and `heaptrack`; `perf` additionally needs
 the host's `kernel.perf_event_paranoid` set to 1 or lower, or the container run
-with `--cap-add SYS_ADMIN`. Coverage tooling matches the repository's own gate:
-the `llvm-tools-preview` component, `cargo-llvm-cov` pinned to the version in
-`.github/workflows/coverage.yml`, and `lcov` for `genhtml`. It's published at
+with `--cap-add SYS_ADMIN`. Optional local coverage tooling includes the
+`llvm-tools-preview` component, pinned `cargo-llvm-cov`, and `lcov` for
+`genhtml`. It's published at
 `ghcr.io/brokkai/mjolnir/agent-dev:latest`, public and
 multi-arch for both `linux/amd64` and `linux/arm64`, so the same image name
 works whether Mjolnir is running it through Podman, Docker, Apple's `container`

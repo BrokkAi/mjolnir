@@ -33,8 +33,8 @@ COPY --from=node /usr/local/ /usr/local/
 # kernel: it needs `kernel.perf_event_paranoid` <= 1 or the container to be run
 # with `--cap-add SYS_ADMIN`. That is a host setting; nothing in this image can
 # or should change it. `lcov` comes along for `genhtml`, which renders the lcov
-# file the coverage workflow produces; on Debian it only pulls a handful of
-# small pure-Perl modules.
+# files from optional local coverage runs; on Debian it only pulls a handful
+# of small pure-Perl modules.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
@@ -152,14 +152,12 @@ RUN apt-get update \
     && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH" \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
-# Rust profiling and coverage front ends. `cargo install --locked` at pinned
-# versions matches how the rest of this image treats tooling: the version moves
-# only when someone edits these lines. The registry and build caches are dropped
-# afterwards because nothing at run time reads them.
+# Rust profiling and optional coverage front ends. `cargo install --locked` at
+# pinned versions matches how the rest of this image treats tooling: the version
+# moves only when someone edits these lines. The registry and build caches are
+# dropped afterwards because nothing at run time reads them.
 ARG FLAMEGRAPH_VERSION=0.6.14
 ARG SAMPLY_VERSION=0.13.1
-# Mirrors the pin in .github/workflows/coverage.yml; bump both together so a
-# session measures coverage the same way the gate does.
 ARG CARGO_LLVM_COV_VERSION=0.8.7
 RUN cargo install --locked flamegraph@${FLAMEGRAPH_VERSION} \
     && cargo install --locked samply@${SAMPLY_VERSION} \

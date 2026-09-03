@@ -158,9 +158,9 @@ browser tests run without a privileged install or a run-time download,
 and the profiling tools `perf`, `cargo-flamegraph`, `samply`, and `heaptrack`
 (`perf` also needs the host's `kernel.perf_event_paranoid` to be 1 or lower, or
 `--cap-add SYS_ADMIN` on the container).
-Coverage runs in a session too: the image carries the `llvm-tools-preview`
-component, `cargo-llvm-cov` at the version `.github/workflows/coverage.yml`
-pins, and `lcov` for `genhtml`.
+For optional local coverage analysis, the image carries the
+`llvm-tools-preview` component, pinned `cargo-llvm-cov`, and `lcov` for
+`genhtml`.
 See [docs/src/content/docs/custom-images.md](docs/src/content/docs/custom-images.md)
 to build your own.
 

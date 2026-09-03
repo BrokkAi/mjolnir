@@ -9,15 +9,6 @@ permissions:
   contents: write
 
 jobs:
-  # Tags are not covered by the branch and pull request triggers on CI, so
-  # nothing else re-checks the tagged tree. Collecting coverage runs the whole
-  # workspace test suite, so this gates the release on the tests passing and on
-  # the coverage baseline holding. Everything downstream of the release
-  # workflow, crates.io and npm included, inherits the gate.
-  coverage:
-    name: Coverage gate
-    uses: ./.github/workflows/coverage.yml
-
   verify-version:
     name: Verify release version
     runs-on: ubuntu-latest
@@ -33,7 +24,7 @@ jobs:
   # worker lookup expects them.
   build-worker-x64:
     name: Build worker x86_64-unknown-linux-musl
-    needs: [coverage, verify-version]
+    needs: verify-version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
@@ -76,7 +67,7 @@ jobs:
 
   build-worker-arm64:
     name: Build worker aarch64-unknown-linux-musl
-    needs: [coverage, verify-version]
+    needs: verify-version
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6

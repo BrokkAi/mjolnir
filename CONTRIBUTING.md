@@ -140,10 +140,6 @@ reached 144 GiB). Run `scripts/sweep-target.sh` now and then, or before a long
 validation run; it removes artifacts no build has used in 7 days and needs
 `cargo install cargo-sweep --locked`.
 
-The separate LLVM coverage job, local collection commands, 70% production
-module target, and reviewed integration-boundary exceptions are documented in
-[COVERAGE.md](COVERAGE.md).
-
 When changing the voice worker, also run:
 
 ```bash
