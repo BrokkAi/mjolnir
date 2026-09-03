@@ -859,14 +859,6 @@ impl DurableRelay {
                     None,
                 ));
             }
-            RelayRequest::Compact { .. } => {
-                return Ok(relay_error(
-                    RelayErrorCode::InvalidState,
-                    "compaction requests must be handled by the live relay transport",
-                    false,
-                    None,
-                ));
-            }
             RelayRequest::RespondElicitation { .. } => {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,

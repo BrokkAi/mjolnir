@@ -19,6 +19,12 @@ const outputPath = path.resolve(
 // otherwise change without anyone deciding whether an artifact notice is due.
 const auditedStandaloneNotices = new Set(["cfg_aliases/NOTICES.md"]);
 const auditedLinksPackages = new Set([
+  // aws-lc-sys compiles the vendored AWS-LC source. Its nested LICENSE is
+  // byte-identical to the package LICENSE apart from trailing whitespace, so
+  // cargo-about already ships the complete Apache-2.0/ISC attribution. The
+  // safe Rust wrapper links that native library without another payload.
+  "aws-lc-rs",
+  "aws-lc-sys",
   // Desktop system-library bindings and objc2's compiled helper are covered
   // by their Cargo package licenses; they do not embed separate payloads.
   "atk-sys",
@@ -123,7 +129,7 @@ async function checkStandaloneNoticeInventory(metadata) {
 }
 
 async function checkFontInventory() {
-  const fontDirectory = path.join(repositoryRoot, "src", "fonts");
+  const fontDirectory = path.join(repositoryRoot, "mj-controller", "src", "fonts");
   const discovered = (await readdir(fontDirectory))
     .filter((filename) => filename.endsWith(".woff2"))
     .sort();
@@ -240,7 +246,7 @@ async function embeddedFontsNotice() {
   await checkedInLegalFile("licenses/OFL-1.1.md");
   return {
     component: "Embedded web fonts",
-    source: "src/fonts/*.woff2",
+    source: "mj-controller/src/fonts/*.woff2",
     scope: "embedded in the Mjolnir binary and served by the remote viewer",
     text: [
       "The following font software is licensed under the SIL Open Font License 1.1. The complete terms are in OFL-1.1.md.",

@@ -42,10 +42,15 @@ exceptions = [
     # Workspace packages are the GPL-covered project, not generally allowed
     # third-party dependencies.
     { crate = "brokk-mjolnir", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-chat", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-controller", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-core", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-desktop", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-tui", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-voice-worker", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-worker", allow = ["GPL-3.0-only"] },
+    # The utility inference client is the sibling LGPL-covered Anvil library.
+    { crate = "brokk-anvil-llm@0.27.1", allow = ["LGPL-3.0-only"] },
     # MPL applies at file scope. Keep it limited to the reviewed crate.
     { crate = "option-ext@0.2.0", allow = ["MPL-2.0"] },
 

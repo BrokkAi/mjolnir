@@ -45,9 +45,6 @@ const RELAY_HISTORY_TIMEOUT: Duration = Duration::from_secs(900);
 /// worker performs that maintenance before replying, so it needs a deadline
 /// sized for filesystem work rather than ordinary relay bookkeeping.
 const RELAY_ACKNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(300);
-/// A compaction request runs a full model turn in a scratch ACP session, so it
-/// outlives the deadline that suits the relay's bookkeeping calls.
-const RELAY_COMPACT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Capturing a review delta runs Git over every workspace repository, which is
 /// filesystem work on a possibly large tree rather than relay bookkeeping.
 const REVIEW_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -706,19 +703,6 @@ impl RelayClient {
                 ..
             } => bail!("relay accepted command under ID {accepted_id}, expected {command_id}"),
             _ => bail!("relay returned an unexpected command response"),
-        }
-    }
-
-    /// Run a prompt in a disposable ACP session and return its agent text.
-    /// The relay serves this on the connection, so it never becomes session
-    /// history.
-    pub async fn compact(&mut self, prompt: String) -> Result<String> {
-        match self
-            .call_with_timeout(RelayRequest::Compact { prompt }, RELAY_COMPACT_TIMEOUT)
-            .await?
-        {
-            RelayResponsePayload::Compacted { text } => Ok(text),
-            _ => bail!("relay returned an unexpected compaction response"),
         }
     }
 
@@ -2232,17 +2216,17 @@ cat > /dev/null
 
         // The abandoned reply is still in flight. A later call must not read it
         // as its own response, so it fails at once with the real cause. The
-        // compaction deadline is minutes long: without this the controller
-        // would block on someone else's reply.
+        // normal request deadline is long enough that without this the
+        // controller would block on someone else's reply.
         let started = std::time::Instant::now();
-        let compaction = client
-            .compact("summarize".into())
+        let subsequent = client
+            .status()
             .await
             .expect_err("a call on an abandoned connection must fail");
         let elapsed = started.elapsed();
         assert!(
-            format!("{compaction:#}").contains("relay connection abandoned after status timed out"),
-            "{compaction:#}"
+            format!("{subsequent:#}").contains("relay connection abandoned after status timed out"),
+            "{subsequent:#}"
         );
         assert!(
             elapsed < Duration::from_millis(250),

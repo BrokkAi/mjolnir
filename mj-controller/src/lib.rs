@@ -19,5 +19,6 @@ pub mod hel_server;
 pub mod hel_session_manager;
 pub mod hel_setup;
 pub mod hel_tailscale;
+pub mod hel_utility_llm;
 pub mod hel_worker_client;
 pub mod hel_worker_upgrade;

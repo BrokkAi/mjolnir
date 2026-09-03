@@ -15,7 +15,7 @@ use hel::hel_archive::{
     checkpoint_bundle_prerequisites, read_checkpoint_repository_bundles, verify_archive_streaming,
 };
 use hel::hel_checkpoint::{CheckpointRestoreSpec, restore_command};
-use hel::hel_config::{ProjectRepository, mount_history_host};
+use hel::hel_config::{HelConfig, ProjectRepository, mount_history_host};
 use hel::hel_projection::materialized_session_from_canonical;
 use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation, SessionState};
 use hel::hel_targets::{
@@ -754,6 +754,21 @@ impl Controller {
         let context_bytes = profile
             .context_window_bytes
             .unwrap_or(crate::hel_compaction::DEFAULT_CONTEXT_BYTES);
+        let utility_handoff = if same_harness {
+            None
+        } else {
+            let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
+            Some(
+                utility_handoff_while_cancellable(
+                    &self.config,
+                    &canonical_session,
+                    context_bytes,
+                    executor,
+                )
+                .await
+                .context("compact the cross-harness handoff transcript")?,
+            )
+        };
         let discard_queued_prompts = discard_queue || !same_harness;
         // When this controller archived the session, its durable projection is
         // already the archive's content. Reading one row decides that; a read
@@ -1099,18 +1114,13 @@ impl Controller {
                     );
                 }
             } else {
-                // The new harness compacts the prior transcript itself, in a
-                // scratch session on this relay, before its first real prompt.
-                let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
-                let context = compact_while_cancellable(
-                    &canonical_session,
-                    context_bytes,
-                    &mut relay,
-                    executor,
-                )
-                .await
-                .context("compact the cross-harness handoff transcript")?;
-                relay.install_prompt_context(context).await?;
+                relay
+                    .install_prompt_context(
+                        utility_handoff
+                            .clone()
+                            .context("cross-harness resume has no utility-model handoff")?,
+                    )
+                    .await?;
                 if !discard_queue {
                     for prompt in &canonical_session.queued_prompts {
                         // A queued configuration change is replayed as itself;
@@ -1370,26 +1380,34 @@ fn projection_rebuild_required(
     stored != Some((archive_frontier, archive_frontier_digest))
 }
 
-/// Run the cross-harness handoff compaction while still watching for
-/// cancellation. Compaction is several model turns long, so a resume that the
-/// user cancels must not wait it out; dropping the pinned future abandons the
-/// scratch request, and the resume failure path rolls the session back.
-async fn compact_while_cancellable(
+/// Discover a utility model and compact the cross-harness handoff while still
+/// watching for cancellation. Discovery and compaction can both make several
+/// network requests, so a cancelled resume must not wait them out.
+async fn utility_handoff_while_cancellable(
+    config: &HelConfig,
     snapshot: &CanonicalSessionSnapshot,
     context_bytes: usize,
-    backend: &mut impl crate::hel_compaction::CompactionBackend,
     executor: &impl CommandExecutor,
 ) -> Result<String> {
     if executor.cancellation_requested() {
         bail!("operation cancelled while compacting the cross-harness handoff");
     }
-    let compaction = crate::hel_compaction::compact_snapshot(snapshot, context_bytes, backend);
-    tokio::pin!(compaction);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let operation = async {
+        let candidates = crate::hel_utility_llm::UtilityLlmRuntime::shared()
+            .resolve(config, &cancel)
+            .await?;
+        let backend =
+            crate::hel_utility_llm::UtilityCompactionBackend::new(candidates, cancel.clone());
+        crate::hel_compaction::compact_snapshot(snapshot, context_bytes, &backend).await
+    };
+    tokio::pin!(operation);
     loop {
         tokio::select! {
-            context = &mut compaction => return context,
+            context = &mut operation => return context,
             _ = tokio::time::sleep(super::readiness::CANCELLATION_POLL_INTERVAL) => {
                 if executor.cancellation_requested() {
+                    cancel.cancel();
                     bail!("operation cancelled while compacting the cross-harness handoff");
                 }
             }

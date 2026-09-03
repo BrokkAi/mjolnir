@@ -25,6 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
+#[cfg(test)]
+use agent_client_protocol::schema::v1::TextContent;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
@@ -36,7 +38,7 @@ use agent_client_protocol::schema::v1::{
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModeState,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
     StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
-    TextContent, ToolCallUpdateFields, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    ToolCallUpdateFields, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -273,30 +275,6 @@ fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> LoadSession
         .meta(session_request_meta(spec))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProductionCompactionConfig {
-    model: &'static str,
-    effort_option: &'static str,
-    effort: &'static str,
-}
-
-fn production_compaction_config(harness: HarnessKind) -> Option<ProductionCompactionConfig> {
-    match harness {
-        HarnessKind::Codex => Some(ProductionCompactionConfig {
-            model: "gpt-5.6-luna",
-            effort_option: "reasoning_effort",
-            effort: "high",
-        }),
-        HarnessKind::Claude => Some(ProductionCompactionConfig {
-            model: "sonnet 5",
-            effort_option: "effort",
-            effort: "high",
-        }),
-        // Both auto-compact and expose a native `/compact`.
-        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Deepseek => None,
-    }
-}
-
 #[derive(Debug)]
 pub enum CommandRequest {
     Prompt {
@@ -312,10 +290,6 @@ pub enum CommandRequest {
     SetSessionMode {
         request_id: String,
         mode_id: String,
-    },
-    Compact {
-        prompt: String,
-        response: oneshot::Sender<std::result::Result<String, String>>,
     },
     /// Connection-only answer to an in-flight ACP elicitation. The content is
     /// deliberately never put in the durable relay command ledger.
@@ -1057,8 +1031,6 @@ where
     let session_elicitations = pending_elicitations.clone();
     let next_elicitation_id = Arc::new(AtomicU64::new(1));
     let permission_policy = spec.execution_policy;
-    let scratch_outputs = Arc::new(Mutex::new(BTreeMap::<String, String>::new()));
-    let notification_scratch_outputs = scratch_outputs.clone();
     let terminals = TerminalRegistry::new();
     let create_terminals = terminals.clone();
     let output_terminals = terminals.clone();
@@ -1081,20 +1053,6 @@ where
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 notification_activity.mark();
-                let scratch_id = notification.session_id.to_string();
-                {
-                    let mut scratch = notification_scratch_outputs
-                        .lock()
-                        .expect("scratch output lock poisoned");
-                    if let Some(output) = scratch.get_mut(&scratch_id) {
-                        if let SessionUpdate::AgentMessageChunk(chunk) = &notification.update
-                            && let ContentBlock::Text(text) = &chunk.content
-                        {
-                            output.push_str(&text.text);
-                        }
-                        return Ok(());
-                    }
-                }
                 if !notification_session_updates_enabled.load(Ordering::Acquire) {
                     return Ok(());
                 }
@@ -1588,7 +1546,6 @@ where
                 &spec,
                 requests,
                 &events,
-                scratch_outputs,
                 terminals,
                 session_elicitations,
                 opened,
@@ -1656,7 +1613,6 @@ async fn drive_connection(
     spec: &LaunchSpec,
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: &mpsc::Sender<RuntimeEvent>,
-    scratch_outputs: Arc<Mutex<BTreeMap<String, String>>>,
     terminals: TerminalRegistry,
     pending_elicitations: PendingElicitations,
     opened: Arc<Mutex<Option<OpenedSession>>>,
@@ -1672,7 +1628,6 @@ async fn drive_connection(
         spec,
         requests,
         events,
-        scratch_outputs,
         &terminals,
         &pending_elicitations,
         opened,
@@ -1827,10 +1782,6 @@ fn drain_requests_from_the_previous_bridge(requests: &mut mpsc::Receiver<Command
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
             CommandRequest::Close { request_id } => ("Close", Some(request_id)),
             CommandRequest::ResolveElicitation { .. } => ("ResolveElicitation", None),
-            CommandRequest::Compact { response, .. } => {
-                let _ = response.send(Err("ACP bridge restarted before the request ran".into()));
-                ("Compact", None)
-            }
         };
         tracing::debug!(
             operation = "acp_bridge_restart",
@@ -1847,7 +1798,6 @@ async fn serve_session(
     spec: &LaunchSpec,
     requests: &mut mpsc::Receiver<CommandRequest>,
     events: &mpsc::Sender<RuntimeEvent>,
-    scratch_outputs: Arc<Mutex<BTreeMap<String, String>>>,
     terminals: &TerminalRegistry,
     pending_elicitations: &PendingElicitations,
     opened: Arc<Mutex<Option<OpenedSession>>>,
@@ -2292,21 +2242,6 @@ async fn serve_session(
                                 )
                                 .await?;
                             }
-                            Some(CommandRequest::Compact { response, .. }) => {
-                                if response
-                                    .send(Err(
-                                        "cannot compact while the destination prompt is running"
-                                            .into(),
-                                    ))
-                                    .is_err()
-                                {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        operation = "compact_rejected",
-                                        "compaction rejection receiver was already closed"
-                                    );
-                                }
-                            }
                             Some(CommandRequest::ResolveElicitation {
                                 elicitation_id,
                                 response,
@@ -2435,186 +2370,6 @@ async fn serve_session(
                             },
                         )
                         .await?;
-                    }
-                }
-            }
-            CommandRequest::Compact { prompt, response } => {
-                // Compaction is several model turns long. It runs in a scratch
-                // session, so the destination stays idle and the coordinator
-                // keeps serving cancels, closes and rejections meanwhile.
-                let compaction =
-                    compact_in_scratch_session(connection, spec, prompt, &scratch_outputs);
-                tokio::pin!(compaction);
-                let mut response = Some(response);
-                loop {
-                    tokio::select! {
-                        result = &mut compaction => {
-                            if let Some(response) = response.take()
-                                && response
-                                    .send(result.map_err(|error| format!("{error:#}")))
-                                    .is_err()
-                            {
-                                tracing::debug!(
-                                    session_id = %session_id,
-                                    operation = "compact",
-                                    "compaction result receiver was already closed"
-                                );
-                            }
-                            break;
-                        }
-                        command = requests.recv() => match command {
-                            Some(CommandRequest::Cancel {
-                                request_id: cancel_id,
-                                ..
-                            }) => {
-                                apply_cancel(
-                                    connection,
-                                    &session_id,
-                                    cancel_id,
-                                    events,
-                                    terminals,
-                                )
-                                .await?;
-                            }
-                            Some(CommandRequest::Close { request_id: close_id }) => {
-                                if let Some(response) = response.take()
-                                    && response
-                                        .send(Err("session closed during compaction".into()))
-                                        .is_err()
-                                {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        operation = "compact_close",
-                                        "compaction close receiver was already closed"
-                                    );
-                                }
-                                if let Err(error) = connection.send_notification(CancelNotification::new(session_id.clone())) {
-                                    emit_runtime_event(
-                                        events,
-                                        RuntimeEvent::Warning {
-                                            message: format!("cancel ACP prompt before close: {error}"),
-                                        },
-                                    )
-                                    .await?;
-                                }
-                                emit_runtime_event(
-                                    events,
-                                    RuntimeEvent::Warning {
-                                        message: "a compaction was abandoned because the session was closed".into(),
-                                    },
-                                )
-                                .await?;
-                                match connection
-                                    .send_request(CloseSessionRequest::new(session_id.clone()))
-                                    .block_task()
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        emit_runtime_event(
-                                            events,
-                                            RuntimeEvent::CloseApplied {
-                                                request_id: close_id,
-                                            },
-                                        )
-                                        .await?;
-                                    }
-                                    Err(error) => {
-                                        emit_runtime_event(
-                                            events,
-                                            RuntimeEvent::CommandRejected {
-                                                request_id: close_id,
-                                                message: format!("close ACP session: {error}"),
-                                            },
-                                        )
-                                        .await?;
-                                    }
-                                }
-                                return Ok(None);
-                            }
-                            None => {
-                                if let Some(response) = response.take()
-                                    && response
-                                        .send(Err(
-                                            "ACP command channel closed while a compaction was running"
-                                                .into(),
-                                        ))
-                                        .is_err()
-                                {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        operation = "compact_shutdown",
-                                        "compaction shutdown receiver was already closed"
-                                    );
-                                }
-                                connection
-                                    .send_notification(CancelNotification::new(session_id.clone()))
-                                    .context("cancel ACP prompt during runtime shutdown")?;
-                                return Ok(None);
-                            }
-                            Some(CommandRequest::Prompt { request_id, .. }) => {
-                                emit_runtime_event(
-                                    events,
-                                    RuntimeEvent::CommandRejected {
-                                        request_id,
-                                        message: "a compaction is running; retry when it finishes".into(),
-                                    },
-                                )
-                                .await?;
-                            }
-                            Some(CommandRequest::SetConfig { request_id, .. }) => {
-                                emit_runtime_event(
-                                    events,
-                                    RuntimeEvent::CommandRejected {
-                                        request_id,
-                                        message: "configuration can only be changed while the agent is idle".into(),
-                                    },
-                                )
-                                .await?;
-                            }
-                            Some(CommandRequest::SetSessionMode { request_id, .. }) => {
-                                emit_runtime_event(
-                                    events,
-                                    RuntimeEvent::CommandRejected {
-                                        request_id,
-                                        message: "the session mode can only be changed while the agent is idle".into(),
-                                    },
-                                )
-                                .await?;
-                            }
-                            Some(CommandRequest::Compact { response, .. }) => {
-                                if response
-                                    .send(Err("a compaction is already running".into()))
-                                    .is_err()
-                                {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        operation = "compact_rejected",
-                                        "duplicate compaction rejection receiver was already closed"
-                                    );
-                                }
-                            }
-                            Some(CommandRequest::ResolveElicitation {
-                                elicitation_id,
-                                response,
-                                resolved,
-                            }) => {
-                                if resolved
-                                    .send(resolve_pending_elicitation(
-                                        pending_elicitations,
-                                        &elicitation_id,
-                                        response,
-                                    ))
-                                    .is_err()
-                                {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        operation = "resolve_elicitation",
-                                        %elicitation_id,
-                                        "elicitation resolution receiver was already closed"
-                                    );
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -2860,127 +2615,6 @@ pub(crate) fn find_session_config_option<'a>(
             .find(|option| option.category == Some(SessionConfigOptionCategory::Mode)),
         _ => None,
     }
-}
-
-async fn compact_in_scratch_session(
-    connection: &ConnectionTo<Agent>,
-    spec: &LaunchSpec,
-    prompt: String,
-    scratch_outputs: &Arc<Mutex<BTreeMap<String, String>>>,
-) -> Result<String> {
-    let created = connection
-        .send_request(new_session_request(spec, false))
-        .block_task()
-        .await
-        .context("create scratch ACP session")?;
-    let session_id = created.session_id;
-    let enforcement = spec.harness.execution_enforcement(spec.execution_policy);
-    let mut config_options = created.config_options.unwrap_or_default();
-    let mut modes = created.modes;
-    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
-        enforce_execution_mode(
-            connection,
-            &session_id,
-            desired_mode,
-            &mut config_options,
-            &mut modes,
-        )
-        .await?;
-    }
-    configure_production_compactor(connection, &session_id, spec.harness, config_options).await?;
-    scratch_outputs
-        .lock()
-        .expect("scratch output lock poisoned")
-        .insert(session_id.to_string(), String::new());
-    let prompt_result = connection
-        .send_request(PromptRequest::new(
-            session_id.clone(),
-            vec![ContentBlock::Text(TextContent::new(prompt))],
-        ))
-        .block_task()
-        .await;
-    let close_result = connection
-        .send_request(CloseSessionRequest::new(session_id.clone()))
-        .block_task()
-        .await
-        .context("close scratch ACP compaction session");
-    let output = scratch_outputs
-        .lock()
-        .expect("scratch output lock poisoned")
-        .remove(&session_id.to_string())
-        .unwrap_or_default();
-    let prompt_result = prompt_result.context("run scratch ACP compaction prompt");
-    match (prompt_result, close_result) {
-        (Ok(_), Ok(_)) => {}
-        (Err(error), Ok(_)) | (Ok(_), Err(error)) => return Err(error),
-        (Err(error), Err(close_error)) => {
-            return Err(error.context(format!(
-                "also failed to close scratch ACP compaction session: {close_error:#}"
-            )));
-        }
-    }
-    if output.trim().is_empty() {
-        bail!("scratch ACP compaction returned no agent text");
-    }
-    Ok(output)
-}
-
-async fn configure_production_compactor(
-    connection: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    harness: HarnessKind,
-    options: Vec<SessionConfigOption>,
-) -> Result<()> {
-    let Some(config) = production_compaction_config(harness) else {
-        return Ok(());
-    };
-    let model_option = options
-        .iter()
-        .find(|option| {
-            option.id.to_string() == "model"
-                || option.category == Some(SessionConfigOptionCategory::Model)
-        })
-        .context("ACP bridge does not expose a model selector for compaction")?;
-    let response = connection
-        .send_request(SetSessionConfigOptionRequest::new(
-            session_id.clone(),
-            model_option.id.clone(),
-            SessionConfigValueId::new(config.model.to_owned()),
-        ))
-        .block_task()
-        .await
-        .with_context(|| format!("select production compaction model {}", config.model))?;
-    let effort_option = response
-        .config_options
-        .iter()
-        .find(|option| option.id.to_string() == config.effort_option)
-        .with_context(|| {
-            format!(
-                "ACP bridge does not expose compaction effort option {:?}",
-                config.effort_option
-            )
-        })?;
-    ensure!(
-        select_contains(&effort_option.kind, config.effort),
-        "ACP compaction model {} does not support effort {}",
-        config.model,
-        config.effort
-    );
-    connection
-        .send_request(SetSessionConfigOptionRequest::new(
-            session_id.clone(),
-            effort_option.id.clone(),
-            SessionConfigValueId::new(config.effort.to_owned()),
-        ))
-        .block_task()
-        .await
-        .with_context(|| {
-            format!(
-                "select production compaction effort {} for {}",
-                config.effort, config.model
-            )
-        })?;
-    Ok(())
 }
 
 async fn enforce_execution_mode(
