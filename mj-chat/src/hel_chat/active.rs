@@ -335,7 +335,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
             &snapshot.operational.active_agent_terminals,
             &snapshot.materialized,
         );
-        state.set_last_acp_activity(snapshot.operational.last_acp_activity_at_ms);
+        state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
         state.set_session_activity(crate::usage_format::SessionActivity::of(
             &snapshot.operational,
@@ -502,7 +502,7 @@ impl ActiveChat {
                     &snapshot.operational.active_agent_terminals,
                     &snapshot.materialized,
                 );
-                state.set_last_acp_activity(snapshot.operational.last_acp_activity_at_ms);
+                state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
                 state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
                 state.set_session_activity(crate::usage_format::SessionActivity::of(
                     &snapshot.operational,
@@ -2595,6 +2595,7 @@ mod tests {
                     checkpoint_barrier: None,
                     checkpoint_ready: None,
                     last_acp_activity_at_ms: None,
+                    current_step_started_at_ms: None,
                     harness_turn: None,
                     last_harness_turn_started_ordinal: None,
                     background_commands: Vec::new(),
@@ -2773,11 +2774,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .operational
-            .last_acp_activity_at_ms = Some(12_345);
+            .current_step_started_at_ms = Some(12_345);
         assert!(apply_session_view(&mut chat, Ok(first_view)));
         assert_eq!(chat.latest_seq(), 5);
         assert_eq!(chat.entries.len(), 1);
-        assert_eq!(chat.last_acp_activity_at_ms, Some(12_345));
+        assert_eq!(chat.current_step_started_at_ms, Some(12_345));
         assert!(!chat.transcript_loading);
 
         session.applied_event_ordinal = 8;
@@ -2785,7 +2786,7 @@ mod tests {
         assert!(apply_session_view(&mut chat, Ok(managed_view(session))));
         assert_eq!(chat.latest_seq(), 8);
         assert_eq!(chat.entries.len(), 2);
-        assert_eq!(chat.last_acp_activity_at_ms, None);
+        assert_eq!(chat.current_step_started_at_ms, None);
     }
 
     #[test]

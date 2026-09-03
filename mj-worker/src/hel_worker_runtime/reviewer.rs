@@ -598,11 +598,16 @@ impl ReviewerRole {
                 digest: relay.latest_digest().to_owned(),
             }
         };
-        let resume_session = relay
-            .lock()
-            .expect("reviewer relay lock poisoned")
-            .operational_state()
-            .native_session_id;
+        // One acquisition: a guard taken inside the struct literal below
+        // would live until the literal ends and deadlock the next one.
+        let (resume_session, acp_activity, step_clock) = {
+            let relay = relay.lock().expect("reviewer relay lock poisoned");
+            (
+                relay.operational_state().native_session_id,
+                relay.acp_activity_clock(),
+                relay.step_clock(),
+            )
+        };
         let spec = LaunchSpec {
             command: self.placement.worker_executable.clone(),
             args: vec![
@@ -621,10 +626,8 @@ impl ReviewerRole {
             resume_session,
             harness: config.harness,
             execution_policy: config.execution_policy,
-            acp_activity: relay
-                .lock()
-                .expect("reviewer relay lock poisoned")
-                .acp_activity_clock(),
+            acp_activity,
+            step_clock,
         };
 
         let (commands_tx, commands_rx) = mpsc::channel(32);

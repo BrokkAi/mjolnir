@@ -1,0 +1,16 @@
+{"at_ms":118,"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}
+{"at_ms":178,"update":{"sessionUpdate":"session_info_update"}}
+{"at_ms":2918,"update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_0592afc0c1c878bc016a98e578310887d099ed37aa9c8b89c2","content":{"type":"text","text":"I"}}}
+{"at_ms":2918,"update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_0592afc0c1c878bc016a98e578310887d099ed37aa9c8b89c2","content":{"type":"text","text":"\u2019ll"}}}
+{"at_ms":2934,"update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_0592afc0c1c878bc016a98e578310887d099ed37aa9c8b89c2","content":{"type":"text","text":" inspect"}}}
+{"at_ms":5190,"update":{"sessionUpdate":"tool_call","toolCallId":"exec-926168e6-d63e-4d39-a661-1b08b7f98146","status":"in_progress","kind":"read","title":"List files"}}
+{"at_ms":5193,"update":{"sessionUpdate":"tool_call_update","toolCallId":"exec-926168e6-d63e-4d39-a661-1b08b7f98146","status":"completed"}}
+{"at_ms":5210,"update":{"sessionUpdate":"usage_update","used":15944,"size":258400}}
+{"at_ms":10161,"update":{"sessionUpdate":"agent_thought_chunk","messageId":"rs_0592afc0c1c878bc016a98e57e87c887d08f0c1cff1e198caf","content":{"type":"text","text":"\n\n"}}}
+{"at_ms":10161,"update":{"sessionUpdate":"agent_thought_chunk","messageId":"rs_0592afc0c1c878bc016a98e57e87c887d08f0c1cff1e198caf","content":{"type":"text","text":"**Summarizing di"}}}
+{"at_ms":10186,"update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_0592afc0c1c878bc016a98e57f7c9087d08c39bb2e47021055","content":{"type":"text","text":"The"}}}
+{"at_ms":10186,"update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_0592afc0c1c878bc016a98e57f7c9087d08c39bb2e47021055","content":{"type":"text","text":" working"}}}
+{"at_ms":10188,"update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_0592afc0c1c878bc016a98e57f7c9087d08c39bb2e47021055","content":{"type":"text","text":" directory"}}}
+{"at_ms":13800,"update":{"sessionUpdate":"usage_update","used":16464,"size":258400}}
+{"at_ms":13823,"update":{"sessionUpdate":"session_info_update"}}
+{"at_ms":13825,"update":{"sessionUpdate":"session_info_update"}}

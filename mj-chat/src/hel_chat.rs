@@ -411,7 +411,8 @@ pub struct ChatState {
     /// What the session is doing beyond `phase`: the turn the harness started
     /// on its own, and the commands the agent left running.
     session_activity: crate::usage_format::SessionActivity,
-    last_acp_activity_at_ms: Option<u64>,
+    /// When the step the agent is on began, so the pane title can age it.
+    current_step_started_at_ms: Option<u64>,
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
     pub(super) frame_surfaces: FrameSurfaces,
@@ -497,7 +498,7 @@ impl ChatState {
             turn_started_at_epoch_seconds: None,
             prompt_in_flight: snapshot.active_prompt.is_some(),
             session_activity: crate::usage_format::SessionActivity::default(),
-            last_acp_activity_at_ms: None,
+            current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
             frame_surfaces_exclusive: false,
             transcript_selection: None,
@@ -923,8 +924,8 @@ impl ChatState {
         &self.session_activity
     }
 
-    fn set_last_acp_activity(&mut self, timestamp_ms: Option<i64>) {
-        self.last_acp_activity_at_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
+    fn set_current_step_start(&mut self, timestamp_ms: Option<i64>) {
+        self.current_step_started_at_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
     }
 
     /// The full text of the newest agent message recorded after `seq`.

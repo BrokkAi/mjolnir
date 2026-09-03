@@ -9,6 +9,8 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 include = [
     "src/**/*.rs",
+    # Recorded ACP bridge traffic the step-clock tests replay.
+    "src/**/testdata/**/*.jsonl",
     "Cargo.toml",
     "Cargo.lock",
     "README.md",

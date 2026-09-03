@@ -5,8 +5,10 @@
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod dialect;
+pub mod step_clock;
 pub mod surface;
 mod terminal_compat;
+pub use step_clock::StepClock;
 pub use surface::PlanControl;
 pub use terminal_compat::fallback_terminal_tool_call;
 pub(crate) use terminal_compat::fallback_terminal_tool_call_id;
@@ -187,6 +189,9 @@ pub struct LaunchSpec {
     pub harness: HarnessKind,
     pub execution_policy: ExecutionPolicy,
     pub acp_activity: AcpActivityClock,
+    /// When the step the agent is on began. Marked from the same handlers as
+    /// `acp_activity`, but only where a new step actually starts.
+    pub step_clock: StepClock,
 }
 
 fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
@@ -1001,6 +1006,7 @@ where
 {
     let notification_events = events.clone();
     let notification_activity = spec.acp_activity.clone();
+    let notification_step_clock = spec.step_clock.clone();
     let session_update_count = Arc::new(AtomicU64::new(0));
     let notification_session_update_count = session_update_count.clone();
     // A provider may replay the native transcript as `session/update`
@@ -1018,8 +1024,10 @@ where
     let notification_live_tool_calls = live_tool_calls.clone();
     let permission_events = events.clone();
     let permission_activity = spec.acp_activity.clone();
+    let permission_step_clock = spec.step_clock.clone();
     let ext_events = events.clone();
     let ext_activity = spec.acp_activity.clone();
+    let ext_step_clock = spec.step_clock.clone();
     let ext_harness = spec.harness;
     let elicitation_events = events.clone();
     let pending_elicitations = PendingElicitations::default();
@@ -1038,6 +1046,7 @@ where
     let release_terminals = terminals.clone();
     let create_events = events.clone();
     let create_activity = spec.acp_activity.clone();
+    let create_step_clock = spec.step_clock.clone();
     let output_activity = spec.acp_activity.clone();
     let wait_activity = spec.acp_activity.clone();
     let kill_activity = spec.acp_activity.clone();
@@ -1052,6 +1061,7 @@ where
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 notification_activity.mark();
+                notification_step_clock.observe(&notification.update);
                 if !notification_session_updates_enabled.load(Ordering::Acquire) {
                     return Ok(());
                 }
@@ -1079,6 +1089,7 @@ where
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
                 permission_activity.mark();
+                permission_step_clock.begin_client_work();
                 if is_plan_permission(&request) {
                     let id = format!(
                         "plan-review-{}",
@@ -1197,6 +1208,7 @@ where
         .on_receive_request(
             async move |request: CreateTerminalRequest, responder, _cx| {
                 create_activity.mark();
+                create_step_clock.begin_client_work();
                 let started_at_ms = crate::clock::epoch_millis();
                 let spawn = TerminalSpawn {
                     command: request.command.clone(),
@@ -1331,6 +1343,7 @@ where
         .on_receive_request(
             async move |request: agent_client_protocol::UntypedMessage, responder, _cx| {
                 ext_activity.mark();
+                ext_step_clock.begin_client_work();
                 let method = request.method().to_owned();
                 if method == "elicitation/create" {
                     let id = format!(
@@ -1985,6 +1998,7 @@ async fn serve_session(
                     continue;
                 }
                 let updates_before = session_update_count.load(Ordering::Acquire);
+                spec.step_clock.begin_turn();
                 let prompt = connection
                     .send_request(PromptRequest::new(session_id.clone(), prompt))
                     .block_task();
@@ -1995,6 +2009,7 @@ async fn serve_session(
                     tokio::select! {
                         response = &mut prompt => {
                             spec.acp_activity.mark();
+                            spec.step_clock.end_turn();
                             if let Some(mut pending) = pending_steer.take() {
                                 match tokio::time::timeout(
                                     Duration::from_secs(2),

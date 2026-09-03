@@ -66,14 +66,19 @@ impl SessionActivity {
 
 /// The clock columns a wide session row shows: the running turn and its
 /// current step, the background work the session left running, or `[idle]`.
+///
+/// The step is the tool call, message or thought the agent is on now, which
+/// the worker times with [`hel::hel_acp::StepClock`]. A worker too old to
+/// report one leaves the step reading as the whole turn rather than
+/// pretending to a precision it does not have.
 pub fn format_activity_columns(
     now_epoch_seconds: u64,
     current_turn_started_at: Option<u64>,
-    last_acp_activity_at_ms: Option<u64>,
+    current_step_started_at_ms: Option<u64>,
     activity: &SessionActivity,
 ) -> Vec<String> {
     if let Some(turn_started) = current_turn_started_at {
-        let step_started = last_acp_activity_at_ms
+        let step_started = current_step_started_at_ms
             .map(|value| value / 1_000)
             .unwrap_or(turn_started)
             .max(turn_started);
@@ -121,7 +126,7 @@ pub fn format_session_summary(
     queued_prompts: usize,
     now_epoch_seconds: u64,
     current_turn_started_at: Option<u64>,
-    last_acp_activity_at_ms: Option<u64>,
+    current_step_started_at_ms: Option<u64>,
     activity: &SessionActivity,
     profile: &str,
 ) -> String {
@@ -132,7 +137,7 @@ pub fn format_session_summary(
     columns.extend(format_activity_columns(
         now_epoch_seconds,
         current_turn_started_at,
-        last_acp_activity_at_ms,
+        current_step_started_at_ms,
         activity,
     ));
     columns.push(profile.to_owned());
@@ -211,6 +216,32 @@ mod tests {
                 "{label} cell"
             );
         }
+    }
+
+    #[test]
+    fn a_row_reads_its_step_as_the_whole_turn_when_no_step_is_reported() {
+        // A worker too old to time steps sends nothing, and a turn whose
+        // first update has not arrived has no step yet. Both read as the
+        // turn rather than as a step of zero.
+        assert_eq!(
+            format_activity_columns(20_000, Some(17_384), None, &SessionActivity::default()),
+            vec!["Turn 43m36s".to_owned(), "Step 43m36s".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_step_that_predates_its_turn_reads_from_the_turn_start() {
+        // The step clock belongs to the previous turn until the new turn's
+        // first update lands; a row never claims a step older than its turn.
+        assert_eq!(
+            format_activity_columns(
+                20_000,
+                Some(19_900),
+                Some(17_384_000),
+                &SessionActivity::default()
+            ),
+            vec!["Turn 1m40s".to_owned(), "Step 1m40s".to_owned()]
+        );
     }
 
     #[test]

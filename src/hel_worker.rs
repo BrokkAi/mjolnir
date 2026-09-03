@@ -287,6 +287,7 @@ pub struct DurableRelay {
     /// lock-free reader already tolerates.
     journal_generation: u64,
     acp_activity: AcpActivityClock,
+    step_clock: crate::hel_acp::StepClock,
     /// Whether agent output arriving with no prompt in flight opens a turn.
     /// The runtime sets this from the configured harness right after `open`.
     harness_turns: HarnessTurnPolicy,
@@ -449,6 +450,7 @@ impl DurableRelay {
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
             acp_activity: AcpActivityClock::default(),
+            step_clock: crate::hel_acp::StepClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
             background_work: BackgroundWorkPolicy::default(),
             background_exec_cards: BTreeMap::new(),
@@ -529,6 +531,7 @@ impl DurableRelay {
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
+        state.current_step_started_at_ms = self.step_clock.started_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.background_commands = self.background_commands();
         state
@@ -607,6 +610,10 @@ impl DurableRelay {
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {
         self.acp_activity.clone()
+    }
+
+    pub fn step_clock(&self) -> crate::hel_acp::StepClock {
+        self.step_clock.clone()
     }
 
     /// The directory holding this relay's durable state.
@@ -2658,6 +2665,32 @@ mod tests {
 
         let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         assert_eq!(reopened.operational_state().last_acp_activity_at_ms, None);
+    }
+
+    #[test]
+    fn step_clock_is_shared_with_operational_status_but_not_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert_eq!(relay.operational_state().current_step_started_at_ms, None);
+        relay.step_clock().begin_turn();
+        assert!(
+            relay
+                .operational_state()
+                .current_step_started_at_ms
+                .is_some()
+        );
+        relay.step_clock().end_turn();
+        assert_eq!(
+            relay.operational_state().current_step_started_at_ms,
+            None,
+            "a finished turn leaves no step in flight"
+        );
+
+        let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert_eq!(
+            reopened.operational_state().current_step_started_at_ms,
+            None
+        );
     }
 
     #[test]

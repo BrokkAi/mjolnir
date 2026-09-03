@@ -1735,7 +1735,7 @@ fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> String {
             chat.queued_prompts.len(),
             now_epoch_seconds,
             chat.turn_started_at_epoch_seconds,
-            chat.last_acp_activity_at_ms,
+            chat.current_step_started_at_ms,
             chat.session_activity(),
             &chat.header_profile,
         )

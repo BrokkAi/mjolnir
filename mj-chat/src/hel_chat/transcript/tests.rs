@@ -150,7 +150,7 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_header_summary("precision-3260/bifrost-fuzz", "kimi");
     chat.turn_started_at_epoch_seconds = Some(7_847);
-    chat.set_last_acp_activity(Some(20_000_000));
+    chat.set_current_step_start(Some(20_000_000));
 
     assert_eq!(
         transcript_title(&chat, 20_000),

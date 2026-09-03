@@ -913,7 +913,7 @@ fn dashboard_agent_prefixes(now_epoch_seconds: u64, detail: Option<&SessionDetai
     let columns = mj_chat::usage_format::format_activity_columns(
         now_epoch_seconds,
         detail.and_then(|detail| detail.current_turn_started_at),
-        detail.and_then(|detail| detail.last_acp_activity_at_ms),
+        detail.and_then(|detail| detail.current_step_started_at_ms),
         detail.map_or(&*EMPTY_ACTIVITY, |detail| &detail.activity),
     );
     match columns.as_slice() {
@@ -2242,7 +2242,7 @@ mod tests {
     fn dashboard_agent_prefixes_show_active_clocks_and_idle_activity_time() {
         let detail = SessionDetail {
             current_turn_started_at: Some(1_000),
-            last_acp_activity_at_ms: Some(1_297_000),
+            current_step_started_at_ms: Some(1_297_000),
             ..SessionDetail::default()
         };
 

@@ -225,6 +225,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // way out of it — including an error — passes through the pause below.
     // Stopping the reviewer's process group before this worker exits is what
     // keeps a harness from outliving the session it was reviewing for.
+    // One acquisition: a guard taken inside the struct literal below would
+    // live until the literal ends and deadlock the next one.
+    let (acp_activity, step_clock) = {
+        let relay = relay.lock().expect("relay lock poisoned");
+        (relay.acp_activity_clock(), relay.step_clock())
+    };
     let outcome = async {
         let acp_spec = LaunchSpec {
             command: worker_executable,
@@ -242,10 +248,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             resume_session,
             harness: config.harness,
             execution_policy: config.execution_policy,
-            acp_activity: relay
-                .lock()
-                .expect("relay lock poisoned")
-                .acp_activity_clock(),
+            acp_activity,
+            step_clock,
         };
         let mut acp_task = tokio::spawn(hel_acp::run(acp_spec, acp_commands_rx, acp_events_tx));
 

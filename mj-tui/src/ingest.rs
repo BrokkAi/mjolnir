@@ -47,7 +47,8 @@ pub(crate) struct SessionDetail {
     pub(crate) last_user_message: Option<Arc<str>>,
     pub(crate) last_agent_message_follows_last_user: bool,
     pub(crate) latest_agent_activity_after_last_user: Option<Arc<str>>,
-    pub(crate) last_acp_activity_at_ms: Option<u64>,
+    /// When the step the agent is on began, so a row can age it.
+    pub(crate) current_step_started_at_ms: Option<u64>,
     /// What the session is doing beyond its turn clock: the turn the harness
     /// started on its own, and the commands the agent left running.
     pub(crate) activity: mj_chat::usage_format::SessionActivity,
@@ -852,11 +853,11 @@ impl DashboardState {
         true
     }
 
-    pub fn set_last_acp_activity(&mut self, session_id: &str, timestamp_ms: Option<i64>) {
+    pub fn set_current_step_start(&mut self, session_id: &str, timestamp_ms: Option<i64>) {
         self.session_details
             .entry(session_id.to_owned())
             .or_default()
-            .last_acp_activity_at_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
+            .current_step_started_at_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
     }
 
     /// Record what a session is doing beyond its turn clock, so a row can say

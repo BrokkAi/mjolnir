@@ -77,6 +77,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let servers = project_memory_mcp(&spec);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
@@ -124,6 +125,7 @@ fn claude_session_metadata_disables_sandbox_only_for_unconstrained_targets() {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
     assert_eq!(
@@ -548,6 +550,7 @@ async fn answer_to_ext_request(
         harness: HarnessKind::Grok,
         execution_policy,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -698,6 +701,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1075,6 +1079,7 @@ async fn config_change_request(
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1216,6 +1221,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1286,6 +1292,7 @@ async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1397,6 +1404,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1755,6 +1763,7 @@ async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1863,6 +1872,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1986,6 +1996,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2062,6 +2073,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
+            step_clock: crate::hel_acp::StepClock::default(),
         }
     }
 
@@ -2381,6 +2393,7 @@ mod terminals {
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
+            step_clock: crate::hel_acp::StepClock::default(),
         };
         let driver = tokio::spawn(async move {
             drive(
@@ -2903,6 +2916,7 @@ while True:
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
 
@@ -3016,6 +3030,7 @@ while True:
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
 
@@ -3111,6 +3126,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
 
     let error = tokio::time::timeout(
@@ -3160,6 +3176,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
     };
 
     let error = run(spec, request_rx, event_tx).await.unwrap_err();

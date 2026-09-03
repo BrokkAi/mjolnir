@@ -368,8 +368,16 @@ pub struct RelayOperationalState {
     pub active_agent_terminals: Vec<ActiveAgentTerminal>,
     pub checkpoint_barrier: Option<String>,
     pub checkpoint_ready: Option<RelayCursor>,
+    /// When anything at all last arrived over ACP. This is the liveness
+    /// signal — a bridge that has gone quiet — not the step clock: a
+    /// streaming message refreshes it many times a second.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_acp_activity_at_ms: Option<i64>,
+    /// When the step the agent is on began, in epoch milliseconds, while a
+    /// step is in flight. A worker too old to report it leaves this empty and
+    /// the step clock falls back to the turn it belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step_started_at_ms: Option<i64>,
     /// The turn the harness started on its own, while it is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_turn: Option<HarnessTurn>,
@@ -758,6 +766,7 @@ impl RelaySnapshot {
                     digest: digest.clone(),
                 }),
             last_acp_activity_at_ms: None,
+            current_step_started_at_ms: None,
             harness_turn: self.harness_turn.map(|turn| HarnessTurn {
                 started_at_ms: turn.started_at_ms,
             }),

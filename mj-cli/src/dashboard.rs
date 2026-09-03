@@ -1836,13 +1836,13 @@ impl DashboardContext {
                 .snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.materialized.clone());
-            let last_acp_activity_at_ms = update
+            let current_step_started_at_ms = update
                 .view
                 .snapshot
                 .as_ref()
-                .and_then(|snapshot| snapshot.operational.last_acp_activity_at_ms);
+                .and_then(|snapshot| snapshot.operational.current_step_started_at_ms);
             self.dashboard
-                .set_last_acp_activity(&session_id, last_acp_activity_at_ms);
+                .set_current_step_start(&session_id, current_step_started_at_ms);
             // What the session is doing beyond its turn clock: the turn the
             // harness started on its own, and the commands the agent left
             // running after the turn that started them ended.
