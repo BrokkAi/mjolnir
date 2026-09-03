@@ -261,6 +261,12 @@ pub enum Focus {
     Prompt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectionDirection {
+    Up,
+    Down,
+}
+
 /// Tab order, which follows the layout down the screen: Sessions above the
 /// conversation, the composer under it, then the two support panes. Shift-Tab
 /// walks it backwards.
@@ -401,6 +407,10 @@ pub struct DashboardState {
     pub(crate) sessions_scroll: Cell<usize>,
     pub(crate) targets_scroll: Cell<usize>,
     pub(crate) quota_scroll: Cell<usize>,
+    /// The next render keeps one row beyond the selection visible in the
+    /// direction of the latest keyboard or wheel navigation, when it fits.
+    /// This is consumed by that pane's renderer after the movement.
+    pub(crate) scroll_lookahead: Cell<Option<(Focus, SelectionDirection)>>,
     pub(crate) capacity_index: usize,
     pub(crate) quota_index: usize,
     pub(crate) focus: Focus,
@@ -471,6 +481,7 @@ impl DashboardState {
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
+            scroll_lookahead: Cell::new(None),
             capacity_index: 0,
             quota_index: 0,
             focus: Focus::Sessions,
@@ -894,6 +905,7 @@ impl DashboardState {
     fn handle_row_click(&mut self, focus: Focus, index: usize) -> DashboardAction {
         // Clicking a row selects it wherever the dial has left the pane; the
         // grid draws focus and its selection, so there is nothing to open.
+        self.scroll_lookahead.set(None);
         self.focus = focus;
         if focus == Focus::Sessions {
             let clicked = self
@@ -1290,6 +1302,7 @@ impl DashboardState {
     /// Moves the focused list's selection to `index`, counted among the rows
     /// currently on screen.
     fn set_selection_for(&mut self, focus: Focus, index: usize) {
+        self.scroll_lookahead.set(None);
         match focus {
             Focus::Sessions => {
                 let sessions = self.ordered_sessions();
@@ -1325,8 +1338,19 @@ impl DashboardState {
             return;
         }
         let mut index = self.selection_for(focus).min(len.saturating_sub(1));
+        let previous = index;
         move_index(&mut index, len, delta);
         self.set_selection_for(focus, index);
+        if index != previous {
+            self.scroll_lookahead.set(Some((
+                focus,
+                if delta < 0 {
+                    SelectionDirection::Up
+                } else {
+                    SelectionDirection::Down
+                },
+            )));
+        }
     }
 
     pub(crate) fn clamp_selections(&mut self) {

@@ -28,12 +28,83 @@ use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
 use crate::widgets::{focus_border, format_resource_bytes};
 use crate::wizards::{render_new_wizard, render_resume_wizard};
-use crate::{DashboardState, Focus, Mode, SessionOperationKind, SessionsRow};
+use crate::{DashboardState, Focus, Mode, SelectionDirection, SessionOperationKind, SessionsRow};
 
 #[cfg(test)]
 const ACTIVE_MESSAGE_LINES: usize = 4;
 
 const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
+
+/// Move a table viewport just far enough to show the row beyond the selection
+/// in the direction the user moved. Variable-height rows only get that margin
+/// when the selected row and its neighbor fit together.
+fn offset_with_directional_lookahead(
+    current_offset: usize,
+    selected: usize,
+    direction: SelectionDirection,
+    row_heights: &[usize],
+    viewport_height: usize,
+) -> usize {
+    if row_heights.is_empty() || viewport_height == 0 || selected >= row_heights.len() {
+        return current_offset;
+    }
+    let neighbor = match direction {
+        SelectionDirection::Up => selected.checked_sub(1),
+        SelectionDirection::Down => selected
+            .checked_add(1)
+            .filter(|index| *index < row_heights.len()),
+    };
+    let Some(neighbor) = neighbor else {
+        return current_offset;
+    };
+    let pair_start = selected.min(neighbor);
+    let pair_end = selected.max(neighbor);
+    let pair_height = row_heights[pair_start..=pair_end]
+        .iter()
+        .copied()
+        .sum::<usize>();
+    if pair_height > viewport_height {
+        return current_offset;
+    }
+
+    match direction {
+        SelectionDirection::Up => {
+            let offset = current_offset.min(neighbor);
+            if row_heights[offset..=selected]
+                .iter()
+                .copied()
+                .sum::<usize>()
+                <= viewport_height
+            {
+                offset
+            } else {
+                neighbor
+            }
+        }
+        SelectionDirection::Down => {
+            let mut offset = current_offset.min(selected);
+            let mut visible_height = row_heights[offset..=neighbor]
+                .iter()
+                .copied()
+                .sum::<usize>();
+            while offset < selected && visible_height > viewport_height {
+                visible_height = visible_height.saturating_sub(row_heights[offset]);
+                offset += 1;
+            }
+            offset
+        }
+    }
+}
+
+fn take_scroll_lookahead(dashboard: &DashboardState, focus: Focus) -> Option<SelectionDirection> {
+    let pending = dashboard.scroll_lookahead.get();
+    if pending.is_some_and(|(pending_focus, _)| pending_focus == focus) {
+        dashboard.scroll_lookahead.set(None);
+        pending.map(|(_, direction)| direction)
+    } else {
+        None
+    }
+}
 
 #[cfg(test)]
 pub(crate) const SUMMARY_RULE: &str = "─";
@@ -530,6 +601,7 @@ pub(crate) fn render_sessions(
     dashboard: &DashboardState,
 ) -> SessionRowsRendered {
     if dashboard.sessions_compact() {
+        let _ = take_scroll_lookahead(dashboard, Focus::Sessions);
         return render_sessions_grid(frame, area, dashboard);
     }
     let drawn = drawn_session_rows(dashboard, area.width);
@@ -546,13 +618,28 @@ pub(crate) fn render_sessions(
         [Constraint::Min(1)],
     )
     .block(block);
-    let mut state = TableState::default()
-        .with_offset(dashboard.sessions_scroll.get())
-        .with_selected(
-            dashboard
-                .selected_visible_index()
-                .filter(|index| *index < drawn.len()),
+    let selected = dashboard
+        .selected_visible_index()
+        .filter(|index| *index < drawn.len());
+    let mut offset = dashboard.sessions_scroll.get();
+    if let (Some(selected), Some(direction)) =
+        (selected, take_scroll_lookahead(dashboard, Focus::Sessions))
+    {
+        let row_heights = drawn
+            .iter()
+            .map(|row| usize::from(row.content_height().saturating_add(row.spacing)))
+            .collect::<Vec<_>>();
+        offset = offset_with_directional_lookahead(
+            offset,
+            selected,
+            direction,
+            &row_heights,
+            usize::from(area.height.saturating_sub(2)),
         );
+    }
+    let mut state = TableState::default()
+        .with_offset(offset)
+        .with_selected(selected);
     frame.render_stateful_widget(table, area, &mut state);
     // The table scrolled only as far as it had to; remember where it settled
     // so the next frame does not scroll back to the top.
@@ -1331,11 +1418,20 @@ pub(crate) fn render_capacity(frame: &mut Frame, area: Rect, dashboard: &mut Das
             .border_type(focus_border(focused))
             .title(" Targets "),
     );
-    let mut state = TableState::default()
-        .with_offset(dashboard.targets_scroll.get())
-        .with_selected(
-            (!dashboard.capacity_details.is_empty()).then_some(dashboard.capacity_index),
+    let mut offset = dashboard.targets_scroll.get();
+    if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Targets) {
+        let row_heights = vec![1; dashboard.capacity_details.len()];
+        offset = offset_with_directional_lookahead(
+            offset,
+            dashboard.capacity_index,
+            direction,
+            &row_heights,
+            usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
         );
+    }
+    let mut state = TableState::default().with_offset(offset).with_selected(
+        (!dashboard.capacity_details.is_empty()).then_some(dashboard.capacity_index),
+    );
     frame.render_stateful_widget(table, area, &mut state);
     dashboard.targets_scroll.set(state.offset());
     render_session_scrollbar(
@@ -1881,8 +1977,19 @@ pub(crate) fn render_quotas(frame: &mut Frame, area: Rect, dashboard: &mut Dashb
                 .border_type(border_type)
                 .title(title),
         );
+    let mut offset = dashboard.quota_scroll.get();
+    if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Quota) {
+        let row_heights = vec![1; dashboard.config.profiles.len()];
+        offset = offset_with_directional_lookahead(
+            offset,
+            dashboard.quota_index,
+            direction,
+            &row_heights,
+            usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
+        );
+    }
     let mut state = TableState::default()
-        .with_offset(dashboard.quota_scroll.get())
+        .with_offset(offset)
         .with_selected((!dashboard.config.profiles.is_empty()).then_some(dashboard.quota_index));
     frame.render_stateful_widget(table, area, &mut state);
     dashboard.quota_scroll.set(state.offset());
@@ -2004,7 +2111,7 @@ fn refresh_age(now: u64, refreshed: u64) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -2022,6 +2129,27 @@ mod tests {
 
     use crate::ingest::SessionDetail;
     use crate::{DashboardAction, DashboardState, Focus, SessionOperationKind};
+
+    #[test]
+    fn directional_lookahead_reserves_an_adjacent_variable_height_row() {
+        let heights = [2, 3, 4, 2];
+
+        assert_eq!(
+            offset_with_directional_lookahead(0, 1, SelectionDirection::Down, &heights, 7),
+            1,
+            "the row after the selection is brought fully into view"
+        );
+        assert_eq!(
+            offset_with_directional_lookahead(2, 2, SelectionDirection::Up, &heights, 7),
+            1,
+            "the row before the selection is brought fully into view"
+        );
+        assert_eq!(
+            offset_with_directional_lookahead(0, 1, SelectionDirection::Down, &heights, 6),
+            0,
+            "an impossible two-row margin does not displace the selected row"
+        );
+    }
 
     #[test]
     fn grouped_dashboard_has_no_column_header_and_uses_fixed_session_summaries() {
@@ -3675,13 +3803,11 @@ mod tests {
         dashboard
     }
 
-    /// Navigating the Sessions pane scrolls only as far as it must to keep the
-    /// selection on screen. Drawn in a portrait terminal, where the collapsed
-    /// dial keeps the scrolling list rather than the fixed grid. Once a down-arrow has scrolled to reveal a row, an
-    /// up-arrow that lands on a still-visible row must not scroll back — the
-    /// pane only scrolls up again when the selection would leave the top.
+    /// Arrow and wheel navigation leave one row visible beyond the selection
+    /// in their direction. Drawn in a portrait terminal, where the collapsed
+    /// dial keeps the scrolling list rather than the fixed grid.
     #[test]
-    fn the_sessions_pane_scrolls_only_to_keep_the_selection_visible() {
+    fn session_navigation_keeps_the_next_row_in_its_direction_visible() {
         let mut dashboard = scrollable_sessions_dashboard(12);
         // Collapse the project so each session is one line and several show at
         // once — the case where over-scrolling would be visible.
@@ -3690,33 +3816,51 @@ mod tests {
         }
         dashboard.selected_session_id = Some("session-00".into());
 
-        // At the top, no scroll.
         drawn(&mut dashboard, 36, 42);
         assert_eq!(dashboard.sessions_scroll.get(), 0);
 
-        // Arrow down far enough that the pane has to scroll.
-        for _ in 0..9 {
+        for expected in 1..12 {
             dashboard.handle_key(key(KeyCode::Down));
             drawn(&mut dashboard, 36, 42);
+            assert_eq!(dashboard.selected_visible_index(), Some(expected));
+            if expected < 11 {
+                assert!(
+                    dashboard
+                        .session_row_areas
+                        .iter()
+                        .any(|(index, _)| *index == expected + 1),
+                    "Down at {expected} keeps row {} visible: {:?}",
+                    expected + 1,
+                    dashboard.session_row_areas
+                );
+            }
         }
-        let scrolled = dashboard.sessions_scroll.get();
-        assert!(scrolled > 0, "the pane should have scrolled down");
-
-        // One arrow up lands on a row that is still visible, so the pane holds
-        // its position rather than scrolling back toward the top.
-        dashboard.handle_key(key(KeyCode::Up));
+        let bottom_offset = dashboard.sessions_scroll.get();
+        dashboard.handle_key(key(KeyCode::Down));
         drawn(&mut dashboard, 36, 42);
-        assert_eq!(
-            dashboard.sessions_scroll.get(),
-            scrolled,
-            "an up-arrow onto a visible row must not scroll"
-        );
+        assert_eq!(dashboard.sessions_scroll.get(), bottom_offset);
 
-        // Walking all the way back to the first session does scroll up.
-        for _ in 0..11 {
-            dashboard.handle_key(key(KeyCode::Up));
+        for expected in (0..11).rev() {
+            let sessions_area = dashboard.pane_areas.expect("pane areas")[0];
+            dashboard.handle_mouse(mouse_in(MouseEventKind::ScrollUp, sessions_area));
             drawn(&mut dashboard, 36, 42);
+            assert_eq!(dashboard.selected_visible_index(), Some(expected));
+            if expected > 0 {
+                assert!(
+                    dashboard
+                        .session_row_areas
+                        .iter()
+                        .any(|(index, _)| *index == expected - 1),
+                    "wheel up at {expected} keeps row {} visible: {:?}",
+                    expected - 1,
+                    dashboard.session_row_areas
+                );
+            }
         }
+        assert_eq!(dashboard.sessions_scroll.get(), 0);
+        let sessions_area = dashboard.pane_areas.expect("pane areas")[0];
+        dashboard.handle_mouse(mouse_in(MouseEventKind::ScrollUp, sessions_area));
+        drawn(&mut dashboard, 36, 42);
         assert_eq!(dashboard.sessions_scroll.get(), 0);
     }
 
