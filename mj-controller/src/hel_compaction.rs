@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::{Context, Result, ensure};
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{TryStreamExt, stream};
 use serde_json::Value;
 
 use hel::hel_archive::{CanonicalSessionSnapshot, CanonicalTranscriptBody};
@@ -24,7 +24,11 @@ pub const LEGACY_HANDOFF_PREAMBLE: &str =
 /// handoff body would only spend budget on a summary of a summary.
 const HANDOFF_PLACEHOLDER: &str =
     "[cross-harness resume handoff: continuing work from a prior harness]";
-const MIN_CONTEXT_BYTES: usize = 32 * 1024;
+pub const MIN_CONTEXT_BYTES: usize = 32 * 1024;
+/// How many summarizer requests run at once. Every page is independent, and
+/// each round of the reduction is independent within itself, so the only
+/// reason to serialize them is politeness to the provider.
+pub const COMPACTION_CONCURRENCY: usize = 8;
 const EXACT_TAIL_TURNS: usize = 2;
 // OpenCode v2 protects 40k estimated tokens of older tool output and only
 // prunes when doing so recovers more than 20k. Hel budgets imports in bytes,
@@ -153,16 +157,38 @@ enum TurnEvent {
     Plan(Value),
 }
 
+/// The two sizes a compaction is bounded by. They are different numbers with
+/// different owners: `page_bytes` is how much transcript the *summarizer* can
+/// read in one request, and `handoff_bytes` is how much text the *target
+/// harness* accepts as its first message. Sizing pages from the target's
+/// budget is what turned one incident's transcript into 65 requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionBudget {
+    pub page_bytes: usize,
+    pub handoff_bytes: usize,
+}
+
+impl CompactionBudget {
+    /// One number for both, for callers and tests that do not distinguish
+    /// the summarizer from the target.
+    pub const fn uniform(bytes: usize) -> Self {
+        Self {
+            page_bytes: bytes,
+            handoff_bytes: bytes,
+        }
+    }
+}
+
 /// Produce the single synthetic handoff turn sent to the target session.
 /// Short transcripts take exactly one model request. Larger inputs are
-/// summarized in bounded pages and reduced as a balanced tree.
+/// summarized in bounded pages and merged in as few requests as fit.
 pub async fn compact_snapshot(
     snapshot: &CanonicalSessionSnapshot,
-    context_bytes: usize,
+    budget: CompactionBudget,
     backend: &impl CompactionBackend,
 ) -> Result<String> {
     ensure!(
-        context_bytes >= MIN_CONTEXT_BYTES,
+        budget.page_bytes >= MIN_CONTEXT_BYTES && budget.handoff_bytes >= MIN_CONTEXT_BYTES,
         "cross-harness context byte budget must be at least {MIN_CONTEXT_BYTES}"
     );
     let turns = turns_from_snapshot(snapshot)?;
@@ -175,10 +201,13 @@ pub async fn compact_snapshot(
         .sum::<usize>();
     let requests = Requests::new(backend);
 
-    if rendered_bytes.saturating_add(page_overhead) <= context_bytes {
+    if rendered_bytes.saturating_add(page_overhead) <= budget.page_bytes {
+        log_compaction_plan(rendered_bytes, 1, budget, true);
         let transcript = render_turns(&compactable_turns, 0);
         match requests.run(page_prompt(&transcript)).await? {
-            RequestOutcome::Summary(summary) => return handoff(&summary, None, context_bytes),
+            RequestOutcome::Summary(summary) => {
+                return handoff(&summary, None, budget.handoff_bytes);
+            }
             // The transcript fit Hel's byte budget but not the model's real
             // context, so fall through to the paged pipeline, whose prompts are
             // strictly smaller. A fatal failure never reaches here.
@@ -191,18 +220,40 @@ pub async fn compact_snapshot(
     // target model can plan the import coherently.
     let user_index = render_user_index(&turns);
     ensure!(
-        user_index.len() <= context_bytes,
+        user_index.len() <= budget.handoff_bytes,
         "too large to import across harnesses: user messages alone exceed the target context byte budget"
     );
 
-    let tail_start = exact_tail_start(&turns, context_bytes);
+    let tail_start = exact_tail_start(&turns, budget.handoff_bytes);
     let head = &compactable_turns[..tail_start];
     let tail = &turns[tail_start..];
-    let page_payload_bytes = context_bytes.saturating_sub(page_overhead).max(1);
-    let summaries = summarize_turn_pages(head, page_payload_bytes, requests).await?;
-    let summary = reduce_summaries(summaries, context_bytes, requests).await?;
+    let page_payload_bytes = budget.page_bytes.saturating_sub(page_overhead).max(1);
+    let pages = build_turn_pages(head, page_payload_bytes);
+    log_compaction_plan(rendered_bytes, pages.len(), budget, false);
+    let summaries = summarize_pages(pages, requests).await?;
+    let summary = reduce_summaries(summaries, budget.page_bytes, requests).await?;
     let exact_tail = (!tail.is_empty()).then(|| render_turns(tail, tail_start));
-    handoff(&summary, exact_tail.as_deref(), context_bytes)
+    handoff(&summary, exact_tail.as_deref(), budget.handoff_bytes)
+}
+
+/// State the plan before spending on it, so a slow compaction can be read out
+/// of the log instead of guessed at. A compaction that starts on the
+/// single-request path and falls through to paging logs both plans, which is
+/// the transition worth seeing.
+fn log_compaction_plan(
+    rendered_bytes: usize,
+    page_count: usize,
+    budget: CompactionBudget,
+    single_request: bool,
+) {
+    tracing::info!(
+        rendered_bytes,
+        page_count,
+        page_bytes = budget.page_bytes,
+        handoff_bytes = budget.handoff_bytes,
+        single_request,
+        "compaction paging decided"
+    );
 }
 
 fn prune_old_tool_outputs(turns: &[Turn]) -> Vec<Turn> {
@@ -248,11 +299,10 @@ fn completed_tool_output_bytes(value: &Value) -> Option<usize> {
     })
 }
 
-async fn summarize_turn_pages<B: CompactionBackend>(
-    turns: &[Turn],
-    limit: usize,
-    requests: Requests<'_, B>,
-) -> Result<Vec<String>> {
+/// Split rendered turns into pages no larger than the summarizer's limit. This
+/// is pure, so the number of requests a compaction will make is known before
+/// the first one is sent.
+fn build_turn_pages(turns: &[Turn], limit: usize) -> Vec<String> {
     let mut pages = Vec::new();
     let mut page = String::new();
     for (index, turn) in turns.iter().enumerate() {
@@ -275,11 +325,18 @@ async fn summarize_turn_pages<B: CompactionBackend>(
     if !page.is_empty() {
         pages.push(page);
     }
+    pages
+}
+
+async fn summarize_pages<B: CompactionBackend>(
+    pages: Vec<String>,
+    requests: Requests<'_, B>,
+) -> Result<Vec<String>> {
     let nested = stream::iter(pages.into_iter().map(|page| {
         let page_requests = requests;
         Ok::<_, anyhow::Error>(async move { summarize_page_adaptively(page, page_requests).await })
     }))
-    .try_buffered(2)
+    .try_buffered(COMPACTION_CONCURRENCY)
     .try_collect::<Vec<_>>()
     .await?;
     let summaries = nested.into_iter().flatten().collect::<Vec<_>>();
@@ -517,8 +574,8 @@ fn rendered_turn_len(turn: &Turn, index: usize) -> usize {
     rendered.len()
 }
 
-fn exact_tail_start(turns: &[Turn], context_bytes: usize) -> usize {
-    let limit = context_bytes / 3;
+fn exact_tail_start(turns: &[Turn], handoff_bytes: usize) -> usize {
+    let limit = handoff_bytes / 3;
     let mut used = 0usize;
     let mut start = turns.len();
     for index in (0..turns.len()).rev().take(EXACT_TAIL_TURNS) {
@@ -575,43 +632,69 @@ fn reduction_prompt(summaries: &[String]) -> String {
     )
 }
 
+/// Group consecutive summaries into as few reduction prompts as the page
+/// budget allows, keeping their order. Merging two at a time costs one request
+/// per pair and one round per level of a binary tree; packing a whole round
+/// into one prompt is what turns 32 dependent requests into one.
+fn pack_reduction_groups(summaries: &[String], page_bytes: usize) -> Result<Vec<Vec<String>>> {
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for summary in summaries {
+        current.push(summary.clone());
+        if reduction_prompt(&current).len() <= page_bytes {
+            continue;
+        }
+        let overflow = current.pop().expect("a summary was just pushed");
+        if !current.is_empty() {
+            groups.push(std::mem::take(&mut current));
+        }
+        current.push(overflow);
+        // One snapshot that cannot be sent on its own can never be merged, so
+        // no smaller grouping exists.
+        ensure!(
+            reduction_prompt(&current).len() <= page_bytes,
+            "compaction response exceeds the target context byte budget"
+        );
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    Ok(groups)
+}
+
 async fn reduce_summaries<B: CompactionBackend>(
     mut summaries: Vec<String>,
-    context_bytes: usize,
+    page_bytes: usize,
     requests: Requests<'_, B>,
 ) -> Result<String> {
     while summaries.len() > 1 {
-        summaries = stream::iter(
-            summaries
-                .chunks(2)
-                .map(|pair| pair.to_vec())
-                .collect::<Vec<_>>(),
-        )
-        .map(|pair| {
-            let pair_requests = requests;
+        let groups = pack_reduction_groups(&summaries, page_bytes)?;
+        // Every group of one passes through untouched, so a round that groups
+        // nothing would repeat forever.
+        ensure!(
+            groups.len() < summaries.len(),
+            "compaction cannot merge these snapshots within the page byte budget"
+        );
+        summaries = stream::iter(groups.into_iter().map(|group| {
+            let group_requests = requests;
             Ok::<_, anyhow::Error>(async move {
-                if pair.len() == 1 {
-                    return Ok(pair[0].clone());
+                if group.len() == 1 {
+                    return Ok(group.into_iter().next().expect("a group is never empty"));
                 }
-                let prompt = reduction_prompt(&pair);
-                ensure!(
-                    prompt.len() <= context_bytes,
-                    "compaction response exceeds the target context byte budget"
-                );
-                match pair_requests.run(prompt).await? {
+                match group_requests.run(reduction_prompt(&group)).await? {
                     RequestOutcome::Summary(summary) => Ok(summary),
                     RequestOutcome::Splittable(error) => Err(error),
                 }
             })
-        })
-        .try_buffered(2)
+        }))
+        .try_buffered(COMPACTION_CONCURRENCY)
         .try_collect::<Vec<_>>()
         .await?;
     }
     summaries.pop().context("compaction produced no summaries")
 }
 
-fn handoff(summary: &str, exact_tail: Option<&str>, context_bytes: usize) -> Result<String> {
+fn handoff(summary: &str, exact_tail: Option<&str>, handoff_bytes: usize) -> Result<String> {
     let mut result = format!(
         "{HANDOFF_PREAMBLE} The restored workspace is authoritative. Use the historical state below for continuity, and do not repeat completed work unless verification requires it.\n\n"
     );
@@ -622,7 +705,7 @@ fn handoff(summary: &str, exact_tail: Option<&str>, context_bytes: usize) -> Res
         result.push_str("</exact_recent_conversation>");
     }
     ensure!(
-        result.len() <= context_bytes,
+        result.len() <= handoff_bytes,
         "compacted handoff exceeds the target context byte budget"
     );
     Ok(result)
@@ -776,9 +859,13 @@ mod tests {
     #[tokio::test]
     async fn short_history_uses_one_compaction_request() {
         let backend = FakeBackend::default();
-        let handoff = compact_snapshot(&exchanges(&[("fix it", "done")]), 64 * 1024, &backend)
-            .await
-            .unwrap();
+        let handoff = compact_snapshot(
+            &exchanges(&[("fix it", "done")]),
+            CompactionBudget::uniform(64 * 1024),
+            &backend,
+        )
+        .await
+        .unwrap();
         assert_eq!(backend.prompts.lock().unwrap().len(), 1);
         assert!(handoff.contains("<state_snapshot>kept</state_snapshot>"));
     }
@@ -792,7 +879,9 @@ mod tests {
             ("latest user", "latest answer"),
         ]);
         let backend = FakeBackend::default();
-        let handoff = compact_snapshot(&input, 32 * 1024, &backend).await.unwrap();
+        let handoff = compact_snapshot(&input, CompactionBudget::uniform(32 * 1024), &backend)
+            .await
+            .unwrap();
         assert!(backend.prompts.lock().unwrap().len() >= 3);
         assert!(handoff.contains("latest user"));
         assert!(handoff.contains("latest answer"));
@@ -809,7 +898,9 @@ mod tests {
         ]);
         let backend = FakeBackend::default();
 
-        compact_snapshot(&input, 32 * 1024, &backend).await.unwrap();
+        compact_snapshot(&input, CompactionBudget::uniform(32 * 1024), &backend)
+            .await
+            .unwrap();
 
         assert!(backend.prompts.lock().unwrap().len() >= 6);
         assert!(
@@ -826,9 +917,13 @@ mod tests {
     async fn a_fatal_backend_failure_surfaces_on_the_first_request() {
         let backend = FailingBackend::new("session/prompt failed: 401 unauthorized");
 
-        let error = compact_snapshot(&exchanges(&[("fix it", "done")]), 64 * 1024, &backend)
-            .await
-            .unwrap_err();
+        let error = compact_snapshot(
+            &exchanges(&[("fix it", "done")]),
+            CompactionBudget::uniform(64 * 1024),
+            &backend,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(
             backend.attempts.load(Ordering::Relaxed),
@@ -844,9 +939,13 @@ mod tests {
         let input = exchanges(&[("first", &large), ("second", &large), ("latest", "answer")]);
         let backend = FailingBackend::new("relay request failed: backend exploded");
 
-        let error = compact_snapshot(&input, DEFAULT_CONTEXT_BYTES, &backend)
-            .await
-            .unwrap_err();
+        let error = compact_snapshot(
+            &input,
+            CompactionBudget::uniform(DEFAULT_CONTEXT_BYTES),
+            &backend,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(
             backend.attempts.load(Ordering::Relaxed),
@@ -865,9 +964,13 @@ mod tests {
             rejections: AtomicUsize::new(0),
         };
 
-        let handoff = compact_snapshot(&input, DEFAULT_CONTEXT_BYTES, &backend)
-            .await
-            .unwrap();
+        let handoff = compact_snapshot(
+            &input,
+            CompactionBudget::uniform(DEFAULT_CONTEXT_BYTES),
+            &backend,
+        )
+        .await
+        .unwrap();
 
         assert!(
             backend.rejections.load(Ordering::Relaxed) >= 3,
@@ -879,7 +982,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn independent_pages_run_with_at_most_two_requests_in_flight() {
+    async fn independent_pages_run_at_the_compaction_concurrency_limit() {
         struct ConcurrentBackend {
             active: AtomicUsize,
             maximum: AtomicUsize,
@@ -900,8 +1003,10 @@ mod tests {
             }
         }
 
+        // Each answer fills a page on its own, so this is more than twice as
+        // many independent requests as the concurrency limit.
         let large = "p".repeat(20 * 1024);
-        let turns = (0..8)
+        let turns = (0..20)
             .map(|index| (format!("prompt {index}"), large.clone()))
             .collect::<Vec<_>>();
         let refs = turns
@@ -913,12 +1018,124 @@ mod tests {
             maximum: AtomicUsize::new(0),
         };
 
-        compact_snapshot(&exchanges(&refs), 32 * 1024, &backend)
-            .await
-            .unwrap();
+        compact_snapshot(
+            &exchanges(&refs),
+            CompactionBudget::uniform(32 * 1024),
+            &backend,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(backend.maximum.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            backend.maximum.load(Ordering::SeqCst),
+            COMPACTION_CONCURRENCY
+        );
         assert_eq!(backend.active.load(Ordering::SeqCst), 0);
+    }
+
+    /// Merging two summaries at a time cost one request per pair and a round
+    /// per level of the tree: 33 pages became 32 further requests, run two at
+    /// a time. Packing a whole round into one prompt is the fix.
+    #[tokio::test]
+    async fn page_summaries_that_fit_one_prompt_reduce_in_a_single_request() {
+        let large = "r".repeat(20 * 1024);
+        let turns = (0..20)
+            .map(|index| (format!("prompt {index}"), large.clone()))
+            .collect::<Vec<_>>();
+        let refs = turns
+            .iter()
+            .map(|(prompt, answer)| (prompt.as_str(), answer.as_str()))
+            .collect::<Vec<_>>();
+        let backend = FakeBackend::default();
+
+        compact_snapshot(
+            &exchanges(&refs),
+            CompactionBudget::uniform(32 * 1024),
+            &backend,
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let pages = prompts
+            .iter()
+            .filter(|prompt| prompt.contains("<historical_transcript>"))
+            .count();
+        let reductions = prompts
+            .iter()
+            .filter(|prompt| prompt.contains("Merge these contiguous historical state snapshots"))
+            .count();
+        assert!(pages >= 16, "the transcript must page: {pages} pages");
+        assert_eq!(
+            reductions, 1,
+            "summaries that fit one prompt merge in one request"
+        );
+    }
+
+    /// The summarizer's window and the target harness's window are unrelated
+    /// numbers. A transcript that fits the summarizer takes one request even
+    /// when the handoff budget is far smaller.
+    #[tokio::test]
+    async fn a_wide_page_budget_summarizes_in_one_request_under_a_small_handoff() {
+        let large = "w".repeat(100 * 1024);
+        let input = exchanges(&[("first", &large), ("second", &large), ("latest", "answer")]);
+        let backend = FakeBackend::default();
+
+        let handoff = compact_snapshot(
+            &input,
+            CompactionBudget {
+                page_bytes: 1024 * 1024,
+                handoff_bytes: MIN_CONTEXT_BYTES,
+            },
+            &backend,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(backend.prompts.lock().unwrap().len(), 1);
+        assert!(handoff.len() <= MIN_CONTEXT_BYTES);
+    }
+
+    #[test]
+    fn reduction_packing_keeps_order_and_fills_each_prompt() {
+        let summaries = (0..6)
+            .map(|index| format!("{index}").repeat(1024))
+            .collect::<Vec<_>>();
+
+        // Room for two of these per prompt, and no more.
+        let prompt_room = reduction_prompt(&summaries[..2]).len();
+        let groups = pack_reduction_groups(&summaries, prompt_room).unwrap();
+
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().all(|group| group.len() == 2));
+        assert_eq!(
+            groups.concat(),
+            summaries,
+            "a reduction must not reorder history"
+        );
+    }
+
+    #[tokio::test]
+    async fn reduction_that_cannot_pack_any_pair_is_an_error() {
+        // A summary that fits a prompt alone but never with a neighbour would
+        // repeat the same round forever.
+        let summaries = vec!["a".repeat(4 * 1024), "b".repeat(4 * 1024)];
+        let single = reduction_prompt(&summaries[..1]).len();
+        let backend = FakeBackend::default();
+
+        let error = reduce_summaries(summaries, single, Requests::new(&backend))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("cannot merge"), "{error}");
+        assert!(backend.prompts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_single_snapshot_too_large_for_its_own_prompt_is_an_error() {
+        let error = pack_reduction_groups(&["z".repeat(64 * 1024)], MIN_CONTEXT_BYTES).unwrap_err();
+
+        assert!(error.to_string().contains("context byte budget"), "{error}");
     }
 
     #[test]
@@ -966,7 +1183,7 @@ mod tests {
 
         let error = compact_snapshot(
             &exchanges(&[("fix it", "done")]),
-            MIN_CONTEXT_BYTES,
+            CompactionBudget::uniform(MIN_CONTEXT_BYTES),
             &OversizeBackend,
         )
         .await

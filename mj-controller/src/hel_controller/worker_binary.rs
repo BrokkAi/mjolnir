@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::hel_session_manager::{
-    ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh, WorkerBinaryRefreshPlan,
-    WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
+    ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh,
+    WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
 };
 use hel::hel_config::{ExecutionPolicy, ProjectBundle, ProjectRepository, atomic_write, data_dir};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
@@ -732,9 +732,21 @@ fn worker_binary_for_arch(
     arch: &str,
     requirement: WorkerBinaryRequirement,
 ) -> Result<WorkerBinaryAvailability> {
+    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
+    worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
+}
+
+/// The lookup itself, with the controller's own path and the file probe passed
+/// in so both can be exercised without the machine they describe.
+fn worker_binary_prerequisite_for_current(
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+    current: &Path,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Result<WorkerBinaryAvailability> {
     let triple = format!("{arch}-unknown-linux-musl");
     if let Some(path) = hel::hel_config::env_override_os("WORKER_BINARY").map(PathBuf::from) {
-        if !path.is_file() {
+        if !is_file(&path) {
             bail!("MJ_WORKER_BINARY is not a file: {}", path.display());
         }
         return Ok(WorkerBinaryAvailability::Local {
@@ -742,7 +754,10 @@ fn worker_binary_for_arch(
             source: "MJ_WORKER_BINARY".into(),
         });
     }
-    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
+    // A rebuilt or renamed checkout leaves a running controller pointing at a
+    // path that no longer holds a binary. Every lookup derived from that path
+    // is meaningless, so remember the fact and skip those lookups.
+    let controller_replaced = !is_file(current);
     let mut candidates = Vec::new();
     if let Some(directory) = hel::hel_config::env_override_os("WORKER_DIR").map(PathBuf::from) {
         candidates.push((
@@ -751,22 +766,26 @@ fn worker_binary_for_arch(
         ));
         candidates.push((directory.join(&triple).join("hel"), "MJ_WORKER_DIR"));
     }
-    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| path.is_file()) {
+    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| is_file(path)) {
         return Ok(WorkerBinaryAvailability::Local {
             path,
             source: source.into(),
         });
     }
+    // The native branches survive a replaced controller: they copy
+    // /proc/self/exe, which still names the running image.
     if cfg!(all(target_os = "linux", target_env = "musl"))
         && ((arch == "x86_64" && cfg!(target_arch = "x86_64"))
             || (arch == "aarch64" && cfg!(target_arch = "aarch64")))
     {
         return Ok(WorkerBinaryAvailability::Local {
-            path: stable_running_executable(&current)?,
+            path: stable_running_executable(current)?,
             source: "native musl mj binary".into(),
         });
     }
-    if let Some((path, source)) = select_sibling_worker(&current, &triple, |path| path.is_file()) {
+    if !controller_replaced
+        && let Some((path, source)) = select_sibling_worker(current, &triple, is_file)
+    {
         return Ok(WorkerBinaryAvailability::Local {
             path,
             source: source.into(),
@@ -778,7 +797,7 @@ fn worker_binary_for_arch(
             || (arch == "aarch64" && cfg!(target_arch = "aarch64")))
     {
         return Ok(WorkerBinaryAvailability::Local {
-            path: stable_running_executable(&current)?,
+            path: stable_running_executable(current)?,
             source: "native Linux mj binary".into(),
         });
     }
@@ -792,9 +811,99 @@ fn worker_binary_for_arch(
             triple,
         });
     }
+    // Telling someone to install a worker beside a binary that is no longer
+    // there sends them looking in the wrong place.
+    ensure!(
+        !controller_replaced,
+        "the running mj binary was replaced or removed on disk ({}); restart the Mjolnir daemon so it runs the current build, then retry",
+        display_path(current)
+    );
     bail!(
         "no Linux worker for {triple}; install mj-worker-{triple} beside mj, set MJ_WORKER_DIR/MJ_WORKER_BINARY, or configure MJ_WORKER_URL and MJ_WORKER_SHA256"
     )
+}
+
+/// Linux appends " (deleted)" to `/proc/<pid>/exe` for a removed image. That
+/// marker belongs in a message but never in a decision, which `is_file` makes.
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    text.strip_suffix(" (deleted)").unwrap_or(&text).to_owned()
+}
+
+/// The architecture a configured template names outright, if it names one. A
+/// container `platform` such as `linux/arm64` decides what the target runs
+/// whatever the controller's own machine is, and it is the only architecture a
+/// configured target template can state: the configured `AwsEc2` variant names
+/// a launch template, whose instance type is only discoverable through the AWS
+/// API.
+fn template_architecture(template: &hel::hel_config::TargetTemplate) -> Option<&'static str> {
+    use hel::hel_config::TargetTemplate as Template;
+    let platform = match template {
+        Template::LocalPodman { container }
+        | Template::LocalDocker { container }
+        | Template::AppleContainer { container }
+        | Template::SshPodman { container, .. } => container.platform.as_deref()?,
+        Template::LocalBare | Template::SshBare { .. } | Template::AwsEc2 { .. } => return None,
+    };
+    // Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
+    platform.split('/').find_map(|part| match part.trim() {
+        "x86_64" | "amd64" => Some("x86_64"),
+        "aarch64" | "arm64" => Some("aarch64"),
+        _ => None,
+    })
+}
+
+/// Architectures a resume must be able to serve, knowing only the configured
+/// template. Provisioning learns the real answer by running `uname -m` on the
+/// live target; a resume has no target yet, so this uses what is knowable
+/// without one: an architecture the template names, else the controller's own
+/// architecture for a target that runs on this machine, else either Linux
+/// architecture for a remote target.
+fn preflight_architectures(template: &hel::hel_config::TargetTemplate) -> Vec<&'static str> {
+    use hel::hel_config::TargetTemplate as Template;
+    if let Some(arch) = template_architecture(template) {
+        return vec![arch];
+    }
+    match template {
+        Template::LocalBare
+        | Template::LocalPodman { .. }
+        | Template::LocalDocker { .. }
+        | Template::AppleContainer { .. } => vec![std::env::consts::ARCH],
+        Template::SshBare { .. } | Template::SshPodman { .. } | Template::AwsEc2 { .. } => {
+            vec!["x86_64", "aarch64"]
+        }
+    }
+}
+
+/// Whether this controller could produce a Linux worker binary for a target
+/// that does not exist yet.
+///
+/// A resume compacts a cross-harness transcript before it provisions anything,
+/// which costs minutes and paid model requests. Resolving the worker binary is
+/// local and takes microseconds, so a resume that could never install a worker
+/// must fail before spending any of that. This downloads nothing: a remote
+/// source counts as available, because fetching it belongs to provisioning.
+pub(super) fn preflight_worker_binary(template: &hel::hel_config::TargetTemplate) -> Result<()> {
+    // Only a bare local target may run the controller's own host binary as
+    // its worker; every other target needs a portable Linux worker.
+    let requirement = if matches!(template, hel::hel_config::TargetTemplate::LocalBare) {
+        WorkerBinaryRequirement::LocalHost
+    } else {
+        WorkerBinaryRequirement::PortableLinux
+    };
+    let mut failure = None;
+    for arch in preflight_architectures(template) {
+        match worker_binary_for_arch(arch, requirement) {
+            Ok(_) => return Ok(()),
+            Err(error) => failure = Some(error),
+        }
+    }
+    match failure {
+        // The message is the one provisioning would have printed later, so the
+        // user reads the same fix, sooner.
+        Some(error) => Err(error).context("preflight the worker binary before resuming"),
+        None => Ok(()),
+    }
 }
 
 fn stable_running_executable(current: &Path) -> Result<PathBuf> {
@@ -1779,15 +1888,17 @@ fn worker_binary_refresh_plan(
             | hel_targets::TargetLocator::SshBare { .. }
             | hel_targets::TargetLocator::SshPodman { .. }
     ) {
-        return Ok(Some(WorkerBinaryRefresh::Remote(RemoteWorkerBinaryRefresh {
-            locator: locator.clone(),
-            session_id: session_id.to_owned(),
-            installed_digest: installed_file_digest_command(
-                locator,
-                &installed,
-                "identify installed Mjolnir worker binary",
-            ),
-        })));
+        return Ok(Some(WorkerBinaryRefresh::Remote(
+            RemoteWorkerBinaryRefresh {
+                locator: locator.clone(),
+                session_id: session_id.to_owned(),
+                installed_digest: installed_file_digest_command(
+                    locator,
+                    &installed,
+                    "identify installed Mjolnir worker binary",
+                ),
+            },
+        )));
     }
     // Local: resolve the source now. Resolving a deleted running executable
     // materializes /proc/self/exe and can copy hundreds of megabytes; target
@@ -1805,15 +1916,17 @@ fn worker_binary_refresh_plan(
         Ok(WorkerBinaryAvailability::Local { path, .. }) => path,
         Ok(WorkerBinaryAvailability::Remote { .. }) | Err(_) => return Ok(None),
     };
-    Ok(Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
-        replace: installed_worker_binary_replacement_plan(locator, session_id, &source)?,
-        source,
-        installed_digest: installed_file_digest_command(
-            locator,
-            &installed,
-            "identify installed Mjolnir worker binary",
-        ),
-    })))
+    Ok(Some(WorkerBinaryRefresh::Prepared(
+        WorkerBinaryRefreshPlan {
+            replace: installed_worker_binary_replacement_plan(locator, session_id, &source)?,
+            source,
+            installed_digest: installed_file_digest_command(
+                locator,
+                &installed,
+                "identify installed Mjolnir worker binary",
+            ),
+        },
+    )))
 }
 
 /// Refresh a remote worker binary during recovery: pick the worker binary for
@@ -2264,13 +2377,122 @@ mod tests {
     fn replaced_dev_controller_never_selects_the_new_glibc_controller_as_its_worker() {
         let controller = PathBuf::from("target/debug/mj (deleted)");
         let replacement = PathBuf::from("target/debug/mj");
-        let selected = select_sibling_worker(
-            &controller,
-            "x86_64-unknown-linux-musl",
-            |path| path == replacement,
-        );
+        let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
+            path == replacement
+        });
 
         assert_eq!(selected, None);
+    }
+
+    /// A configured container template for the preflight tests. Only the
+    /// platform matters here; the rest is the smallest valid template.
+    fn container_template(platform: Option<&str>) -> hel::hel_config::ContainerTemplate {
+        hel::hel_config::ContainerTemplate {
+            image: "example.invalid/mj-test:latest".into(),
+            pull_policy: Default::default(),
+            platform: platform.map(str::to_owned),
+            cpus: None,
+            memory: None,
+            environment: BTreeMap::new(),
+        }
+    }
+
+    fn ssh_connection() -> hel::hel_config::SshConnection {
+        hel::hel_config::SshConnection {
+            host: "builder".into(),
+            user: Some("dev".into()),
+            identity_file: None,
+            extra_args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn preflight_reads_the_architecture_a_template_names() {
+        use hel::hel_config::TargetTemplate;
+
+        for (platform, expected) in [
+            ("linux/arm64", "aarch64"),
+            ("linux/arm64/v8", "aarch64"),
+            ("linux/amd64", "x86_64"),
+            ("aarch64", "aarch64"),
+        ] {
+            assert_eq!(
+                preflight_architectures(&TargetTemplate::LocalPodman {
+                    container: container_template(Some(platform)),
+                }),
+                vec![expected],
+                "platform {platform}"
+            );
+        }
+        // A named platform decides a remote container target too, so a resume
+        // onto an arm64 container never asks about the host's architecture.
+        assert_eq!(
+            preflight_architectures(&TargetTemplate::SshPodman {
+                ssh: ssh_connection(),
+                container: container_template(Some("linux/arm64")),
+            }),
+            vec!["aarch64"]
+        );
+    }
+
+    #[test]
+    fn preflight_uses_the_host_architecture_for_a_local_target() {
+        use hel::hel_config::TargetTemplate;
+
+        for template in [
+            TargetTemplate::LocalBare,
+            TargetTemplate::LocalPodman {
+                container: container_template(None),
+            },
+            TargetTemplate::LocalDocker {
+                container: container_template(None),
+            },
+            TargetTemplate::AppleContainer {
+                container: container_template(None),
+            },
+        ] {
+            assert_eq!(
+                preflight_architectures(&template),
+                vec![std::env::consts::ARCH],
+                "{template:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_accepts_either_linux_architecture_for_a_remote_target() {
+        use hel::hel_config::TargetTemplate;
+
+        // Nothing in the configuration says what a remote machine runs, so the
+        // preflight passes as long as one architecture could be served; the
+        // real architecture is read from the live target during provisioning.
+        for template in [
+            TargetTemplate::SshBare {
+                ssh: ssh_connection(),
+                permissions: hel::hel_config::PermissionMode::Yolo,
+                workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+            },
+            TargetTemplate::SshPodman {
+                ssh: ssh_connection(),
+                container: container_template(None),
+            },
+            TargetTemplate::AwsEc2 {
+                aws_profile: None,
+                region: "us-east-1".into(),
+                launch_template: "lt-mj".into(),
+                launch_template_version: None,
+                ssh_user: "dev".into(),
+                address_source: Default::default(),
+                identity_file: None,
+                ssh_args: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                preflight_architectures(&template),
+                vec!["x86_64", "aarch64"],
+                "{template:?}"
+            );
+        }
     }
 
     #[test]
@@ -2282,6 +2504,151 @@ mod tests {
             present.iter().any(|p| p == path)
         });
         assert_eq!(selected, Some((musl, "development musl sibling")));
+    }
+
+    /// An architecture no host builds for, so the lookup cannot take one of
+    /// the "native mj binary" shortcuts and reaches the end on any machine.
+    const FOREIGN_ARCH: &str = "riscv64";
+
+    /// A rebuilt or renamed checkout leaves a running daemon pointing at a
+    /// path that holds nothing. Searching beside that path finds nothing and
+    /// blames the user for a worker that may well be installed correctly.
+    #[test]
+    fn a_replaced_controller_is_reported_instead_of_a_missing_worker() {
+        let stale = PathBuf::from("/src/.backup-vHXvCs/target/debug/mj (deleted)");
+        let probed = RefCell::new(Vec::new());
+
+        let error = worker_binary_prerequisite_for_current(
+            FOREIGN_ARCH,
+            WorkerBinaryRequirement::PortableLinux,
+            &stale,
+            &|path| {
+                probed.borrow_mut().push(path.to_path_buf());
+                false
+            },
+        )
+        .unwrap_err();
+
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("was replaced or removed on disk"),
+            "{detail}"
+        );
+        assert!(detail.contains("restart the Mjolnir daemon"), "{detail}");
+        // The path is named without the kernel's deletion marker.
+        assert!(
+            detail.contains("/src/.backup-vHXvCs/target/debug/mj)"),
+            "{detail}"
+        );
+        assert!(!detail.contains("(deleted)"), "{detail}");
+        assert_eq!(
+            probed.into_inner(),
+            vec![stale],
+            "nothing beside a path that no longer exists is worth probing"
+        );
+    }
+
+    /// The guard is about a controller path that no longer exists and nothing
+    /// else: a controller still on disk keeps its whole sibling lookup, and
+    /// keeps the plain "no Linux worker" answer when that lookup comes up
+    /// empty. A present controller is never its own portable worker, so with
+    /// nothing installed beside it the lookup ends in that plain answer.
+    #[test]
+    fn a_present_controller_still_looks_beside_itself() {
+        let controller = PathBuf::from("/opt/brokk/mj");
+        let probed = RefCell::new(Vec::new());
+
+        let error = worker_binary_prerequisite_for_current(
+            FOREIGN_ARCH,
+            WorkerBinaryRequirement::PortableLinux,
+            &controller,
+            &|path| {
+                probed.borrow_mut().push(path.to_path_buf());
+                path == controller
+            },
+        )
+        .unwrap_err();
+
+        let probed = probed.into_inner();
+        assert!(
+            probed
+                .iter()
+                .any(|path| path.ends_with("mj-worker-riscv64-unknown-linux-musl")),
+            "the packaged worker name must still be probed: {probed:?}"
+        );
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("no Linux worker for riscv64-unknown-linux-musl"),
+            "{detail}"
+        );
+        assert!(!detail.contains("restart the Mjolnir daemon"), "{detail}");
+
+        // With nothing beside it either, a present controller still gets the
+        // generic message; only a replaced one is told to restart.
+        let root = PathBuf::from("/");
+        let error = worker_binary_prerequisite_for_current(
+            FOREIGN_ARCH,
+            WorkerBinaryRequirement::PortableLinux,
+            &root,
+            &|path| path == root,
+        )
+        .unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("no Linux worker for riscv64-unknown-linux-musl"),
+            "{detail}"
+        );
+        assert!(!detail.contains("restart the Mjolnir daemon"), "{detail}");
+    }
+
+    const WORKER_BINARY_OVERRIDE_CHILD: &str = "MJ_WORKER_BINARY_OVERRIDE_CHILD";
+
+    /// The override names a worker outright, so it does not care where the
+    /// controller lives or whether that path still exists.
+    #[test]
+    fn a_replaced_controller_still_honors_the_worker_binary_override() {
+        // MJ_WORKER_BINARY is process-global and other tests resolve worker
+        // binaries, so set it only in an exact child test.
+        if std::env::var_os(WORKER_BINARY_OVERRIDE_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let worker = directory.path().join("mj-worker");
+            std::fs::write(&worker, b"worker").unwrap();
+            let test_name = format!(
+                "{}::a_replaced_controller_still_honors_the_worker_binary_override",
+                module_path!()
+                    .strip_prefix("mj_controller::")
+                    .unwrap_or(module_path!())
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(WORKER_BINARY_OVERRIDE_CHILD, "1")
+                .env("MJ_WORKER_BINARY", &worker)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated worker override test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let stale = PathBuf::from("/src/.backup-vHXvCs/target/debug/mj (deleted)");
+        let availability = worker_binary_prerequisite_for_current(
+            FOREIGN_ARCH,
+            WorkerBinaryRequirement::PortableLinux,
+            &stale,
+            &|path| path.is_file(),
+        )
+        .unwrap();
+
+        match availability {
+            WorkerBinaryAvailability::Local { source, .. } => {
+                assert_eq!(source, "MJ_WORKER_BINARY");
+            }
+            other => panic!("expected the override to resolve, got {other:?}"),
+        }
     }
 
     #[test]

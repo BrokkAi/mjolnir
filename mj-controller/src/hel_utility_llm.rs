@@ -18,12 +18,18 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use crate::hel_compaction::{CompactionBackend, CompactionFailure};
+use crate::hel_compaction::{
+    CompactionBackend, CompactionFailure, DEFAULT_CONTEXT_BYTES, MIN_CONTEXT_BYTES,
+};
 use crate::hel_quota::{ProfileQuota, QuotaManager, QuotaRefreshRequest};
 use hel::hel_config::{HarnessKind, HarnessProfile, HelConfig};
 
 const QUOTA_FRESH_SECONDS: u64 = 20 * 60;
 const MAX_SUMMARY_BYTES: usize = 8 * 1024;
+/// The largest page this pipeline sends, whatever the model could accept.
+/// Beyond about a megabyte a single request stops being a summary and starts
+/// being a bet, and the pages are already independent and concurrent.
+pub const MAX_PAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UtilityQuotaClass {
@@ -40,6 +46,8 @@ pub struct UtilityCandidate {
     pub quota_class: UtilityQuotaClass,
     pub quota_score: u8,
     pub reasoning_effort: Option<String>,
+    /// How much transcript this model can read in one compaction request.
+    pub page_bytes: usize,
     backend: Arc<dyn LlmBackend>,
 }
 
@@ -52,6 +60,7 @@ impl std::fmt::Debug for UtilityCandidate {
             .field("model", &self.model)
             .field("quota_class", &self.quota_class)
             .field("quota_score", &self.quota_score)
+            .field("page_bytes", &self.page_bytes)
             .finish()
     }
 }
@@ -134,6 +143,7 @@ impl UtilityLlmRuntime {
                 quota_class,
                 quota_score,
                 reasoning_effort,
+                page_bytes: page_bytes_for(profile.kind, metadata),
                 backend,
             });
         }
@@ -189,6 +199,33 @@ impl UtilityCompactionBackend {
             disabled: RwLock::new(BTreeSet::new()),
             cancel,
         }
+    }
+
+    /// How large a page this backend accepts. Any candidate may answer any
+    /// request once an earlier one fails, so the smallest window governs. The
+    /// floor keeps one small-window candidate from failing the whole
+    /// compaction before a single request is sent; a page that model really
+    /// cannot read comes back as an oversize rejection and is split.
+    pub fn page_bytes(&self) -> usize {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.page_bytes)
+            .min()
+            .unwrap_or(DEFAULT_CONTEXT_BYTES)
+            .max(MIN_CONTEXT_BYTES)
+    }
+}
+
+/// How much transcript to send this model in one request. Providers publish a
+/// context window in tokens; four bytes per token is the estimator this
+/// codebase already uses, and half the window is left for the system prompt
+/// and the response. Codex publishes no window at all, and the GPT-5 family's
+/// is far larger than the cap, so it is trusted with a full page.
+fn page_bytes_for(harness: HarnessKind, metadata: &ModelMetadata) -> usize {
+    match metadata.context_length {
+        Some(tokens) => MAX_PAGE_BYTES.min(tokens as usize * 4 / 2),
+        None if harness == HarnessKind::Codex => MAX_PAGE_BYTES,
+        None => DEFAULT_CONTEXT_BYTES,
     }
 }
 
@@ -533,6 +570,75 @@ mod tests {
             model_version_cmp("gpt-5.10-luna", "gpt-5.9-luna"),
             Ordering::Greater
         );
+    }
+
+    fn model_with_window(id: &str, context_length: Option<u32>) -> ModelMetadata {
+        ModelMetadata {
+            context_length,
+            ..ModelMetadata::id_only(id)
+        }
+    }
+
+    #[test]
+    fn page_bytes_follow_the_summarizer_context_window() {
+        // Four bytes per token, half the window left for the prompt and the
+        // response.
+        assert_eq!(
+            page_bytes_for(HarnessKind::Kimi, &model_with_window("k3", Some(400_000))),
+            800_000
+        );
+        assert_eq!(
+            page_bytes_for(HarnessKind::Kimi, &model_with_window("k3", Some(2_000_000))),
+            MAX_PAGE_BYTES,
+            "a huge published window is still capped"
+        );
+        // Codex publishes no window, and the GPT-5 family's is far larger than
+        // the cap.
+        assert_eq!(
+            page_bytes_for(HarnessKind::Codex, &model_with_window("gpt-5.6-luna", None)),
+            MAX_PAGE_BYTES
+        );
+        // Any other backend that publishes nothing keeps the conservative
+        // default.
+        assert_eq!(
+            page_bytes_for(HarnessKind::Grok, &model_with_window("grok-4.6", None)),
+            DEFAULT_CONTEXT_BYTES
+        );
+    }
+
+    #[test]
+    fn backend_page_bytes_take_the_smallest_candidate() {
+        fn candidate(profile_id: &str, page_bytes: usize) -> UtilityCandidate {
+            UtilityCandidate {
+                profile_id: profile_id.into(),
+                harness: HarnessKind::Codex,
+                model: "gpt-5.6-luna".into(),
+                quota_class: UtilityQuotaClass::Healthy,
+                quota_score: 100,
+                reasoning_effort: None,
+                page_bytes,
+                backend: Arc::new(CodexClient::with_auth_path(PathBuf::from("auth.json"))),
+            }
+        }
+
+        // Failover means any candidate may answer any request, so the smallest
+        // window governs the page size.
+        let mixed = UtilityCompactionBackend::new(
+            vec![
+                candidate("wide", MAX_PAGE_BYTES),
+                candidate("narrow", 300_000),
+            ],
+            CancellationToken::new(),
+        );
+        assert_eq!(mixed.page_bytes(), 300_000);
+
+        // A window below the compaction floor would fail the whole compaction
+        // before a request was sent; an oversize page is split instead.
+        let tiny = UtilityCompactionBackend::new(
+            vec![candidate("tiny", 8 * 1024)],
+            CancellationToken::new(),
+        );
+        assert_eq!(tiny.page_bytes(), MIN_CONTEXT_BYTES);
     }
 
     #[test]
