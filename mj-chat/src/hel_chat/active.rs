@@ -2313,7 +2313,7 @@ pub(super) fn render_in(
     if let Some(SecondOpinion::Setup { captured, setup }) = chat.second_opinion() {
         // The waterfall owns the frame's interaction, so the chat behind it
         // stops being selectable while a reviewer is being chosen.
-        let area = centered(inner, 60, 16);
+        let area = crate::hel_modal::centered_modal_rect_fixed(frame, 60, 16, inner);
         let body = render_setup(
             frame,
             area,
@@ -2422,22 +2422,6 @@ fn remembered_value(stored: Option<&str>) -> Option<String> {
     stored
         .filter(|value| *value != hel::hel_second_opinion::HARNESS_DEFAULT_VALUE)
         .map(str::to_owned)
-}
-
-/// A box of at most `width` by `height`, centered in `area`.
-pub(super) fn centered(
-    area: ratatui::layout::Rect,
-    width: u16,
-    height: u16,
-) -> ratatui::layout::Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    ratatui::layout::Rect::new(
-        area.x + (area.width.saturating_sub(width)) / 2,
-        area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    )
 }
 
 /// What the agent left running, named for the composer title. One command is
@@ -2676,9 +2660,15 @@ mod tests {
 
         let popup_top = row_of("Overlaid dialog");
         row_of("Visible dialog message");
-        // The chat underneath still shows through above and below the
-        // dialog's centred popup.
-        assert!(row_of("UNDERLYING CHAT SENTINEL") < popup_top);
+        // The chat underneath still shows through beyond the modal's blank
+        // halo, but content beneath that halo is deliberately obscured.
+        assert!(row_of("Conversation") < popup_top);
+        assert!(row_of("│ UNDER") < popup_top);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("UNDERLYING CHAT SENTINEL"))
+        );
         assert!(row_of("Tab pane") > popup_top);
     }
 

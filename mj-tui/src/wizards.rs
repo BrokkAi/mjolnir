@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use sha2::{Digest, Sha256};
 
 use hel::hel_config::{
@@ -523,12 +523,12 @@ pub(crate) fn render_picker(
 ) {
     let width_percent = if area.width < 64 { 100 } else { 68 };
     let popup = centered_modal(
+        frame,
         surfaces,
         width_percent,
         (choices.len() as u16 + help.len() as u16 + 6).clamp(9, 19),
         area,
     );
-    frame.render_widget(Clear, popup);
     let lines = choices
         .into_iter()
         .enumerate()
@@ -674,8 +674,13 @@ pub(crate) fn render_new_wizard(
             "Enter validates · Backspace on empty goes back · Esc cancels",
             Style::default().fg(Color::Gray),
         ));
-        let popup = centered_modal(surfaces, 76, (lines.len() as u16 + 2).clamp(9, 16), area);
-        frame.render_widget(Clear, popup);
+        let popup = centered_modal(
+            frame,
+            surfaces,
+            76,
+            (lines.len() as u16 + 2).clamp(9, 16),
+            area,
+        );
         frame.render_widget(
             Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(if local {
                 " New session · 3/4 local project "
@@ -699,8 +704,7 @@ pub(crate) fn render_new_wizard(
         return;
     }
     if wizard.step == WizardStep::NewBundle {
-        let popup = centered_modal(surfaces, 76, 9, area);
-        frame.render_widget(Clear, popup);
+        let popup = centered_modal(frame, surfaces, 76, 9, area);
         frame.render_widget(
             Paragraph::new(vec![
                 Line::raw("Local Git path or GitHub owner/repository:"),
@@ -931,8 +935,13 @@ fn render_review_wizard(
     }
     buttons.push((submit_label, focus == ReviewFocus::Submit));
     lines.push(action_buttons(&buttons));
-    let popup = centered_modal(surfaces, 84, (lines.len() as u16 + 2).clamp(13, 24), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        84,
+        (lines.len() as u16 + 2).clamp(13, 24),
+        area,
+    );
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))
@@ -1116,8 +1125,13 @@ fn render_mount_wizard(
         ]),
     ]);
     // One row taller than before the read-only checkbox joined the editor.
-    let popup = centered_modal(surfaces, 84, (lines.len() as u16 + 2).clamp(13, 25), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        84,
+        (lines.len() as u16 + 2).clamp(13, 25),
+        area,
+    );
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))

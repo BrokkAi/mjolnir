@@ -13,7 +13,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use mj_chat::hel_selection::FrameSurfaces;
 
@@ -197,7 +197,7 @@ pub(crate) fn render_help(
 ) {
     let lines = help_lines(dashboard);
     let height = (lines.len() as u16).saturating_add(2).min(area.height);
-    let popup = centered_modal(surfaces, 90, height, area);
+    let popup = centered_modal(frame, surfaces, 90, height, area);
     let paragraph = Paragraph::new(lines)
         .scroll((overlay.scroll as u16, 0))
         .block(
@@ -205,7 +205,6 @@ pub(crate) fn render_help(
                 .borders(Borders::ALL)
                 .title(" Keys · Up/Down scrolls · Esc or F1 closes "),
         );
-    frame.render_widget(Clear, popup);
     frame.render_widget(paragraph, popup);
 }
 

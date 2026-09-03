@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use std::path::PathBuf;
 
@@ -315,8 +315,13 @@ pub(crate) fn render_import_progress(
     )))
     // `trim: false` keeps the padding inside the leftmost button background.
     .wrap(Wrap { trim: false });
-    let popup = centered_modal(surfaces, 76, popup_height(&paragraph, 76, 10, area), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        76,
+        popup_height(&paragraph, 76, 10, area),
+        area,
+    );
     frame.render_widget(paragraph, popup);
 }
 
@@ -393,8 +398,13 @@ pub(crate) fn render_import_bundle_confirmation(
         )
         // `trim: false` keeps the padding inside the leftmost button background.
         .wrap(Wrap { trim: false });
-    let popup = centered_modal(surfaces, 76, popup_height(&paragraph, 76, 12, area), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        76,
+        popup_height(&paragraph, 76, 12, area),
+        area,
+    );
     frame.render_widget(paragraph, popup);
 }
 
@@ -704,8 +714,13 @@ pub(crate) fn render_container_editor(
             .borders(Borders::ALL)
             .title(" Edit container size and mounts "),
     );
-    let popup = centered_modal(surfaces, 70, popup_height(&paragraph, 70, 18, area), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        70,
+        popup_height(&paragraph, 70, 18, area),
+        area,
+    );
     frame.render_widget(paragraph, popup);
 }
 
@@ -734,8 +749,13 @@ pub(crate) fn render_rename_editor(
             .borders(Borders::ALL)
             .title(" Rename session "),
     );
-    let popup = centered_modal(surfaces, 60, popup_height(&paragraph, 60, 8, area), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        60,
+        popup_height(&paragraph, 60, 8, area),
+        area,
+    );
     frame.render_widget(paragraph, popup);
 }
 
@@ -768,8 +788,13 @@ pub(crate) fn render_config_id_editor(
             .borders(Borders::ALL)
             .title(format!(" Rename {} ID ", editor.kind.label())),
     );
-    let popup = centered_modal(surfaces, 60, popup_height(&paragraph, 60, 8, area), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        60,
+        popup_height(&paragraph, 60, 8, area),
+        area,
+    );
     frame.render_widget(paragraph, popup);
 }
 
@@ -843,8 +868,13 @@ pub(crate) fn render_target_actions(
                 .title(" Target actions "),
         )
         .wrap(Wrap { trim: false });
-    let popup = centered_modal(surfaces, 72, popup_height(&paragraph, 72, 12, area), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        72,
+        popup_height(&paragraph, 72, 12, area),
+        area,
+    );
     frame.render_widget(paragraph, popup);
 }
 
@@ -951,8 +981,7 @@ pub(crate) fn render_web_dialog(
     let wrapped =
         u16::try_from(paragraph.line_count(box_width.saturating_sub(2))).unwrap_or(u16::MAX);
     let box_height = wrapped.saturating_add(2).min(inner_area.height);
-    let popup = centered_modal_fixed(surfaces, box_width, box_height, area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal_fixed(frame, surfaces, box_width, box_height, area);
     frame.render_widget(paragraph, popup);
 }
 
@@ -1053,8 +1082,13 @@ pub(crate) fn render_repository_origin(
                 .title(" Repository history is missing "),
         )
         .wrap(Wrap { trim: false });
-    let popup = centered_modal(surfaces, 76, popup_height(&paragraph, 76, 14, area), area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(
+        frame,
+        surfaces,
+        76,
+        popup_height(&paragraph, 76, 14, area),
+        area,
+    );
     frame.render_widget(paragraph, popup);
 }
 
@@ -1207,12 +1241,12 @@ pub(crate) fn render_confirmation(
         // `trim: false` keeps the padding inside the leftmost button background.
         .wrap(Wrap { trim: false });
     let popup = centered_modal(
+        frame,
         surfaces,
         72,
         popup_height(&paragraph, 72, nominal, area),
         area,
     );
-    frame.render_widget(Clear, popup);
     frame.render_widget(paragraph, popup);
 }
 

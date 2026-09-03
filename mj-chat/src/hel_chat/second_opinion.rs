@@ -598,7 +598,6 @@ pub(super) fn render_setup(
         .title(" Choose a reviewer ")
         .border_style(Style::default().fg(Color::LightMagenta));
     let inner = block.inner(area);
-    frame.render_widget(ratatui::widgets::Clear, area);
     frame.render_widget(block, area);
 
     let mut lines = vec![

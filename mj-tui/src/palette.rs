@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
@@ -261,8 +261,7 @@ pub(crate) fn render_palette(
     palette: &CommandPalette,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(surfaces, 72, 22, area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(frame, surfaces, 72, 22, area);
     let outer = Block::default().borders(Borders::ALL).title(" Commands ");
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);

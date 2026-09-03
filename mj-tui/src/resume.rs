@@ -19,7 +19,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
 use hel::hel_config::{HarnessKind, HelConfig};
 use hel::hel_state::{HelState, SessionRecord, SessionState};
@@ -800,8 +800,7 @@ pub(crate) fn render_resume_dialog(
     dialog: &ResumeDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(surfaces, 84, 24, area);
-    frame.render_widget(Clear, popup);
+    let popup = centered_modal(frame, surfaces, 84, 24, area);
     let (scanned, total) = dialog.scan_progress();
     let title = if dialog.is_scanning() {
         format!(" Resume a session · scanning {scanned}/{total} ")
