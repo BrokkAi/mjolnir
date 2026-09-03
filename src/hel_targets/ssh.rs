@@ -211,7 +211,7 @@ pub(super) fn verify_locator(locator: &TargetLocator, session_id: &str) -> Resul
                 bail!("refusing cleanup: invalid local bare worker root");
             }
         }
-        TargetLocator::LocalPodman { container_id }
+        TargetLocator::LocalPodman { container_id, .. }
         | TargetLocator::LocalDocker { container_id }
         | TargetLocator::AppleContainer { container_id }
         | TargetLocator::SshPodman { container_id, .. } => {

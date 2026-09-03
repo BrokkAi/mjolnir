@@ -640,12 +640,34 @@ impl SessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PodmanWorkspaceLocator {
+    ContainerLayer,
+    Volume {
+        name: String,
+    },
+    HostPath {
+        path: PathBuf,
+        helper: Vec<String>,
+        resource: String,
+    },
+}
+
+impl Default for PodmanWorkspaceLocator {
+    fn default() -> Self {
+        Self::ContainerLayer
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TargetLocator {
     LocalBare {
         worker_root: PathBuf,
     },
     LocalPodman {
         container_id: String,
+        #[serde(default)]
+        workspace_storage: PodmanWorkspaceLocator,
     },
     LocalDocker {
         container_id: String,
@@ -667,6 +689,8 @@ pub enum TargetLocator {
     SshPodman {
         host: String,
         container_id: String,
+        #[serde(default)]
+        workspace_storage: PodmanWorkspaceLocator,
     },
 }
 
@@ -800,7 +824,7 @@ impl TargetLocator {
                     );
                 }
             }
-            Self::LocalPodman { container_id }
+            Self::LocalPodman { container_id, .. }
             | Self::LocalDocker { container_id }
             | Self::AppleContainer { container_id }
             | Self::SshPodman { container_id, .. }
@@ -1592,6 +1616,7 @@ mod tests {
             state: SessionState::Running,
             target: Some(TargetLocator::LocalPodman {
                 container_id: "afb67d".into(),
+                workspace_storage: Default::default(),
             }),
             native_session_id: Some("native-1".into()),
             acp_session_title: Some("Build Hel".into()),
@@ -1659,6 +1684,7 @@ mod tests {
                         cpus: None,
                         memory: None,
                         environment: BTreeMap::new(),
+                        workspace_storage: Default::default(),
                     },
                 },
             )]),

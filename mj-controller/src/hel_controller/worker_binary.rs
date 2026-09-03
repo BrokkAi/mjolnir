@@ -982,7 +982,7 @@ fn target_architecture(
 ) -> Result<&'static str> {
     let command = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("uname", ["-m"]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "uname", "-m"])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -993,9 +993,9 @@ fn target_architecture(
         }
         hel_targets::TargetLocator::AwsEc2 { ssh, .. }
         | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh_command_spec(ssh, ["uname", "-m"]),
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "uname", "-m"])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "uname", "-m"]),
     }
     .purpose("detect target architecture");
     let output = execute_checked(executor, command)?;
@@ -1380,7 +1380,7 @@ fn install_worker_files(
                 execute_checked(executor, command)?;
             }
         }
-        hel_targets::TargetLocator::LocalPodman { container_id }
+        hel_targets::TargetLocator::LocalPodman { container_id, .. }
         | hel_targets::TargetLocator::LocalDocker { container_id }
         | hel_targets::TargetLocator::AppleContainer { container_id } => {
             let engine = match locator {
@@ -1478,7 +1478,9 @@ fn install_worker_files(
                 profile_stage,
             )?;
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             // The worker binary is 10-30 MB and identical across sessions, so
             // keep it in a content-addressed cache on the remote host and copy
             // it over the wire only once per unique binary.
@@ -1698,7 +1700,7 @@ fn installed_worker_binary_replacement_plan(
             CommandSpec::new("chmod", ["700", &installed])
                 .purpose("make replaced Mjolnir worker executable"),
         ],
-        hel_targets::TargetLocator::LocalPodman { container_id }
+        hel_targets::TargetLocator::LocalPodman { container_id, .. }
         | hel_targets::TargetLocator::LocalDocker { container_id }
         | hel_targets::TargetLocator::AppleContainer { container_id } => {
             let engine = match locator {
@@ -1751,7 +1753,9 @@ fn installed_worker_binary_replacement_plan(
             ssh_command_spec(ssh, ["chmod", "700", &installed])
                 .purpose("make replaced Mjolnir worker executable"),
         ],
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let upload = format!(".cache/mjolnir/uploads/{session_id}-hel.next");
             vec![
                 ssh_command_spec(ssh, ["mkdir", "-p", ".cache/mjolnir/uploads"])
@@ -1800,7 +1804,7 @@ fn installed_file_digest_command(
 ) -> CommandSpec {
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sha256sum", [path]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sha256sum", path])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -1813,9 +1817,9 @@ fn installed_file_digest_command(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sha256sum", path])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sha256sum", path])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sha256sum", path]),
     }
     .purpose(purpose)
 }
@@ -1835,7 +1839,7 @@ fn worker_launch_refresh_plan(
     let expected_sha256 = format!("{:x}", Sha256::digest(&body));
     let replace = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", "-i", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -1849,7 +1853,9 @@ fn worker_launch_refresh_plan(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => ssh_command_spec(
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(
             ssh,
             ["podman", "exec", "-i", container_id, "sh", "-c", &script],
         ),
@@ -2013,7 +2019,7 @@ fn stop_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str) 
     let script = hel_targets::stop_worker_daemon_script(worker_root);
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2026,9 +2032,9 @@ fn stop_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str) 
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
     }
     .purpose("stop Mjolnir worker daemon")
 }
@@ -2037,7 +2043,7 @@ fn worker_liveness_command(locator: &hel_targets::TargetLocator, worker_root: &s
     let script = hel_targets::worker_daemon_liveness_script(worker_root);
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2050,9 +2056,9 @@ fn worker_liveness_command(locator: &hel_targets::TargetLocator, worker_root: &s
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
     }
     .purpose("probe Mjolnir worker daemon liveness")
 }
@@ -2110,7 +2116,7 @@ fn start_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str)
         hel_targets::TargetLocator::LocalBare { .. } => {
             CommandSpec::new("sh", ["-c", &detached_script])
         }
-        hel_targets::TargetLocator::LocalPodman { container_id } => CommandSpec::new(
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => CommandSpec::new(
             "podman",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
@@ -2126,7 +2132,9 @@ fn start_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str)
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &detached_script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => ssh_command_spec(
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(
             ssh,
             [
                 "podman",
@@ -2175,7 +2183,7 @@ fn worker_binary_probe_failure(
         hel_targets::TargetLocator::LocalBare { .. } => {
             CommandSpec::new(binary.clone(), ["--version"])
         }
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, &binary, "--version"])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2188,7 +2196,9 @@ fn worker_binary_probe_failure(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, [binary.as_str(), "--version"])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => ssh_command_spec(
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(
             ssh,
             ["podman", "exec", container_id, binary.as_str(), "--version"],
         ),
@@ -2231,7 +2241,7 @@ pub(super) fn worker_last_words(
     );
     let command = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2244,9 +2254,9 @@ pub(super) fn worker_last_words(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
     }
     .purpose("collect worker last words");
     let output = match executor.execute(&command) {

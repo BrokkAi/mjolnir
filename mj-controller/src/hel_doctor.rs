@@ -558,6 +558,7 @@ fn podman_image_check(
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
+            workspace_storage: Default::default(),
         });
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
             Ok(()) => DoctorCheck::ready(
@@ -684,6 +685,7 @@ fn docker_image_check(
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
+            workspace_storage: Default::default(),
         });
         return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
             Ok(()) => DoctorCheck::ready(
@@ -934,6 +936,7 @@ fn ssh_podman_check(
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
+            workspace_storage: Default::default(),
         },
     };
     match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
@@ -1322,6 +1325,7 @@ pub fn apple_container_check(
         image,
         pull_policy: Default::default(),
         extra_run_args: vec![],
+        workspace_storage: Default::default(),
     });
     match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
         Ok(()) => DoctorCheck::ready(

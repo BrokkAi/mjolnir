@@ -271,7 +271,7 @@ fn upload_reviewer_profile(
                 execute_checked(executor, command)?;
             }
         }
-        hel_targets::TargetLocator::LocalPodman { container_id }
+        hel_targets::TargetLocator::LocalPodman { container_id, .. }
         | hel_targets::TargetLocator::LocalDocker { container_id }
         | hel_targets::TargetLocator::AppleContainer { container_id } => {
             let engine = match locator {
@@ -345,7 +345,9 @@ fn upload_reviewer_profile(
                     .purpose("restrict reviewer profile permissions"),
             )?;
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let upload = format!("{worker_root}/.reviewer-upload");
             execute_checked(
                 executor,

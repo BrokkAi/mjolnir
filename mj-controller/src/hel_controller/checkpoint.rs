@@ -1688,7 +1688,7 @@ pub(super) fn upload_checkpoint_spec(
                 .with_context(|| format!("copy checkpoint specification to {remote}"))?;
             Ok(())
         }
-        hel_targets::TargetLocator::LocalPodman { container_id } => execute_checked(
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => execute_checked(
             executor,
             CommandSpec::new(
                 "podman",
@@ -1733,7 +1733,9 @@ pub(super) fn upload_checkpoint_spec(
             scp_command_spec(ssh, local, remote, false).purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let staging = format!(".local/share/hel/uploads/{session_id}-checkpoint.json");
             execute_checked(
                 executor,

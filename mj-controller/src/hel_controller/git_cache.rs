@@ -536,6 +536,7 @@ mod tests {
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
         });
         let mut bundle = ProjectBundleSpec {
             primary: "app".to_owned(),
@@ -619,6 +620,7 @@ mod tests {
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
         });
 
         let host = CacheHost::for_target(&target).expect("Docker has a clone-cache host");

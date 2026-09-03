@@ -311,6 +311,7 @@ fn session(id: &str, bundle: &str) -> SessionRecord {
         state: SessionState::Stopped,
         target: Some(TargetLocator::LocalPodman {
             container_id: "container-1".into(),
+            workspace_storage: Default::default(),
         }),
         native_session_id: Some("native-1".into()),
         acp_session_title: Some("Agent title".into()),
@@ -868,6 +869,11 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
     ] {
         connection
             .execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+            .unwrap();
+    }
+    if version < 22 {
+        connection
+            .execute_batch("ALTER TABLE session_targets DROP COLUMN workspace_storage;")
             .unwrap();
     }
     connection
@@ -3666,6 +3672,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
         .execute_batch(
             "DELETE FROM schema_migrations WHERE version > 20;
              PRAGMA user_version = 20;
+             ALTER TABLE session_targets DROP COLUMN workspace_storage;
              CREATE TABLE turn_review_settings (
                  workspace_id TEXT PRIMARY KEY,
                  auto_review INTEGER NOT NULL,

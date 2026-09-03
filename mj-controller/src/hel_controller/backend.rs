@@ -7,8 +7,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use hel::hel_config::{AwsAddressSource, HelConfig, ProjectBundle, TargetTemplate, data_dir};
-use hel::hel_state::{SessionRecord, SessionResourceAllocation, TargetLocator, allocation_cpus};
+use hel::hel_config::{
+    AwsAddressSource, HelConfig, PodmanWorkspaceStorage, ProjectBundle, TargetTemplate, data_dir,
+};
+use hel::hel_state::{
+    PodmanWorkspaceLocator, SessionRecord, SessionResourceAllocation, TargetLocator,
+    allocation_cpus,
+};
 use hel::hel_targets::{
     self, AwsTemplate, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost,
     ImageRefresh, ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
@@ -416,9 +421,11 @@ pub(super) fn backend_target(
 ) -> Result<hel_targets::TargetTemplate> {
     Ok(match template {
         TargetTemplate::LocalBare => hel_targets::TargetTemplate::LocalBare,
-        TargetTemplate::LocalPodman { container } => hel_targets::TargetTemplate::LocalPodman(
-            backend_container(container, allocation, overrides),
-        ),
+        TargetTemplate::LocalPodman { container } => {
+            let mut backend = backend_container(container, allocation, overrides);
+            backend.workspace_storage = backend_workspace_storage(&container.workspace_storage);
+            hel_targets::TargetTemplate::LocalPodman(backend)
+        }
         TargetTemplate::LocalDocker { container } => hel_targets::TargetTemplate::LocalDocker(
             backend_container(container, allocation, overrides),
         ),
@@ -462,9 +469,11 @@ pub(super) fn backend_target(
             workspace_prefix: workspace_prefix.to_string_lossy().into_owned(),
         },
         TargetTemplate::SshPodman { ssh, container, .. } => {
+            let mut backend = backend_container(container, allocation, overrides);
+            backend.workspace_storage = backend_workspace_storage(&container.workspace_storage);
             hel_targets::TargetTemplate::SshPodman {
                 ssh: backend_ssh(ssh),
-                container: backend_container(container, allocation, overrides),
+                container: backend,
             }
         }
     })
@@ -613,6 +622,68 @@ fn backend_container(
         image: container.image.clone(),
         pull_policy: container.pull_policy,
         extra_run_args,
+        workspace_storage: hel_targets::PodmanWorkspaceStorage::ContainerLayer,
+    }
+}
+
+fn backend_workspace_storage(
+    storage: &PodmanWorkspaceStorage,
+) -> hel_targets::PodmanWorkspaceStorage {
+    match storage {
+        PodmanWorkspaceStorage::PodmanVolume => hel_targets::PodmanWorkspaceStorage::PodmanVolume,
+        PodmanWorkspaceStorage::HostHelper { root, helper } => {
+            hel_targets::PodmanWorkspaceStorage::HostHelper {
+                root: root.to_string_lossy().into_owned(),
+                helper: helper.clone(),
+            }
+        }
+        PodmanWorkspaceStorage::ContainerLayer => {
+            hel_targets::PodmanWorkspaceStorage::ContainerLayer
+        }
+    }
+}
+
+fn backend_workspace_locator(
+    storage: &PodmanWorkspaceLocator,
+) -> hel_targets::PodmanWorkspaceLocator {
+    match storage {
+        PodmanWorkspaceLocator::ContainerLayer => {
+            hel_targets::PodmanWorkspaceLocator::ContainerLayer
+        }
+        PodmanWorkspaceLocator::Volume { name } => {
+            hel_targets::PodmanWorkspaceLocator::Volume { name: name.clone() }
+        }
+        PodmanWorkspaceLocator::HostPath {
+            path,
+            helper,
+            resource,
+        } => hel_targets::PodmanWorkspaceLocator::HostPath {
+            path: path.to_string_lossy().into_owned(),
+            helper: helper.clone(),
+            resource: resource.clone(),
+        },
+    }
+}
+
+fn durable_workspace_locator(
+    storage: hel_targets::PodmanWorkspaceLocator,
+) -> PodmanWorkspaceLocator {
+    match storage {
+        hel_targets::PodmanWorkspaceLocator::ContainerLayer => {
+            PodmanWorkspaceLocator::ContainerLayer
+        }
+        hel_targets::PodmanWorkspaceLocator::Volume { name } => {
+            PodmanWorkspaceLocator::Volume { name }
+        }
+        hel_targets::PodmanWorkspaceLocator::HostPath {
+            path,
+            helper,
+            resource,
+        } => PodmanWorkspaceLocator::HostPath {
+            path: PathBuf::from(path),
+            helper,
+            resource,
+        },
     }
 }
 
@@ -691,9 +762,17 @@ pub(super) fn locator_after_provision(
         TargetTemplate::LocalBare => TargetLocator::LocalBare {
             worker_root: data_dir().join("workers").join(session_id),
         },
-        TargetTemplate::LocalPodman { .. } => TargetLocator::LocalPodman {
-            container_id: generated,
-        },
+        TargetTemplate::LocalPodman { .. } => {
+            let hel_targets::TargetTemplate::LocalPodman(container) = backend else {
+                bail!("session locator/template mismatch")
+            };
+            TargetLocator::LocalPodman {
+                container_id: generated,
+                workspace_storage: durable_workspace_locator(
+                    hel_targets::podman_workspace_locator(container, session_id)?,
+                ),
+            }
+        }
         TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
             container_id: generated,
         },
@@ -705,10 +784,18 @@ pub(super) fn locator_after_provision(
             workspace: PathBuf::from(hel_targets::workspace_for(backend, session_id)?),
             worker_id: None,
         },
-        TargetTemplate::SshPodman { ssh, .. } => TargetLocator::SshPodman {
-            host: ssh.host.clone(),
-            container_id: generated,
-        },
+        TargetTemplate::SshPodman { ssh, .. } => {
+            let hel_targets::TargetTemplate::SshPodman { container, .. } = backend else {
+                bail!("session locator/template mismatch")
+            };
+            TargetLocator::SshPodman {
+                host: ssh.host.clone(),
+                container_id: generated,
+                workspace_storage: durable_workspace_locator(
+                    hel_targets::podman_workspace_locator(container, session_id)?,
+                ),
+            }
+        }
         TargetTemplate::AwsEc2 {
             aws_profile,
             region,
@@ -820,8 +907,12 @@ pub(super) fn backend_locator(
                 worker_root: worker_root.to_string_lossy().into_owned(),
             }
         }
-        TargetLocator::LocalPodman { container_id } => hel_targets::TargetLocator::LocalPodman {
+        TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage,
+        } => hel_targets::TargetLocator::LocalPodman {
             container_id: container_id.clone(),
+            workspace_storage: backend_workspace_locator(workspace_storage),
         },
         TargetLocator::LocalDocker { container_id } => hel_targets::TargetLocator::LocalDocker {
             container_id: container_id.clone(),
@@ -840,13 +931,18 @@ pub(super) fn backend_locator(
                 workspace: workspace.to_string_lossy().into_owned(),
             }
         }
-        TargetLocator::SshPodman { container_id, .. } => {
+        TargetLocator::SshPodman {
+            container_id,
+            workspace_storage,
+            ..
+        } => {
             let TargetTemplate::SshPodman { ssh, .. } = template else {
                 bail!("session locator/template mismatch")
             };
             hel_targets::TargetLocator::SshPodman {
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
+                workspace_storage: backend_workspace_locator(workspace_storage),
             }
         }
         TargetLocator::AwsEc2 {
@@ -1231,6 +1327,7 @@ mod tests {
             image: "dev:1".into(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
+            workspace_storage: Default::default(),
         });
         assert!(configure_github_token_environment(&mut podman));
         let hel_targets::TargetTemplate::LocalPodman(container) = podman else {

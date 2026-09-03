@@ -1028,9 +1028,13 @@ fn provisioned_locator(
         // A bare project directory belongs to the user: provisioning creates
         // nothing that a failure could leak.
         hel_targets::TargetTemplate::LocalBare => return None,
-        hel_targets::TargetTemplate::LocalPodman(_) => hel_targets::TargetLocator::LocalPodman {
-            container_id: container_id()?,
-        },
+        hel_targets::TargetTemplate::LocalPodman(container) => {
+            hel_targets::TargetLocator::LocalPodman {
+                container_id: container_id()?,
+                workspace_storage: hel_targets::podman_workspace_locator(container, session_id)
+                    .ok()?,
+            }
+        }
         hel_targets::TargetTemplate::LocalDocker(_) => hel_targets::TargetLocator::LocalDocker {
             container_id: container_id()?,
         },
@@ -1039,10 +1043,12 @@ fn provisioned_locator(
                 container_id: container_id()?,
             }
         }
-        hel_targets::TargetTemplate::SshPodman { ssh, .. } => {
+        hel_targets::TargetTemplate::SshPodman { ssh, container } => {
             hel_targets::TargetLocator::SshPodman {
                 ssh: ssh.clone(),
                 container_id: container_id()?,
+                workspace_storage: hel_targets::podman_workspace_locator(container, session_id)
+                    .ok()?,
             }
         }
         hel_targets::TargetTemplate::SshBare { ssh, .. } => hel_targets::TargetLocator::SshBare {
@@ -1829,6 +1835,7 @@ mod tests {
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
             extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
         })
     }
 
@@ -1934,6 +1941,7 @@ mod tests {
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 extra_run_args: Vec::new(),
+                workspace_storage: Default::default(),
             }),
             hel_targets::TargetTemplate::AwsEc2(hel_targets::AwsTemplate {
                 profile: "default".into(),
@@ -2292,6 +2300,7 @@ mod tests {
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
             extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
         };
         vec![
             hel_targets::TargetTemplate::LocalPodman(container.clone()),
