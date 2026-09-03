@@ -1404,7 +1404,15 @@ async fn utility_handoff_while_cancellable(
             .await?;
         let backend =
             crate::hel_utility_llm::UtilityCompactionBackend::new(candidates, cancel.clone());
-        crate::hel_compaction::compact_snapshot(snapshot, context_bytes, &backend).await
+        // Pages are sized by what the summarizer can read; the handoff is
+        // sized by what the target harness accepts. They are unrelated
+        // numbers, and using the target's for both is what made one incident
+        // shard a transcript into 33 pages.
+        let budget = crate::hel_compaction::CompactionBudget {
+            page_bytes: backend.page_bytes(),
+            handoff_bytes: context_bytes,
+        };
+        crate::hel_compaction::compact_snapshot(snapshot, budget, &backend).await
     };
     tokio::pin!(operation);
     loop {
