@@ -623,6 +623,63 @@ fn packaged_worker_binary_path(directory: &Path, triple: &str) -> PathBuf {
     directory.join(format!("mj-worker-{triple}"))
 }
 
+/// File names a worker binary may carry when it sits beside the controller or
+/// in a development sibling directory. The controller's own file name comes
+/// first (after the 2.0 rename that is `mj`), then the legacy `hel` name that
+/// older packages shipped, so both resolve without hardcoding one.
+fn worker_sibling_names(controller: &Path) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    let mut names = Vec::new();
+    if let Some(own) = controller.file_name() {
+        names.push(own.to_os_string());
+    }
+    let legacy = OsString::from("hel");
+    if !names.contains(&legacy) {
+        names.push(legacy);
+    }
+    names
+}
+
+/// Choose a worker binary that ships beside the controller or in a development
+/// musl sibling directory. `is_file` probes the filesystem; tests pass a
+/// hand-written probe. The static musl sibling is probed before the worker in
+/// the controller's own directory, because in a development checkout that
+/// same-directory candidate resolves to the controller itself, whose glibc may
+/// be newer than the target's.
+fn select_sibling_worker(
+    controller: &Path,
+    triple: &str,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<(PathBuf, &'static str)> {
+    let directory = controller.parent()?;
+    let names = worker_sibling_names(controller);
+    let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+    // Packaged worker beside the controller, named for the target triple.
+    candidates.push((
+        packaged_worker_binary_path(directory, triple),
+        "beside the mj binary",
+    ));
+    // Development checkout: a controller at target/<profile>/<name> finds its
+    // musl sibling at target/<triple>/<profile>/<name>. The static build is
+    // preferred because the target's glibc may be older than the host's, so it
+    // is probed before the same-directory worker (which is the controller
+    // itself in a development checkout).
+    if let (Some(profile), Some(target_dir)) = (directory.file_name(), directory.parent()) {
+        for name in &names {
+            candidates.push((
+                target_dir.join(triple).join(profile).join(name),
+                "development musl sibling",
+            ));
+        }
+    }
+    // Worker installed in the controller's own directory (released layout,
+    // including the legacy `hel` name).
+    for name in &names {
+        candidates.push((directory.join(name), "beside the running executable"));
+    }
+    candidates.into_iter().find(|(path, _)| is_file(path))
+}
+
 /// Find a worker source without downloading it.
 ///
 /// Container provisioning resolves this after discovering the target
@@ -664,27 +721,7 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
             source: "native musl mj binary".into(),
         });
     }
-    let mut candidates = Vec::new();
-    if let Some(directory) = current.parent() {
-        candidates.push((
-            packaged_worker_binary_path(directory, &triple),
-            "beside the mj binary",
-        ));
-        candidates.push((directory.join("hel"), "beside the running executable"));
-        // Development checkout: a controller at target/<profile>/hel finds its
-        // musl sibling at target/<triple>/<profile>/hel. The static build is
-        // preferred because the target's glibc may be older than the host's.
-        if let (Some(profile), Some(target_dir)) = (
-            directory.file_name().map(std::ffi::OsString::from),
-            directory.parent(),
-        ) {
-            candidates.push((
-                target_dir.join(&triple).join(profile).join("hel"),
-                "development musl sibling",
-            ));
-        }
-    }
-    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| path.is_file()) {
+    if let Some((path, source)) = select_sibling_worker(&current, &triple, |path| path.is_file()) {
         return Ok(WorkerBinaryAvailability::Local {
             path,
             source: source.into(),
@@ -2052,6 +2089,43 @@ mod tests {
             packaged_worker_binary_path(directory, "aarch64-unknown-linux-musl"),
             directory.join("mj-worker-aarch64-unknown-linux-musl")
         );
+    }
+
+    #[test]
+    fn dev_checkout_prefers_the_musl_sibling_over_the_glibc_controller() {
+        let controller = PathBuf::from("target/debug/mj");
+        let musl = PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj");
+        // Both the controller (glibc) and its musl sibling exist on disk.
+        let present = [controller.clone(), musl.clone()];
+        let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
+            present.iter().any(|p| p == path)
+        });
+        assert_eq!(
+            selected,
+            Some((musl, "development musl sibling")),
+            "the static musl sibling must win over the glibc controller itself"
+        );
+    }
+
+    #[test]
+    fn dev_checkout_still_finds_a_hel_named_sibling() {
+        let controller = PathBuf::from("target/debug/hel");
+        let musl = PathBuf::from("target/x86_64-unknown-linux-musl/debug/hel");
+        let present = [controller.clone(), musl.clone()];
+        let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
+            present.iter().any(|p| p == path)
+        });
+        assert_eq!(selected, Some((musl, "development musl sibling")));
+    }
+
+    #[test]
+    fn sibling_lookup_falls_back_to_the_legacy_hel_name_beside_an_mj_controller() {
+        let controller = PathBuf::from("/opt/brokk/mj");
+        let legacy = PathBuf::from("/opt/brokk/hel");
+        let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
+            path == legacy
+        });
+        assert_eq!(selected, Some((legacy, "beside the running executable")));
     }
     #[cfg(target_os = "linux")]
     #[test]
