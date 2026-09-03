@@ -31,14 +31,14 @@ case "$arguments" in
     *" copy-image "*) printf '%s\n' 'ami-deadbeef' ;;
     *" create-tags "*|*" wait image-available "*) ;;
     *" describe-vpcs "*) printf '%s\n' 'vpc-1234abcd' ;;
-    *" describe-security-groups "*" --filters "*)
+    *" describe-security-groups --filters "*)
         [[ -f "$MJ_RUNSON_TEST_AWS_STATE" ]] && printf '%s\n' 'sg-1234abcd' || printf '%s\n' 'None'
         ;;
     *" create-security-group "*) printf '%s\n' 'sg-1234abcd' ;;
     *" authorize-security-group-ingress "*) ;;
     *" describe-launch-template-versions "*) command cat "$MJ_RUNSON_TEST_LAUNCH_DATA" ;;
-    *" describe-launch-templates "*" --launch-template-ids "*) printf '%s\n' '1' ;;
-    *" describe-launch-templates "*)
+    *" describe-launch-templates --launch-template-ids "*) printf '%s\n' '1' ;;
+    *" describe-launch-templates --filters "*)
         [[ -f "$MJ_RUNSON_TEST_AWS_STATE" ]] && printf '%s\n' 'lt-1234abcd' || printf '%s\n' 'None'
         ;;
     *" create-launch-template "*)

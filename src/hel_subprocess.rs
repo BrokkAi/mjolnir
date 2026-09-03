@@ -373,18 +373,17 @@ mod tests {
             Some(libc::ECHILD)
         );
 
+        // The grandchild can briefly be a zombie between exit and init's
+        // wait. What matters is that its adoptive parent eventually reaps it.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            match detached_test_process_state(pid) {
-                None => break,
-                Some(state) => assert_ne!(
-                    state, 'Z',
-                    "process {pid} is still a zombie of this process"
-                ),
+            let state = detached_test_process_state(pid);
+            if state.is_none() {
+                break;
             }
             assert!(
                 Instant::now() < deadline,
-                "process {pid} never left the process table"
+                "process {pid} never left the process table (last state: {state:?})"
             );
             std::thread::sleep(Duration::from_millis(20));
         }

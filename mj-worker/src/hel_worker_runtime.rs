@@ -11,9 +11,11 @@ pub use hel::hel_worker::WORKER_PID_FILE;
 
 // The launch descriptions and MCP shapes both sides of the relay share live in
 // the foundation. The runtime and its submodules keep naming them here.
+use hel::hel_worker_launch::WorkerLaunchConfig;
+#[cfg(unix)]
 use hel::hel_worker_launch::{
     DISCOVER_LOGIN_PATH_ENV, ProjectMemoryLaunchConfig, REVIEWER_DIR, REVIEWER_PROFILE_DIR,
-    ReviewerLaunchConfig, WorkerLaunchConfig,
+    ReviewerLaunchConfig,
 };
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
