@@ -622,6 +622,14 @@ enum LifecycleKind {
     DestroyStopped,
 }
 
+/// Whether a lifecycle has exclusive ownership of the worker target, so the
+/// session manager must stop polling it. A graceful close needs the manager's
+/// relay lease through checkpointing and sealing; once the durable state says
+/// `Destroying`, that lease has been released and target teardown is exclusive.
+fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>) -> bool {
+    kind != LifecycleKind::Close || state == Some(SessionState::Destroying)
+}
+
 struct ActiveLifecycle {
     kind: LifecycleKind,
     cancelled: Arc<AtomicBool>,
@@ -763,13 +771,21 @@ impl RuntimeState {
         self.workspaces_tx.subscribe()
     }
 
-    fn worker_poll_exclusion_session_ids(&self) -> BTreeSet<String> {
+    fn worker_poll_exclusion_session_ids(&self, controller: &Controller) -> BTreeSet<String> {
         self.lifecycle
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|(_, active)| {
-                active.result.borrow().is_none() && active.kind != LifecycleKind::Close
+            .filter(|(session_id, active)| {
+                active.result.borrow().is_none()
+                    && lifecycle_owns_worker_target(
+                        active.kind,
+                        controller
+                            .state
+                            .sessions
+                            .get(*session_id)
+                            .map(|session| session.state),
+                    )
             })
             .map(|(session_id, _)| session_id.clone())
             .collect()
@@ -2979,14 +2995,12 @@ fn spawn_manager_target_refresher(
                     let _config_mutation = state.config_mutation.lock().await;
                     match tokio::task::spawn_blocking(Controller::load).await {
                         Ok(Ok(controller)) => {
-                            // Startup, force-stop, and relocation own the worker
-                            // target, so polling them can race an incomplete
-                            // install or teardown. Close is different: it needs
-                            // the manager's existing relay lease to checkpoint,
-                            // and removing that target here makes a fast Stop
-                            // fail with "session is not managed".
+                            // Startup, force-stop, relocation, and the teardown
+                            // phase of close own the worker target. Graceful
+                            // close keeps polling only until it has released the
+                            // manager lease after sealing the relay.
                             let lifecycle_sessions =
-                                state.worker_poll_exclusion_session_ids();
+                                state.worker_poll_exclusion_session_ids(&controller);
                             let refreshed = dashboard_worker_targets_excluding(
                                 &controller,
                                 &lifecycle_sessions,
@@ -3800,6 +3814,30 @@ fn session_state_label(state: SessionState) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn graceful_close_retires_worker_polling_only_during_target_teardown() {
+        assert!(!lifecycle_owns_worker_target(
+            LifecycleKind::Close,
+            Some(SessionState::Running)
+        ));
+        assert!(!lifecycle_owns_worker_target(
+            LifecycleKind::Close,
+            Some(SessionState::Checkpointing)
+        ));
+        assert!(!lifecycle_owns_worker_target(
+            LifecycleKind::Close,
+            Some(SessionState::Closing)
+        ));
+        assert!(lifecycle_owns_worker_target(
+            LifecycleKind::Close,
+            Some(SessionState::Destroying)
+        ));
+        assert!(lifecycle_owns_worker_target(
+            LifecycleKind::ForceStop,
+            Some(SessionState::Running)
+        ));
+    }
+
     /// A process that has exited but has not been reaped still answers
     /// `kill(pid, 0)`. The daemon-specific probe may reap its own child;
     /// platform process tables do not all expose a reliable Zombie status.
@@ -4419,7 +4457,16 @@ mod tests {
             })
             .unwrap();
 
-        assert!(state.worker_poll_exclusion_session_ids().is_empty());
+        assert!(
+            state
+                .worker_poll_exclusion_session_ids(
+                    &state
+                        .controller
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                )
+                .is_empty()
+        );
 
         release.notify_one();
         RuntimeState::wait_lifecycle_result(result).await.unwrap();
@@ -4447,7 +4494,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            state.worker_poll_exclusion_session_ids(),
+            state.worker_poll_exclusion_session_ids(
+                &state
+                    .controller
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+            ),
             BTreeSet::from(["session-1".to_owned()])
         );
         let executor =

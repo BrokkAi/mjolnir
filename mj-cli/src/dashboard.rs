@@ -1933,6 +1933,11 @@ impl DashboardContext {
                     SessionOperationKind::Destroying
                 }
             };
+            mark_active_chat_retiring_for_remote_lifecycle(
+                self.active_chat.as_mut(),
+                &lifecycle.session_id,
+                kind,
+            );
             if !self
                 .lifecycle_operations
                 .contains_key(&lifecycle.session_id)
@@ -2326,6 +2331,23 @@ impl DashboardContext {
     }
 }
 
+/// A lifecycle started by another attached surface reaches this UI through
+/// the daemon feed rather than its local action path. Give the open chat the
+/// same early retirement signal so its closing relay feed is not reported as
+/// a lost connection while the session row already says Stopping.
+fn mark_active_chat_retiring_for_remote_lifecycle(
+    active_chat: Option<&mut mj_chat::hel_chat::ActiveChat>,
+    session_id: &str,
+    kind: SessionOperationKind,
+) {
+    if matches!(
+        kind,
+        SessionOperationKind::Stopping | SessionOperationKind::Destroying
+    ) {
+        actions::mark_active_chat_retiring(active_chat, session_id);
+    }
+}
+
 /// A durable terminal lifecycle state is authoritative over a remote UI
 /// overlay. The daemon lifecycle feed normally removes the overlay first, but
 /// records and lifecycles travel on separate watch channels; retaining a
@@ -2646,6 +2668,7 @@ fn configuration_needs_setup(config: &HelConfig) -> bool {
 mod tests {
     use super::*;
     use hel::hel_state::HelState;
+    use mj_chat::hel_chat::{ActiveChat, Notices, SessionHeaderIdentity};
     use mj_chat::hel_selection::SurfaceFrame;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2666,6 +2689,20 @@ mod tests {
             KeyCode::Esc,
             KeyModifiers::NONE,
         ))
+    }
+
+    fn open_test_chat(session_id: &str) -> ActiveChat {
+        let fixture =
+            mj_controller::hel_session_manager::replacement_session_test_fixture(session_id, 1);
+        ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        )
     }
 
     /// A dashboard with profiles and a target, so the adaptive layout draws
@@ -2773,6 +2810,25 @@ mod tests {
             SessionOperationKind::Destroying,
             None
         ));
+    }
+
+    #[tokio::test]
+    async fn a_remote_stop_marks_the_open_chat_retiring_before_its_feed_closes() {
+        let mut stopped = open_test_chat("session-open");
+        mark_active_chat_retiring_for_remote_lifecycle(
+            Some(&mut stopped),
+            "session-open",
+            SessionOperationKind::Stopping,
+        );
+        assert!(stopped.session_retiring());
+
+        let mut launched = open_test_chat("session-open");
+        mark_active_chat_retiring_for_remote_lifecycle(
+            Some(&mut launched),
+            "session-open",
+            SessionOperationKind::Launching,
+        );
+        assert!(!launched.session_retiring());
     }
 
     /// Draws the combined surface exactly as the loop does, so the highlight
