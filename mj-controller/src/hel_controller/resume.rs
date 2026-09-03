@@ -750,6 +750,11 @@ impl Controller {
                 ),
             }
         }
+        // Resolving the worker binary is local and costs microseconds, while
+        // the compaction below costs minutes and paid model requests. A resume
+        // that could never install a worker fails here rather than after all
+        // that work has been thrown away.
+        super::worker_binary::preflight_worker_binary(target_template)?;
         let same_harness = profile.kind == archive_manifest.session.harness_kind;
         let context_bytes = profile
             .context_window_bytes
@@ -1443,6 +1448,109 @@ mod tests {
 
     const RESUME_ROLLBACK_TEST_CHILD: &str = "MJ_RESUME_ROLLBACK_TEST_CHILD";
     const RETIRED_WORKTREE_RESUME_TEST_CHILD: &str = "MJ_RETIRED_WORKTREE_RESUME_TEST_CHILD";
+    const WORKER_PREFLIGHT_TEST_CHILD: &str = "MJ_WORKER_PREFLIGHT_TEST_CHILD";
+
+    /// Compaction costs minutes and paid model requests; resolving the worker
+    /// binary is local and costs microseconds. A cross-harness resume that
+    /// cannot produce a worker must say so before it compacts anything.
+    #[test]
+    fn a_resume_preflights_the_worker_binary_before_compacting() {
+        // MJ_WORKER_BINARY, MJ_DATA_DIR, and MJ_CONFIG_DIR are process-global,
+        // so run the half that sets them in an exact child test.
+        if std::env::var_os(WORKER_PREFLIGHT_TEST_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let test_name = format!(
+                "{}::a_resume_preflights_the_worker_binary_before_compacting",
+                module_path!()
+                    .strip_prefix("mj_controller::")
+                    .unwrap_or(module_path!())
+            );
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(WORKER_PREFLIGHT_TEST_CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path().join("data"))
+                .env("MJ_CONFIG_DIR", directory.path().join("config"))
+                // Names a worker binary that is not there, which is how a
+                // machine without an installed worker fails the same lookup.
+                .env("MJ_WORKER_BINARY", directory.path().join("absent-worker"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated worker preflight test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Alone in this child process, so it installs the one writer.
+        let _writer = hel::hel_database::install_isolated_test_writer();
+
+        let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+        let archive_directory = data_directory.join("archives");
+        std::fs::create_dir_all(&archive_directory).unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
+        let repository = committed_repository();
+        let mut session = managed_worktree_session(repository.path(), session_id);
+        session.checkpoint = Some(checkpoint);
+
+        let profile_home = data_directory.join("profile");
+        std::fs::create_dir_all(&profile_home).unwrap();
+        let mut config = resume_compatibility_config();
+        // The archive was written by Codex, so resuming onto Claude is a
+        // cross-harness resume and would compact the transcript.
+        config.profiles.insert(
+            "claude".into(),
+            HarnessProfile {
+                kind: hel::hel_config::HarnessKind::Claude,
+                home: profile_home,
+                executable: None,
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+            },
+        );
+        let mut controller = Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        };
+        hel::hel_database::save_state(&controller.state).unwrap();
+
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(controller.resume_session_controlled(
+                session_id,
+                "claude",
+                "local-bare",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &ProcessExecutor,
+            ))
+            .unwrap_err();
+
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("preflight the worker binary before resuming"),
+            "{detail}"
+        );
+        assert!(detail.contains("absent-worker"), "{detail}");
+        assert!(
+            !detail.contains("compact the cross-harness handoff transcript"),
+            "compaction must not run for a resume that cannot install a worker: {detail}"
+        );
+        assert_eq!(
+            controller.state.sessions[session_id].state,
+            SessionState::Stopped
+        );
+    }
 
     #[test]
     fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {

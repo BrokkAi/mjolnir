@@ -752,6 +752,75 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
     )
 }
 
+/// The architecture a configured template names outright, if it names one. A
+/// container `platform` such as `linux/arm64` decides what the target runs
+/// whatever the controller's own machine is, and it is the only architecture a
+/// configured target template can state: the configured `AwsEc2` variant names
+/// a launch template, whose instance type is only discoverable through the AWS
+/// API.
+fn template_architecture(template: &hel::hel_config::TargetTemplate) -> Option<&'static str> {
+    use hel::hel_config::TargetTemplate as Template;
+    let platform = match template {
+        Template::LocalPodman { container }
+        | Template::LocalDocker { container }
+        | Template::AppleContainer { container }
+        | Template::SshPodman { container, .. } => container.platform.as_deref()?,
+        Template::LocalBare | Template::SshBare { .. } | Template::AwsEc2 { .. } => return None,
+    };
+    // Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
+    platform.split('/').find_map(|part| match part.trim() {
+        "x86_64" | "amd64" => Some("x86_64"),
+        "aarch64" | "arm64" => Some("aarch64"),
+        _ => None,
+    })
+}
+
+/// Architectures a resume must be able to serve, knowing only the configured
+/// template. Provisioning learns the real answer by running `uname -m` on the
+/// live target; a resume has no target yet, so this uses what is knowable
+/// without one: an architecture the template names, else the controller's own
+/// architecture for a target that runs on this machine, else either Linux
+/// architecture for a remote target.
+fn preflight_architectures(template: &hel::hel_config::TargetTemplate) -> Vec<&'static str> {
+    use hel::hel_config::TargetTemplate as Template;
+    if let Some(arch) = template_architecture(template) {
+        return vec![arch];
+    }
+    match template {
+        Template::LocalBare
+        | Template::LocalPodman { .. }
+        | Template::LocalDocker { .. }
+        | Template::AppleContainer { .. } => vec![std::env::consts::ARCH],
+        Template::SshBare { .. } | Template::SshPodman { .. } | Template::AwsEc2 { .. } => {
+            vec!["x86_64", "aarch64"]
+        }
+    }
+}
+
+/// Whether this controller could produce a Linux worker binary for a target
+/// that does not exist yet.
+///
+/// A resume compacts a cross-harness transcript before it provisions anything,
+/// which costs minutes and paid model requests. Resolving the worker binary is
+/// local and takes microseconds, so a resume that could never install a worker
+/// must fail before spending any of that. This downloads nothing: a remote
+/// source counts as available, because fetching it belongs to provisioning.
+pub(super) fn preflight_worker_binary(template: &hel::hel_config::TargetTemplate) -> Result<()> {
+    let mut failure = None;
+    for arch in preflight_architectures(template) {
+        match worker_binary_prerequisite_for_arch(arch) {
+            Ok(_) => return Ok(()),
+            Err(error) => failure = Some(error),
+        }
+    }
+    match failure {
+        // The message is the one provisioning would have printed later, so the
+        // user reads the same fix, sooner.
+        Some(error) => Err(error).context("preflight the worker binary before resuming"),
+        None => Ok(()),
+    }
+}
+
 fn stable_running_executable(current: &Path) -> Result<PathBuf> {
     if current.is_file() {
         return Ok(current.to_path_buf());
@@ -2175,6 +2244,117 @@ mod tests {
             Some((musl, "development musl sibling")),
             "the static musl sibling must win over the glibc controller itself"
         );
+    }
+
+    /// A configured container template for the preflight tests. Only the
+    /// platform matters here; the rest is the smallest valid template.
+    fn container_template(platform: Option<&str>) -> hel::hel_config::ContainerTemplate {
+        hel::hel_config::ContainerTemplate {
+            image: "example.invalid/mj-test:latest".into(),
+            pull_policy: Default::default(),
+            platform: platform.map(str::to_owned),
+            cpus: None,
+            memory: None,
+            environment: BTreeMap::new(),
+        }
+    }
+
+    fn ssh_connection() -> hel::hel_config::SshConnection {
+        hel::hel_config::SshConnection {
+            host: "builder".into(),
+            user: Some("dev".into()),
+            identity_file: None,
+            extra_args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn preflight_reads_the_architecture_a_template_names() {
+        use hel::hel_config::TargetTemplate;
+
+        for (platform, expected) in [
+            ("linux/arm64", "aarch64"),
+            ("linux/arm64/v8", "aarch64"),
+            ("linux/amd64", "x86_64"),
+            ("aarch64", "aarch64"),
+        ] {
+            assert_eq!(
+                preflight_architectures(&TargetTemplate::LocalPodman {
+                    container: container_template(Some(platform)),
+                }),
+                vec![expected],
+                "platform {platform}"
+            );
+        }
+        // A named platform decides a remote container target too, so a resume
+        // onto an arm64 container never asks about the host's architecture.
+        assert_eq!(
+            preflight_architectures(&TargetTemplate::SshPodman {
+                ssh: ssh_connection(),
+                container: container_template(Some("linux/arm64")),
+            }),
+            vec!["aarch64"]
+        );
+    }
+
+    #[test]
+    fn preflight_uses_the_host_architecture_for_a_local_target() {
+        use hel::hel_config::TargetTemplate;
+
+        for template in [
+            TargetTemplate::LocalBare,
+            TargetTemplate::LocalPodman {
+                container: container_template(None),
+            },
+            TargetTemplate::LocalDocker {
+                container: container_template(None),
+            },
+            TargetTemplate::AppleContainer {
+                container: container_template(None),
+            },
+        ] {
+            assert_eq!(
+                preflight_architectures(&template),
+                vec![std::env::consts::ARCH],
+                "{template:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_accepts_either_linux_architecture_for_a_remote_target() {
+        use hel::hel_config::TargetTemplate;
+
+        // Nothing in the configuration says what a remote machine runs, so the
+        // preflight passes as long as one architecture could be served; the
+        // real architecture is read from the live target during provisioning.
+        for template in [
+            TargetTemplate::SshBare {
+                ssh: ssh_connection(),
+                permissions: hel::hel_config::PermissionMode::Yolo,
+                workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+            },
+            TargetTemplate::SshPodman {
+                ssh: ssh_connection(),
+                container: container_template(None),
+            },
+            TargetTemplate::AwsEc2 {
+                aws_profile: None,
+                region: "us-east-1".into(),
+                launch_template: "lt-mj".into(),
+                launch_template_version: None,
+                ssh_user: "dev".into(),
+                address_source: Default::default(),
+                identity_file: None,
+                ssh_args: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                preflight_architectures(&template),
+                vec!["x86_64", "aarch64"],
+                "{template:?}"
+            );
+        }
     }
 
     #[test]
