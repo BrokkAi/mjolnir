@@ -1660,6 +1660,24 @@ fn quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
     }
 }
 
+fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
+    let Ok(reset) = u64::try_from(reset_at_epoch_seconds) else {
+        return "now".into();
+    };
+    let remaining = reset.saturating_sub(now);
+    if remaining == 0 {
+        "now".into()
+    } else if remaining < 60 {
+        "<1m".into()
+    } else if remaining < 60 * 60 {
+        format!("{}m", remaining / 60)
+    } else {
+        let hours = remaining / (60 * 60);
+        let minutes = remaining % (60 * 60) / 60;
+        format!("{hours}h{minutes}m")
+    }
+}
+
 fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
     let Some(window) = window else {
         return String::new();
@@ -1682,7 +1700,16 @@ fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
     let five_hour = if weekly_quota_exhausted(quota) {
         String::new()
     } else {
-        quota_reset_cell(quota.five_hour_window(), now)
+        quota
+            .five_hour_window()
+            .map(|window| {
+                window
+                    .resets_at_epoch_seconds
+                    .map(|reset| five_hour_quota_reset_countdown(now, reset))
+                    .or_else(|| window.resets.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
     };
     (weekly, five_hour)
 }
@@ -5069,7 +5096,27 @@ mod tests {
             refreshed_at_epoch_seconds: 0,
         };
 
-        assert_eq!(quota_reset_cells(&quota, 0), ("7d".into(), "4h".into()));
+        assert_eq!(quota_reset_cells(&quota, 0), ("7d".into(), "4h0m".into()));
+    }
+
+    #[test]
+    fn five_hour_reset_always_uses_minutes_above_one_hour() {
+        const MINUTE: i64 = 60;
+        const HOUR: i64 = 60 * MINUTE;
+
+        assert_eq!(
+            five_hour_quota_reset_countdown(100, 100 + 4 * HOUR + 50 * MINUTE),
+            "4h50m"
+        );
+        assert_eq!(
+            five_hour_quota_reset_countdown(100, 100 + 4 * HOUR + 5 * MINUTE),
+            "4h5m"
+        );
+        assert_eq!(
+            five_hour_quota_reset_countdown(100, 100 + HOUR + 5 * MINUTE),
+            "1h5m"
+        );
+        assert_eq!(five_hour_quota_reset_countdown(100, 130), "<1m");
     }
 
     #[test]
