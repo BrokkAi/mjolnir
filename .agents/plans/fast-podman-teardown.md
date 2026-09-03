@@ -14,7 +14,7 @@ Stopping a Podman-backed session currently blocks until Podman deletes the conta
 - [x] (2026-09-03 21:35Z) Provisioned isolated storage for local and SSH Podman targets, including exact identity validation and failed-launch rollback.
 - [x] (2026-09-03 22:35Z) Split Podman quiescence from supervised asynchronous storage cleanup, including restart recovery, visible stages, and bounded shutdown draining.
 - [x] (2026-09-03 21:42Z) Added the optional root-owned ZFS helper example and target planning coverage.
-- [ ] Run focused tests, the full test suite, and clippy; commit coherent validated checkpoints.
+- [x] (2026-09-03 23:05Z) Passed focused tests, the full `cargo test` suite, `cargo clippy --all-targets -- -D warnings`, helper shell parsing, and a local Podman 5.7 named-volume smoke test.
 
 ## Surprises & Discoveries
 
@@ -46,7 +46,7 @@ Stopping a Podman-backed session currently blocks until Podman deletes the conta
 
 ## Outcomes & Retrospective
 
-Configuration, persistence, provisioning, rollback, decomposed cleanup plans, the daemon handoff, and the example helper are implemented. Focused configuration, database, target-planning, controller-lifecycle, and daemon tests pass. Full repository validation and a host-level Podman smoke check remain.
+Configuration, persistence, provisioning, rollback, decomposed cleanup plans, the daemon handoff, documentation, and the example helper are implemented. Focused tests pass, the full workspace test suite passes, and clippy is clean with warnings denied. A local Podman 5.7 smoke test mounted the per-session volume at `/workspace`, wrote and read workspace data, confirmed the container stopped before deletion, and removed the container and volume separately. Installing and exercising the optional ZFS helper on Morannon remains an operator deployment check rather than a repository implementation requirement.
 
 ## Context and Orientation
 

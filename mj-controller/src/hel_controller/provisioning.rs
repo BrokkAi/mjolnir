@@ -2338,10 +2338,10 @@ mod tests {
             // Remote commands reach the target posix-quoted.
             let removal = executor
                 .commands()
-                .last()
-                .unwrap()
-                .join(" ")
-                .replace('\'', "");
+                .into_iter()
+                .map(|arguments| arguments.join(" ").replace('\'', ""))
+                .find(|command| command.contains("rm --force") && command.contains(&name))
+                .expect("cleanup removes the exact provisioned container");
             assert!(removal.contains("rm --force"), "{removal}");
             assert!(removal.contains(&name), "{removal}");
         }
@@ -2415,7 +2415,12 @@ mod tests {
         let reported = format!("{error:#}");
         assert!(reported.contains("never reported an address"), "{reported}");
         assert!(reported.contains("cleanup succeeded"), "{reported}");
-        let removal = executor.commands().last().unwrap().join(" ");
+        let removal = executor
+            .commands()
+            .into_iter()
+            .map(|arguments| arguments.join(" "))
+            .find(|command| command.contains("podman rm --force --ignore"))
+            .expect("cleanup removes the provisioned Podman container");
         assert!(removal.contains("podman rm --force --ignore"), "{removal}");
     }
 

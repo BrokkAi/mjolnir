@@ -638,9 +638,10 @@ impl SessionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum PodmanWorkspaceLocator {
+    #[default]
     ContainerLayer,
     Volume {
         name: String,
@@ -650,12 +651,6 @@ pub enum PodmanWorkspaceLocator {
         helper: Vec<String>,
         resource: String,
     },
-}
-
-impl Default for PodmanWorkspaceLocator {
-    fn default() -> Self {
-        Self::ContainerLayer
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
