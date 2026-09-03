@@ -47,6 +47,10 @@ You can see all three working from the test suite (named tests below) and, on a 
   Evidence: `git log --oneline` in `/home/jonathan/Projects/hel` shows `23715a6 Keep remote workers on portable binaries`, which is not present in this worktree; this worktree's fallback at `mj-controller/src/hel_controller/worker_binary.rs:731` is unconditional on target locality.
 - Observation: greedy packing needs a progress guard. If two adjacent summaries are each small enough to be a legal single-summary prompt but too large to share one prompt, every round packs the same number of groups and the loop never terminates.
   Evidence: constructed by reasoning about `pack_reduction_groups`; guarded with `ensure!(groups.len() < summaries.len(), ...)` in `reduce_summaries` and covered by `reduction_that_cannot_pack_any_pair_is_an_error`.
+- Observation: while a controller binary is still on disk, `select_sibling_worker` offers that binary itself as the worker for *any* architecture, because its last candidates are `directory.join(name)` for the controller's own file name. So on this branch the generic "no Linux worker for {triple}" message is effectively unreachable for a controller that exists, and Milestone C's new message covers the case that actually happens. This is further evidence for the paragraph above: the incident's build must have restricted that self-fallback for remote targets.
+  Evidence: the first draft of `a_present_controller_still_reports_a_missing_worker_plainly` failed with `called Result::unwrap_err() on an Ok value: Local { path: "/opt/brokk/mj", source: "beside the running executable" }`. The test was rewritten as `a_present_controller_still_looks_beside_itself`, which asserts the sibling lookup still runs and, separately, that a present controller with no sibling directory at all still gets the generic message.
+- Observation: two process-driven tests fail occasionally under a fully parallel workspace `cargo test` and pass every time on their own — `mj-cli/tests/termination_pty.rs` (both cases, once) and `grok_usage::tests::an_agent_that_exits_without_answering_is_reported_not_awaited` (once). Neither touches compaction, resume, or worker binaries. They are load-sensitive, not regressions.
+  Evidence: `cargo test -p brokk-mjolnir --test termination_pty` passes alone; `cargo test -p brokk-mj-controller --lib` passes five times in a row with the changes and four times in a row with them stashed; the third full-workspace run is entirely green.
 - Observation: deriving the page budget from a model's published context window can produce a budget below `MIN_CONTEXT_BYTES` (32 KiB) for a small model, which would make `compact_snapshot` reject the whole compaction before making a single request. A 16k-token model yields exactly 32 KiB; an 8k-token model yields 16 KiB.
   Evidence: `page_bytes = context_length * 4 / 2`, so `context_length = 8192` gives 16 384. Handled by clamping the backend's reported page budget up to `MIN_CONTEXT_BYTES`; an oversize rejection from such a model is already handled by the adaptive halving path in `summarize_page_adaptively`.
 
@@ -69,6 +73,9 @@ You can see all three working from the test suite (named tests below) and, on a 
   Date/Author: 2026-09-03, implementation agent.
 - Decision: `worker_binary_prerequisite_for_arch` keeps its public signature and delegates to a private `worker_binary_prerequisite_for_current(arch, current, is_file)`.
   Rationale: Milestone C's behavior depends on whether the controller's own path still exists, which is untestable while the function reads `std::env::current_exe()` and the real filesystem itself. Passing the controller path and a file probe makes both new behaviors testable without touching the machine. The environment-variable branches stay inside the function so that a test can still prove they survive a replaced controller; that test runs in a child process, following the existing `RAW_CONVERSION_TEST_CHILD` pattern in `resume.rs`, because environment variables are process-global and the mj-controller test binary runs tests in parallel.
+  Date/Author: 2026-09-03, implementation agent.
+- Decision: Milestone C's "present controller" test asserts that the sibling lookup still runs, instead of asserting the generic message from a controller that has a sibling directory.
+  Rationale: a controller that exists is itself one of the sibling candidates, so that path always resolves and the generic message is unreachable from it. Asserting the message there would have required a contrived controller path; asserting that the probe still happens tests the actual guard, and the generic message is still pinned by a second case whose controller has no parent directory to search.
   Date/Author: 2026-09-03, implementation agent.
 - Decision: Milestone C was added to this plan after Milestones A and B were specified, at the user's request, and is implemented as its own commit.
   Rationale: it shares the incident and the file (`worker_binary.rs`) with Milestone A but is an independent behavior: A decides *when* the worker check runs, C decides *what the check says* when the controller binary itself was replaced.
@@ -207,7 +214,9 @@ Milestone B, in `mj-controller/src/hel_compaction.rs`:
 * `independent_pages_run_at_the_compaction_concurrency_limit` — the renamed concurrency test, now with at least sixteen pages, asserting the observed maximum in flight equals `COMPACTION_CONCURRENCY` and that nothing is left running.
 * `page_summaries_that_fit_one_prompt_reduce_in_a_single_request` — with many pages whose summaries all fit one reduction prompt, exactly one prompt containing `Merge these contiguous historical state snapshots` is sent.
 * `a_wide_page_budget_summarizes_in_one_request_under_a_small_handoff` — a transcript far larger than the handoff budget but smaller than the page budget takes exactly one request, and the handoff still respects `handoff_bytes`.
-* `reduction_that_cannot_pack_any_pair_is_an_error` — the progress guard.
+* `reduction_packing_keeps_order_and_fills_each_prompt` — six summaries with room for two per prompt make three groups, in the original order.
+* `reduction_that_cannot_pack_any_pair_is_an_error` — the progress guard, proven by the backend receiving no request at all.
+* `a_single_snapshot_too_large_for_its_own_prompt_is_an_error` — the surviving single-summary check.
 
 Milestone B, in `mj-controller/src/hel_utility_llm.rs`:
 
@@ -216,8 +225,8 @@ Milestone B, in `mj-controller/src/hel_utility_llm.rs`:
 
 Milestone C, in `mj-controller/src/hel_controller/worker_binary.rs`:
 
-* `a_replaced_controller_is_reported_instead_of_a_missing_worker` — with a controller path that does not exist, the sibling probe is never called (the test's probe records every path it is asked about) and the error names the stale path and says to restart the daemon.
-* `a_present_controller_still_reports_a_missing_worker_plainly` — with a controller path that does exist and no worker anywhere, the message is still the generic `no Linux worker for {triple}` one.
+* `a_replaced_controller_is_reported_instead_of_a_missing_worker` — with a controller path that does not exist, the sibling probe is never called (the test's probe records every path it is asked about) and the error names the stale path, without the kernel's ` (deleted)` marker, and says to restart the daemon.
+* `a_present_controller_still_looks_beside_itself` — with a controller path that does exist, the packaged worker name beside it is still probed; and a present controller with no sibling directory at all still gets the generic `no Linux worker for {triple}` message rather than the restart advice.
 * `a_replaced_controller_still_honors_the_worker_binary_override` — in a child process with `MJ_WORKER_BINARY` pointing at a real file, a stale controller path still resolves that override.
 
 Beyond the tests, the user-visible acceptance is the incident itself: with no worker binary for the target architecture, `mj` resume of a cross-harness session prints the worker message immediately instead of sitting in `Compacting`. In the controller log, one `compaction paging decided` line now precedes the model requests and states how many pages there will be.
@@ -293,4 +302,5 @@ No new crates, no new workspace members, no new configuration keys.
 
 * 2026-09-03, first version: written from the incident evidence before any code changed, covering Milestones A and B.
 * 2026-09-03, second version: Milestone C added at the user's request, with its own evidence paragraph in the Purpose section, its own acceptance tests, and a Decision Log entry recording that it was a later addition. The Interfaces section gained the split of `worker_binary_prerequisite_for_arch`, because Milestone C's behavior is only testable once the controller path and the file probe are parameters.
+* 2026-09-03, fourth version: Milestone C's acceptance tests renamed after implementation revealed that a controller still on disk is its own sibling candidate, plus the two load-induced test flakes recorded so the next contributor does not chase them.
 * 2026-09-03, third version: Progress, Surprises & Discoveries, and Outcomes filled in after implementation. The progress guard in the reduction loop and the `MIN_CONTEXT_BYTES` clamp on the derived page budget were both discovered while implementing Milestone B and are recorded as decisions rather than silently added.

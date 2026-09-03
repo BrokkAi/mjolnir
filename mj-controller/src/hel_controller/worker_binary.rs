@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
@@ -688,9 +688,20 @@ fn select_sibling_worker(
 /// expected architecture, so it can recommend a fix without creating a
 /// container or making a network request.
 pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAvailability> {
+    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
+    worker_binary_prerequisite_for_current(arch, &current, &|path| path.is_file())
+}
+
+/// The lookup itself, with the controller's own path and the file probe passed
+/// in so both can be exercised without the machine they describe.
+fn worker_binary_prerequisite_for_current(
+    arch: &str,
+    current: &Path,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Result<WorkerBinaryAvailability> {
     let triple = format!("{arch}-unknown-linux-musl");
     if let Some(path) = hel::hel_config::env_override_os("WORKER_BINARY").map(PathBuf::from) {
-        if !path.is_file() {
+        if !is_file(&path) {
             bail!("MJ_WORKER_BINARY is not a file: {}", path.display());
         }
         return Ok(WorkerBinaryAvailability::Local {
@@ -698,7 +709,10 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
             source: "MJ_WORKER_BINARY".into(),
         });
     }
-    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
+    // A rebuilt or renamed checkout leaves a running controller pointing at a
+    // path that no longer holds a binary. Every lookup derived from that path
+    // is meaningless, so remember the fact and skip those lookups.
+    let controller_replaced = !is_file(current);
     let mut candidates = Vec::new();
     if let Some(directory) = hel::hel_config::env_override_os("WORKER_DIR").map(PathBuf::from) {
         candidates.push((
@@ -707,22 +721,26 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
         ));
         candidates.push((directory.join(&triple).join("hel"), "MJ_WORKER_DIR"));
     }
-    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| path.is_file()) {
+    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| is_file(path)) {
         return Ok(WorkerBinaryAvailability::Local {
             path,
             source: source.into(),
         });
     }
+    // The native branches survive a replaced controller: they copy
+    // /proc/self/exe, which still names the running image.
     if cfg!(all(target_os = "linux", target_env = "musl"))
         && ((arch == "x86_64" && cfg!(target_arch = "x86_64"))
             || (arch == "aarch64" && cfg!(target_arch = "aarch64")))
     {
         return Ok(WorkerBinaryAvailability::Local {
-            path: stable_running_executable(&current)?,
+            path: stable_running_executable(current)?,
             source: "native musl mj binary".into(),
         });
     }
-    if let Some((path, source)) = select_sibling_worker(&current, &triple, |path| path.is_file()) {
+    if !controller_replaced
+        && let Some((path, source)) = select_sibling_worker(current, &triple, is_file)
+    {
         return Ok(WorkerBinaryAvailability::Local {
             path,
             source: source.into(),
@@ -733,7 +751,7 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
             || (arch == "aarch64" && cfg!(target_arch = "aarch64")))
     {
         return Ok(WorkerBinaryAvailability::Local {
-            path: stable_running_executable(&current)?,
+            path: stable_running_executable(current)?,
             source: "native Linux mj binary".into(),
         });
     }
@@ -747,9 +765,23 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
             triple,
         });
     }
+    // Telling someone to install a worker beside a binary that is no longer
+    // there sends them looking in the wrong place.
+    ensure!(
+        !controller_replaced,
+        "the running mj binary was replaced or removed on disk ({}); restart the Mjolnir daemon so it runs the current build, then retry",
+        display_path(current)
+    );
     bail!(
         "no Linux worker for {triple}; install mj-worker-{triple} beside mj, set MJ_WORKER_DIR/MJ_WORKER_BINARY, or configure MJ_WORKER_URL and MJ_WORKER_SHA256"
     )
+}
+
+/// Linux appends " (deleted)" to `/proc/<pid>/exe` for a removed image. That
+/// marker belongs in a message but never in a decision, which `is_file` makes.
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    text.strip_suffix(" (deleted)").unwrap_or(&text).to_owned()
 }
 
 /// The architecture a configured template names outright, if it names one. A
@@ -2366,6 +2398,131 @@ mod tests {
             present.iter().any(|p| p == path)
         });
         assert_eq!(selected, Some((musl, "development musl sibling")));
+    }
+
+    /// An architecture no host builds for, so the lookup cannot take one of
+    /// the "native mj binary" shortcuts and reaches the end on any machine.
+    const FOREIGN_ARCH: &str = "riscv64";
+
+    /// A rebuilt or renamed checkout leaves a running daemon pointing at a
+    /// path that holds nothing. Searching beside that path finds nothing and
+    /// blames the user for a worker that may well be installed correctly.
+    #[test]
+    fn a_replaced_controller_is_reported_instead_of_a_missing_worker() {
+        let stale = PathBuf::from("/src/.backup-vHXvCs/target/debug/mj (deleted)");
+        let probed = RefCell::new(Vec::new());
+
+        let error = worker_binary_prerequisite_for_current(FOREIGN_ARCH, &stale, &|path| {
+            probed.borrow_mut().push(path.to_path_buf());
+            false
+        })
+        .unwrap_err();
+
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("was replaced or removed on disk"),
+            "{detail}"
+        );
+        assert!(detail.contains("restart the Mjolnir daemon"), "{detail}");
+        // The path is named without the kernel's deletion marker.
+        assert!(
+            detail.contains("/src/.backup-vHXvCs/target/debug/mj)"),
+            "{detail}"
+        );
+        assert!(!detail.contains("(deleted)"), "{detail}");
+        assert_eq!(
+            probed.into_inner(),
+            vec![stale],
+            "nothing beside a path that no longer exists is worth probing"
+        );
+    }
+
+    /// The guard is about a controller path that no longer exists and nothing
+    /// else: a controller still on disk keeps its whole sibling lookup, and
+    /// keeps the plain "no Linux worker" answer when that lookup comes up
+    /// empty.
+    #[test]
+    fn a_present_controller_still_looks_beside_itself() {
+        let controller = PathBuf::from("/opt/brokk/mj");
+        let probed = RefCell::new(Vec::new());
+
+        let availability =
+            worker_binary_prerequisite_for_current(FOREIGN_ARCH, &controller, &|path| {
+                probed.borrow_mut().push(path.to_path_buf());
+                path == controller
+            })
+            .unwrap();
+
+        let probed = probed.into_inner();
+        assert!(
+            probed
+                .iter()
+                .any(|path| path.ends_with("mj-worker-riscv64-unknown-linux-musl")),
+            "the packaged worker name must still be probed: {probed:?}"
+        );
+        assert!(matches!(
+            availability,
+            WorkerBinaryAvailability::Local { .. }
+        ));
+
+        // With nothing beside it either, a present controller still gets the
+        // generic message; only a replaced one is told to restart.
+        let root = PathBuf::from("/");
+        let error =
+            worker_binary_prerequisite_for_current(FOREIGN_ARCH, &root, &|path| path == root)
+                .unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(
+            detail.contains("no Linux worker for riscv64-unknown-linux-musl"),
+            "{detail}"
+        );
+        assert!(!detail.contains("restart the Mjolnir daemon"), "{detail}");
+    }
+
+    const WORKER_BINARY_OVERRIDE_CHILD: &str = "MJ_WORKER_BINARY_OVERRIDE_CHILD";
+
+    /// The override names a worker outright, so it does not care where the
+    /// controller lives or whether that path still exists.
+    #[test]
+    fn a_replaced_controller_still_honors_the_worker_binary_override() {
+        // MJ_WORKER_BINARY is process-global and other tests resolve worker
+        // binaries, so set it only in an exact child test.
+        if std::env::var_os(WORKER_BINARY_OVERRIDE_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let worker = directory.path().join("mj-worker");
+            std::fs::write(&worker, b"worker").unwrap();
+            let test_name = format!(
+                "{}::a_replaced_controller_still_honors_the_worker_binary_override",
+                module_path!()
+                    .strip_prefix("mj_controller::")
+                    .unwrap_or(module_path!())
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(WORKER_BINARY_OVERRIDE_CHILD, "1")
+                .env("MJ_WORKER_BINARY", &worker)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated worker override test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let stale = PathBuf::from("/src/.backup-vHXvCs/target/debug/mj (deleted)");
+        let availability =
+            worker_binary_prerequisite_for_current(FOREIGN_ARCH, &stale, &|path| path.is_file())
+                .unwrap();
+
+        match availability {
+            WorkerBinaryAvailability::Local { source, .. } => {
+                assert_eq!(source, "MJ_WORKER_BINARY");
+            }
+            other => panic!("expected the override to resolve, got {other:?}"),
+        }
     }
 
     #[test]
