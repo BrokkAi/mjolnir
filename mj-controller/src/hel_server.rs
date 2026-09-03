@@ -981,6 +981,7 @@ pub enum ControllerAction {
     },
     Resume {
         session_id: String,
+        workspace_id: String,
         profile_id: String,
         target_id: String,
         queue: ResumeQueueDisposition,
@@ -1848,14 +1849,17 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
         }
         ControllerAction::Resume {
             session_id,
+            workspace_id,
             profile_id,
             target_id,
             ..
         } => {
             validate_public_id(session_id)?;
+            validate_public_id(workspace_id)?;
             validate_public_id(profile_id)?;
             validate_public_id(target_id)?;
             let session = require_session_record(snapshot, session_id)?;
+            require_workspace(snapshot, workspace_id)?;
             require_profile(snapshot, profile_id)?;
             require_target(snapshot, target_id)?;
             if session
@@ -2089,6 +2093,15 @@ fn require_session_record<'a>(
         .iter()
         .find(|session| session.id == id)
         .ok_or_else(|| ApiError::not_found("unknown session"))
+}
+
+fn require_workspace(snapshot: &ViewerSnapshot, id: &str) -> Result<(), ApiError> {
+    snapshot
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.id == id)
+        .then_some(())
+        .ok_or_else(|| ApiError::bad_request("unknown workspace"))
 }
 
 fn require_profile<'a>(
@@ -3122,6 +3135,68 @@ mod tests {
     /// hand-written stub rather than importing a module.
     fn run_viewer_script(name: &str, script: &str) {
         run_web_check(name, script);
+    }
+
+    #[test]
+    fn embedded_viewer_lists_histories_from_every_workspace() {
+        let source = viewer_source("function renderResumable()", "function resumableCard");
+        let setup = r#"
+const snapshot = {
+  sessions: [
+    { id: "history-a", workspace_id: "workspace-a", capabilities: { resume: true } },
+    { id: "history-b", workspace_id: "workspace-b", capabilities: { resume: true } },
+    { id: "running-b", workspace_id: "workspace-b", capabilities: { resume: false } },
+  ],
+};
+const resumable = {
+  children: [],
+  replaceChildren(...children) { this.children = children; },
+};
+function resumableCard(session) { return session.id; }
+function el(_tag, _className, text) { return text; }
+"#;
+        let checks = r#"
+renderResumable();
+if (JSON.stringify(resumable.children) !== JSON.stringify(["history-a", "history-b"])) {
+  throw new Error(`global histories were filtered: ${JSON.stringify(resumable.children)}`);
+}
+"#;
+        run_viewer_script(
+            "global-resume-history",
+            &format!("{setup}\n{source}\n{checks}"),
+        );
+    }
+
+    #[test]
+    fn embedded_viewer_sends_the_selected_resume_workspace() {
+        let source = viewer_source("async function runSessionAction", "sessions.onclick =");
+        let setup = r#"
+const pendingActions = new Set();
+const snapshot = { sessions: [] };
+let sent = null;
+function selectedWorkspaceId() { return "workspace-b"; }
+function navigate() {}
+function renderRoute() {}
+async function refresh() {}
+async function request(path, options) {
+  sent = { path, body: JSON.parse(options.body) };
+}
+"#;
+        let checks = r#"
+const errorNode = { textContent: "" };
+await runSessionAction(
+  { action: "resume", id: "history-a", profile: "codex-1", target: "podman" },
+  errorNode,
+  { queue: "start" },
+);
+if (sent.path !== "/api/actions" || sent.body.workspace_id !== "workspace-b") {
+  throw new Error(`resume did not carry its destination: ${JSON.stringify(sent)}`);
+}
+"#;
+        run_viewer_script(
+            "resume-workspace-destination",
+            &format!("{setup}\n{source}\n{checks}"),
+        );
     }
 
     /// The projection publishes what the browser needs to group and filter
@@ -4389,10 +4464,15 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 environment: BTreeMap::new(),
             },
         );
-        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        snapshot.workspaces.push(ViewerWorkspace {
+            id: "workspace-1".into(),
+            name: "One".into(),
+        });
         validate_action(
             &ControllerAction::Resume {
                 session_id: "session-1".into(),
+                workspace_id: "workspace-1".into(),
                 profile_id: "claude-1".into(),
                 target_id: "podman".into(),
                 queue: ResumeQueueDisposition::Start,
@@ -4400,6 +4480,19 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             &snapshot,
         )
         .unwrap();
+
+        let error = validate_action(
+            &ControllerAction::Resume {
+                session_id: "session-1".into(),
+                workspace_id: "missing".into(),
+                profile_id: "claude-1".into(),
+                target_id: "podman".into(),
+                queue: ResumeQueueDisposition::Start,
+            },
+            &snapshot,
+        )
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
 
         let error = validate_action(
             &ControllerAction::Close {
@@ -4551,7 +4644,11 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         // A project that only exists on GitHub cannot become a checkout on this
         // machine, so the bare target stays out of reach for its sessions.
         config.bundles.get_mut("hel").unwrap().repositories[0].local = None;
-        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        snapshot.workspaces.push(ViewerWorkspace {
+            id: "workspace-1".into(),
+            name: "One".into(),
+        });
         assert_eq!(
             snapshot.sessions[0].incompatible_resume_targets,
             vec!["raw".to_owned()]
@@ -4560,6 +4657,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         let error = validate_action(
             &ControllerAction::Resume {
                 session_id: "session-1".into(),
+                workspace_id: "workspace-1".into(),
                 profile_id: "codex-1".into(),
                 target_id: "raw".into(),
                 queue: ResumeQueueDisposition::Start,

@@ -1627,6 +1627,7 @@ async fn apply_phone_action(
         }
         ControllerAction::Resume {
             session_id,
+            workspace_id,
             profile_id,
             target_id,
             queue,
@@ -1634,6 +1635,7 @@ async fn apply_phone_action(
             .daemon_runtime
             .resume_session(ResumeSessionRequest {
                 session_id,
+                workspace_id,
                 profile_id,
                 target_template_id: target_id,
                 additional_mounts: None,

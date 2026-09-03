@@ -630,6 +630,7 @@ fn start_session_launch_with_repository_preflight(
                 &profile_id,
                 &target_template_id,
             ));
+            let workspace_id = context.workspace_id.clone();
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Resuming);
             context.dashboard.set_resume_destination(
@@ -647,6 +648,7 @@ fn start_session_launch_with_repository_preflight(
                             .await?
                             .resume_session(daemon::ResumeSessionRequest {
                                 session_id: session_id.clone(),
+                                workspace_id,
                                 profile_id: profile_id.clone(),
                                 target_template_id: target_template_id.clone(),
                                 additional_mounts: Some(additional_mounts),

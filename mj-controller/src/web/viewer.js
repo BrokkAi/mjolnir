@@ -690,12 +690,9 @@ async function commitNew() {
 /// sentence saying why and where to finish it. Hiding it would leave a person
 /// looking for a session they know exists.
 function renderResumable() {
-  const workspaceId = selectedWorkspaceId();
-  const list = (snapshot.sessions || []).filter(
-    session => session.workspace_id === workspaceId && session.capabilities?.resume,
-  );
+  const list = (snapshot.sessions || []).filter(session => session.capabilities?.resume);
   if (!list.length) {
-    resumable.replaceChildren(el('p', 'dim', 'No sessions to resume in this workspace.'));
+    resumable.replaceChildren(el('p', 'dim', 'No sessions to resume.'));
     return;
   }
   resumable.replaceChildren(...list.map(resumableCard));
@@ -2440,6 +2437,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     // back to what the session last used.
     body.profile_id = extra?.profile_id || dataset.profile;
     body.target_id = extra?.target_id || dataset.target;
+    body.workspace_id = selectedWorkspaceId();
     body.queue = extra?.queue || 'start';
   }
   pendingActions.add(key);

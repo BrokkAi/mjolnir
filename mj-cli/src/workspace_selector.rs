@@ -4,14 +4,18 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use mj_chat::hel_chat::Notices;
 use mj_chat::hel_text_input::TextInput;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::TerminalGuard;
 use crate::daemon::{WorkspaceListing, WorkspaceSnapshot};
+
+const SELECTOR_HINTS: &str =
+    "↑↓ select  Enter open  N new  R rename  V recover draft  D delete  Esc cancel";
 
 pub(crate) struct SelectorWorkspace {
     pub listing: WorkspaceListing,
@@ -21,9 +25,15 @@ pub(crate) struct SelectorWorkspace {
 pub(crate) enum SelectorOutcome {
     Select(String),
     Create(String),
-    Rename { workspace_id: String, name: String },
+    Rename {
+        workspace_id: String,
+        name: String,
+    },
     Delete(String),
-    RecoverDraft(String),
+    RecoverDraft {
+        workspace_id: String,
+        draft_id: String,
+    },
     Cancel,
 }
 
@@ -35,9 +45,11 @@ enum EditMode {
 pub(crate) fn select_workspace(
     workspaces: &[SelectorWorkspace],
     suggested_name: &str,
+    notices: &Notices,
+    selected_workspace_id: Option<&str>,
 ) -> Result<SelectorOutcome> {
     let mut terminal = TerminalGuard::enter()?;
-    let mut selected = 0_usize;
+    let mut selected = initial_selection(workspaces, selected_workspace_id);
     let mut editing: Option<EditMode> = None;
     let mut input = TextInput::new().with_max_chars(64);
 
@@ -99,19 +111,8 @@ pub(crate) fn select_workspace(
                 right,
             );
 
-            let footer_text = match &editing {
-                Some(EditMode::Create) => {
-                    format!("Create workspace: {}", input.with_cursor_marker("▌"))
-                }
-                Some(EditMode::Rename { .. }) => {
-                    format!("Rename workspace: {}", input.with_cursor_marker("▌"))
-                }
-                None => {
-                    "↑↓ select  Enter open  N new  R rename  V recover draft  D delete  Esc cancel"
-                        .into()
-                }
-            };
-            frame.render_widget(Paragraph::new(footer_text), footer);
+            let (footer_text, footer_style) = selector_footer(editing.as_ref(), &input, notices);
+            frame.render_widget(Paragraph::new(footer_text).style(footer_style), footer);
         })?;
 
         let Event::Key(key) = event::read()? else {
@@ -120,6 +121,7 @@ pub(crate) fn select_workspace(
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        notices.dismiss(std::time::Instant::now());
         if let Some(mode) = &editing {
             match key.code {
                 KeyCode::Esc => {
@@ -180,11 +182,48 @@ pub(crate) fn select_workspace(
             }
             KeyCode::Char('v' | 'V') if selected < workspaces.len() => {
                 if let Some(draft) = workspaces[selected].snapshot.drafts.first() {
-                    return Ok(SelectorOutcome::RecoverDraft(draft.id.clone()));
+                    return Ok(SelectorOutcome::RecoverDraft {
+                        workspace_id: workspaces[selected].listing.workspace.id.clone(),
+                        draft_id: draft.id.clone(),
+                    });
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn initial_selection(
+    workspaces: &[SelectorWorkspace],
+    selected_workspace_id: Option<&str>,
+) -> usize {
+    selected_workspace_id
+        .and_then(|workspace_id| {
+            workspaces
+                .iter()
+                .position(|candidate| candidate.listing.workspace.id == workspace_id)
+        })
+        .unwrap_or(0)
+}
+
+fn selector_footer(
+    editing: Option<&EditMode>,
+    input: &TextInput,
+    notices: &Notices,
+) -> (String, Style) {
+    match editing {
+        Some(EditMode::Create) => (
+            format!("Create workspace: {}", input.with_cursor_marker("▌")),
+            Style::default(),
+        ),
+        Some(EditMode::Rename { .. }) => (
+            format!("Rename workspace: {}", input.with_cursor_marker("▌")),
+            Style::default(),
+        ),
+        None => match notices.current() {
+            Some(notice) => (notice, Style::default().fg(Color::Yellow)),
+            None => (SELECTOR_HINTS.into(), Style::default()),
+        },
     }
 }
 
@@ -254,4 +293,58 @@ fn preview_lines(candidate: &SelectorWorkspace) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::{WorkspaceListing, WorkspaceSnapshot};
+    use hel::hel_workspace::WorkspaceRecord;
+
+    fn candidate(id: &str) -> SelectorWorkspace {
+        let workspace = WorkspaceRecord {
+            id: id.into(),
+            name: id.into(),
+            created_at: "2026-09-03T00:00:00Z".into(),
+            last_opened_at: "2026-09-03T00:00:00Z".into(),
+            session_count: 0,
+        };
+        SelectorWorkspace {
+            listing: WorkspaceListing {
+                workspace: workspace.clone(),
+                attached_pids: Vec::new(),
+            },
+            snapshot: WorkspaceSnapshot {
+                workspace,
+                sessions: Vec::new(),
+                drafts: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_delete_failure_uses_the_standard_notice_footer() {
+        let notices = Notices::default();
+        notices.set_failure(
+            "Could not delete workspace: workspace is not empty (1 active sessions, 0 drafts)",
+        );
+
+        let (text, style) = selector_footer(None, &TextInput::new(), &notices);
+
+        assert!(text.starts_with("Could not delete workspace:"));
+        assert_eq!(style.fg, Some(Color::Yellow));
+        assert!(!notices.dismiss(std::time::Instant::now()));
+    }
+
+    #[test]
+    fn retrying_the_selector_keeps_the_failed_workspace_selected() {
+        let workspaces = [
+            candidate("first"),
+            candidate("plandiag"),
+            candidate("third"),
+        ];
+
+        assert_eq!(initial_selection(&workspaces, Some("plandiag")), 1);
+        assert_eq!(initial_selection(&workspaces, Some("deleted")), 0);
+    }
 }

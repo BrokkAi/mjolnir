@@ -13,6 +13,7 @@ pub struct WorkspaceRecord {
     pub name: String,
     pub created_at: String,
     pub last_opened_at: String,
+    /// Number of active sessions currently owned by this workspace.
     pub session_count: u64,
 }
 

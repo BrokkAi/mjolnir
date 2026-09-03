@@ -496,11 +496,15 @@ pub(super) fn retain_workspace_sessions(
     let session_ids = hel::hel_database::session_ids_for_workspace(workspace_id)?
         .into_iter()
         .collect::<BTreeSet<_>>();
-    controller
+    controller.state.sessions.retain(|session_id, session| {
+        !session.state.is_active() || session_ids.contains(session_id)
+    });
+    for session in controller
         .state
         .sessions
-        .retain(|session_id, _| session_ids.contains(session_id));
-    for session in controller.state.sessions.values_mut() {
+        .values_mut()
+        .filter(|session| session.state.is_active())
+    {
         let frontier =
             hel::hel_database::client_read_frontier(client_id, workspace_id, &session.id)?;
         session.viewed_through_event_ordinal = frontier;

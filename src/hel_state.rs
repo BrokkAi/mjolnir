@@ -869,6 +869,10 @@ impl CheckpointMetadata {
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
     pub id: String,
+    /// Owning workspace while active, or the most recent workspace while inactive.
+    ///
+    /// Inactive histories are globally resumable, so this id may refer to a
+    /// workspace that has since been deleted.
     #[serde(default = "default_session_workspace_id")]
     pub workspace_id: String,
     pub title: String,

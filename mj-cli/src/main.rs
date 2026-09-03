@@ -515,6 +515,8 @@ async fn run_workspace_dashboard(
             _ => bail!("several workspaces exist; pass `--workspace NAME`"),
         }
     } else {
+        let notices = mj_chat::hel_chat::Notices::default();
+        let mut selected_workspace_id = None;
         loop {
             let suggested = suggested_workspace_name(&workspaces)?;
             let mut selector_entries = Vec::with_capacity(workspaces.len());
@@ -525,23 +527,60 @@ async fn run_workspace_dashboard(
                     snapshot,
                 });
             }
-            match workspace_selector::select_workspace(&selector_entries, &suggested)? {
+            match workspace_selector::select_workspace(
+                &selector_entries,
+                &suggested,
+                &notices,
+                selected_workspace_id.as_deref(),
+            )? {
                 workspace_selector::SelectorOutcome::Select(workspace_id) => break workspace_id,
                 workspace_selector::SelectorOutcome::Create(name) => {
-                    let workspace = daemon.create_workspace(name).await?;
-                    break workspace.id;
+                    match daemon.create_workspace(name).await {
+                        Ok(workspace) => break workspace.id,
+                        Err(error) => {
+                            notices.set_failure(format!("Could not create workspace: {error:#}"))
+                        }
+                    }
                 }
                 workspace_selector::SelectorOutcome::Rename { workspace_id, name } => {
-                    daemon.rename_workspace(workspace_id, name).await?;
-                    workspaces = daemon.list_workspaces().await?;
+                    selected_workspace_id = Some(workspace_id.clone());
+                    match daemon.rename_workspace(workspace_id, name).await {
+                        Ok(()) => {
+                            notices.clear();
+                            workspaces = daemon.list_workspaces().await?;
+                        }
+                        Err(error) => {
+                            notices.set_failure(format!("Could not rename workspace: {error:#}"))
+                        }
+                    }
                 }
                 workspace_selector::SelectorOutcome::Delete(workspace_id) => {
-                    daemon.delete_workspace(workspace_id).await?;
-                    workspaces = daemon.list_workspaces().await?;
+                    selected_workspace_id = Some(workspace_id.clone());
+                    match daemon.delete_workspace(workspace_id).await {
+                        Ok(()) => {
+                            notices.clear();
+                            selected_workspace_id = None;
+                            workspaces = daemon.list_workspaces().await?;
+                        }
+                        Err(error) => {
+                            notices.set_failure(format!("Could not delete workspace: {error:#}"))
+                        }
+                    }
                 }
-                workspace_selector::SelectorOutcome::RecoverDraft(draft_id) => {
-                    daemon.recover_draft(draft_id).await?;
-                    workspaces = daemon.list_workspaces().await?;
+                workspace_selector::SelectorOutcome::RecoverDraft {
+                    workspace_id,
+                    draft_id,
+                } => {
+                    selected_workspace_id = Some(workspace_id);
+                    match daemon.recover_draft(draft_id).await {
+                        Ok(()) => {
+                            notices.clear();
+                            workspaces = daemon.list_workspaces().await?;
+                        }
+                        Err(error) => {
+                            notices.set_failure(format!("Could not recover draft: {error:#}"))
+                        }
+                    }
                 }
                 workspace_selector::SelectorOutcome::Cancel => {
                     if let Some(workspace_id) = &fallback_workspace {

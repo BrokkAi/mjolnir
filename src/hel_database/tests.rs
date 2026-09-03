@@ -3395,15 +3395,14 @@ fn legacy_sessions_are_migrated_into_the_default_workspace_without_copying_state
         workspace_for_session_at(&database, "session-1").unwrap(),
         Some(DEFAULT_WORKSPACE_ID.to_owned())
     );
-    let workspaces = list_workspaces_from(&database).unwrap();
-    assert_eq!(workspaces.len(), 1);
-    assert_eq!(workspaces[0].id, DEFAULT_WORKSPACE_ID);
-    assert_eq!(workspaces[0].name, "default");
-    assert_eq!(workspaces[0].session_count, 1);
+    assert!(
+        list_workspaces_from(&database).unwrap().is_empty(),
+        "an inactive migrated history must not make the hidden default workspace visible"
+    );
 }
 
 #[test]
-fn workspace_crud_enforces_unique_names_and_only_deletes_empty_workspaces() {
+fn workspace_crud_preserves_history_and_blocks_active_sessions_and_drafts() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "  Bifrost  ").unwrap();
@@ -3412,17 +3411,111 @@ fn workspace_crud_enforces_unique_names_and_only_deletes_empty_workspaces() {
 
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
     assign_new_session_workspace_at(&database, "session-1", &workspace.id).unwrap();
-    assert!(delete_empty_workspace_at(&database, &workspace.id).is_err());
+    let materialized = materialized_session("session-1");
+    save_materialized_session_to(&database, &materialized).unwrap();
+    record_prompt_to(
+        &database,
+        "session-1",
+        "project-1",
+        1,
+        Some("2026-09-03T00:00:00Z"),
+        "remember this prompt",
+    )
+    .unwrap();
     assert!(assign_new_session_workspace_at(&database, "session-1", DEFAULT_WORKSPACE_ID).is_err());
+    assert_eq!(list_workspaces_from(&database).unwrap()[0].session_count, 0);
+
+    delete_workspace_at(&database, &workspace.id).unwrap();
+    let preserved = load_state_from(&database).unwrap();
+    assert_eq!(preserved.sessions["session-1"].workspace_id, workspace.id);
+    assert_eq!(
+        preserved.sessions["session-1"].checkpoint,
+        session("session-1", "project-1").checkpoint
+    );
+    assert_eq!(
+        load_materialized_session_from(&database, "session-1")
+            .unwrap()
+            .unwrap(),
+        materialized
+    );
+    assert_eq!(
+        search_prompts_from(
+            &database,
+            "session-1",
+            "project-1",
+            HistoryScope::Session,
+            "remember this prompt",
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+
+    let active_workspace = create_workspace_at(&database, "Active").unwrap();
+    let mut active = session("session-active", "project-1");
+    active.workspace_id = active_workspace.id.clone();
+    active.state = SessionState::Running;
+    save_session_to(&database, &active).unwrap();
+    let error = delete_workspace_at(&database, &active_workspace.id).unwrap_err();
+    assert!(
+        error.to_string().contains("1 active sessions, 0 drafts"),
+        "{error:#}"
+    );
+
+    let draft_workspace = create_workspace_at(&database, "Drafts").unwrap();
+    save_detached_draft_at(
+        &database,
+        &draft_workspace.id,
+        None,
+        "terminal",
+        Some(42),
+        "unfinished",
+    )
+    .unwrap();
+    let error = delete_workspace_at(&database, &draft_workspace.id).unwrap_err();
+    assert!(
+        error.to_string().contains("0 active sessions, 1 drafts"),
+        "{error:#}"
+    );
 
     let empty = create_workspace_at(&database, "Empty").unwrap();
     rename_workspace_at(&database, &empty.id, "Renamed").unwrap();
-    delete_empty_workspace_at(&database, &empty.id).unwrap();
+    delete_workspace_at(&database, &empty.id).unwrap();
     assert!(
         list_workspaces_from(&database)
             .unwrap()
             .iter()
             .all(|candidate| candidate.id != empty.id)
+    );
+}
+
+#[test]
+fn only_resumable_sessions_can_move_to_a_new_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let source = create_workspace_at(&database, "Source").unwrap();
+    let destination = create_workspace_at(&database, "Destination").unwrap();
+    let mut stopped = session("session-stopped", "project-1");
+    stopped.workspace_id = source.id.clone();
+    save_session_to(&database, &stopped).unwrap();
+
+    reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
+    assert_eq!(
+        workspace_for_session_at(&database, &stopped.id).unwrap(),
+        Some(destination.id.clone())
+    );
+    reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
+
+    let mut running = session("session-running", "project-1");
+    running.workspace_id = source.id;
+    running.state = SessionState::Running;
+    save_session_to(&database, &running).unwrap();
+    assert!(
+        reassign_resumable_session_workspace_at(&database, &running.id, &destination.id).is_err()
+    );
+    assert!(
+        reassign_resumable_session_workspace_at(&database, &stopped.id, "missing-workspace")
+            .is_err()
     );
 }
 

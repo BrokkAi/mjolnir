@@ -45,7 +45,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 6;
+pub(crate) const PROTOCOL_VERSION: u32 = 7;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -200,6 +200,7 @@ pub(crate) struct RuntimeLifecycleView {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResumeSessionRequest {
     pub session_id: String,
+    pub workspace_id: String,
     pub profile_id: String,
     pub target_template_id: String,
     pub additional_mounts: Option<Vec<AdditionalMount>>,
@@ -635,6 +636,9 @@ struct ActiveLifecycle {
     cancelled: Arc<AtomicBool>,
     started_at_epoch_seconds: u64,
     active_stages: BTreeMap<ProvisionStage, (usize, u64)>,
+    /// The workspace a resume is claiming before its durable record changes.
+    /// Workspace deletion consults this so it cannot race the claim.
+    resume_workspace_id: Option<String>,
     resume_destination: Option<(String, String)>,
     notice: Option<String>,
     result:
@@ -909,7 +913,9 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .filter(|(session_id, active)| {
-                session_ids.contains(*session_id) && active.result.borrow().is_none()
+                (session_ids.contains(*session_id)
+                    || active.resume_workspace_id.as_deref() == Some(workspace_id))
+                    && active.result.borrow().is_none()
             })
             .map(|(session_id, active)| RuntimeLifecycleView {
                 session_id: session_id.clone(),
@@ -942,7 +948,7 @@ impl RuntimeState {
             .controller
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let records = runtime_records_for_sessions(&controller, &session_ids);
+        let records = runtime_records_for_workspace(&controller, &session_ids);
         Ok(RuntimeSnapshot {
             revision,
             config: controller.config.clone(),
@@ -958,6 +964,22 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
+        work: F,
+    ) -> Result<
+        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
+    >
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
+        self.start_or_join_lifecycle_for_workspace(session_id, kind, None, work)
+    }
+
+    fn start_or_join_lifecycle_for_workspace<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        resume_workspace_id: Option<String>,
         work: F,
     ) -> Result<
         tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
@@ -983,6 +1005,11 @@ impl RuntimeState {
                     active.kind == kind,
                     "another lifecycle operation is already running for session {session_id}"
                 );
+                ensure!(
+                    resume_workspace_id.is_none()
+                        || active.resume_workspace_id == resume_workspace_id,
+                    "session {session_id} is already resuming into another workspace"
+                );
                 active.result.clone()
             } else {
                 let cancelled = Arc::new(AtomicBool::new(false));
@@ -994,6 +1021,7 @@ impl RuntimeState {
                         cancelled: cancelled.clone(),
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
+                        resume_workspace_id,
                         resume_destination: None,
                         notice: None,
                         result: result_rx.clone(),
@@ -1254,10 +1282,13 @@ impl RuntimeState {
         }
         let profile_id = request.profile_id.clone();
         let target_template_id = request.target_template_id.clone();
+        let workspace_id = request.workspace_id.clone();
+        let rebind_workspace_id = workspace_id.clone();
         let operation_session_id = session_id.clone();
-        let result = self.start_or_join_lifecycle(
+        let result = self.start_or_join_lifecycle_for_workspace(
             session_id,
             LifecycleKind::Resume,
+            Some(workspace_id),
             move |state, session_id, cancelled| async move {
                 let _recovery_reservation = tokio::task::spawn_blocking({
                     let observer = state.recovery_observer.clone();
@@ -1267,6 +1298,16 @@ impl RuntimeState {
                 })
                 .await
                 .context("reserve recovery for daemon resume task")??;
+                blocking({
+                    let session_id = session_id.clone();
+                    move || {
+                        hel::hel_database::reassign_resumable_session_workspace(
+                            &session_id,
+                            &rebind_workspace_id,
+                        )
+                    }
+                })
+                .await?;
                 let mut controller = tokio::task::spawn_blocking(Controller::load)
                     .await
                     .context("load controller for daemon resume task")??;
@@ -1566,7 +1607,7 @@ fn report_worker_upgrade(
     }
 }
 
-fn runtime_records_for_sessions(
+fn runtime_records_for_workspace(
     controller: &Controller,
     session_ids: &BTreeSet<String>,
 ) -> Vec<SessionRecord> {
@@ -1574,7 +1615,9 @@ fn runtime_records_for_sessions(
         .state
         .sessions
         .iter()
-        .filter(|(session_id, _)| session_ids.contains(*session_id))
+        .filter(|(session_id, session)| {
+            !session.state.is_active() || session_ids.contains(*session_id)
+        })
         .map(|(_, session)| session.clone())
         .collect()
 }
@@ -3342,7 +3385,19 @@ async fn handle_action(
                     .any(|attachment| attachment.workspace_id == workspace_id),
                 "workspace still has attached clients"
             );
-            blocking(move || hel::hel_database::delete_empty_workspace(&workspace_id)).await?;
+            ensure!(
+                !state
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .values()
+                    .any(|active| {
+                        active.result.borrow().is_none()
+                            && active.resume_workspace_id.as_deref() == Some(workspace_id.as_str())
+                    }),
+                "workspace has a session resume in progress"
+            );
+            blocking(move || hel::hel_database::delete_workspace(&workspace_id)).await?;
             refresh_runtime_workspaces(state).await?;
             Ok(DaemonReply::Done)
         }
@@ -3767,7 +3822,7 @@ fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot> {
         .state
         .sessions
         .values()
-        .filter(|session| ids.contains(&session.id))
+        .filter(|session| session.state.is_active() && ids.contains(&session.id))
         .map(|session| SessionPreview {
             id: session.id.clone(),
             title: session.display_title().to_owned(),
@@ -3942,6 +3997,62 @@ mod tests {
                 })
             },
         ))
+    }
+
+    fn runtime_test_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            workspace_id: workspace_id.into(),
+            title: id.into(),
+            harness_kind: hel::hel_config::HarnessKind::Codex,
+            last_profile: "codex".into(),
+            bundle_id: "project".into(),
+            project_directory: None,
+            managed_worktree: None,
+            target_template_id: "local".into(),
+            resource_allocation: None,
+            additional_mounts: Vec::new(),
+            container_cpus: None,
+            container_memory: None,
+            state,
+            archived: false,
+            target: None,
+            native_session_id: None,
+            acp_session_title: None,
+            session_title_override: None,
+            created_at: "2026-09-03T00:00:00Z".into(),
+            updated_at: "2026-09-03T00:00:00Z".into(),
+            viewed_through_event_ordinal: 0,
+            draft_input: String::new(),
+            last_error: None,
+            last_checkpoint_error: None,
+            checkpoint: None,
+        }
+    }
+
+    #[test]
+    fn runtime_records_include_global_history_but_only_local_active_sessions() {
+        let local = runtime_test_session("local", "workspace-a", SessionState::Running);
+        let remote = runtime_test_session("remote", "workspace-b", SessionState::Running);
+        let history = runtime_test_session("history", "deleted-workspace", SessionState::Stopped);
+        let controller = Controller {
+            config: HelConfig::default(),
+            state: hel::hel_state::HelState {
+                sessions: [local, remote, history]
+                    .into_iter()
+                    .map(|session| (session.id.clone(), session))
+                    .collect(),
+                ..hel::hel_state::HelState::default()
+            },
+        };
+        let records =
+            runtime_records_for_workspace(&controller, &BTreeSet::from(["local".to_owned()]));
+        let ids = records
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(ids, BTreeSet::from(["history", "local"]));
     }
 
     #[tokio::test]
@@ -4147,7 +4258,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
-        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(PROTOCOL_VERSION, 7);
         let state = test_runtime_state();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();

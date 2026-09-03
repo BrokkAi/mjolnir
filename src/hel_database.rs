@@ -433,11 +433,16 @@ pub fn list_workspaces_from(path: &Path) -> Result<Vec<WorkspaceRecord>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(
         "SELECT w.workspace_id, w.name, w.created_at, w.last_opened_at,
-                count(c.session_id)
+                count(s.session_id) FILTER (
+                    WHERE s.state NOT IN ('stopped', 'lost', 'destroyed-with-data-loss')
+                )
           FROM workspaces w
            LEFT JOIN session_contexts c USING(workspace_id)
+           LEFT JOIN sessions s USING(session_id)
           GROUP BY w.workspace_id
-         HAVING w.workspace_id != 'default' OR count(c.session_id) > 0
+         HAVING w.workspace_id != 'default' OR count(s.session_id) FILTER (
+                    WHERE s.state NOT IN ('stopped', 'lost', 'destroyed-with-data-loss')
+                ) > 0
           ORDER BY w.last_opened_at DESC, w.created_at DESC, w.workspace_id",
     )?;
     let rows = statement.query_map([], |row| {
@@ -488,9 +493,12 @@ pub fn create_or_get_workspace_at(path: &Path, name: &str) -> Result<WorkspaceRe
         .with_context(|| format!("create or find workspace {name:?}"))?;
     let workspace = transaction.query_row(
         "SELECT w.workspace_id, w.name, w.created_at, w.last_opened_at,
-                count(c.session_id)
+                count(s.session_id) FILTER (
+                    WHERE s.state NOT IN ('stopped', 'lost', 'destroyed-with-data-loss')
+                )
            FROM workspaces w
            LEFT JOIN session_contexts c USING(workspace_id)
+           LEFT JOIN sessions s USING(session_id)
           WHERE w.name_key = ?1
           GROUP BY w.workspace_id",
         params![name_key],
@@ -568,35 +576,101 @@ pub fn touch_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_empty_workspace(workspace_id: &str) -> Result<()> {
+/// Delete a workspace that owns no active sessions or recoverable drafts.
+///
+/// Inactive session records are global resume history. Their last workspace
+/// id is retained as historical metadata even when that workspace disappears.
+pub fn delete_workspace(workspace_id: &str) -> Result<()> {
     let workspace_id = workspace_id.to_owned();
-    submit_database_write("delete_empty_workspace", move |_| {
-        delete_empty_workspace_at(&database_path(), &workspace_id)
+    submit_database_write("delete_workspace", move |_| {
+        delete_workspace_at(&database_path(), &workspace_id)
     })
 }
 
-pub fn delete_empty_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
+pub fn delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let context_count: u64 = tx.query_row(
-        "SELECT count(*) FROM session_contexts WHERE workspace_id = ?1",
-        [workspace_id],
-        |row| row.get(0),
-    )?;
+    let active_count = {
+        let mut statement = tx.prepare(
+            "SELECT s.state
+               FROM session_contexts c
+               JOIN sessions s USING(session_id)
+              WHERE c.workspace_id = ?1",
+        )?;
+        let states = statement.query_map([workspace_id], |row| row.get::<_, String>(0))?;
+        states
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|state| parse_session_state(state).is_active())
+            .count()
+    };
     let draft_count: u64 = tx.query_row(
         "SELECT count(*) FROM detached_drafts WHERE workspace_id = ?1",
         [workspace_id],
         |row| row.get(0),
     )?;
     ensure!(
-        context_count == 0 && draft_count == 0,
-        "workspace is not empty ({context_count} session histories, {draft_count} drafts)"
+        active_count == 0 && draft_count == 0,
+        "workspace is not empty ({active_count} active sessions, {draft_count} drafts)"
     );
     let changed = tx.execute(
         "DELETE FROM workspaces WHERE workspace_id = ?1",
         [workspace_id],
     )?;
     ensure!(changed == 1, "unknown workspace {workspace_id:?}");
+    tx.commit()?;
+    Ok(())
+}
+
+/// Move a durable history into the workspace from which it is being resumed.
+///
+/// This is deliberately limited to states accepted by the resume controller;
+/// an active session must never move between live dashboards underneath its
+/// worker or viewers.
+pub fn reassign_resumable_session_workspace(session_id: &str, workspace_id: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let workspace_id = workspace_id.to_owned();
+    submit_database_write("reassign_resumable_session_workspace", move |_| {
+        reassign_resumable_session_workspace_at(&database_path(), &session_id, &workspace_id)
+    })
+}
+
+pub fn reassign_resumable_session_workspace_at(
+    path: &Path,
+    session_id: &str,
+    workspace_id: &str,
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let (current_workspace, state): (String, String) = tx
+        .query_row(
+            "SELECT c.workspace_id, s.state
+               FROM session_contexts c
+               JOIN sessions s USING(session_id)
+              WHERE c.session_id = ?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .with_context(|| format!("find resumable session {session_id:?}"))?;
+    ensure!(
+        matches!(
+            parse_session_state(&state),
+            SessionState::Stopped | SessionState::Lost | SessionState::Error
+        ),
+        "session {session_id} is not resumable"
+    );
+    let destination_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = ?1)",
+        [workspace_id],
+        |row| row.get(0),
+    )?;
+    ensure!(destination_exists, "unknown workspace {workspace_id:?}");
+    if current_workspace != workspace_id {
+        tx.execute(
+            "UPDATE session_contexts SET workspace_id = ?2 WHERE session_id = ?1",
+            params![session_id, workspace_id],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -620,6 +694,8 @@ pub fn session_ids_for_workspace(workspace_id: &str) -> Result<Vec<String>> {
     session_ids_for_workspace_at(&database_path(), workspace_id)
 }
 
+/// Return sessions whose current or last workspace id matches `workspace_id`.
+/// Callers deciding live membership must additionally check `SessionState`.
 pub fn session_ids_for_workspace_at(path: &Path, workspace_id: &str) -> Result<Vec<String>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(
@@ -634,7 +710,7 @@ pub fn session_ids_for_workspace_at(path: &Path, workspace_id: &str) -> Result<V
 }
 
 /// Assign a newly-created session context to a workspace. Existing contexts
-/// are immutable: moving sessions is deliberately outside the v1 model.
+/// remain immutable here; only the guarded resume operation may move one.
 pub fn assign_new_session_workspace(session_id: &str, workspace_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let workspace_id = workspace_id.to_owned();
