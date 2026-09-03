@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::hel_session_manager::{
-    ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh, WorkerBinaryRefreshPlan,
-    WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
+    ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh,
+    WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
 };
 use hel::hel_config::{ExecutionPolicy, ProjectBundle, ProjectRepository, atomic_write, data_dir};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
@@ -1729,15 +1729,17 @@ fn worker_binary_refresh_plan(
             | hel_targets::TargetLocator::SshBare { .. }
             | hel_targets::TargetLocator::SshPodman { .. }
     ) {
-        return Ok(Some(WorkerBinaryRefresh::Remote(RemoteWorkerBinaryRefresh {
-            locator: locator.clone(),
-            session_id: session_id.to_owned(),
-            installed_digest: installed_file_digest_command(
-                locator,
-                &installed,
-                "identify installed Mjolnir worker binary",
-            ),
-        })));
+        return Ok(Some(WorkerBinaryRefresh::Remote(
+            RemoteWorkerBinaryRefresh {
+                locator: locator.clone(),
+                session_id: session_id.to_owned(),
+                installed_digest: installed_file_digest_command(
+                    locator,
+                    &installed,
+                    "identify installed Mjolnir worker binary",
+                ),
+            },
+        )));
     }
     // Local: resolve the source now. Resolving a deleted running executable
     // materializes /proc/self/exe and can copy hundreds of megabytes; target
@@ -1750,15 +1752,17 @@ fn worker_binary_refresh_plan(
         Ok(WorkerBinaryAvailability::Local { path, .. }) => path,
         Ok(WorkerBinaryAvailability::Remote { .. }) | Err(_) => return Ok(None),
     };
-    Ok(Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
-        replace: installed_worker_binary_replacement_plan(locator, session_id, &source)?,
-        source,
-        installed_digest: installed_file_digest_command(
-            locator,
-            &installed,
-            "identify installed Mjolnir worker binary",
-        ),
-    })))
+    Ok(Some(WorkerBinaryRefresh::Prepared(
+        WorkerBinaryRefreshPlan {
+            replace: installed_worker_binary_replacement_plan(locator, session_id, &source)?,
+            source,
+            installed_digest: installed_file_digest_command(
+                locator,
+                &installed,
+                "identify installed Mjolnir worker binary",
+            ),
+        },
+    )))
 }
 
 /// Refresh a remote worker binary during recovery: pick the worker binary for

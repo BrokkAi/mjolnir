@@ -53,10 +53,10 @@ use hel::hel_targets::{
 };
 
 pub(crate) use backend::controller_github_token;
-pub(crate) use worker_binary::refresh_remote_worker_binary_if_stale;
 pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
 use provisioning::apply_failed_new_session_rollback;
+pub(crate) use worker_binary::refresh_remote_worker_binary_if_stale;
 
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, checkpoint_was_deferred,
