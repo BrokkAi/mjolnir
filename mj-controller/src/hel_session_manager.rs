@@ -25,8 +25,8 @@ use hel::hel_projection::{
 };
 use hel::hel_state::{ManagedSessionSnapshot, MaterializedSession};
 use hel::hel_targets::{
-    CancellableProcessExecutor, CommandExecutor, CommandPlan, CommandSpec, TargetRecoveryOutcome,
-    TargetRecoveryPlan, ensure_recovery_target_running,
+    CancellableProcessExecutor, CommandExecutor, CommandPlan, CommandSpec, TargetLocator,
+    TargetRecoveryOutcome, TargetRecoveryPlan, ensure_recovery_target_running,
 };
 use hel::hel_worker::{RelayCommand, RelayCursor, RelayOperationalState};
 use hel::hel_worker_launch::ReviewerLaunchConfig;
@@ -94,11 +94,25 @@ pub struct WorkerRecoveryPlan {
     /// Refresh a stale installed worker before restarting it. The digest is
     /// computed inside the recovery task so hashing a large binary never
     /// blocks a controller UI loop.
-    pub binary_refresh: Option<WorkerBinaryRefreshPlan>,
+    pub binary_refresh: Option<WorkerBinaryRefresh>,
     /// Keep the worker executable and its launch schema paired. Configuration
     /// bytes travel through redacted stdin only when their digest is stale.
     pub launch_refresh: Option<WorkerLaunchRefreshPlan>,
     pub restart: CommandPlan,
+}
+
+/// How recovery refreshes a stale installed worker binary before restarting.
+///
+/// Local targets resolve the source and the copy at plan-build time, which is
+/// cheap. Remote targets cannot: choosing the binary needs the target's
+/// architecture, and that probe plus hashing the remote binary are blocking
+/// ssh round-trips that must not run on the plan-build/UI path. So a remote
+/// refresh carries only what is cheap to compute and resolves the rest inside
+/// the recovery task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerBinaryRefresh {
+    Prepared(WorkerBinaryRefreshPlan),
+    Remote(RemoteWorkerBinaryRefresh),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +120,16 @@ pub struct WorkerBinaryRefreshPlan {
     pub source: PathBuf,
     pub installed_digest: CommandSpec,
     pub replace: CommandPlan,
+}
+
+/// A remote worker refresh resolved at recovery time: select the worker binary
+/// for the target's own architecture, compare it to the installed one, and
+/// copy only when they differ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWorkerBinaryRefresh {
+    pub locator: TargetLocator,
+    pub session_id: String,
+    pub installed_digest: CommandSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,19 +164,26 @@ enum WorkerRecoveryOutcome {
 
 fn refresh_worker_binary_if_stale(
     executor: &impl CommandExecutor,
-    plan: Option<&WorkerBinaryRefreshPlan>,
+    refresh: Option<&WorkerBinaryRefresh>,
 ) -> Result<()> {
-    let Some(plan) = plan else {
-        return Ok(());
-    };
-    let expected = hel::hel_worker_launch::worker_executable_digest(&plan.source)?;
-    if installed_digest_matches(executor, &plan.installed_digest, &expected) {
-        return Ok(());
+    match refresh {
+        None => Ok(()),
+        Some(WorkerBinaryRefresh::Prepared(plan)) => {
+            let expected = hel::hel_worker_launch::worker_executable_digest(&plan.source)?;
+            if installed_digest_matches(executor, &plan.installed_digest, &expected) {
+                return Ok(());
+            }
+            plan.replace
+                .execute(executor)
+                .context("replace stale relay worker binary")?;
+            Ok(())
+        }
+        // Remote: pick the binary for the target's architecture and copy only
+        // if it differs. Runs here in the recovery task, never on the UI path.
+        Some(WorkerBinaryRefresh::Remote(refresh)) => {
+            crate::hel_controller::refresh_remote_worker_binary_if_stale(executor, refresh)
+        }
     }
-    plan.replace
-        .execute(executor)
-        .context("replace stale relay worker binary")?;
-    Ok(())
 }
 
 fn installed_digest_matches(
@@ -3315,7 +3346,7 @@ mod tests {
                 target: None,
                 liveness_probe: CommandSpec::new("printf", ["dead\n"])
                     .purpose("probe test worker liveness"),
-                binary_refresh: Some(WorkerBinaryRefreshPlan {
+                binary_refresh: Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
                     source: source.clone(),
                     installed_digest: CommandSpec::new(
                         "printf",
@@ -3329,7 +3360,7 @@ mod tests {
                                 .purpose("refresh test worker"),
                         ],
                     },
-                }),
+                })),
                 launch_refresh: None,
                 restart: CommandPlan {
                     description: "restart test worker".into(),
