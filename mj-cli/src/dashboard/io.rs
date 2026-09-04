@@ -527,12 +527,18 @@ pub(crate) fn spawn_stored_session_summary(
 
 pub(crate) fn spawn_lifecycle_reload(
     reload: LifecycleReload,
+    workspace_id: String,
+    client_id: String,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     spawn_io(
         "reload lifecycle state",
         updates,
-        Controller::load,
+        move || {
+            let mut controller = Controller::load()?;
+            super::retain_workspace_sessions(&mut controller, &workspace_id, &client_id)?;
+            Ok(controller)
+        },
         move |result| {
             DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded { reload, result }))
         },
@@ -623,6 +629,8 @@ pub(crate) struct ContainerSettingsRequest {
     pub(crate) memory: Option<String>,
     pub(crate) additional_mounts: Vec<hel::hel_targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
+    pub(crate) workspace_id: String,
+    pub(crate) client_id: String,
 }
 
 pub(crate) fn spawn_dashboard_container_settings(
@@ -637,22 +645,33 @@ pub(crate) fn spawn_dashboard_container_settings(
         format!("saving container settings for {}", short_id(&session_id)),
         updates,
         move || {
+            let ContainerSettingsRequest {
+                session_id,
+                cpus,
+                memory,
+                additional_mounts,
+                mount_history,
+                workspace_id,
+                client_id,
+            } = request;
             runtime.block_on(async {
                 daemon::connect_or_start()
                     .await?
                     .set_session_container_settings(
-                        request.session_id,
-                        request.cpus,
-                        request.memory,
-                        request.additional_mounts,
-                        request.mount_history,
+                        session_id,
+                        cpus,
+                        memory,
+                        additional_mounts,
+                        mount_history,
                     )
                     .await
             })?;
             // Return a fresh durable snapshot so the dashboard can update its
             // state without synchronously reloading the database while it is
             // applying the worker result.
-            Controller::load()
+            let mut controller = Controller::load()?;
+            super::retain_workspace_sessions(&mut controller, &workspace_id, &client_id)?;
+            Ok(controller)
         },
         move |result| DashboardIoUpdate::ContainerSettings { session_id, result },
     );
@@ -1777,5 +1796,165 @@ mod tests {
             &mut state,
             &mut dashboard,
         ));
+    }
+
+    const LIFECYCLE_RELOAD_CHILD: &str = "MJ_TEST_LIFECYCLE_RELOAD_CHILD";
+
+    /// A completed lifecycle is the moment a freshly started container session
+    /// first appears, so the reload it schedules is exactly when another
+    /// workspace's live sessions would flood the pane. The reloaded controller
+    /// must carry this workspace's live sessions and the global stopped
+    /// history, and nothing else.
+    #[tokio::test]
+    async fn a_lifecycle_reload_keeps_other_workspaces_live_sessions_out() {
+        if std::env::var_os(LIFECYCLE_RELOAD_CHILD).is_none() {
+            // MJ_DATA_DIR is process-global, so the database-backed half runs
+            // alone in an exact child with its own store.
+            let directory = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dashboard::io::tests::a_lifecycle_reload_keeps_other_workspaces_live_sessions_out",
+                    "--nocapture",
+                ])
+                .env(LIFECYCLE_RELOAD_CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_CONFIG_DIR", directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated lifecycle reload failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let _writer = hel::hel_database::install_isolated_test_writer();
+
+        let mut config = HelConfig::default();
+        config.profiles.insert(
+            "codex".into(),
+            hel::hel_config::HarnessProfile {
+                kind: HarnessKind::Codex,
+                home: PathBuf::from("/home/dev/.codex"),
+                executable: None,
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+            },
+        );
+        config.bundles.insert(
+            "project".into(),
+            ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![ProjectRepository {
+                    id: "project".into(),
+                    github: Some("owner/project".into()),
+                    local: None,
+                    destination: PathBuf::from("project"),
+                    git_ref: None,
+                }],
+            },
+        );
+        config.targets.insert(
+            "podman".into(),
+            hel::hel_config::TargetTemplate::LocalPodman {
+                container: hel::hel_config::ContainerTemplate {
+                    image: "example.invalid/hel-test:latest".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
+                },
+            },
+        );
+        config.save().unwrap();
+
+        let database = hel::hel_database::database_path();
+        let alpha = hel::hel_database::create_workspace_at(&database, "alpha").unwrap();
+        let beta = hel::hel_database::create_workspace_at(&database, "beta").unwrap();
+        hel::hel_database::save_session(&lifecycle_session(
+            "session-alpha-live",
+            &alpha.id,
+            SessionState::Running,
+        ))
+        .unwrap();
+        hel::hel_database::save_session(&lifecycle_session(
+            "session-alpha-stopped",
+            &alpha.id,
+            SessionState::Stopped,
+        ))
+        .unwrap();
+        hel::hel_database::save_session(&lifecycle_session(
+            "session-beta-live",
+            &beta.id,
+            SessionState::Running,
+        ))
+        .unwrap();
+
+        let (updates_tx, mut updates_rx) =
+            tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
+        spawn_lifecycle_reload(
+            LifecycleReload {
+                update: LifecycleUpdate {
+                    session_id: "session-beta-live".into(),
+                    result: Ok(LifecycleSuccess::Created),
+                    deferred_cleanup: false,
+                },
+                operation: None,
+            },
+            beta.id.clone(),
+            "client-1".into(),
+            updates_tx,
+        );
+
+        let DashboardIoUpdate::LifecycleReloaded(reloaded) =
+            updates_rx.recv().await.expect("the reload reports back")
+        else {
+            panic!("the reload reports through LifecycleReloaded");
+        };
+        let loaded = reloaded.result.expect("the reload succeeds");
+        let ids = loaded.state.sessions.keys().collect::<BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            BTreeSet::from([
+                &"session-beta-live".to_owned(),
+                &"session-alpha-stopped".to_owned()
+            ]),
+            "the pane keeps this workspace's live sessions and the global stopped history"
+        );
+    }
+
+    fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
+        SessionRecord {
+            workspace_id: workspace_id.to_owned(),
+            archived: false,
+            container_cpus: None,
+            container_memory: None,
+            id: id.into(),
+            title: id.into(),
+            harness_kind: HarnessKind::Codex,
+            last_profile: "codex".into(),
+            bundle_id: "project".into(),
+            project_directory: None,
+            managed_worktree: None,
+            target_template_id: "podman".into(),
+            resource_allocation: None,
+            additional_mounts: Vec::new(),
+            state,
+            target: None,
+            native_session_id: None,
+            acp_session_title: None,
+            session_title_override: None,
+            created_at: "2026-09-04T00:00:00Z".into(),
+            updated_at: "2026-09-04T00:00:00Z".into(),
+            viewed_through_event_ordinal: 0,
+            draft_input: String::new(),
+            last_error: None,
+            last_checkpoint_error: None,
+            checkpoint: None,
+        }
     }
 }

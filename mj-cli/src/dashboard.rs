@@ -2209,6 +2209,8 @@ impl DashboardContext {
             self.dashboard.finish_session_operation(&session_id);
             spawn_lifecycle_reload(
                 LifecycleReload { update, operation },
+                self.workspace_id.clone(),
+                self.client_id.clone(),
                 self.dashboard_io_tx.clone(),
             );
         }

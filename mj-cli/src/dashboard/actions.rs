@@ -295,6 +295,8 @@ pub(crate) async fn apply_dashboard_action(
                     memory,
                     additional_mounts,
                     mount_history,
+                    workspace_id: context.workspace_id.clone(),
+                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
