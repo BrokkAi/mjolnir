@@ -1,8 +1,14 @@
 name: Docs
 
-# Manual-only until a docs site is wanted for Hel; deploying also needs
-# GitHub Pages enabled in the repository settings.
+# Deploys on every change under docs/ on master, and on demand. Deploying
+# needs GitHub Pages enabled for the GitHub Actions source in the
+# repository settings.
 on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
   workflow_dispatch: {}
 
 permissions:
