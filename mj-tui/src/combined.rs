@@ -15,12 +15,13 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
 use crate::render::{
     MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, minimized_quota_line, minimized_targets_line,
-    render_capacity, render_footer, render_modal, render_onboarding_surface, render_quotas,
-    render_sessions, render_terminal_too_small, sessions_content_height,
+    pane_size_control_areas, pane_size_controls, pane_title_content_width, render_capacity,
+    render_footer, render_modal, render_onboarding_surface, render_quotas, render_sessions,
+    render_terminal_too_small, sessions_content_height,
 };
 use crate::resume::resume_sessions_pane;
 use crate::widgets::bordered_content;
-use crate::{DashboardState, Focus, Mode};
+use crate::{DashboardState, Focus, Mode, PaneSize, SupportPane};
 
 /// Rows the footer always keeps.
 const FOOTER_HEIGHT: u16 = 1;
@@ -40,8 +41,7 @@ const SUMMARY_ROW: u16 = 1;
 const TALL_TERMINAL_HEIGHT: u16 = 40;
 
 /// How many content rows the minimized Sessions grid draws: five when the
-/// terminal is tall enough to spare them, two on a tiny terminal (where the
-/// grid also sheds its border, so two rows is all it needs).
+/// terminal is tall enough to spare them and two on a short terminal.
 pub(crate) fn minimized_grid_rows(frame_height: u16) -> u16 {
     if frame_height >= TALL_TERMINAL_HEIGHT {
         5
@@ -50,44 +50,11 @@ pub(crate) fn minimized_grid_rows(frame_height: u16) -> u16 {
     }
 }
 
-/// Whether the minimized Sessions grid keeps its title and border. A tiny
-/// terminal drops them to spend every row on sessions.
-pub(crate) fn minimized_grid_bordered(frame_height: u16) -> bool {
-    frame_height >= TALL_TERMINAL_HEIGHT
-}
-
-/// Whether a tiny terminal drops the Targets and Quota panes entirely. It does
-/// so only once they are already collapsed (modes 2 and 3); mode 1 keeps its
-/// tables and simply reports the terminal is too small if they will not fit.
-fn omits_support_panes(minimized: bool, frame_height: u16) -> bool {
-    minimized && frame_height < TALL_TERMINAL_HEIGHT
-}
-
 /// The height the composer settles at: its desired height, but never below
-/// [`PROMPT_MINIMUM`] and never above a third of the frame. Mirrors the growth
-/// target in [`allocate_combined_heights`] so mode 2 can predict the room the
-/// prompt leaves for the Sessions/conversation split.
+/// [`PROMPT_MINIMUM`] and never above a third of the frame.
 fn prompt_target(desired_prompt: u16, frame_height: u16) -> u16 {
     let ceiling = (frame_height / 3).max(PROMPT_MINIMUM);
     desired_prompt.clamp(PROMPT_MINIMUM, ceiling)
-}
-
-/// Mode 2 gives Sessions a fixed third of the room it shares with the
-/// conversation — the frame less the composer, the footer, and whatever the
-/// support panes still occupy (`support_rows`: two collapsed rows normally,
-/// zero on a tiny terminal that drops them). The conversation takes the other
-/// two thirds as the residual transcript band, so the 1:2 split holds across
-/// Tab and any session count.
-fn support_collapsed_sessions_height(
-    frame_height: u16,
-    prompt_height: u16,
-    support_rows: u16,
-) -> u16 {
-    let shared = frame_height
-        .saturating_sub(prompt_height)
-        .saturating_sub(support_rows)
-        .saturating_sub(FOOTER_HEIGHT);
-    (shared / 3).max(PANE_MINIMUM)
 }
 
 /// How tall one band wants to be and how short it may get.
@@ -117,18 +84,16 @@ enum CombinedAllocation {
 /// Divides the frame between the six bands.
 ///
 /// Every band starts at its minimum, and the surplus is then spent in a fixed
-/// order: the composer first, because it is where the user is typing; then
-/// whichever pane has the keyboard; then Sessions, Targets and Quota; and the
-/// transcript takes whatever is left. The caps stop any one pane from eating
-/// a small screen — a project with thirty live sessions must not push the
-/// conversation off it.
+/// order: the composer first, because it is where the user is typing; then the
+/// one maximized pane; then Standard Sessions, Targets, and Quota in screen
+/// order. The transcript takes whatever is left. Focus never participates.
 fn allocate_combined_heights(
     frame_height: u16,
     sessions: PaneBand,
     targets: PaneBand,
     quota: PaneBand,
     desired_prompt: u16,
-    focus: Focus,
+    sizes: [(SupportPane, PaneSize); 3],
 ) -> CombinedAllocation {
     let required = sessions
         .minimum
@@ -158,51 +123,51 @@ fn allocate_combined_heights(
     };
     grow(
         &mut heights.prompt,
-        desired_prompt.min((frame_height / 3).max(PROMPT_MINIMUM)),
+        prompt_target(desired_prompt, frame_height),
         &mut surplus,
     );
-    match focus {
-        Focus::Sessions => grow(
-            &mut heights.sessions,
-            sessions.full.min(sessions.cap),
-            &mut surplus,
-        ),
-        Focus::Targets => grow(
-            &mut heights.targets,
-            targets.full.min(targets.cap),
-            &mut surplus,
-        ),
-        Focus::Quota => grow(&mut heights.quota, quota.full.min(quota.cap), &mut surplus),
-        Focus::Prompt => {}
+    {
+        let mut grow_pane = |pane: SupportPane, surplus: &mut u16| match pane {
+            SupportPane::Sessions => grow(
+                &mut heights.sessions,
+                sessions.full.min(sessions.cap),
+                surplus,
+            ),
+            SupportPane::Targets => {
+                grow(&mut heights.targets, targets.full.min(targets.cap), surplus)
+            }
+            SupportPane::Quota => grow(&mut heights.quota, quota.full.min(quota.cap), surplus),
+        };
+        if let Some((pane, _)) = sizes.iter().find(|(_, size)| *size == PaneSize::Maximized) {
+            grow_pane(*pane, &mut surplus);
+        }
+        for (pane, size) in sizes {
+            if size == PaneSize::Standard {
+                grow_pane(pane, &mut surplus);
+            }
+        }
     }
-    grow(
-        &mut heights.sessions,
-        sessions.full.min(sessions.cap),
-        &mut surplus,
-    );
-    grow(
-        &mut heights.targets,
-        targets.full.min(targets.cap),
-        &mut surplus,
-    );
-    grow(&mut heights.quota, quota.full.min(quota.cap), &mut surplus);
     heights.transcript = heights.transcript.saturating_add(surplus);
     CombinedAllocation::Fits(heights)
 }
 
-fn support_band(full: u16, focused: bool, frame_height: u16, minimized: bool) -> PaneBand {
-    if minimized {
-        return PaneBand {
-            minimum: SUMMARY_ROW,
-            full: SUMMARY_ROW,
-            cap: SUMMARY_ROW,
-        };
-    }
-    let divisor = if focused { 3 } else { 4 };
-    PaneBand {
-        minimum: PANE_MINIMUM,
-        full,
-        cap: (frame_height / divisor).max(PANE_MINIMUM),
+fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u16) -> PaneBand {
+    match size {
+        PaneSize::Minimized => PaneBand {
+            minimum: minimized_height,
+            full: minimized_height,
+            cap: minimized_height,
+        },
+        PaneSize::Standard => PaneBand {
+            minimum: PANE_MINIMUM,
+            full,
+            cap: standard_cap.max(PANE_MINIMUM),
+        },
+        PaneSize::Maximized => PaneBand {
+            minimum: PANE_MINIMUM,
+            full,
+            cap: full.max(PANE_MINIMUM),
+        },
     }
 }
 
@@ -222,11 +187,11 @@ pub fn render_combined(
     dashboard.pane_areas = None;
     dashboard.session_row_areas.clear();
     dashboard.project_heading_areas.clear();
+    dashboard.pane_size_control_areas.clear();
     dashboard.frame_surfaces.clear();
     dashboard.chat_transcript_area = None;
     dashboard.chat_prompt_area = None;
     let area = frame.area();
-    dashboard.frame_size = Some((area.width, area.height));
     if area.width < MINIMUM_TERMINAL_WIDTH {
         render_terminal_too_small(
             frame,
@@ -242,89 +207,42 @@ pub fn render_combined(
         return;
     }
 
-    let layout = dashboard.pane_layout();
-    let minimized = layout.support_collapsed();
-    let omit_support = omits_support_panes(minimized, area.height);
-    let focus = dashboard.focus();
     // With no conversation the prompt band holds the two-line guidance that
-    // stands in for a composer, so it asks for the rows to show both. This is
-    // computed before the Sessions band so mode 2 can carve the leftover room.
+    // stands in for a composer, so it asks for the rows to show both.
     let desired_prompt = chat.as_ref().map_or(EMPTY_PROMPT_HEIGHT, |chat| {
         chat.desired_prompt_height(area.width)
     });
-    let sessions_compact = dashboard.sessions_compact();
-    let sessions = if sessions_compact {
-        // Minimized: a fixed-height grid — five content rows in a tall enough
-        // terminal plus its border, or two borderless rows on a tiny one. It
-        // neither grows nor shrinks, so minimum, full and cap are the same.
-        let border = if minimized_grid_bordered(area.height) {
-            2
-        } else {
-            0
-        };
-        let height = minimized_grid_rows(area.height) + border;
-        PaneBand {
-            minimum: height,
-            full: height,
-            cap: height,
-        }
-    } else if minimized {
-        // Mode 2 (support panes collapsed): Sessions takes a fixed third of
-        // the room it shares with the conversation, so the split stays 1:2
-        // whatever has the keyboard and however many sessions are live. The
-        // conversation takes the other two thirds as the residual band.
-        let support_rows = if omit_support { 0 } else { SUMMARY_ROW * 2 };
-        let height = support_collapsed_sessions_height(
-            area.height,
-            prompt_target(desired_prompt, area.height),
-            support_rows,
-        );
-        PaneBand {
-            minimum: height,
-            full: height,
-            cap: height,
-        }
-    } else {
-        // Mode 1: content-sized, and free to reach half the height when it has
-        // the keyboard so a focused list has room to work in.
-        let sessions_cap = if focus == Focus::Sessions {
-            area.height / 2
-        } else {
-            area.height / 3
-        };
-        PaneBand {
-            minimum: PANE_MINIMUM,
-            full: sessions_content_height(dashboard, area.width).saturating_add(2),
-            cap: sessions_cap.max(PANE_MINIMUM),
-        }
-    };
-    // A tiny terminal drops Targets and Quota entirely once they are collapsed,
-    // so they take no rows and are not drawn.
-    let no_band = PaneBand {
-        minimum: 0,
-        full: 0,
-        cap: 0,
-    };
-    let (targets, quota) = if omit_support {
-        (no_band, no_band)
-    } else {
+    let sizes = [
         (
-            support_band(
-                table_height(dashboard.capacity_details.len()),
-                focus == Focus::Targets,
-                area.height,
-                minimized,
-            ),
-            support_band(
-                table_height(dashboard.config.profiles.len()),
-                focus == Focus::Quota,
-                area.height,
-                minimized,
-            ),
-        )
-    };
+            SupportPane::Sessions,
+            dashboard.pane_size(SupportPane::Sessions),
+        ),
+        (
+            SupportPane::Targets,
+            dashboard.pane_size(SupportPane::Targets),
+        ),
+        (SupportPane::Quota, dashboard.pane_size(SupportPane::Quota)),
+    ];
+    let sessions = sized_band(
+        sizes[0].1,
+        minimized_grid_rows(area.height).saturating_add(2),
+        sessions_content_height(dashboard, area.width).saturating_add(2),
+        area.height / 3,
+    );
+    let targets = sized_band(
+        sizes[1].1,
+        SUMMARY_ROW,
+        table_height(dashboard.capacity_details.len()),
+        area.height / 4,
+    );
+    let quota = sized_band(
+        sizes[2].1,
+        SUMMARY_ROW,
+        table_height(dashboard.config.profiles.len()),
+        area.height / 4,
+    );
     let allocation =
-        allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, focus);
+        allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
     let heights = match allocation {
         CombinedAllocation::Fits(heights) => heights,
         CombinedAllocation::TooSmall {
@@ -353,18 +271,20 @@ pub fn render_combined(
     let (sessions_area, transcript_area, prompt_area, targets_area, quota_area, footer_area) =
         (bands[0], bands[1], bands[2], bands[3], bands[4], bands[5]);
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
+    for (pane, pane_area) in [
+        (SupportPane::Sessions, sessions_area),
+        (SupportPane::Targets, targets_area),
+        (SupportPane::Quota, quota_area),
+    ] {
+        dashboard
+            .pane_size_control_areas
+            .extend(pane_size_control_areas(pane_area, pane));
+    }
 
     let rendered = render_sessions(frame, sessions_area, dashboard);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
-    let sessions_content = if sessions_compact && !minimized_grid_bordered(area.height) {
-        // The tiny grid deliberately has no border, so all two rows are
-        // content. Applying the bordered inset here would collapse it to a
-        // zero-height selection surface.
-        sessions_area
-    } else {
-        bordered_content(sessions_area)
-    };
+    let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),
         sessions_content,
@@ -409,45 +329,63 @@ pub fn render_combined(
         }
     };
 
-    // Targets and Quota keep their pane numbers whether they are full tables
-    // or one-row summaries, so a click resolves to the same pane either way.
-    if omit_support {
-        // A tiny terminal drops both panes; there is nothing to draw and no
-        // hitbox to register.
-    } else if minimized {
-        // Drawn as the pane's own title so a collapsed pane keeps the rule the
-        // full one has, rather than becoming a loose line of text.
+    // Targets and Quota choose their representations independently.
+    if sizes[1].1 == PaneSize::Minimized {
         frame.render_widget(
             Block::default()
                 .borders(Borders::TOP)
-                .title(minimized_targets_line(dashboard, targets_area.width)),
+                .border_type(if dashboard.focus() == Focus::Targets {
+                    BorderType::Double
+                } else {
+                    BorderType::Plain
+                })
+                .title(minimized_targets_line(
+                    dashboard,
+                    pane_title_content_width(targets_area.width),
+                ))
+                .title(pane_size_controls(PaneSize::Minimized)),
             targets_area,
         );
+    } else {
+        render_capacity(frame, targets_area, dashboard, Some(sizes[1].1));
+    }
+    if sizes[2].1 == PaneSize::Minimized {
         frame.render_widget(
             Block::default()
                 .borders(Borders::TOP)
-                .title(minimized_quota_line(dashboard, quota_area.width)),
+                .border_type(if dashboard.focus() == Focus::Quota {
+                    BorderType::Double
+                } else {
+                    BorderType::Plain
+                })
+                .title(minimized_quota_line(
+                    dashboard,
+                    pane_title_content_width(quota_area.width),
+                ))
+                .title(pane_size_controls(PaneSize::Minimized)),
             quota_area,
         );
-        dashboard.frame_surfaces.push(SurfaceFrame::fixed(
-            SurfaceId::DashboardPane(1),
-            targets_area,
-        ));
-        dashboard
-            .frame_surfaces
-            .push(SurfaceFrame::fixed(SurfaceId::DashboardPane(2), quota_area));
     } else {
-        render_capacity(frame, targets_area, dashboard);
-        render_quotas(frame, quota_area, dashboard);
-        dashboard.frame_surfaces.push(SurfaceFrame::fixed(
-            SurfaceId::DashboardPane(1),
-            bordered_content(targets_area),
-        ));
-        dashboard.frame_surfaces.push(SurfaceFrame::fixed(
-            SurfaceId::DashboardPane(2),
-            bordered_content(quota_area),
-        ));
+        render_quotas(frame, quota_area, dashboard, Some(sizes[2].1));
     }
+    let targets_content = if sizes[1].1 == PaneSize::Minimized {
+        targets_area
+    } else {
+        bordered_content(targets_area)
+    };
+    let quota_content = if sizes[2].1 == PaneSize::Minimized {
+        quota_area
+    } else {
+        bordered_content(quota_area)
+    };
+    dashboard.frame_surfaces.push(SurfaceFrame::fixed(
+        SurfaceId::DashboardPane(1),
+        targets_content,
+    ));
+    dashboard.frame_surfaces.push(SurfaceFrame::fixed(
+        SurfaceId::DashboardPane(2),
+        quota_content,
+    ));
 
     if !chat_drew_footer {
         render_footer(frame, footer_area, dashboard);
@@ -541,21 +479,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minimized_grid_takes_five_bordered_rows_when_tall_and_two_bare_rows_when_tiny() {
+    fn minimized_grid_uses_five_content_rows_when_tall_and_two_when_short() {
         assert_eq!(minimized_grid_rows(40), 5);
         assert_eq!(minimized_grid_rows(100), 5);
-        assert!(minimized_grid_bordered(40));
         assert_eq!(minimized_grid_rows(39), 2);
         assert_eq!(minimized_grid_rows(10), 2);
-        assert!(!minimized_grid_bordered(39));
-    }
-
-    #[test]
-    fn support_panes_drop_only_once_collapsed_and_only_on_a_tiny_terminal() {
-        assert!(omits_support_panes(true, 39));
-        assert!(!omits_support_panes(true, 40));
-        // Mode 1 keeps its tables however short the terminal.
-        assert!(!omits_support_panes(false, 10));
     }
 
     #[test]
@@ -568,52 +496,81 @@ mod tests {
     }
 
     #[test]
-    fn support_collapsed_sessions_take_a_third_of_the_shared_room() {
-        // 60 tall, composer 3, two collapsed rows: shared = 60 - 3 - 2 - 1 =
-        // 54, a third is 18.
-        assert_eq!(support_collapsed_sessions_height(60, 3, 2), 18);
-        // With the support panes dropped, the two rows come back to the split.
-        assert_eq!(support_collapsed_sessions_height(60, 3, 0), 18);
-        // Never below the pane minimum, even when there is almost no room.
-        assert_eq!(support_collapsed_sessions_height(10, 6, 0), PANE_MINIMUM);
+    fn sized_bands_encode_each_states_minimum_and_cap() {
+        assert_eq!(
+            sized_band(PaneSize::Minimized, 7, 40, 20),
+            PaneBand {
+                minimum: 7,
+                full: 7,
+                cap: 7,
+            }
+        );
+        assert_eq!(
+            sized_band(PaneSize::Standard, 1, 40, 20),
+            PaneBand {
+                minimum: 3,
+                full: 40,
+                cap: 20,
+            }
+        );
+        assert_eq!(
+            sized_band(PaneSize::Maximized, 1, 40, 20),
+            PaneBand {
+                minimum: 3,
+                full: 40,
+                cap: 40,
+            }
+        );
     }
 
-    /// Mode 2 holds the Sessions/conversation split at 1:2 whether Sessions or
-    /// the composer has the keyboard, so Tab never resizes either pane.
     #[test]
-    fn mode_two_split_stays_put_across_tab() {
-        let frame = 60;
-        let prompt = prompt_target(3, frame);
-        let height = support_collapsed_sessions_height(frame, prompt, SUMMARY_ROW * 2);
-        let sessions = PaneBand {
+    fn prompt_then_maximum_then_standard_panes_receive_surplus() {
+        let band = |full, cap| PaneBand {
+            minimum: 3,
+            full,
+            cap,
+        };
+        let sizes = [
+            (SupportPane::Sessions, PaneSize::Standard),
+            (SupportPane::Targets, PaneSize::Maximized),
+            (SupportPane::Quota, PaneSize::Standard),
+        ];
+        let CombinedAllocation::Fits(heights) =
+            allocate_combined_heights(40, band(12, 10), band(15, 15), band(8, 8), 6, sizes)
+        else {
+            panic!("40 rows should fit");
+        };
+        assert_eq!(heights.prompt, 6);
+        assert_eq!(heights.targets, 15);
+        assert_eq!(heights.sessions, 10);
+        assert_eq!(heights.quota, 5);
+        assert_eq!(heights.transcript, 3);
+    }
+
+    #[test]
+    fn allocation_reports_the_dynamic_state_minimum() {
+        let fixed = |height| PaneBand {
             minimum: height,
             full: height,
             cap: height,
         };
-        let collapsed = PaneBand {
-            minimum: SUMMARY_ROW,
-            full: SUMMARY_ROW,
-            cap: SUMMARY_ROW,
-        };
-        let heights_for = |focus| match allocate_combined_heights(
-            frame, sessions, collapsed, collapsed, 3, focus,
-        ) {
-            CombinedAllocation::Fits(heights) => heights,
-            CombinedAllocation::TooSmall { .. } => panic!("60 rows should fit"),
-        };
-
-        let focused = heights_for(Focus::Sessions);
-        let unfocused = heights_for(Focus::Prompt);
-        assert_eq!(
-            focused.sessions, unfocused.sessions,
-            "Sessions must not resize on Tab"
+        let result = allocate_combined_heights(
+            12,
+            fixed(4),
+            fixed(1),
+            fixed(1),
+            3,
+            [
+                (SupportPane::Sessions, PaneSize::Minimized),
+                (SupportPane::Targets, PaneSize::Minimized),
+                (SupportPane::Quota, PaneSize::Minimized),
+            ],
         );
         assert_eq!(
-            focused.transcript, unfocused.transcript,
-            "the conversation must not resize on Tab"
+            result,
+            CombinedAllocation::TooSmall {
+                required_frame_height: 13,
+            }
         );
-        // A third for Sessions, two thirds for the conversation.
-        assert_eq!(focused.sessions, height);
-        assert_eq!(focused.transcript, 2 * height);
     }
 }

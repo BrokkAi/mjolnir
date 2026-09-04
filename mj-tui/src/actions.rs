@@ -32,7 +32,8 @@ pub enum CommandId {
     Refresh,
     OpenConfig,
     CycleFocus,
-    CyclePaneLayout,
+    CycleFocusedPaneSize,
+    TogglePanePreset,
     Workspaces,
     WebViewer,
     QuitDetach,
@@ -248,10 +249,29 @@ fn config_absent(dashboard: &DashboardState) -> Availability {
 }
 
 fn profiles_present(dashboard: &DashboardState) -> Availability {
+    if dashboard.pane_size(crate::SupportPane::Quota) == crate::PaneSize::Minimized {
+        return Availability::Hidden;
+    }
     if dashboard.config.profiles.is_empty() {
         Availability::Hidden
     } else {
         Availability::Ready
+    }
+}
+
+fn targets_visible(dashboard: &DashboardState) -> Availability {
+    if dashboard.pane_size(crate::SupportPane::Targets) == crate::PaneSize::Minimized {
+        Availability::Hidden
+    } else {
+        Availability::Ready
+    }
+}
+
+fn support_pane_focused(dashboard: &DashboardState) -> Availability {
+    if dashboard.focus().support_pane().is_some() {
+        Availability::Ready
+    } else {
+        Availability::Blocked("select Sessions, Targets, or Quota first")
     }
 }
 
@@ -323,7 +343,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         keys: &[KeyHint::alt(KeyCode::Char('x'), "Alt-X")],
         footer: cancel_footer,
         footer_group: FooterGroup::Chord,
-        footer_rank: 4,
+        footer_rank: 5,
         available: operation_in_flight,
     },
     CommandSpec {
@@ -382,7 +402,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("actions"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: always_ready,
+        available: targets_visible,
     },
     CommandSpec {
         id: CommandId::EditProfile,
@@ -421,14 +441,25 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
-        id: CommandId::CyclePaneLayout,
-        label: "Pane layout",
-        description: "Turn the two-position dial: panes open, or collapsed for the conversation.",
+        id: CommandId::CycleFocusedPaneSize,
+        label: "Pane size",
+        description: "Cycle the focused pane through minimized, standard, and maximized.",
+        scope: Scope::Pane,
+        keys: &[KeyHint::alt(KeyCode::Char('z'), "Alt-Z")],
+        footer: footer_word!("size"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 3,
+        available: support_pane_focused,
+    },
+    CommandSpec {
+        id: CommandId::TogglePanePreset,
+        label: "Pane preset",
+        description: "Restore standard panes, or maximize Sessions when all are standard.",
         scope: Scope::Pane,
         keys: &[KeyHint::alt(KeyCode::Char('g'), "Alt-G")],
         footer: footer_word!("panes"),
         footer_group: FooterGroup::Chord,
-        footer_rank: 3,
+        footer_rank: 4,
         available: always_ready,
     },
     CommandSpec {
@@ -472,7 +503,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         keys: &[KeyHint::alt(KeyCode::Char('q'), "Alt-Q")],
         footer: footer_word!("detach"),
         footer_group: FooterGroup::Chord,
-        footer_rank: 5,
+        footer_rank: 6,
         available: always_ready,
     },
     CommandSpec {
@@ -522,7 +553,8 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::NewSession,
     CommandId::ResumeDialog,
     CommandId::MarkAllRead,
-    CommandId::CyclePaneLayout,
+    CommandId::CycleFocusedPaneSize,
+    CommandId::TogglePanePreset,
     CommandId::QuitDetach,
     CommandId::CancelOperation,
 ];
@@ -622,7 +654,7 @@ impl DashboardState {
     /// Whether a global chord still answers with the current dialog open.
     ///
     /// Help and detach have always answered from every surface, and the pane
-    /// dial only changes the layout underneath, so all three survive a modal.
+    /// preset only changes the layout underneath, so all three survive a modal.
     /// The rest would act on a surface the user cannot see, so they wait for
     /// the dialog to close — except over the help overlay, which is a
     /// reference rather than a decision.
@@ -633,12 +665,13 @@ impl DashboardState {
             // the dialog owns.
             CommandId::Help
             | CommandId::QuitDetach
-            | CommandId::CyclePaneLayout
+            | CommandId::TogglePanePreset
             | CommandId::Refresh => true,
             // While the target-actions dialog is up, Alt-X belongs to the test
             // that dialog is running, so it must not be caught here; the
             // modal check is what leaves it to the dialog's own handler.
             CommandId::CancelOperation => !self.modal_open(),
+            CommandId::CycleFocusedPaneSize => !self.modal_open(),
             _ => !self.modal_open() || matches!(self.mode, crate::Mode::Help(_)),
         }
     }
@@ -690,10 +723,16 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::TargetActions => {
+                if self.pane_size(crate::SupportPane::Targets) == crate::PaneSize::Minimized {
+                    return DashboardAction::None;
+                }
                 self.begin_target_actions();
                 DashboardAction::None
             }
             CommandId::EditProfile => {
+                if self.pane_size(crate::SupportPane::Quota) == crate::PaneSize::Minimized {
+                    return DashboardAction::None;
+                }
                 self.begin_profile_rename();
                 DashboardAction::None
             }
@@ -703,8 +742,12 @@ impl DashboardState {
                 self.cycle_focus(false);
                 DashboardAction::None
             }
-            CommandId::CyclePaneLayout => {
-                self.cycle_pane_layout();
+            CommandId::CycleFocusedPaneSize => {
+                self.cycle_focused_pane_size();
+                DashboardAction::None
+            }
+            CommandId::TogglePanePreset => {
+                self.toggle_pane_preset();
                 DashboardAction::None
             }
             CommandId::Workspaces => DashboardAction::OpenWorkspacePicker,

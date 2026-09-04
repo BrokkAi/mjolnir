@@ -193,27 +193,28 @@ Mjolnir opens on the session whose agent spoke most recently, with the cursor in
 Prompt.
 
 `Tab` moves the keyboard down the layout — Sessions, Prompt, Targets, Quota —
-and `Shift+Tab` reverses it. Once the support panes are collapsed the ring is
-the two panes that are still lists. The transcript is not a Tab stop: read it
-with the mouse wheel or `PageUp`/`PageDown` from wherever you are.
+and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The
+transcript is not a Tab stop: read it with the mouse wheel or
+`PageUp`/`PageDown` from wherever you are. Moving focus never resizes a pane.
 
-`Alt+G` is a two-position dial: panes open, or panes collapsed for the
-conversation. Collapsed, Targets and Quota become one summary row each — host
-names with CPU load, EC2 fleets with how many machines they are running,
-profile names with weekly quota remaining — and the session list shrinks to a
-fixed grid, one line per session, unless your terminal has more rows than
-half its columns, in which case the list stays a list.
+Sessions, Targets, and Quota each have `▁`, `▪`, and `□` controls in their
+title bars for minimized, standard, and maximized size. Minimized Targets and
+Quota become one summary row each; minimized Sessions becomes a compact
+three-column grid. A maximized pane gets the space its contents need after the
+Prompt has grown, while every other band keeps its minimum. Only one pane can
+be maximized at a time.
 
-`Alt+G` always leaves the keyboard in Prompt: asking for room around the
-conversation and asking to work in it are the same gesture.
-
-Tab leaves the dial where you set it.
+`Alt+Z` cycles the focused support pane through its three sizes without moving
+focus. `Alt+G` is the layout shortcut: from all-standard it maximizes Sessions
+and minimizes Targets and Quota; from any customized layout it restores all
+three panes to standard. Tab leaves every chosen size alone.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
 `F2` opens the command palette, `F3` the workspace picker, `F4` the web
 viewer, `F5` refreshes the Targets and Quota panes, `Alt+N` creates a session,
 `Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
-the selected session is in the middle of, `Alt+G` turns the pane dial, and
+the selected session is in the middle of, `Alt+Z` sizes the focused support
+pane, `Alt+G` toggles the pane preset, and
 `Alt+Q` detaches this terminal client — the daemon and the sessions it runs
 keep working. Each of these has one spelling: a command you can reach from
 anywhere has no plain-letter alias as well.
