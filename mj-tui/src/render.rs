@@ -1735,8 +1735,7 @@ fn quota_remaining_percent(window: &QuotaWindow) -> Option<u8> {
         })
 }
 
-const EMPTY_QUOTA_COLOR: Color = Color::DarkGray;
-const EMPTY_QUOTA_CELL: &str = "░";
+const EMPTY_QUOTA_CELL: &str = " ";
 const QUOTA_CHART_LEFT_BORDER: &str = "▕";
 const QUOTA_CHART_RIGHT_BORDER: &str = "▏";
 // Both bar kinds occupy the same column, so they must agree on the cell count.
@@ -1773,7 +1772,7 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
         Span::styled(partial.to_string(), bar_style),
         Span::styled(
             EMPTY_QUOTA_CELL.repeat(empty_cells),
-            Style::default().fg(EMPTY_QUOTA_COLOR).bg(Color::Black),
+            Style::default().bg(Color::Black),
         ),
         // This replaces the separator before the percentage, keeping the
         // line's width unchanged while closing the chart on its right edge.
@@ -1785,19 +1784,18 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
     ])
 }
 
-/// Renders the API label centered in depleted-quota glyphs, with the label
-/// cells left unshaded. This is a usage-pricing marker rather than a capacity
-/// chart, so it keeps the terminal background and does not receive chart rails.
+/// Renders the API label in the same black, bordered field as capacity charts.
 fn api_quota_bar() -> Line<'static> {
     let label = mj_controller::hel_quota::API_LABEL;
     let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
     let left = (QUOTA_BAR_CELLS - label_cells) / 2;
     let right = QUOTA_BAR_CELLS - label_cells - left;
-    let shading = Style::default().fg(EMPTY_QUOTA_COLOR);
+    let field = Style::default().bg(Color::Black);
     Line::from(vec![
-        Span::styled(EMPTY_QUOTA_CELL.repeat(left), shading),
-        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(EMPTY_QUOTA_CELL.repeat(right), shading),
+        Span::styled(EMPTY_QUOTA_CELL.repeat(left), field),
+        Span::styled(label, field.add_modifier(Modifier::BOLD)),
+        Span::styled(EMPTY_QUOTA_CELL.repeat(right), field),
+        Span::styled(QUOTA_CHART_RIGHT_BORDER, quota_chart_border_style()),
     ])
 }
 
@@ -1911,6 +1909,7 @@ struct QuotaTableRow {
     harness: String,
     weekly: Line<'static>,
     weekly_chart: bool,
+    weekly_width_overhang: usize,
     weekly_reset: String,
     five_hour: Line<'static>,
     five_hour_chart: bool,
@@ -1979,69 +1978,82 @@ pub(crate) fn render_quotas(
         .profiles
         .iter()
         .map(|(id, profile)| {
-            let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
-                if profile.kind == HarnessKind::Deepseek {
-                    (
-                        api_quota_bar(),
+            let (
+                weekly,
+                weekly_reset,
+                five_hour,
+                five_hour_reset,
+                weekly_chart,
+                five_hour_chart,
+                weekly_width_overhang,
+            ) = if profile.kind == HarnessKind::Deepseek {
+                (
+                    api_quota_bar(),
+                    String::new(),
+                    Line::default(),
+                    String::new(),
+                    true,
+                    false,
+                    1,
+                )
+            } else if dashboard.quota_refreshing.contains(id) {
+                (
+                    Line::raw("refreshing…"),
+                    String::new(),
+                    Line::default(),
+                    String::new(),
+                    false,
+                    false,
+                    0,
+                )
+            } else {
+                match dashboard.quotas.get(id) {
+                    Some(quota) if quota.error.is_none() => {
+                        let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
+                        let weekly = quota_bar(quota.weekly_window());
+                        let five_hour = five_hour_quota_bar(quota);
+                        let weekly_chart = !weekly.spans.is_empty();
+                        let five_hour_chart = !five_hour.spans.is_empty();
+                        (
+                            weekly,
+                            weekly_reset,
+                            five_hour,
+                            five_hour_reset,
+                            weekly_chart,
+                            five_hour_chart,
+                            0,
+                        )
+                    }
+                    Some(quota) => (
+                        Line::raw(
+                            quota
+                                .error_label()
+                                .unwrap_or_else(|| "unavailable: unknown error".into()),
+                        ),
                         String::new(),
                         Line::default(),
                         String::new(),
                         false,
                         false,
-                    )
-                } else if dashboard.quota_refreshing.contains(id) {
-                    (
+                        0,
+                    ),
+                    None => (
                         Line::raw("refreshing…"),
                         String::new(),
                         Line::default(),
                         String::new(),
                         false,
                         false,
-                    )
-                } else {
-                    match dashboard.quotas.get(id) {
-                        Some(quota) if quota.error.is_none() => {
-                            let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
-                            let weekly = quota_bar(quota.weekly_window());
-                            let five_hour = five_hour_quota_bar(quota);
-                            let weekly_chart = !weekly.spans.is_empty();
-                            let five_hour_chart = !five_hour.spans.is_empty();
-                            (
-                                weekly,
-                                weekly_reset,
-                                five_hour,
-                                five_hour_reset,
-                                weekly_chart,
-                                five_hour_chart,
-                            )
-                        }
-                        Some(quota) => (
-                            Line::raw(
-                                quota
-                                    .error_label()
-                                    .unwrap_or_else(|| "unavailable: unknown error".into()),
-                            ),
-                            String::new(),
-                            Line::default(),
-                            String::new(),
-                            false,
-                            false,
-                        ),
-                        None => (
-                            Line::raw("refreshing…"),
-                            String::new(),
-                            Line::default(),
-                            String::new(),
-                            false,
-                            false,
-                        ),
-                    }
-                };
+                        0,
+                    ),
+                }
+            };
             QuotaTableRow {
                 profile: id.clone(),
                 harness: profile.kind.display_name().into(),
                 weekly,
                 weekly_chart,
+                weekly_width_overhang,
                 weekly_reset,
                 five_hour,
                 five_hour_chart,
@@ -2090,7 +2102,12 @@ pub(crate) fn render_quotas(
                 .map(|row| Line::raw(row.harness.as_str()).width()),
             12,
         ),
-        quota_column_width("Weekly", rows.iter().map(|row| row.weekly.width()), 32),
+        quota_column_width(
+            "Weekly",
+            rows.iter()
+                .map(|row| row.weekly.width().saturating_sub(row.weekly_width_overhang)),
+            32,
+        ),
         quota_column_width(
             "Resets",
             rows.iter()
@@ -5278,6 +5295,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("API"));
+        assert!(rendered.contains("▕   API    ▏"));
         assert!(!rendered.contains("API Pricing"));
         assert!(rendered.contains("DSH"));
         assert!(!rendered.contains("DeepSeek Harness"));
@@ -5302,10 +5320,10 @@ mod tests {
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>(),
-            "███████▎░░▏ 73%"
+            "███████▎  ▏ 73%"
         );
         assert_eq!(bar.spans[0].style.fg, Some(Color::Green));
-        assert_eq!(bar.spans[2].style.fg, Some(Color::DarkGray));
+        assert_eq!(bar.spans[2].style.fg, None);
         assert!(
             bar.spans[..4]
                 .iter()
@@ -5319,29 +5337,16 @@ mod tests {
     }
 
     #[test]
-    fn api_quota_label_is_punched_into_the_depleted_bar_shading() {
+    fn api_quota_label_uses_the_black_bordered_chart_field() {
         let api = api_quota_bar();
-        let exhausted = quota_bar(Some(&QuotaWindow {
-            label: "Week".into(),
-            remaining_percent: Some(0),
-            used: None,
-            limit: None,
-            resets: None,
-            resets_at_epoch_seconds: None,
-        }));
-        let shading = &exhausted.spans[2];
-        assert_eq!(shading.content, "░░░░░░░░░░");
-
         let rendered: String = api.spans.iter().map(|span| span.content.as_ref()).collect();
-        assert_eq!(rendered, "░░░API░░░░");
-        // The usage-priced marker keeps the depleted bar's glyph and
-        // foreground, but is not a chart and therefore does not paint the
-        // chart's black background.
-        for padding in [&api.spans[0], &api.spans[2]] {
-            assert_eq!(padding.style.fg, shading.style.fg);
-            assert_eq!(padding.style.bg, None);
-        }
-        assert!(api.spans.iter().all(|span| span.style.bg.is_none()));
+        assert_eq!(rendered, "   API    ▏");
+        assert!(
+            api.spans
+                .iter()
+                .all(|span| span.style.bg == Some(Color::Black))
+        );
+        assert_eq!(api.spans[3].style.fg, Some(Color::DarkGray));
     }
 
     #[test]
@@ -5532,8 +5537,8 @@ mod tests {
             .iter()
             .find(|line| line.contains("codex-1"))
             .expect("quota row");
-        assert!(row.contains("▕███████▎░░▏ 73%"), "{row:?}");
-        assert!(row.contains("▕███████░░░▏ 70%"), "{row:?}");
+        assert!(row.contains("▕███████▎  ▏ 73%"), "{row:?}");
+        assert!(row.contains("▕███████   ▏ 70%"), "{row:?}");
         let weekly_percent = cell_column(row, "73%");
         let weekly_reset = cell_column(row, "2d");
         let five_hour_percent = cell_column(row, "70%");
