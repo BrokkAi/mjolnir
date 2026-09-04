@@ -445,6 +445,11 @@ mod tests {
         assert!(chat.input.is_empty());
         assert_eq!(chat.input_cursor, 0);
 
+        // Repeated cancellation on the empty composer keeps the draft recoverable.
+        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
+        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
+        assert!(chat.input.is_empty());
+
         chat.handle_key(key(KeyCode::Up));
         assert_eq!(chat.input, "draft prompt");
     }

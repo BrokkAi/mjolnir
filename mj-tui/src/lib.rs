@@ -739,8 +739,11 @@ impl DashboardState {
             self.cancel_modal();
             return DashboardAction::None;
         }
-        if !text_focused && dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
-            return DashboardAction::QuitDetach;
+        // Ctrl-C belongs to the prompt or a text field. Everywhere else it is
+        // intentionally inert, including modal controls that happen to use
+        // the letter `c` for another purpose.
+        if dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
+            return DashboardAction::None;
         }
 
         // Retire the notice this key press is stepping past, but only once it
@@ -1037,7 +1040,7 @@ impl DashboardState {
     /// Everything that runs a named command is looked up in the action
     /// registry ([`crate::actions`]) rather than matched here, so the keys, the
     /// footer, and the help overlay are all reading one table. What stays as
-    /// hand-written arms is the input that is not a command: quitting, list
+    /// hand-written arms is the input that is not a command: list
     /// navigation, and the two keys whose meaning depends on state.
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> DashboardAction {
         let command = dashboard_accelerator(key.modifiers);
@@ -1045,9 +1048,6 @@ impl DashboardState {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         match (key.code, command) {
-            // Ctrl-C is quit's second key rather than a command of its own, so
-            // it is not in the registry and the footer never names it.
-            (KeyCode::Char('c'), true) => return DashboardAction::QuitDetach,
             // Shift-Tab is the reverse of the registry's Tab.
             (KeyCode::BackTab, _) => {
                 self.cycle_focus(true);
@@ -1864,6 +1864,46 @@ mod tests {
         assert_eq!(dashboard.handle_key(ctrl_key('q')), DashboardAction::None);
         assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-Q moved to Alt-Q"));
         assert_eq!(dashboard.mode, Mode::Dashboard);
+    }
+
+    #[test]
+    fn ctrl_c_is_inert_on_an_empty_dashboard_and_every_pane() {
+        for focus in [Focus::Sessions, Focus::Prompt, Focus::Targets, Focus::Quota] {
+            let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+            dashboard.focus = focus;
+
+            for _ in 0..2 {
+                assert_eq!(
+                    dashboard.handle_key(ctrl_key('c')),
+                    DashboardAction::None,
+                    "Ctrl-C should not quit from {focus:?}"
+                );
+                assert_eq!(dashboard.mode, Mode::Dashboard, "{focus:?}");
+                assert_eq!(dashboard.focus, focus, "{focus:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_c_cancels_text_modal_but_is_inert_on_non_text_modal_controls() {
+        let mut rename = dashboard_with_session(running_session());
+        open_rename_through_the_palette(&mut rename);
+        assert_eq!(rename.handle_key(ctrl_key('c')), DashboardAction::None);
+        assert_eq!(rename.mode, Mode::Dashboard);
+        // A second press remains harmless after the text modal has closed.
+        assert_eq!(rename.handle_key(ctrl_key('c')), DashboardAction::None);
+        assert_eq!(rename.mode, Mode::Dashboard);
+
+        let mut new_session = dashboard_with_session(running_session());
+        assert_eq!(new_session.handle_key(alt_key('n')), DashboardAction::None);
+        let mode_before_ctrl_c = new_session.mode.clone();
+        assert!(matches!(mode_before_ctrl_c, Mode::New(_)));
+        assert_eq!(new_session.handle_key(ctrl_key('c')), DashboardAction::None);
+        assert_eq!(new_session.mode, mode_before_ctrl_c);
+        // The wizard is still open, and repeated Ctrl-C does not activate a
+        // control whose label happens to contain the letter `c`.
+        assert_eq!(new_session.handle_key(ctrl_key('c')), DashboardAction::None);
+        assert!(matches!(new_session.mode, Mode::New(_)));
     }
 
     #[test]
