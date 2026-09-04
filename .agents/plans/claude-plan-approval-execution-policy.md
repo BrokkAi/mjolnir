@@ -12,7 +12,7 @@ Selecting Implement must resume Claude in Auto on guardian deployments and bypas
 - [x] Finalized the mj-only workaround with the user.
 - [x] Implement policy-aware option selection and the supervised continuation sequence.
 - [x] Add deterministic ACP behavior tests and run repository validation: cargo test and cargo clippy --all-targets -- -D warnings passed.
-- [ ] Commit on hel3, merge origin/master, validate the merged result, and push to origin/master.
+- [x] Committed implementation as c5ad2128 on hel3 and merged origin/master as f475961b. Merged chat/TUI tests and the final warnings-as-errors Clippy check passed. Publication uses `git push origin HEAD:master` after committing this validation record.
 
 ## Surprises & Discoveries
 
@@ -33,6 +33,8 @@ The user subsequently authorized merge and push. The current branch is hel3, tra
 Implementation and workspace validation are complete. The full cargo test command passed, including 756 passing core tests (four ignored) and all default workspace members. Clippy with warnings denied passed on retry; its first concurrent run encountered an mbx metadata-artifact collision, not a source diagnostic. Initial ACP validation passed 73 of 74 tests; the failing transport test half-closed its simulated pipe without reproducing the supervisor's driver teardown. The fixture now drops the driver exactly as run_bridge does when its child exits. A cancellation test also exposed the protocol library's expected $/cancel_request notification for the dropped mode future; the test now verifies that notification explicitly. No existing anvil session has been modified.
 
 Fourteen added tests exercise native approval, old and new IDs, context preservation, an 88 KiB plan over a 4 KiB duplex stream, response ordering, duplicate answers, cancellation in both transition phases, close, timeouts in both phases, driver teardown, prompt failure, missing Auto, mode rejection, and verification of the config response's effective mode. The workaround requires an active foreground prompt to own the continuation; a permission request without one is cancelled with an actionable warning rather than starting untracked work.
+
+The upstream merge included only the separate dashboard Ctrl-C fix. `cargo test -p brokk-mj-chat -p brokk-mj-tui` passed on the merged tree (308 chat tests, 282 TUI tests, two TUI tests ignored), followed by a successful `cargo clippy --all-targets -- -D warnings`. The implementation's core files were unchanged by the merge. The working branch remains hel3 and the requested publication target is origin/master.
 
 ## Context and Orientation
 
