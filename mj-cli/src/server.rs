@@ -2576,7 +2576,6 @@ mod tests {
                                 context_window_bytes: None,
                                 kind: HarnessKind::Codex,
                                 home: PathBuf::from("/home/agent").join(id),
-                                executable: None,
                                 environment: std::collections::BTreeMap::new(),
                             },
                         )

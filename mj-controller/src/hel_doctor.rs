@@ -2090,7 +2090,6 @@ mod tests {
         let profile = HarnessProfile {
             kind: HarnessKind::Claude,
             home,
-            executable: None,
             environment: std::collections::BTreeMap::new(),
             context_window_bytes: None,
         };

@@ -17,7 +17,8 @@ use hel::hel_worker::RelayExecutionState;
 use super::Controller;
 use super::readiness::{connect_started_worker_with_timeout, wait_for_native_session};
 use super::worker_binary::{
-    replace_installed_worker_binary, start_worker, stop_worker_after_target_recovery,
+    prepare_managed_harness_for_upgrade, replace_installed_worker_binary,
+    replace_installed_worker_launch_config, start_worker, stop_worker_after_target_recovery,
     worker_binary_for, worker_probe_diagnosis,
 };
 
@@ -39,6 +40,14 @@ pub(super) struct WorkerRestartMessages {
     pub connect: &'static str,
     pub project_memory: &'static str,
     pub native_session: &'static str,
+}
+
+pub(super) struct InstalledWorkerRestart<'a> {
+    pub backend: &'a hel_targets::TargetLocator,
+    pub worker_root: &'a str,
+    pub reconnect: &'a CommandSpec,
+    pub launch: Option<&'a hel::hel_worker_launch::WorkerLaunchConfig>,
+    pub messages: &'a WorkerRestartMessages,
 }
 
 /// A wedged ACP turn is being killed so a checkpoint barrier can be admitted.
@@ -146,15 +155,28 @@ impl Controller {
             lease.release();
             return Ok(WorkerUpgradeOutcome::Deferred);
         }
+        let launch = self.current_worker_launch_config(session_id, &backend)?;
+        if let Err(error) =
+            prepare_managed_harness_for_upgrade(executor, &backend, session_id, &binary, &launch)
+                .context("prepare the current managed harness before replacing the worker")
+        {
+            // Preparation never touches the running worker. Return its live
+            // connection directly instead of making the actor reconnect.
+            lease.release();
+            return Err(error);
+        }
 
         let restarted = self
             .restart_worker_with_installed_binary(
                 session_id,
                 executor,
-                &backend,
-                &worker_root,
-                &reconnect,
-                &RESTART_FOR_UPGRADE,
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &worker_root,
+                    reconnect: &reconnect,
+                    launch: Some(&launch),
+                    messages: &RESTART_FOR_UPGRADE,
+                },
             )
             .await;
         match restarted {
@@ -178,11 +200,15 @@ impl Controller {
         &self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
-        backend: &hel_targets::TargetLocator,
-        worker_root: &str,
-        reconnect: &CommandSpec,
-        messages: &WorkerRestartMessages,
+        restart: InstalledWorkerRestart<'_>,
     ) -> Result<StandaloneSession> {
+        let InstalledWorkerRestart {
+            backend,
+            worker_root,
+            reconnect,
+            launch,
+            messages,
+        } = restart;
         stop_worker_after_target_recovery(executor, backend, session_id, worker_root)
             .context(messages.stop)?;
         // Copy through hel.next and rename. scp/cp onto a still-mapped hel
@@ -191,6 +217,10 @@ impl Controller {
         let binary = worker_binary_for(backend, executor)?;
         replace_installed_worker_binary(executor, backend, session_id, &binary)
             .context(messages.replace)?;
+        if let Some(launch) = launch {
+            replace_installed_worker_launch_config(executor, backend, session_id, launch)
+                .context("install the current Mjolnir worker launch configuration")?;
+        }
         start_worker(executor, backend, worker_root).context(messages.start)?;
         // Journal recovery runs before the daemon binds control.sock. A long
         // kimi session can take well over the ordinary 30s startup window.

@@ -322,4 +322,77 @@ start_worker
 [[ $worker_pid != "$old_worker" ]]
 wait_for_markers 5
 
-echo "chaos: passed; five real worker/bridge generations produced five durable markers"
+# A managed harness version must stay leased by the ACP supervisor after its
+# worker-side lease disappears. Otherwise a quiet upgrade can garbage-collect
+# the executable while an hours-long busy turn is still running.
+lease_root=$chaos_root/managed-harness
+lease_path=$lease_root/.lease
+lease_spec=$lease_root/supervisor.json
+lease_fifo=$lease_root/parent-input
+lease_output_fifo=$lease_root/parent-output
+mkdir -p "$lease_root"
+: >"$lease_path"
+mkfifo "$lease_fifo"
+mkfifo "$lease_output_fifo"
+python3 - "$lease_spec" "$lease_path" "$workspace" <<'PY'
+import json
+import sys
+
+spec, lease, workspace = sys.argv[1:]
+with open(spec, "w", encoding="utf-8") as output:
+    json.dump({
+        "command": "/bin/sh",
+        "args": ["-c", "sleep 300"],
+        "environment": {},
+        "cwd": workspace,
+        "harness_lease": lease,
+    }, output)
+PY
+
+lease_state() {
+    python3 - "$lease_path" <<'PY'
+import fcntl
+import sys
+
+with open(sys.argv[1], "r+", encoding="utf-8") as lease:
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("locked")
+    else:
+        print("unlocked")
+PY
+}
+
+cat "$lease_output_fifo" >"$lease_root/supervisor.out" &
+lease_output_pid=$!
+"$hel_binary" worker acp-supervisor --spec "$lease_spec" <"$lease_fifo" \
+    >"$lease_output_fifo" 2>"$lease_root/supervisor.log" &
+lease_supervisor=$!
+exec {lease_input_fd}>"$lease_fifo"
+for _ in $(seq 1 250); do
+    [[ $(lease_state) == locked ]] && break
+    sleep 0.02
+done
+[[ $(lease_state) == locked ]] || {
+    echo "ACP supervisor did not acquire the managed harness lease" >&2
+    exit 1
+}
+echo "chaos: ACP supervisor holds managed harness lease independently"
+exec {lease_input_fd}>&-
+for _ in $(seq 1 250); do
+    kill -0 "$lease_supervisor" 2>/dev/null || break
+    sleep 0.02
+done
+kill -0 "$lease_supervisor" 2>/dev/null && {
+    echo "ACP supervisor did not stop after parent EOF" >&2
+    exit 1
+}
+wait "$lease_supervisor"
+wait "$lease_output_pid"
+[[ $(lease_state) == unlocked ]] || {
+    echo "ACP supervisor did not release the managed harness lease" >&2
+    exit 1
+}
+
+echo "chaos: passed; five real worker/bridge generations produced five durable markers and supervisor lease handoff survived"

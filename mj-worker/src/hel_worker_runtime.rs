@@ -38,6 +38,10 @@ pub struct AcpSupervisorSpec {
     pub args: Vec<String>,
     pub environment: std::collections::BTreeMap<String, String>,
     pub cwd: PathBuf,
+    /// Shared advisory lock the supervisor holds for the complete lifetime of
+    /// a managed harness process tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_lease: Option<PathBuf>,
 }
 
 impl AcpSupervisorSpec {
@@ -67,6 +71,8 @@ pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) {
         .configure_execution_environment(config.execution_policy, &mut config.environment);
 }
 
+#[cfg(unix)]
+pub(crate) mod harness;
 #[cfg(unix)]
 pub(crate) mod reviewer;
 #[cfg(unix)]
@@ -140,7 +146,9 @@ fn resolve_relative_worker_root(root: PathBuf, base: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-pub use unix::{lead_process_group, proxy, run_acp_supervisor, run_daemon};
+pub use unix::{
+    lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
+};
 
 #[cfg(not(unix))]
 pub async fn run_daemon(
@@ -153,6 +161,11 @@ pub async fn run_daemon(
 #[cfg(not(unix))]
 pub async fn proxy(_root: std::path::PathBuf) -> anyhow::Result<()> {
     anyhow::bail!("target workers require Unix")
+}
+
+#[cfg(not(unix))]
+pub async fn prepare_managed_harness(_config: WorkerLaunchConfig) -> anyhow::Result<()> {
+    anyhow::bail!("managed target harnesses require Unix")
 }
 
 #[cfg(not(unix))]

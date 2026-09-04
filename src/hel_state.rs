@@ -1667,7 +1667,6 @@ mod tests {
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/home/test/.codex"),
-                    executable: None,
                     environment: BTreeMap::new(),
                 },
             )]),

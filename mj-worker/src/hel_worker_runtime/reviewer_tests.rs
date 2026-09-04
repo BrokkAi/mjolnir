@@ -195,6 +195,7 @@ impl Fixture {
             cwd: workspace,
             additional_directories: Vec::new(),
             worker_executable: bridge,
+            harness_runtime: hel::hel_worker_launch::HarnessRuntimePolicy::Ambient,
         });
         Self {
             _temp: temp,
@@ -954,6 +955,7 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
         cwd: temp.path().to_path_buf(),
         additional_directories: Vec::new(),
         worker_executable: PathBuf::from("/bin/false"),
+        harness_runtime: hel::hel_worker_launch::HarnessRuntimePolicy::Ambient,
     }));
     let _guard = unix::serve_review_dispatch(&worker_root, sidecar.clone()).unwrap();
     let socket = worker_root

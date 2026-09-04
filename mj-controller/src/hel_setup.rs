@@ -526,7 +526,6 @@ fn build_config_with_runtimes(
             HarnessProfile {
                 kind: home.kind,
                 home: home.path.clone(),
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },

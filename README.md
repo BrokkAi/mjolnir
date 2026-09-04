@@ -320,12 +320,14 @@ session checks out (multi-repository bundles give agents a virtual monorepo).
 Mjolnir-owned worker and bridge commands use non-login shells. On raw local, SSH,
 and EC2 targets, Mjolnir makes one bounded login-shell probe when each worker starts
 and carries only its discovered `PATH` into the non-login runtime; an explicit
-`environment.PATH` in the profile takes precedence. Later profile changes take
-effect after the worker restarts or the session resumes. Agent-requested shell
-commands still run as `bash -lc` and intentionally use the session user's login
-environment. If automatic discovery is insufficient, set a target-side ACP
-bridge path with the profile's `executable` key or set an explicit search path
-under `[profiles.<id>.environment]` with `PATH = "..."`.
+`environment.PATH` in the profile takes precedence. Raw SSH and EC2 workers install
+the exact Mjolnir-pinned harness runtime in a shared per-user cache and never fall
+back to an arbitrary executable from `PATH`. Their host still needs the installer
+prerequisites: Node.js 22 plus npm for npm-based harnesses, or curl and Bash for
+Kimi Code and Grok Build. Mjolnir does not use sudo to install those prerequisites.
+Later profile changes take effect after the worker restarts or the session resumes.
+Agent-requested shell commands still run as `bash -lc` and intentionally use the
+session user's login environment.
 Target prerequisites and full option lists are covered in
 [docs/PODMAN.md](docs/PODMAN.md), [docs/DOCKER.md](docs/DOCKER.md),
 [docs/SSH.md](docs/SSH.md), and

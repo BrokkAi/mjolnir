@@ -1516,7 +1516,6 @@ mod tests {
             HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Claude,
                 home: profile_home,
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -1943,7 +1942,6 @@ mod tests {
             HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -2347,7 +2345,6 @@ mod tests {
             HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -2504,7 +2501,6 @@ mod tests {
             HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -2629,7 +2625,6 @@ mod tests {
             HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },

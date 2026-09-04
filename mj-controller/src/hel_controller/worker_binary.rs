@@ -15,13 +15,16 @@ use hel::hel_config::{
     ExecutionPolicy, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write,
     data_dir,
 };
+use hel::hel_harness_runtime::{
+    CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, DEEPSEEK_ACP_VERSION, DEEPSEEK_DSH_VERSION,
+};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
 use hel::hel_targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
 };
 use hel::hel_worker_launch::{
-    DISCOVER_LOGIN_PATH_ENV, ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery,
-    WorkerLaunchConfig, WorkerOwnership,
+    DISCOVER_LOGIN_PATH_ENV, HarnessRuntimePolicy, ProjectMemoryLaunchConfig,
+    ProjectMemoryMcpDelivery, WorkerLaunchConfig, WorkerOwnership,
 };
 
 use super::backend::backend_locator;
@@ -133,7 +136,8 @@ impl Controller {
             &launch_path,
             &ownership_path,
             &profile_stage,
-        )
+        )?;
+        prepare_installed_managed_harness(executor, backend, worker_root, &launch)
     }
 
     /// Probe the installed binary and collect the dead worker's exit record
@@ -188,6 +192,27 @@ impl Controller {
     /// session manager runs both off its async actor.
     pub fn worker_recovery_plan(&self, session_id: &str) -> Result<WorkerRecoveryPlan> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
+        let launch = self.current_worker_launch_config(session_id, &backend)?;
+        Ok(WorkerRecoveryPlan {
+            target: hel_targets::target_recovery_plan(&backend, session_id)?,
+            liveness_probe: worker_liveness_command(&backend, &worker_root),
+            binary_refresh: worker_binary_refresh_plan(&backend, session_id)?,
+            launch_refresh: Some(worker_launch_refresh_plan(&backend, session_id, &launch)?),
+            restart: CommandPlan {
+                description: format!("restart Mjolnir worker for session {session_id}"),
+                commands: vec![
+                    stop_worker_command(&backend, &worker_root),
+                    start_worker_command(&backend, &worker_root),
+                ],
+            },
+        })
+    }
+
+    pub(super) fn current_worker_launch_config(
+        &self,
+        session_id: &str,
+        backend: &hel_targets::TargetLocator,
+    ) -> Result<WorkerLaunchConfig> {
         let session = self
             .state
             .sessions
@@ -212,23 +237,11 @@ impl Controller {
             session,
             profile,
             bundle,
-            &backend,
+            backend,
             session_id,
             target.execution_policy(),
         )?;
-        Ok(WorkerRecoveryPlan {
-            target: hel_targets::target_recovery_plan(&backend, session_id)?,
-            liveness_probe: worker_liveness_command(&backend, &worker_root),
-            binary_refresh: worker_binary_refresh_plan(&backend, session_id)?,
-            launch_refresh: Some(worker_launch_refresh_plan(&backend, session_id, &launch)?),
-            restart: CommandPlan {
-                description: format!("restart Mjolnir worker for session {session_id}"),
-                commands: vec![
-                    stop_worker_command(&backend, &worker_root),
-                    start_worker_command(&backend, &worker_root),
-                ],
-            },
-        })
+        Ok(launch)
     }
 
     pub fn project_memory_sync_target(&self, session_id: &str) -> Result<ProjectMemorySyncTarget> {
@@ -300,11 +313,7 @@ fn worker_launch_config(
             "DeepSeek Harness ACP does not support multiple workspace roots; use a single-repository bundle"
         );
     }
-    let (bridge_command, bridge_args) = bridge_launch(
-        profile.kind,
-        profile.executable.as_deref(),
-        execution_policy,
-    );
+    let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
     let mut environment = profile.environment.clone();
     environment.insert(profile.home_env().into(), target_profile_home.clone());
     profile
@@ -331,6 +340,7 @@ fn worker_launch_config(
             harness: profile.kind,
             bridge_command: PathBuf::from(bridge_command),
             bridge_args,
+            harness_runtime: harness_runtime_policy(backend),
             environment,
             cwd: PathBuf::from(&workspace.0),
             additional_directories,
@@ -341,6 +351,15 @@ fn worker_launch_config(
         project_memory,
         target_profile_home,
     ))
+}
+
+fn harness_runtime_policy(backend: &hel_targets::TargetLocator) -> HarnessRuntimePolicy {
+    match backend {
+        hel_targets::TargetLocator::AwsEc2 { .. } | hel_targets::TargetLocator::SshBare { .. } => {
+            HarnessRuntimePolicy::ManagedRemote
+        }
+        _ => HarnessRuntimePolicy::Ambient,
+    }
 }
 
 /// Hand a Claude worker the profile's long-lived setup token, when it has one.
@@ -1096,24 +1115,14 @@ fn workspace_paths(
 // releases could cancel the first project-memory startup while immediately
 // replacing it with an equivalent connection, leaving a false failed-tool
 // event at the beginning of every session.
-const CODEX_ACP_FALLBACK_VERSION: &str = "1.8.0";
-
-const CLAUDE_AGENT_ACP_FALLBACK_VERSION: &str = "0.73.0";
-
-const DEEPSEEK_HARNESS_FALLBACK_VERSION: &str = "0.1.1-rc.2";
-
-const DEEPSEEK_ACP_FALLBACK_VERSION: &str = "0.10.0";
-
 /// Stage shown after the worker is reachable and while its ACP bridge becomes
 /// ready. Default launchers that can fetch their own harness name that work;
 /// explicit executables and DSH only have a process to start.
 pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage {
-    if profile.executable.is_none()
-        && matches!(
-            profile.kind,
-            HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Grok
-        )
-    {
+    if matches!(
+        profile.kind,
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Grok
+    ) {
         ProvisionStage::Installing(profile.kind)
     } else {
         ProvisionStage::Starting
@@ -1122,49 +1131,40 @@ pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage
 
 pub(super) fn bridge_launch(
     harness: hel::hel_config::HarnessKind,
-    executable: Option<&Path>,
     policy: hel::hel_config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
-    if let Some(executable) = executable {
-        let args = harness
-            .bridge_override_args(policy)
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        return (executable.to_string_lossy().into_owned(), args);
-    }
     match harness {
         hel::hel_config::HarnessKind::Codex => (
             "sh".into(),
             vec![
                 "-c".into(),
-                format!("if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"@agentclientprotocol/codex-acp {CODEX_ACP_FALLBACK_VERSION}\" ]; then exec codex-acp; fi; {}; exec npx -y @agentclientprotocol/codex-acp@{CODEX_ACP_FALLBACK_VERSION}", ensure_node_script()),
+                format!("if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"@agentclientprotocol/codex-acp {CODEX_ACP_VERSION}\" ]; then exec codex-acp; fi; {}; exec npx -y @agentclientprotocol/codex-acp@{CODEX_ACP_VERSION}", ensure_node_script()),
             ],
         ),
         hel::hel_config::HarnessKind::Claude => (
             "sh".into(),
             vec![
                 "-c".into(),
-                format!("if command -v claude-agent-acp >/dev/null 2>&1; then exec claude-agent-acp; fi; {}; exec npx -y @agentclientprotocol/claude-agent-acp@{CLAUDE_AGENT_ACP_FALLBACK_VERSION}", ensure_node_script()),
+                format!("if command -v claude-agent-acp >/dev/null 2>&1; then exec claude-agent-acp; fi; {}; exec npx -y @agentclientprotocol/claude-agent-acp@{CLAUDE_ACP_VERSION}", ensure_node_script()),
             ],
         ),
         hel::hel_config::HarnessKind::Kimi => (
             "sh".into(),
             vec![
                 "-c".into(),
-                "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code or curl for its official installer; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi".into(),
+                "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code or curl for its official installer; add the tool to PATH' >&2; exit 127; fi".into(),
             ],
         ),
         hel::hel_config::HarnessKind::Grok => {
             let acp = hel::hel_config::HarnessKind::Grok
-                .bridge_override_args(policy)
+                .bridge_args(policy)
                 .join(" ");
             (
                 "sh".into(),
                 vec![
                     "-c".into(),
                     format!(
-                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build or curl for its official installer; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi"
+                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
                     ),
                 ],
             )
@@ -1174,7 +1174,7 @@ pub(super) fn bridge_launch(
             vec![
                 "-c".into(),
                 format!(
-                    "{}; if command -v dsh >/dev/null 2>&1 && command -v dsh-acp-server >/dev/null 2>&1; then exec dsh-acp-server; fi; echo 'Mjolnir needs @deepseek-ai/dsh@{DEEPSEEK_HARNESS_FALLBACK_VERSION} and dsh-acp-server@{DEEPSEEK_ACP_FALLBACK_VERSION} installed on PATH; configure the profile executable or environment PATH when they are installed elsewhere' >&2; exit 127",
+                    "{}; if command -v dsh >/dev/null 2>&1 && command -v dsh-acp-server >/dev/null 2>&1; then exec dsh-acp-server; fi; echo 'Mjolnir needs @deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION} and dsh-acp-server@{DEEPSEEK_ACP_VERSION} installed on PATH' >&2; exit 127",
                     ensure_node_22_script(),
                 ),
             ],
@@ -1183,7 +1183,7 @@ pub(super) fn bridge_launch(
 }
 
 fn ensure_node_script() -> &'static str {
-    "if ! command -v npx >/dev/null 2>&1; then if [ \"$(id -u)\" = 0 ]; then SUDO=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true; then SUDO='sudo'; else echo 'Mjolnir needs Node/npx or passwordless sudo to install it; configure the profile executable or environment PATH when the tool is installed elsewhere' >&2; exit 127; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y nodejs npm; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y nodejs npm; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y nodejs npm; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache nodejs npm; else echo 'Mjolnir cannot install Node on this image; bake npx or a compatible ACP bridge into it, or configure the profile executable or environment PATH' >&2; exit 127; fi; fi"
+    "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi"
 }
 
 fn ensure_node_22_script() -> String {
@@ -1696,6 +1696,136 @@ pub(super) fn replace_installed_worker_binary(
     for command in plan.commands {
         execute_checked(executor, command)?;
     }
+    Ok(())
+}
+
+pub(super) fn replace_installed_worker_launch_config(
+    executor: &impl CommandExecutor,
+    locator: &hel_targets::TargetLocator,
+    session_id: &str,
+    launch: &WorkerLaunchConfig,
+) -> Result<()> {
+    let plan = worker_launch_refresh_plan(locator, session_id, launch)?;
+    for command in plan.replace.commands {
+        execute_checked(executor, command)?;
+    }
+    Ok(())
+}
+
+/// Prepare the exact managed harness with a separately staged current worker
+/// binary. The running worker is not stopped or replaced, so any failure here
+/// leaves the quiet session attachable on its previous build.
+pub(super) fn prepare_managed_harness_for_upgrade(
+    executor: &impl CommandExecutor,
+    locator: &hel_targets::TargetLocator,
+    session_id: &str,
+    worker_binary: &Path,
+    launch: &WorkerLaunchConfig,
+) -> Result<()> {
+    if launch.harness_runtime != HarnessRuntimePolicy::ManagedRemote {
+        return Ok(());
+    }
+    let ssh = match locator {
+        hel_targets::TargetLocator::AwsEc2 { ssh, .. }
+        | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh,
+        _ => bail!("managed remote harness policy requires an SSH-bare or EC2 target"),
+    };
+    let worker_root = hel_targets::worker_root(locator, session_id)?;
+    let remote = format!("{worker_root}/harness-prepare");
+    let remote_binary = format!("{remote}/hel");
+    let remote_config = format!("{remote}/launch.json");
+    let staging = tempfile::tempdir().context("create managed harness upgrade staging")?;
+    let local_config = staging.path().join("launch.json");
+    launch.write(&local_config)?;
+
+    let result = (|| {
+        execute_checked(
+            executor,
+            ssh_command_spec(ssh, ["rm", "-rf", "--", &remote])
+                .purpose("clear managed harness preparation staging"),
+        )?;
+        execute_checked(
+            executor,
+            ssh_command_spec(ssh, ["mkdir", "-p", &remote])
+                .purpose("create managed harness preparation staging"),
+        )?;
+        execute_checked(
+            executor,
+            scp_command_spec(ssh, worker_binary, &remote_binary, false)
+                .purpose("stage current worker for managed harness preparation"),
+        )?;
+        execute_checked(
+            executor,
+            scp_command_spec(ssh, &local_config, &remote_config, false)
+                .purpose("stage managed harness launch configuration"),
+        )?;
+        execute_checked(
+            executor,
+            ssh_command_spec(ssh, ["chmod", "700", &remote_binary])
+                .purpose("make managed harness preparation worker executable"),
+        )?;
+        execute_checked(
+            executor,
+            ssh_command_spec(
+                ssh,
+                [
+                    remote_binary.as_str(),
+                    "worker",
+                    "prepare-harness",
+                    "--config",
+                    remote_config.as_str(),
+                ],
+            )
+            .purpose("prepare exact managed harness"),
+        )?;
+        Ok(())
+    })();
+    let cleanup = execute_checked(
+        executor,
+        ssh_command_spec(ssh, ["rm", "-rf", "--", &remote])
+            .purpose("remove managed harness preparation staging"),
+    );
+    match (result, cleanup) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Ok(()), Err(error)) => Err(error).context("clean managed harness preparation staging"),
+        (Err(error), Ok(_)) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            tracing::warn!(%cleanup, path = %remote, "managed harness preparation staging cleanup failed");
+            Err(error)
+        }
+    }
+}
+
+fn prepare_installed_managed_harness(
+    executor: &impl CommandExecutor,
+    locator: &hel_targets::TargetLocator,
+    worker_root: &str,
+    launch: &WorkerLaunchConfig,
+) -> Result<()> {
+    if launch.harness_runtime != HarnessRuntimePolicy::ManagedRemote {
+        return Ok(());
+    }
+    let ssh = match locator {
+        hel_targets::TargetLocator::AwsEc2 { ssh, .. }
+        | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh,
+        _ => bail!("managed remote harness policy requires an SSH-bare or EC2 target"),
+    };
+    let worker_binary = format!("{worker_root}/hel");
+    let launch_config = format!("{worker_root}/launch.json");
+    execute_checked(
+        executor,
+        ssh_command_spec(
+            ssh,
+            [
+                worker_binary.as_str(),
+                "worker",
+                "prepare-harness",
+                "--config",
+                launch_config.as_str(),
+            ],
+        )
+        .purpose("prepare exact managed harness before worker startup"),
+    )?;
     Ok(())
 }
 
@@ -3141,7 +3271,6 @@ mod tests {
     fn default_bridges_pin_command_capable_adapter_versions() {
         let (codex_command, codex_arguments) = bridge_launch(
             hel::hel_config::HarnessKind::Codex,
-            None,
             ExecutionPolicy::Unconstrained,
         );
         assert_eq!(codex_command, "sh");
@@ -3151,7 +3280,6 @@ mod tests {
 
         let (claude_command, claude_arguments) = bridge_launch(
             hel::hel_config::HarnessKind::Claude,
-            None,
             ExecutionPolicy::Unconstrained,
         );
         assert_eq!(claude_command, "sh");
@@ -3160,7 +3288,6 @@ mod tests {
 
         let (deepseek_command, deepseek_arguments) = bridge_launch(
             hel::hel_config::HarnessKind::Deepseek,
-            None,
             ExecutionPolicy::Unconstrained,
         );
         assert_eq!(deepseek_command, "sh");
@@ -3175,10 +3302,9 @@ mod tests {
 
     #[test]
     fn readiness_stage_names_only_install_capable_default_harnesses() {
-        let profile = |kind, executable| hel::hel_config::HarnessProfile {
+        let profile = |kind| hel::hel_config::HarnessProfile {
             kind,
             home: PathBuf::from("/profiles/test"),
-            executable,
             environment: BTreeMap::new(),
             context_window_bytes: None,
         };
@@ -3190,19 +3316,12 @@ mod tests {
             HarnessKind::Grok,
         ] {
             assert_eq!(
-                bridge_readiness_stage(&profile(harness, None)),
+                bridge_readiness_stage(&profile(harness)),
                 ProvisionStage::Installing(harness)
             );
         }
         assert_eq!(
-            bridge_readiness_stage(&profile(HarnessKind::Deepseek, None)),
-            ProvisionStage::Starting
-        );
-        assert_eq!(
-            bridge_readiness_stage(&profile(
-                HarnessKind::Codex,
-                Some(PathBuf::from("/opt/bin/codex-acp")),
-            )),
+            bridge_readiness_stage(&profile(HarnessKind::Deepseek)),
             ProvisionStage::Starting
         );
     }
@@ -3269,6 +3388,49 @@ mod tests {
         assert!(!managed_environment.contains_key(DISCOVER_LOGIN_PATH_ENV));
     }
     #[test]
+    fn only_remote_bare_targets_use_managed_harnesses() {
+        let ssh = SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        };
+        let targets = [
+            (
+                hel_targets::TargetLocator::LocalBare {
+                    worker_root: "/worker".into(),
+                },
+                HarnessRuntimePolicy::Ambient,
+            ),
+            (
+                hel_targets::TargetLocator::LocalPodman {
+                    container_id: "container".into(),
+                    workspace_storage: Default::default(),
+                },
+                HarnessRuntimePolicy::Ambient,
+            ),
+            (
+                hel_targets::TargetLocator::SshBare {
+                    ssh: ssh.clone(),
+                    workspace: "/workspace/session".into(),
+                },
+                HarnessRuntimePolicy::ManagedRemote,
+            ),
+            (
+                hel_targets::TargetLocator::AwsEc2 {
+                    profile: "profile".into(),
+                    region: "us-east-1".into(),
+                    instance_id: "i-test".into(),
+                    ssh,
+                    workspace: "/workspace/session".into(),
+                },
+                HarnessRuntimePolicy::ManagedRemote,
+            ),
+        ];
+
+        for (target, expected) in targets {
+            assert_eq!(harness_runtime_policy(&target), expected, "{target:?}");
+        }
+    }
+    #[test]
     fn grok_sandbox_environment_follows_the_target_policy() {
         let mut isolated = BTreeMap::from([("GROK_SANDBOX".to_owned(), "strict".to_owned())]);
         hel::hel_config::HarnessKind::Grok
@@ -3291,7 +3453,7 @@ mod tests {
     fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         const CONTAINERFILE: &str = include_str!("../../../containers/Containerfile.agent-dev");
 
-        let codex = format!("codex-acp@{CODEX_ACP_FALLBACK_VERSION}");
+        let codex = format!("codex-acp@{CODEX_ACP_VERSION}");
         assert!(
             CONTAINERFILE.contains(&codex),
             "containers/Containerfile.agent-dev must install {codex}. The image and the \
@@ -3299,7 +3461,7 @@ mod tests {
                  session and an npx session run different adapter versions."
         );
 
-        let claude = format!("claude-agent-acp@{CLAUDE_AGENT_ACP_FALLBACK_VERSION}");
+        let claude = format!("claude-agent-acp@{CLAUDE_ACP_VERSION}");
         assert!(
             CONTAINERFILE.contains(&claude),
             "containers/Containerfile.agent-dev must install {claude}. The image and the \
@@ -3308,8 +3470,8 @@ mod tests {
         );
 
         for package in [
-            format!("@deepseek-ai/dsh@{DEEPSEEK_HARNESS_FALLBACK_VERSION}"),
-            format!("dsh-acp-server@{DEEPSEEK_ACP_FALLBACK_VERSION}"),
+            format!("@deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION}"),
+            format!("dsh-acp-server@{DEEPSEEK_ACP_VERSION}"),
         ] {
             assert!(
                 CONTAINERFILE.contains(&package),
@@ -3321,7 +3483,6 @@ mod tests {
     fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
         let (command, arguments) = bridge_launch(
             hel::hel_config::HarnessKind::Kimi,
-            None,
             ExecutionPolicy::Unconstrained,
         );
         assert_eq!(command, "sh");
@@ -3335,7 +3496,6 @@ mod tests {
     fn grok_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
         let (command, arguments) = bridge_launch(
             hel::hel_config::HarnessKind::Grok,
-            None,
             ExecutionPolicy::ConfiguredApprovals,
         );
         assert_eq!(command, "sh");
@@ -3354,48 +3514,21 @@ mod tests {
     #[test]
     fn node_bootstrap_errors_name_mjolnir() {
         let script = ensure_node_script();
-        assert!(script.contains("Mjolnir needs Node/npx or passwordless sudo"));
-        assert!(script.contains("Mjolnir cannot install Node on this image"));
+        assert!(script.contains("Mjolnir needs Node.js, npm, and npx"));
+        assert!(!script.contains("sudo"));
+        assert!(!script.contains("apt-get"));
         assert!(!script.contains("Hel"));
     }
     #[test]
     fn grok_default_bridge_adds_the_always_approve_flag_when_unrestricted() {
         let (_, arguments) = bridge_launch(
             hel::hel_config::HarnessKind::Grok,
-            None,
             ExecutionPolicy::Unconstrained,
         );
         let script = &arguments[1];
         assert!(script.contains("exec grok agent --always-approve stdio"));
         assert!(script.contains("exec \"$GROK_HOME/bin/grok\" agent --always-approve stdio"));
         assert!(script.contains("exec \"$HOME/.grok/bin/grok\" agent --always-approve stdio"));
-    }
-    #[test]
-    fn bridge_executable_override_carries_the_acp_subcommand_per_harness() {
-        let executable = std::path::PathBuf::from("/opt/harness");
-        for policy in [
-            ExecutionPolicy::ConfiguredApprovals,
-            ExecutionPolicy::Unconstrained,
-        ] {
-            for (kind, expected) in [
-                (hel::hel_config::HarnessKind::Codex, Vec::new()),
-                (hel::hel_config::HarnessKind::Claude, Vec::new()),
-                (hel::hel_config::HarnessKind::Kimi, vec!["acp"]),
-                (
-                    hel::hel_config::HarnessKind::Grok,
-                    if policy.is_unconstrained() {
-                        vec!["agent", "--always-approve", "stdio"]
-                    } else {
-                        vec!["agent", "stdio"]
-                    },
-                ),
-                (hel::hel_config::HarnessKind::Deepseek, Vec::new()),
-            ] {
-                let (command, arguments) = bridge_launch(kind, Some(&executable), policy);
-                assert_eq!(command, "/opt/harness");
-                assert_eq!(arguments, expected, "{kind:?} policy: {policy:?}");
-            }
-        }
     }
     #[test]
     fn kimi_uses_runtime_aware_memory_delivery_only_on_staged_targets() {
@@ -3437,7 +3570,6 @@ mod tests {
         let profile = hel::hel_config::HarnessProfile {
             kind: hel::hel_config::HarnessKind::Grok,
             home: home.path().to_path_buf(),
-            executable: None,
             environment: BTreeMap::new(),
             context_window_bytes: None,
         };
@@ -3467,7 +3599,6 @@ mod tests {
         let profile = hel::hel_config::HarnessProfile {
             kind: hel::hel_config::HarnessKind::Claude,
             home: home.path().to_path_buf(),
-            executable: None,
             environment: BTreeMap::new(),
             context_window_bytes: None,
         };
@@ -3494,7 +3625,6 @@ mod tests {
         let profile = hel::hel_config::HarnessProfile {
             kind: hel::hel_config::HarnessKind::Kimi,
             home: home.path().to_path_buf(),
-            executable: None,
             environment: BTreeMap::new(),
             context_window_bytes: None,
         };
@@ -3525,7 +3655,6 @@ mod tests {
         let profile = hel::hel_config::HarnessProfile {
             kind: hel::hel_config::HarnessKind::Kimi,
             home: home.path().to_path_buf(),
-            executable: None,
             environment: BTreeMap::new(),
             context_window_bytes: None,
         };
@@ -3621,7 +3750,6 @@ mod tests {
         let profile = hel::hel_config::HarnessProfile {
             kind: hel::hel_config::HarnessKind::Deepseek,
             home: home.path().to_path_buf(),
-            executable: None,
             environment: BTreeMap::new(),
             context_window_bytes: None,
         };
@@ -3654,7 +3782,6 @@ mod tests {
             let profile = hel::hel_config::HarnessProfile {
                 kind,
                 home: home.path().to_path_buf(),
-                executable: None,
                 environment: std::collections::BTreeMap::new(),
                 context_window_bytes: None,
             };
@@ -3686,7 +3813,6 @@ mod tests {
         let profile = hel::hel_config::HarnessProfile {
             kind: hel::hel_config::HarnessKind::Kimi,
             home: home.path().to_path_buf(),
-            executable: None,
             environment: std::collections::BTreeMap::new(),
             context_window_bytes: None,
         };
@@ -3799,6 +3925,106 @@ mod tests {
             },
             workspace: format!("/srv/mj/{session_id}"),
         }
+    }
+
+    #[test]
+    fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
+        let session = "session-remote";
+        let executor = DigestExecutor {
+            installed_line: String::new(),
+            commands: RefCell::new(Vec::new()),
+        };
+        let launch = WorkerLaunchConfig {
+            session_id: session.into(),
+            harness: HarnessKind::Codex,
+            bridge_command: "ignored".into(),
+            bridge_args: Vec::new(),
+            harness_runtime: HarnessRuntimePolicy::ManagedRemote,
+            environment: BTreeMap::new(),
+            cwd: "/srv/mj/session-remote/project".into(),
+            additional_directories: Vec::new(),
+            native_session_id: None,
+            project_memory: None,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        };
+
+        prepare_managed_harness_for_upgrade(
+            &executor,
+            &ssh_bare_locator(session),
+            session,
+            Path::new("/controller/hel"),
+            &launch,
+        )
+        .unwrap();
+
+        let commands = executor.commands.borrow();
+        let purposes = commands
+            .iter()
+            .map(|command| command.purpose.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            purposes,
+            vec![
+                "clear managed harness preparation staging",
+                "create managed harness preparation staging",
+                "stage current worker for managed harness preparation",
+                "stage managed harness launch configuration",
+                "make managed harness preparation worker executable",
+                "prepare exact managed harness",
+                "remove managed harness preparation staging",
+            ]
+        );
+        assert!(commands.iter().all(|command| {
+            !command.purpose.contains("stop Mjolnir worker")
+                && !command.purpose.contains("start Mjolnir worker")
+                && !command
+                    .purpose
+                    .contains("install the current Mjolnir worker binary")
+        }));
+        let prepare = commands
+            .iter()
+            .find(|command| command.purpose == "prepare exact managed harness")
+            .unwrap();
+        let rendered = format!("{} {}", prepare.program, prepare.args.join(" "));
+        assert!(rendered.contains("worker' 'prepare-harness' '--config'"));
+    }
+
+    #[test]
+    fn initial_remote_provision_prepares_the_harness_from_installed_files() {
+        let session = "session-remote";
+        let executor = DigestExecutor {
+            installed_line: String::new(),
+            commands: RefCell::new(Vec::new()),
+        };
+        let mut launch = WorkerLaunchConfig {
+            session_id: session.into(),
+            harness: HarnessKind::Kimi,
+            bridge_command: "ignored".into(),
+            bridge_args: Vec::new(),
+            harness_runtime: HarnessRuntimePolicy::ManagedRemote,
+            environment: BTreeMap::new(),
+            cwd: "/srv/mj/session-remote/project".into(),
+            additional_directories: Vec::new(),
+            native_session_id: None,
+            project_memory: None,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        };
+
+        let locator = ssh_bare_locator(session);
+        prepare_installed_managed_harness(&executor, &locator, "/worker/root", &launch).unwrap();
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].purpose,
+            "prepare exact managed harness before worker startup"
+        );
+        let rendered = format!("{} {}", commands[0].program, commands[0].args.join(" "));
+        assert!(rendered.contains("'/worker/root/hel' 'worker' 'prepare-harness'"));
+        drop(commands);
+
+        launch.harness_runtime = HarnessRuntimePolicy::Ambient;
+        prepare_installed_managed_harness(&executor, &locator, "/worker/root", &launch).unwrap();
+        assert_eq!(executor.commands.borrow().len(), 1);
     }
 
     #[test]

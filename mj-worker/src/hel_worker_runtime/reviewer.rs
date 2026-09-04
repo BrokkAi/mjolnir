@@ -37,6 +37,7 @@ use hel::hel_worker::{
     RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
     RelayResponsePayload,
 };
+use hel::hel_worker_launch::HarnessRuntimePolicy;
 
 /// How long a reviewer may take to open its native session and advertise its
 /// configuration. A harness that has to authenticate or warm a large profile
@@ -78,6 +79,8 @@ pub struct ReviewerPlacement {
     /// This worker's own executable, which supervises the reviewer's bridge
     /// exactly as it supervises the primary's.
     pub worker_executable: PathBuf,
+    /// Reviewers inherit the primary worker's harness ownership policy.
+    pub harness_runtime: HarnessRuntimePolicy,
 }
 
 impl ReviewerPlacement {
@@ -579,13 +582,33 @@ impl ReviewerRole {
         config
             .harness
             .configure_execution_environment(config.execution_policy, &mut environment);
+        let managed_harness = super::harness::resolve(
+            self.placement.harness_runtime,
+            config.harness,
+            config.execution_policy,
+            &environment,
+        )
+        .await
+        .with_context(|| format!("prepare managed reviewer {}", config.harness.display_name()))?;
+        if let Some(managed) = &managed_harness {
+            environment.extend(managed.environment.clone());
+        }
 
         let supervisor_path = root.join("acp-supervisor.json");
         AcpSupervisorSpec {
-            command: config.bridge_command.clone(),
-            args: config.bridge_args.clone(),
+            command: managed_harness.as_ref().map_or_else(
+                || config.bridge_command.clone(),
+                |managed| managed.command.clone(),
+            ),
+            args: managed_harness.as_ref().map_or_else(
+                || config.bridge_args.clone(),
+                |managed| managed.args.clone(),
+            ),
             environment,
             cwd: self.placement.cwd.clone(),
+            harness_lease: managed_harness
+                .as_ref()
+                .map(|managed| managed.lease_path.clone()),
         }
         .write_spec(&supervisor_path)?;
 

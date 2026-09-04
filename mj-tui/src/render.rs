@@ -3629,7 +3629,6 @@ mod tests {
                 context_window_bytes: None,
                 kind: HarnessKind::Deepseek,
                 home: std::path::PathBuf::from("/profiles/deepseek"),
-                executable: None,
                 environment: BTreeMap::new(),
             },
         );

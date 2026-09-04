@@ -926,7 +926,6 @@ mod tests {
             HarnessProfile {
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/dev/.codex"),
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },

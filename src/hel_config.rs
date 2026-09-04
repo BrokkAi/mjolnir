@@ -372,9 +372,8 @@ impl HarnessKind {
         }
     }
 
-    /// Sub-command a `profile.executable` override needs to speak ACP. Codex
-    /// and Claude override an adapter binary that already speaks it.
-    pub fn bridge_override_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
+    /// Harness-specific arguments that start its ACP stdio server.
+    pub fn bridge_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
         let flag = self.launch_flag_for(policy);
         match self {
             Self::Codex | Self::Claude | Self::Deepseek => Vec::new(),
@@ -401,8 +400,6 @@ pub struct HarnessProfile {
     pub kind: HarnessKind,
     /// Controller-side source home. A fresh copy is made for each target.
     pub home: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executable: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
     /// Conservative byte budget for cross-harness transcript compaction.
@@ -1376,7 +1373,6 @@ mod tests {
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/home/test/.codex-one"),
-                    executable: None,
                     environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]),
                 },
             )]),
@@ -1408,6 +1404,15 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn harness_profiles_reject_the_removed_executable_override() {
+        let error = toml::from_str::<HarnessProfile>(
+            "kind = \"codex\"\nhome = \"/profiles/codex\"\nexecutable = \"/opt/codex-acp\"\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `executable`"));
     }
 
     #[test]
@@ -1551,21 +1556,17 @@ mod tests {
     }
 
     #[test]
-    fn bridge_override_args_carry_the_acp_subcommand_per_harness() {
+    fn bridge_args_carry_the_acp_subcommand_per_harness() {
         for policy in [
             ExecutionPolicy::ConfiguredApprovals,
             ExecutionPolicy::Unconstrained,
         ] {
-            assert!(HarnessKind::Codex.bridge_override_args(policy).is_empty());
-            assert!(HarnessKind::Claude.bridge_override_args(policy).is_empty());
-            assert_eq!(HarnessKind::Kimi.bridge_override_args(policy), ["acp"]);
-            assert!(
-                HarnessKind::Deepseek
-                    .bridge_override_args(policy)
-                    .is_empty()
-            );
+            assert!(HarnessKind::Codex.bridge_args(policy).is_empty());
+            assert!(HarnessKind::Claude.bridge_args(policy).is_empty());
+            assert_eq!(HarnessKind::Kimi.bridge_args(policy), ["acp"]);
+            assert!(HarnessKind::Deepseek.bridge_args(policy).is_empty());
             assert_eq!(
-                HarnessKind::Grok.bridge_override_args(policy),
+                HarnessKind::Grok.bridge_args(policy),
                 if policy.is_unconstrained() {
                     vec!["agent", "--always-approve", "stdio"]
                 } else {

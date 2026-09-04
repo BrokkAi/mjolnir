@@ -90,6 +90,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         harness: HarnessKind::Codex,
         bridge_command: "codex-acp".into(),
         bridge_args: Vec::new(),
+        harness_runtime: hel::hel_worker_launch::HarnessRuntimePolicy::Ambient,
         environment: BTreeMap::from([("CODEX_HOME".into(), profile_home.into())]),
         cwd: ".local/share/hel/workspaces/session/repo".into(),
         additional_directories: Vec::new(),
@@ -765,6 +766,7 @@ fn launch_wires_require_the_new_baseline_shape() {
         args: Vec::new(),
         environment: BTreeMap::new(),
         cwd: ".".into(),
+        harness_lease: None,
     };
     let mut incomplete = serde_json::to_value(&supervisor).unwrap();
     incomplete.as_object_mut().unwrap().remove("environment");
@@ -3531,6 +3533,7 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
         args: vec!["-c".into(), "sleep 30 & exit 17".into()],
         environment: Default::default(),
         cwd: temp.path().to_owned(),
+        harness_lease: None,
     };
     let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
 
@@ -3571,6 +3574,7 @@ async fn acp_bridge_keeps_the_configured_github_wrapper_and_drops_inherited_toke
             ("GITHUB_TOKEN".into(), "also-stale".into()),
         ]),
         cwd: temp.path().to_owned(),
+        harness_lease: None,
     };
     let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
 

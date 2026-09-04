@@ -2725,7 +2725,6 @@ mod tests {
                     context_window_bytes: None,
                     kind,
                     home: std::path::PathBuf::from("/profiles").join(id),
-                    executable: None,
                     environment: std::collections::BTreeMap::new(),
                 },
             );

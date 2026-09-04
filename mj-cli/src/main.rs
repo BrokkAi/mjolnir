@@ -39,7 +39,8 @@ use hel::hel_worker_launch::WorkerLaunchConfig;
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_setup::{SetupOutcome, run_setup_dialog};
 use mj_worker::hel_worker_runtime::{
-    AcpSupervisorSpec, lead_process_group, proxy, run_acp_supervisor, run_daemon,
+    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor,
+    run_daemon,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -210,6 +211,11 @@ enum WorkerCommand {
     Run {
         #[arg(long)]
         root: PathBuf,
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Prepare an exact managed harness without starting a session worker.
+    PrepareHarness {
         #[arg(long)]
         config: PathBuf,
     },
@@ -419,6 +425,9 @@ async fn run_command(
                     write_worker_exit_record(&root, &format!("{error:#}"));
                 }
                 result
+            }
+            WorkerCommand::PrepareHarness { config } => {
+                prepare_managed_harness(WorkerLaunchConfig::read(&config)?).await
             }
             WorkerCommand::Proxy { root } => proxy(root).await,
             WorkerCommand::AcpSupervisor { spec } => {
@@ -1288,7 +1297,6 @@ mod tests {
             hel::hel_config::HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Claude,
                 home: PathBuf::from("/home/user/.claude"),
-                executable: None,
                 environment: Default::default(),
                 context_window_bytes: None,
             },

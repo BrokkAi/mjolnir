@@ -11,6 +11,7 @@ pub mod hel_credentials;
 pub mod hel_database;
 pub mod hel_diff;
 pub mod hel_elicitation;
+pub mod hel_harness_runtime;
 pub mod hel_local_git;
 pub mod hel_project_memory;
 pub mod hel_projection;

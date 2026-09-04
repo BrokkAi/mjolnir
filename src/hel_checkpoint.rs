@@ -4020,6 +4020,7 @@ mod tests {
             harness: HarnessKind::Codex,
             bridge_command: "codex-acp".into(),
             bridge_args: Vec::new(),
+            harness_runtime: crate::hel_worker_launch::HarnessRuntimePolicy::Ambient,
             environment: Default::default(),
             cwd: spec.workspace_root.join("app"),
             additional_directories: Vec::new(),

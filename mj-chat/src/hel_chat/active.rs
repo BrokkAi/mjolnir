@@ -2936,7 +2936,6 @@ mod tests {
                         hel::hel_config::HarnessProfile {
                             kind: *kind,
                             home: std::path::PathBuf::from("/profiles").join(id),
-                            executable: None,
                             environment: BTreeMap::new(),
                             context_window_bytes: None,
                         },

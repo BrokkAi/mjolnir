@@ -26,9 +26,6 @@ pub struct QuotaRefreshRequest {
     pub profile_id: String,
     pub harness: HarnessKind,
     pub source_home: std::path::PathBuf,
-    /// Harness CLI override from the profile, for the backends that shell out
-    /// to the CLI itself rather than to an adapter.
-    pub executable: Option<std::path::PathBuf>,
     pub environment: BTreeMap<String, String>,
     pub cwd: std::path::PathBuf,
 }
@@ -273,7 +270,6 @@ async fn refresh_profile(
         profile_id,
         harness,
         source_home,
-        executable,
         environment,
         cwd,
     } = request;
@@ -373,7 +369,7 @@ async fn refresh_profile(
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
         // an ACP billing extension, and so does Mjolnir.
         HarnessKind::Grok => {
-            grok_usage::query(executable, source_home.clone(), cwd, environment)
+            grok_usage::query(source_home.clone(), cwd, environment)
                 .await
                 .map(|report| ProfileQuota {
                     profile_id: profile_id.clone(),
@@ -1592,17 +1588,22 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let environment = BTreeMap::from([(
-            "GROK_HOME".to_owned(),
-            directory.path().to_string_lossy().into_owned(),
-        )]);
+        let environment = BTreeMap::from([
+            (
+                "GROK_HOME".to_owned(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_owned(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+        ]);
 
         let (outcome, _) = refresh_profile(
             QuotaRefreshRequest {
                 profile_id: "grok".into(),
                 harness: HarnessKind::Grok,
                 source_home: directory.path().to_path_buf(),
-                executable: Some(executable),
                 environment,
                 cwd: directory.path().to_path_buf(),
             },
@@ -1700,7 +1701,6 @@ mod tests {
                 profile_id: "codex".into(),
                 harness: HarnessKind::Codex,
                 source_home: directory.to_path_buf(),
-                executable: None,
                 environment,
                 cwd: directory.to_path_buf(),
             },
@@ -1881,8 +1881,10 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
                 profile_id: "grok".into(),
                 harness: HarnessKind::Grok,
                 source_home: directory.path().to_path_buf(),
-                executable: Some(directory.path().join("no-such-grok")),
-                environment: BTreeMap::new(),
+                environment: BTreeMap::from([(
+                    "PATH".to_owned(),
+                    directory.path().to_string_lossy().into_owned(),
+                )]),
                 cwd: directory.path().to_path_buf(),
             },
             None,
@@ -1905,7 +1907,6 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
                 profile_id: "deepseek".into(),
                 harness: HarnessKind::Deepseek,
                 source_home: directory.path().to_path_buf(),
-                executable: None,
                 environment: BTreeMap::new(),
                 cwd: directory.path().to_path_buf(),
             },
@@ -1939,7 +1940,6 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
                 profile_id: "claude2".into(),
                 harness: HarnessKind::Claude,
                 source_home: directory.path().to_path_buf(),
-                executable: None,
                 environment: BTreeMap::new(),
                 cwd: directory.path().to_path_buf(),
             },
@@ -2587,7 +2587,6 @@ while IFS= read -r line; do :; done
             profile_id: "codex-1".into(),
             harness: HarnessKind::Codex,
             source_home: directory.path().to_path_buf(),
-            executable: None,
             environment: BTreeMap::from([
                 (
                     "PATH".to_owned(),

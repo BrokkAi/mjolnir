@@ -114,7 +114,6 @@ Each profile names one harness installation or account on the controller:
 [profiles.codex-work]
 kind = "codex"
 home = "/home/me/.codex-work"
-# executable = "/opt/bin/codex-acp"
 # context_window_bytes = 131072
 
 [profiles.codex-work.environment]
@@ -126,7 +125,6 @@ home = "/home/me/.codex-work"
 | --- | --- | --- | --- | --- |
 | `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, or `deepseek`. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
-| `executable` | path string | no | unset (automatic resolution) | Target-side ACP bridge command or path. Its exact invocation depends on `kind`. |
 | `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 
@@ -134,12 +132,10 @@ The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
 `KIMI_CODE_HOME`, `GROK_HOME`, and `DSH_HOME` respectively.
 
-`executable` must resolve inside the session target and overrides the ACP
-bridge, not necessarily the login CLI. Kimi adds the `acp` subcommand; Grok
-adds `agent`, its policy flag when needed, and `stdio`; Codex, Claude, and
-DeepSeek execute the override directly. `mj login` also uses this value as a
-controller-side command for Kimi and Grok, so those overrides must be reachable
-in both environments when the login helper is used.
+Profiles do not select target-side executables. Mjolnir owns the bridge command:
+raw SSH and EC2 workers resolve an exact pinned runtime from their managed cache,
+while local and container targets use their target runtime. `mj login` invokes
+the harness's canonical controller-side command from `PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 inside a session, or configure the harness's own defaults in its home. For

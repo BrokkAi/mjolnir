@@ -31,7 +31,7 @@ use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec, Proces
 use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
 
 use super::backend::backend_locator;
-use super::worker_restart::RESTART_FOR_CHECKPOINT;
+use super::worker_restart::{InstalledWorkerRestart, RESTART_FOR_CHECKPOINT};
 use super::{
     Controller, execute_checked, now, persist_session_record_transition_or_restore,
     scp_command_spec, ssh_command_spec, target_kind, target_profile_home,
@@ -1142,10 +1142,13 @@ impl Controller {
         self.restart_worker_with_installed_binary(
             session_id,
             executor,
-            backend,
-            worker_root,
-            reconnect,
-            &RESTART_FOR_CHECKPOINT,
+            InstalledWorkerRestart {
+                backend,
+                worker_root,
+                reconnect,
+                launch: None,
+                messages: &RESTART_FOR_CHECKPOINT,
+            },
         )
         .await
     }
@@ -3373,7 +3376,6 @@ mod tests {
             HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },

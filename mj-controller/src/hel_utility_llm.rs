@@ -377,7 +377,6 @@ fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequ
         profile_id: profile_id.to_string(),
         harness: profile.kind,
         source_home: profile.home.clone(),
-        executable: profile.executable.clone(),
         environment,
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }

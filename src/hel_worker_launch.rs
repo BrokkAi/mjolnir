@@ -19,6 +19,25 @@ pub const REVIEWER_DIR: &str = "reviewer";
 /// Where the controller stages the chosen profile, inside [`REVIEWER_DIR`].
 pub const REVIEWER_PROFILE_DIR: &str = "profile";
 
+/// Who owns the ACP adapter and harness executable selected by a worker.
+///
+/// Ambient launch preserves the historical local/container behavior. Managed
+/// remote launch resolves the exact pin compiled into the worker and never
+/// falls back to an executable from `PATH`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessRuntimePolicy {
+    #[default]
+    Ambient,
+    ManagedRemote,
+}
+
+impl HarnessRuntimePolicy {
+    pub const fn is_ambient(&self) -> bool {
+        matches!(self, Self::Ambient)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerOwnership {
@@ -51,6 +70,8 @@ pub struct WorkerLaunchConfig {
     pub harness: HarnessKind,
     pub bridge_command: PathBuf,
     pub bridge_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "HarnessRuntimePolicy::is_ambient")]
+    pub harness_runtime: HarnessRuntimePolicy,
     pub environment: std::collections::BTreeMap<String, String>,
     pub cwd: PathBuf,
     #[serde(default)]
@@ -276,5 +297,40 @@ pub fn running_executable_digest() -> Option<String> {
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launch_json() -> serde_json::Value {
+        serde_json::json!({
+            "session_id": "session",
+            "harness": "codex",
+            "bridge_command": "codex-acp",
+            "bridge_args": [],
+            "environment": {},
+            "cwd": "/workspace/project",
+            "execution_policy": "configured_approvals"
+        })
+    }
+
+    #[test]
+    fn old_launch_configs_default_to_ambient_harnesses() {
+        let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Ambient);
+    }
+
+    #[test]
+    fn managed_remote_policy_round_trips_explicitly() {
+        let mut value = launch_json();
+        value["harness_runtime"] = serde_json::json!("managed_remote");
+        let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::ManagedRemote);
+        assert_eq!(
+            serde_json::to_value(&launch).unwrap()["harness_runtime"],
+            "managed_remote"
+        );
     }
 }

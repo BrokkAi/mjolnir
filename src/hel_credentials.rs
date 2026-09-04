@@ -643,27 +643,15 @@ pub fn events_report_auth_failure(_kind: HarnessKind, events: &[RelayEvent]) -> 
 /// `claude auth login` (there is no bare `claude login`), `kimi login`,
 /// `grok login`, and DeepSeek's `dsh web` credential settings UI.
 ///
-/// `profile.executable` overrides the *ACP bridge*, not the harness CLI: for
-/// Codex and Claude it names an adapter binary (`codex-acp`,
-/// `claude-agent-acp`) that has no login command, so only Kimi and Grok —
-/// whose bridges are the `kimi` and `grok` CLIs themselves — honor the
-/// override here.
 pub fn login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
-    let overridable = |fallback: &str| {
-        profile
-            .executable
-            .as_ref()
-            .map(|executable| executable.to_string_lossy().into_owned())
-            .unwrap_or_else(|| fallback.to_owned())
-    };
     match profile.kind {
         HarnessKind::Codex => ("codex".to_owned(), vec!["login".to_owned()]),
         HarnessKind::Claude => (
             "claude".to_owned(),
             vec!["auth".to_owned(), "login".to_owned()],
         ),
-        HarnessKind::Kimi => (overridable("kimi"), vec!["login".to_owned()]),
-        HarnessKind::Grok => (overridable("grok"), vec!["login".to_owned()]),
+        HarnessKind::Kimi => ("kimi".to_owned(), vec!["login".to_owned()]),
+        HarnessKind::Grok => ("grok".to_owned(), vec!["login".to_owned()]),
         HarnessKind::Deepseek => ("dsh".to_owned(), vec!["web".to_owned()]),
     }
 }
@@ -1380,66 +1368,34 @@ mod tests {
 
     #[test]
     fn login_commands_match_each_harness_cli() {
-        let profile = |kind: HarnessKind, executable: Option<&str>| HarnessProfile {
+        let profile = |kind: HarnessKind| HarnessProfile {
             kind,
             home: PathBuf::from("/home/user/.config"),
-            executable: executable.map(PathBuf::from),
             environment: Default::default(),
             context_window_bytes: None,
         };
         assert_eq!(
-            login_command(&profile(HarnessKind::Codex, None)),
+            login_command(&profile(HarnessKind::Codex)),
             ("codex".to_owned(), vec!["login".to_owned()])
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Claude, None)),
+            login_command(&profile(HarnessKind::Claude)),
             (
                 "claude".to_owned(),
                 vec!["auth".to_owned(), "login".to_owned()]
             )
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Kimi, None)),
+            login_command(&profile(HarnessKind::Kimi)),
             ("kimi".to_owned(), vec!["login".to_owned()])
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Grok, None)),
+            login_command(&profile(HarnessKind::Grok)),
             ("grok".to_owned(), vec!["login".to_owned()])
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Deepseek, None)),
+            login_command(&profile(HarnessKind::Deepseek)),
             ("dsh".to_owned(), vec!["web".to_owned()])
-        );
-    }
-
-    #[test]
-    fn only_a_cli_bridge_executable_override_names_the_harness_cli() {
-        let profile = |kind: HarnessKind| HarnessProfile {
-            kind,
-            home: PathBuf::from("/home/user/.config"),
-            executable: Some(PathBuf::from("/opt/bin/custom")),
-            environment: Default::default(),
-            context_window_bytes: None,
-        };
-        assert_eq!(
-            login_command(&profile(HarnessKind::Kimi)),
-            ("/opt/bin/custom".to_owned(), vec!["login".to_owned()])
-        );
-        assert_eq!(
-            login_command(&profile(HarnessKind::Grok)),
-            ("/opt/bin/custom".to_owned(), vec!["login".to_owned()])
-        );
-        assert_eq!(
-            login_command(&profile(HarnessKind::Codex)).0,
-            "codex".to_owned()
-        );
-        assert_eq!(
-            login_command(&profile(HarnessKind::Claude)).0,
-            "claude".to_owned()
-        );
-        assert_eq!(
-            login_command(&profile(HarnessKind::Deepseek)).0,
-            "dsh".to_owned()
         );
     }
 

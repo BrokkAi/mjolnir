@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek Harness accounts, credentials, skills, bridges, and quota reporting.
+description: Configure Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek Harness accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -42,14 +42,13 @@ kind = "codex"
 home = "/home/me/.codex-work"
 ```
 
-Optional bridge and environment controls are useful for nonstandard target
+Optional environment and compaction controls are useful for nonstandard target
 installs:
 
 ```toml
 [profiles.codex-work]
 kind = "codex"
 home = "/home/me/.codex-work"
-executable = "/opt/mj-bridges/codex-acp"
 context_window_bytes = 131072
 
 [profiles.codex-work.environment]
@@ -99,11 +98,8 @@ environment before starting the harness's interactive login:
 | Grok Build | `grok login` |
 | DeepSeek Harness | `dsh web` |
 
-For Kimi and Grok, `profile.executable` also replaces the controller-side CLI
-used for login. Because its primary meaning is the target-side ACP bridge, make
-the same command or path reachable in both environments if you use this login
-helper. For Codex, Claude, and DeepSeek, the override replaces only the target
-bridge; login still uses the command shown above.
+The login command is always resolved from the controller's `PATH`. A profile
+selects credentials and environment, not another harness executable.
 
 After login, Mjolnir compares the authentication marker before and after the
 command and reports whether it changed. A successful update is reconciled into
@@ -192,26 +188,26 @@ reconciliation. Other allowlisted directories such as harness plugins are
 staged when a session is created but are not part of this continuous skills
 sync.
 
-## Bridges and executable overrides
+## Harness runtimes
 
 Mjolnir talks to harnesses through the Agent Client Protocol (ACP). The
-published agent image already carries the supported bridge stack. On a more
-minimal target, Mjolnir uses a compatible installed bridge when present and can
-bootstrap supported prerequisites.
+published agent image already carries the supported bridge stack. Local bare
+and container targets retain that target-provided runtime behavior.
 
-Set `executable` only when automatic resolution cannot find the bridge inside
-the target or when you intentionally maintain another compatible build there:
+Raw SSH and EC2 workers instead install the exact versions pinned by the
+Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
+`$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
+only the resulting absolute path—never an arbitrary compatible executable from
+`PATH`. Codex, Claude, and DeepSeek require Node.js 22 or newer plus npm on the
+host. Kimi and Grok require curl and Bash for their official installers.
+Mjolnir reports a missing prerequisite and leaves the existing worker alone;
+it does not invoke sudo or a system package manager.
 
-| Kind | Default bridge path | Arguments added to an override |
-| --- | --- | --- |
-| Codex | Codex ACP adapter | none |
-| Claude | Claude Agent ACP adapter | none |
-| Kimi | Kimi CLI ACP mode | `acp` |
-| Grok | Grok CLI ACP mode | `agent`, policy flag when unconstrained, `stdio` |
-| DeepSeek | `dsh-acp-server` with DeepSeek Harness | none |
-
-DeepSeek's default integration requires `dsh`, `dsh-acp-server`, and Node.js 22
-or newer. Codex and Claude's fallback adapters require Node/npx. For custom
+Installs are content-addressed and shared across sessions for the same remote
+user. A cache hit performs only local manifest and executable checks. Upgrades
+prepare a new version before replacing a quiet worker. Old versions remain
+leased for the complete ACP process lifetime—including busy turns that last
+hours—and are garbage-collected only after the final user exits. For custom
 container images, see [Custom images](/custom-images/).
 
 ## Quota pane

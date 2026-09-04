@@ -97,7 +97,6 @@ fn documentation_dashboard() -> DashboardState {
         HarnessProfile {
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
-            executable: None,
             environment: BTreeMap::new(),
             context_window_bytes: None,
         },

@@ -430,6 +430,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_busy_turn_is_never_upgraded_no_matter_how_long_it_runs() {
+        let started = Utc::now();
+        let policy = PolicyState::default();
+        let two_days_later = started + chrono::Duration::days(2);
+
+        assert!(!policy.due(&observation(Some("old-build"), false), two_days_later));
+        assert!(
+            policy.due(&observation(Some("old-build"), true), two_days_later),
+            "the next quiet observation may upgrade without an age-based busy timeout"
+        );
+    }
+
     /// A session that is closing, checkpointing or already stopped is not a
     /// session whose worker may be replaced underneath it.
     #[test]

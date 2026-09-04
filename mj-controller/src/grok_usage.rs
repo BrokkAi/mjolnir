@@ -78,12 +78,11 @@ impl fmt::Display for GrokUsageError {
 
 /// Ask a profile's Grok Build for its current billing period.
 pub async fn query(
-    executable: Option<PathBuf>,
     home: PathBuf,
     cwd: PathBuf,
     env: HashMap<String, String>,
 ) -> Result<GrokUsageReport, GrokUsageError> {
-    let mut session = GrokUsageSession::spawn(executable.as_deref(), &home, cwd, env)?;
+    let mut session = GrokUsageSession::spawn(&home, cwd, env)?;
     // The exchange is bounded as a whole: a stalled agent must not hold the
     // quota refresh open, and its child must still be reaped.
     let result = tokio::time::timeout(REQUEST_TIMEOUT, session.exchange()).await;
@@ -93,14 +92,9 @@ pub async fn query(
 
 /// Executable candidates, in the order Hel tries them.
 ///
-/// A configured `executable` names the harness CLI itself for Grok Build (the
-/// same override `login_command` honors), so it wins outright. Otherwise the
-/// installed CLI on `PATH` comes first, then the copy the official installer
-/// leaves inside the profile home.
-fn grok_programs(executable: Option<&Path>, home: &Path) -> Vec<PathBuf> {
-    if let Some(executable) = executable {
-        return vec![executable.to_path_buf()];
-    }
+/// The installed CLI on `PATH` comes first, then the copy the official
+/// installer leaves inside the profile home.
+fn grok_programs(home: &Path) -> Vec<PathBuf> {
     let name = if cfg!(windows) { "grok.exe" } else { "grok" };
     vec![PathBuf::from(name), home.join("bin").join(name)]
 }
@@ -115,12 +109,11 @@ struct GrokUsageSession {
 
 impl GrokUsageSession {
     fn spawn(
-        executable: Option<&Path>,
         home: &Path,
         cwd: PathBuf,
         env: HashMap<String, String>,
     ) -> Result<Self, GrokUsageError> {
-        let programs = grok_programs(executable, home);
+        let programs = grok_programs(home);
         let mut child = None;
         for (index, program) in programs.iter().enumerate() {
             let mut command = Command::new(program);
@@ -462,14 +455,8 @@ mod tests {
     }
 
     #[test]
-    fn the_configured_executable_wins_over_every_discovered_one() {
-        let override_path = PathBuf::from("/opt/bin/grok");
-        assert_eq!(
-            grok_programs(Some(&override_path), Path::new("/profiles/grok")),
-            [override_path]
-        );
-
-        let discovered = grok_programs(None, Path::new("/profiles/grok"));
+    fn path_precedes_the_profile_installer_location() {
+        let discovered = grok_programs(Path::new("/profiles/grok"));
         assert_eq!(discovered.len(), 2);
         assert!(
             discovered[0]
@@ -496,7 +483,7 @@ mod tests {
         // Answers both requests, then blocks on stdin. A caller that closes
         // stdin early would end this process before reading the reply, which
         // is exactly how the real agent behaves.
-        let executable = fake_grok(
+        let _executable = fake_grok(
             directory.path(),
             r#"#!/bin/sh
 [ "$1" = "agent" ] && [ "$2" = "stdio" ] || exit 64
@@ -512,10 +499,12 @@ done
         );
 
         let usage = query(
-            Some(executable),
             directory.path().to_path_buf(),
             directory.path().to_path_buf(),
-            HashMap::new(),
+            HashMap::from([(
+                "PATH".to_owned(),
+                directory.path().to_string_lossy().into_owned(),
+            )]),
         )
         .await
         .unwrap();
@@ -528,13 +517,15 @@ done
     #[tokio::test]
     async fn an_agent_that_exits_without_answering_is_reported_not_awaited() {
         let directory = tempfile::tempdir().unwrap();
-        let executable = fake_grok(directory.path(), "#!/bin/sh\nexit 0\n");
+        let _executable = fake_grok(directory.path(), "#!/bin/sh\nexit 0\n");
 
         let error = query(
-            Some(executable),
             directory.path().to_path_buf(),
             directory.path().to_path_buf(),
-            HashMap::new(),
+            HashMap::from([(
+                "PATH".to_owned(),
+                directory.path().to_string_lossy().into_owned(),
+            )]),
         )
         .await
         .unwrap_err();
@@ -551,10 +542,12 @@ done
         let directory = tempfile::tempdir().unwrap();
 
         let error = query(
-            Some(directory.path().join("no-such-grok")),
             directory.path().to_path_buf(),
             directory.path().to_path_buf(),
-            HashMap::new(),
+            HashMap::from([(
+                "PATH".to_owned(),
+                directory.path().to_string_lossy().into_owned(),
+            )]),
         )
         .await
         .unwrap_err();

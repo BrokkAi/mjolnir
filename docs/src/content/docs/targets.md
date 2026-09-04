@@ -106,6 +106,12 @@ areas are lifecycle-managed; a linked worktree you selected yourself remains
 yours. `workspace_prefix` controls a separate per-session lifecycle/cleanup
 path, not the selected project or its linked-worktree location.
 
+The host does not need a preinstalled harness bridge. Its worker installs and
+reuses the exact harness version pinned by Mjolnir in the remote user's cache.
+It does require Node.js 22 and npm for Codex, Claude, and DeepSeek, or curl and
+Bash for Kimi and Grok. Mjolnir never uses sudo to add these prerequisites and
+does not fall back to another harness executable from the remote `PATH`.
+
 `permissions` is required and accepts `guardian` or `yolo`. SSH connection
 fields include `identity_file` and `extra_args`. See
 [SSH and SSH Podman](/ssh/) for host prerequisites, connection checks, and

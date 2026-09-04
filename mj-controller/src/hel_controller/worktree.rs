@@ -2029,7 +2029,6 @@ mod tests {
             HarnessProfile {
                 kind: record.harness_kind,
                 home: PathBuf::from("/profiles/codex"),
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -2110,7 +2109,6 @@ mod tests {
             HarnessProfile {
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: PathBuf::from("/profiles/codex"),
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },

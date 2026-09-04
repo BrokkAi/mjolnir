@@ -86,6 +86,22 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         config.environment.insert("PATH".into(), path);
     }
     configure_github_cli(&root, &mut config.environment)?;
+    let managed_harness = super::harness::resolve(
+        config.harness_runtime,
+        config.harness,
+        config.execution_policy,
+        &config.environment,
+    )
+    .await
+    .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
+    if let Some(managed) = &managed_harness {
+        config.bridge_command = managed.command.clone();
+        config.bridge_args = managed.args.clone();
+        config.environment.extend(managed.environment.clone());
+    }
+    let harness_gc = managed_harness
+        .as_ref()
+        .map(|managed| super::harness::spawn_gc(managed.cache_root.clone(), config.harness));
     let socket = root.join("control.sock");
     // Refuse a second daemon before touching durable state: opening the
     // relay recovers the journal in place, so getting that far would
@@ -204,6 +220,9 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         args: config.bridge_args,
         environment: config.environment,
         cwd: config.cwd.clone(),
+        harness_lease: managed_harness
+            .as_ref()
+            .map(|managed| managed.lease_path.clone()),
     }
     .write_spec(&supervisor_path)?;
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
@@ -216,6 +235,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         cwd: config.cwd.clone(),
         additional_directories: config.additional_directories.clone(),
         worker_executable: worker_executable.clone(),
+        harness_runtime: config.harness_runtime,
     }));
     // The review supervisor's dispatch tool talks to this worker over its own
     // socket inside the reviewer directory: an MCP server started by a harness
@@ -367,7 +387,35 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     .await;
     reviewer.pause_all().await;
     drop(dispatch_socket);
+    if let Some(task) = harness_gc {
+        task.abort();
+    }
     outcome
+}
+
+/// Install or validate the managed harness named by a proposed launch config
+/// without starting, stopping, or otherwise touching the session worker.
+pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<()> {
+    if config.environment.remove(DISCOVER_LOGIN_PATH_ENV).is_some()
+        && !config.environment.contains_key("PATH")
+        && let Some(path) = discover_login_path(&config.session_id).await
+    {
+        config.environment.insert("PATH".into(), path);
+    }
+    let prepared = super::harness::resolve(
+        config.harness_runtime,
+        config.harness,
+        config.execution_policy,
+        &config.environment,
+    )
+    .await
+    .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
+    if config.harness_runtime == hel::hel_worker_launch::HarnessRuntimePolicy::ManagedRemote
+        && prepared.is_none()
+    {
+        bail!("managed remote harness preparation produced no installation");
+    }
+    Ok(())
 }
 
 async fn discover_login_path(session_id: &str) -> Option<String> {
@@ -2359,6 +2407,11 @@ where
 {
     use tokio::io::AsyncWriteExt;
 
+    let _harness_lease = spec
+        .harness_lease
+        .as_deref()
+        .map(super::harness::acquire_supervisor_lease)
+        .transpose()?;
     let mut command = tokio::process::Command::new(&spec.command);
     command
         .args(&spec.args)

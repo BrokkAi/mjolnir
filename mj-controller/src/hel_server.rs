@@ -2625,7 +2625,6 @@ mod tests {
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: "/highly/secret/codex".into(),
-                    executable: None,
                     environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]),
                 },
             )]),
@@ -4514,7 +4513,6 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 context_window_bytes: None,
                 kind: HarnessKind::Claude,
                 home: "/secret/claude".into(),
-                executable: None,
                 environment: BTreeMap::new(),
             },
         );

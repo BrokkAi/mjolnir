@@ -119,7 +119,6 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
             HarnessProfile {
                 kind: HarnessKind::Claude,
                 home: claude_home,
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -230,7 +229,6 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
             HarnessProfile {
                 kind: HarnessKind::Kimi,
                 home: kimi_home.clone(),
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -348,7 +346,6 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
             HarnessProfile {
                 kind: HarnessKind::Grok,
                 home: grok_home.clone(),
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },
@@ -573,7 +570,6 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
             HarnessProfile {
                 kind: HarnessKind::Codex,
                 home: codex_home.clone(),
-                executable: None,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
             },

@@ -261,7 +261,6 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
                 context_window_bytes: None,
                 kind,
                 home: PathBuf::from("/profiles/harness"),
-                executable: None,
                 environment: BTreeMap::new(),
             },
         )]);
@@ -307,7 +306,6 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
             context_window_bytes: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
-            executable: None,
             environment: BTreeMap::new(),
         },
     )]);
