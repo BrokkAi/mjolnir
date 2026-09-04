@@ -74,12 +74,55 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: 'Containers',
+          label: 'Get started',
+          items: [
+            { label: 'What is Mjolnir?', slug: 'overview' },
+            { label: 'Install Mjolnir', slug: 'install' },
+            { label: 'Quickstart', slug: 'quickstart' },
+          ],
+        },
+        {
+          label: 'Core concepts',
+          items: [
+            { label: 'Profiles and harnesses', slug: 'profiles' },
+            { label: 'Workspaces and bundles', slug: 'workspaces-bundles' },
+            { label: 'Targets', slug: 'targets' },
+            { label: 'Session lifecycle', slug: 'sessions' },
+          ],
+        },
+        {
+          label: 'Operate',
+          items: [
+            { label: 'Terminal surface', slug: 'terminal-surface' },
+            { label: 'Web viewer and desktop app', slug: 'web-viewer' },
+            { label: 'Independent turn review', slug: 'turn-review' },
+            { label: 'Durability and recovery', slug: 'durability' },
+          ],
+        },
+        {
+          label: 'Targets',
           items: [
             { label: 'Container targets', slug: 'containers' },
-            { label: 'Podman for Mjolnir', slug: 'podman' },
-            { label: 'Docker for Mjolnir', slug: 'docker' },
-            { label: 'Custom container images', slug: 'custom-images' },
+            { label: 'Podman', slug: 'podman' },
+            { label: 'Docker', slug: 'docker' },
+            { label: 'Apple container', slug: 'apple-container' },
+            { label: 'SSH and SSH Podman', slug: 'ssh' },
+            { label: 'AWS EC2', slug: 'aws' },
+            { label: 'Custom images', slug: 'custom-images' },
+          ],
+        },
+        {
+          label: 'Configure',
+          items: [
+            { label: 'Configuration reference', slug: 'configuration' },
+          ],
+        },
+        {
+          label: 'Reference',
+          items: [
+            { label: 'CLI reference', slug: 'cli-reference' },
+            { label: 'Security boundaries', slug: 'security' },
+            { label: 'Troubleshooting', slug: 'troubleshooting' },
           ],
         },
       ],

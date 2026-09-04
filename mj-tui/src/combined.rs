@@ -14,10 +14,11 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
 use crate::render::{
-    MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, minimized_quota_line, minimized_targets_line,
-    pane_size_control_areas, pane_size_controls, pane_title_content_width, render_capacity,
-    render_footer, render_modal, render_onboarding_surface, render_quotas, render_sessions,
-    render_terminal_too_small, sessions_content_height,
+    MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, minimized_pane_size_controls,
+    minimized_quota_line, minimized_targets_line, pane_size_control_areas,
+    pane_title_content_width, render_capacity, render_footer, render_modal,
+    render_onboarding_surface, render_quotas, render_sessions, render_terminal_too_small,
+    sessions_content_height,
 };
 use crate::resume::resume_sessions_pane;
 use crate::widgets::bordered_content;
@@ -331,10 +332,11 @@ pub fn render_combined(
 
     // Targets and Quota choose their representations independently.
     if sizes[1].1 == PaneSize::Minimized {
+        let focused = dashboard.focus() == Focus::Targets;
         frame.render_widget(
             Block::default()
                 .borders(Borders::TOP)
-                .border_type(if dashboard.focus() == Focus::Targets {
+                .border_type(if focused {
                     BorderType::Double
                 } else {
                     BorderType::Plain
@@ -342,18 +344,20 @@ pub fn render_combined(
                 .title(minimized_targets_line(
                     dashboard,
                     pane_title_content_width(targets_area.width),
+                    focused,
                 ))
-                .title(pane_size_controls(PaneSize::Minimized)),
+                .title(minimized_pane_size_controls(focused)),
             targets_area,
         );
     } else {
         render_capacity(frame, targets_area, dashboard, Some(sizes[1].1));
     }
     if sizes[2].1 == PaneSize::Minimized {
+        let focused = dashboard.focus() == Focus::Quota;
         frame.render_widget(
             Block::default()
                 .borders(Borders::TOP)
-                .border_type(if dashboard.focus() == Focus::Quota {
+                .border_type(if focused {
                     BorderType::Double
                 } else {
                     BorderType::Plain
@@ -361,8 +365,9 @@ pub fn render_combined(
                 .title(minimized_quota_line(
                     dashboard,
                     pane_title_content_width(quota_area.width),
+                    focused,
                 ))
-                .title(pane_size_controls(PaneSize::Minimized)),
+                .title(minimized_pane_size_controls(focused)),
             quota_area,
         );
     } else {

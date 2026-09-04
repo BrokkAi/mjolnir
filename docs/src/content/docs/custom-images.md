@@ -39,7 +39,7 @@ running the bridge with `npx -y`, pinned to Mjolnir's fallback versions. DeepSee
 Harness requires Node 22 or newer and follows its adapter's supported install
 model: bake the pinned `@deepseek-ai/dsh` and `dsh-acp-server` packages into the
 image. Kimi Code and Grok Build have no npm bridge: Mjolnir runs their official
-installer with `curl` instead, which needs `curl` in the image.
+installer with `curl` piped to Bash instead, which needs both tools in the image.
 
 Baking the bridges in, the way the reference image does, avoids that
 per-session install cost and pins the exact bridge version through the image
@@ -48,8 +48,10 @@ instead of through Mjolnir's fallback.
 Mjolnir-owned worker and bridge commands use non-login shells and do not source
 `/etc/profile` or user dotfiles. Images must therefore expose required tools on
 their ordinary process `PATH`; profile-only PATH setup is not part of the
-container contract. Agent-requested shell commands remain `bash -lc` because
-those commands intentionally use the session user's shell environment.
+container contract. The documented `!command` surface always runs the command
+through `bash -lc`, so a custom image must also provide `bash` on `PATH` for
+that surface to work. Those commands intentionally use the session user's
+shell environment.
 
 The DeepSeek bridge is the third-party `dsh-acp-server` package. Mjolnir pins both
 it and `@deepseek-ai/dsh`, launches its self-managed ACP profile over stdio,
@@ -98,8 +100,10 @@ For optional local coverage analysis, the reference image carries the
 
 The reference image also carries `perf` (Debian's `linux-perf`),
 `cargo-flamegraph`, `samply`, and `heaptrack`. `perf` depends on the
-host kernel as well as the image: it needs `kernel.perf_event_paranoid` set to 1
-or lower on the host, or the container run with `--cap-add SYS_ADMIN`.
+host kernel and runtime policy as well as the image: it needs
+`kernel.perf_event_paranoid` set to 1 or lower on the host, or an environment
+that already provides the required capability. Mjolnir has no configuration
+key for adding container capabilities or arbitrary runtime arguments.
 
 ## Resource metrics
 
@@ -116,8 +120,10 @@ itself depends on cgroup v2 being present.
 
 The container-template configuration exposes exactly seven keys: `image`,
 `platform`, `cpus`, `memory`, `environment`, `pull_policy`, and
-`workspace_storage` (the last two only do something useful on the Podman
-target kinds; Docker and Apple targets reject non-default `workspace_storage`).
+`workspace_storage`. Pull policy applies to Podman, Docker, and Apple container
+targets, but only Podman and Docker participate in background refresh; Apple
+evaluates the policy during session provisioning. Non-default workspace
+storage is Podman-only; Docker and Apple targets reject it.
 There's no configuration key
 for arbitrary extra container-runtime arguments. Mjolnir derives the
 rest of the run command itself — the generated container name and the

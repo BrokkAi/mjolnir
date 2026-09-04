@@ -9,6 +9,12 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 
 fn main() {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
+    mj_controller::hel_server::install_rustls_crypto_provider();
     if let Err(error) = run_cli() {
         eprintln!("mj-desktop: {error:#}");
         std::process::exit(1);

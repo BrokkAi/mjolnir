@@ -1,0 +1,140 @@
+---
+title: Terminal surface
+description: Navigate the Mjolnir dashboard, resize panes, compose prompts, run commands, and use the command palette.
+---
+
+import { Image } from 'astro:assets';
+import shotDashboard from '../../assets/screenshots/dashboard.svg';
+import shotCommandPalette from '../../assets/screenshots/command-palette.svg';
+
+The Mjolnir TUI is a single control surface for conversations and the infrastructure behind them. It stays responsive while sessions launch, resume, stop, or run work in the background.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir terminal dashboard">
+    <Image src={shotDashboard} alt="Mjolnir terminal dashboard with Sessions, unopened Conversation and Prompt regions, Targets, Quota, and shortcut footer arranged vertically" />
+  </a>
+  <figcaption>From top to bottom: Sessions, the Conversation and Prompt regions, Targets, Quota, and a context-sensitive shortcut footer.</figcaption>
+</figure>
+
+At startup, Mjolnir opens the session whose agent spoke most recently and puts the cursor in Prompt.
+
+## Focus and scrolling
+
+`Tab` moves focus down through **Sessions → Prompt → Targets → Quota**. `Shift+Tab` moves in reverse. The transcript is not a tab stop, so focus changes never take the composer away merely to scroll conversation history.
+
+Use `Page Up` and `Page Down` to scroll the transcript from any focused pane. A mouse wheel scrolls the surface under the pointer. Clicking a row selects it, and double-clicking a session opens it. Dragging across transcript or pane text copies that surface's selection to the available system or terminal clipboard.
+
+Each list supports the same navigation keys:
+
+| Keys | Action |
+| --- | --- |
+| `↑` / `↓` or `j` / `k` | Select the previous or next row |
+| `Ctrl+P` / `Ctrl+N` | Select the previous or next row |
+| `Home` / `End` | Select the first or last row |
+
+Pane-specific actions are deliberately small:
+
+| Focus | Key | Action |
+| --- | --- | --- |
+| Sessions | `Enter` | Open the selected session |
+| Sessions | `Space` | Fold or unfold the selected project |
+| Sessions | `1`–`9` | Fold or unfold the numbered project |
+| Targets | `Enter` or `e` | Open target actions, including test and rename |
+| Quota | `Enter` or `e` | Edit the selected profile configuration ID |
+
+## Pane sizes
+
+Sessions, Targets, and Quota each have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control, or focus the pane and press `Alt+Z` to cycle through the three sizes.
+
+- A minimized Targets or Quota pane becomes a one-line summary.
+- A minimized Sessions pane becomes a compact three-column grid.
+- Only one support pane can be maximized at a time.
+- Prompt keeps the conversation's working space; a maximized support pane receives the remaining room and the other bands stay at their minimum.
+
+`Alt+G` toggles a dashboard preset. When all panes are standard, it maximizes Sessions and minimizes Targets and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
+
+## Global keys
+
+Function keys and `Alt` chords work no matter which dashboard pane has focus:
+
+| Key | Action |
+| --- | --- |
+| `F1` | Open help; `?` also opens it when a non-Prompt pane has focus |
+| `F2` | Open the command palette |
+| `F3` | Switch workspace |
+| `F4` | Show the web viewer address and access code |
+| `F5` | Refresh all target capacity and profile quota data |
+| `Alt+N` | Create a session |
+| `Alt+S` | Resume any non-live session through the resume picker |
+| `Alt+A` | Mark all session activity as read |
+| `Alt+X` | Cancel the selected session's in-flight launch, resume, or stop operation |
+| `Alt+Z` | Cycle the focused support pane's size |
+| `Alt+G` | Toggle the dashboard pane preset |
+| `Alt+Q` | Detach this terminal while the daemon and sessions continue |
+
+`Esc` is not a detach key. It closes a dialog or, from the conversation, cancels the active agent turn or shell command. `Alt+X` is different: it cancels a lifecycle operation such as launch or resume.
+
+## Command palette
+
+Press `F2` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: Mjolnir command palette">
+    <Image src={shotCommandPalette} alt="Mjolnir command palette with selected-session, pane, and global actions grouped together over the dashboard" />
+  </a>
+  <figcaption>Type to filter commands. Unavailable actions remain visible with the reason they cannot run.</figcaption>
+</figure>
+
+Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Stop, and Force destroy. Stop asks for confirmation; Force destroy permanently removes the session, its target, and its recovery archive. The palette is also how you discover useful commands that have no dedicated key.
+
+## Prompt editor
+
+The Prompt pane is a multiline editor with completion, history, and transcript controls.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Send now, or queue while the active turn is running |
+| `Shift+Enter` / `Alt+Enter` | Insert a newline |
+| `Tab` | Accept a completion, or move to the next pane when none is offered |
+| `Esc` | Cancel the running turn or shell command |
+| `Page Up` / `Page Down` | Scroll the transcript |
+| `↑` / `↓` | Move within multiline input or walk prompt history |
+| `Ctrl+R` | Search prompt history; `Alt+R` changes the search scope |
+| `Alt+T` | Toggle the transcript between rendered and raw text |
+| `Alt+V` | Start or stop dictation when voice input is available |
+| `Ctrl+V` | Paste the system clipboard |
+| `Ctrl+A` / `Ctrl+E` | Move to the start or end of the line |
+| `Ctrl+B` / `Ctrl+F` | Move back or forward one character |
+| `Alt+B` / `Alt+F` | Move back or forward one word |
+| `Ctrl+H` / `Ctrl+D` | Delete before or after the cursor |
+| `Ctrl+W` / `Alt+D` | Delete the word before or after the cursor |
+| `Ctrl+U` / `Ctrl+K` | Delete to the start or end of the line |
+| `Ctrl+Y` | Yank the most recently killed text |
+| `Ctrl+C` | Save the current draft to history and clear Prompt |
+| `Ctrl+P` / `Ctrl+N` | Move to the previous or next line, then through history |
+
+Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `↓` selects a newer match, `Enter` accepts it, and `Esc` or `Ctrl+C` cancels the search.
+
+## Shell commands
+
+Start a message with `!` to run the remainder through `bash -lc` inside the selected session's target and workspace:
+
+```text
+!git status --short
+```
+
+The command runs independently of an active agent turn, so it does not block the harness. Mjolnir streams bounded live output into the transcript and saves the result there. After the command finishes, its result is included once as hidden context with the next prompt you submit, letting the agent respond to what the command found without copying the output into Prompt.
+
+Press `Esc` to cancel a running shell command. The same `!` syntax works in the [web viewer](/web-viewer/), where a Cancel button replaces the terminal key. A shell command has the permissions of the selected target, so review destructive commands just as you would in a directly attached shell.
+
+## Help, footer, and terminal setup
+
+Press `F1` for scrollable contextual help and `Esc` to close it. The footer is generated from the same command registry: pane-local commands appear first, `Alt` chords second, and function keys last. On a narrow terminal, the leftmost hints disappear first while the global function keys remain visible.
+
+If `Alt` shortcuts arrive as `Esc` followed by a letter, configure the terminal to send Meta. In iTerm2 set the left Option key to **Esc+**; in Terminal.app enable **Use Option as Meta key**. Under tmux, a short escape delay keeps chords responsive:
+
+```text
+set -sg escape-time 10
+```
+
+For session states and recovery behavior, continue to [sessions](/sessions/). The [CLI reference](/cli-reference/) covers non-interactive commands, while [troubleshooting](/troubleshooting/) covers key handling, target failures, and viewer connectivity.
