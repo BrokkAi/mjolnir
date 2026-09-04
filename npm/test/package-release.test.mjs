@@ -23,7 +23,9 @@ test("declares every release target exactly once", () => {
 
 test("derives publishable package versions from the release tag", () => {
   assert.equal(versionFromTag("v1.5.2"), "1.5.2");
+  assert.equal(versionFromTag("v2.0.0-rc.1"), "2.0.0-rc.1");
   assert.throws(() => versionFromTag("1.5.2"), /vX.Y.Z/);
+  assert.throws(() => versionFromTag("v2.0.0-"), /vX.Y.Z/);
 });
 
 test("generates exact platform dependency versions", () => {

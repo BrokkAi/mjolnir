@@ -23,7 +23,9 @@ version bump must regenerate it. CI diffs the checked-in report against a fresh
 
 ## What a tag triggers
 
-A `vX.Y.Z` tag triggers the GitHub release and docs workflows.
+A `vX.Y.Z` or `vX.Y.Z-PRERELEASE` tag triggers the GitHub release workflow.
+Prerelease tags create a GitHub prerelease, and npm publishes them under the
+`next` dist-tag rather than moving `latest`.
 
 The release workflow verifies that the tag matches every workspace version
 before building artifacts. CI's branch and pull request triggers do not match

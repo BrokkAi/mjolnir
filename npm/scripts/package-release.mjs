@@ -48,8 +48,13 @@ export const PLATFORMS = [
 ];
 
 export function versionFromTag(tag) {
-  const match = /^v(\d+\.\d+\.\d+)$/.exec(tag);
-  if (!match) throw new Error(`release tag must look like vX.Y.Z, got: ${tag}`);
+  const match =
+    /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/.exec(tag);
+  if (!match) {
+    throw new Error(
+      `release tag must look like vX.Y.Z or vX.Y.Z-PRERELEASE, got: ${tag}`,
+    );
+  }
   return match[1];
 }
 
@@ -218,7 +223,7 @@ export async function packageRelease({ releaseTag, assetsDirectory, outputDirect
 }
 
 function usage() {
-  return "Usage: node scripts/package-release.mjs --release-tag vX.Y.Z --assets DIRECTORY [--out DIRECTORY]";
+  return "Usage: node scripts/package-release.mjs --release-tag vX.Y.Z[-PRERELEASE] --assets DIRECTORY [--out DIRECTORY]";
 }
 
 async function main() {

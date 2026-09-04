@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing Mjolnir release tag to package, in the form vX.Y.Z
+        description: Existing Mjolnir release tag, in the form vX.Y.Z[-PRERELEASE]
         required: true
         type: string
       publish:
@@ -128,6 +128,11 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$version" == *-* ]]; then
+            dist_tag=next
+          else
+            dist_tag=latest
+          fi
           wait_for_version() {
             local package="$1"
             local published_version
@@ -149,25 +154,21 @@ jobs:
             @brokkai/mjolnir-darwin-universal
             @brokkai/mjolnir-linux-x64-gnu
             @brokkai/mjolnir-linux-arm64-gnu
-            @brokkai/mjolnir-android-arm64
-            @brokkai/mjolnir-win32-x64
           )
           tarballs=(
             brokkai-mjolnir-darwin-universal-$version.tgz
             brokkai-mjolnir-linux-x64-gnu-$version.tgz
             brokkai-mjolnir-linux-arm64-gnu-$version.tgz
-            brokkai-mjolnir-android-arm64-$version.tgz
-            brokkai-mjolnir-win32-x64-$version.tgz
           )
           for index in "${!packages[@]}"; do
             package="${packages[$index]}@$version"
             if ! npm view "$package" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-              npm publish "./npm-tarballs/${tarballs[$index]}" --access public --provenance
+              npm publish "./npm-tarballs/${tarballs[$index]}" --access public --provenance --tag "$dist_tag"
             fi
             wait_for_version "$package"
           done
           root=@brokkai/mjolnir
           if ! npm view "$root@$version" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-            npm publish "./npm-tarballs/brokkai-mjolnir-$version.tgz" --access public --provenance
+            npm publish "./npm-tarballs/brokkai-mjolnir-$version.tgz" --access public --provenance --tag "$dist_tag"
           fi
           wait_for_version "$root@$version"

@@ -319,6 +319,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             artifacts/brokk-mjolnir-*.tar.gz
             artifacts/brokk-mjolnir-*.tar.gz.sha256
