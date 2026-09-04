@@ -5,6 +5,8 @@
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod dialect;
+#[cfg(test)]
+mod plan_tests;
 pub mod step_clock;
 pub mod surface;
 mod terminal_compat;
@@ -26,20 +28,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-#[cfg(test)]
 use agent_client_protocol::schema::v1::TextContent;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
     ElicitationFormCapabilities, Implementation, InitializeRequest, KillTerminalRequest,
     KillTerminalResponse, LoadSessionRequest, McpServer, McpServerStdio, NewSessionRequest,
-    PermissionOptionKind, PromptRequest, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModeState,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
-    ToolCallUpdateFields, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    PermissionOptionKind, PromptRequest, PromptResponse, ReleaseTerminalRequest,
+    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionModeRequest, StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, ToolCallUpdateFields, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -435,6 +437,118 @@ pub enum RuntimeEvent {
 }
 
 type PendingElicitations = Arc<Mutex<BTreeMap<String, oneshot::Sender<ElicitationResponse>>>>;
+
+/// A permission callback captures the current command's sender, so a late
+/// answer cannot attach an implementation to a subsequent prompt or bridge.
+type PlanImplementationSlot = Arc<Mutex<Option<mpsc::UnboundedSender<PlanImplementation>>>>;
+
+struct PlanImplementation {
+    plan: String,
+    permission_sent: oneshot::Receiver<bool>,
+}
+
+struct ActivePlanImplementation(PlanImplementationSlot);
+
+type ActivePrompt = Pin<
+    Box<
+        dyn Future<Output = std::result::Result<PromptResponse, agent_client_protocol::Error>>
+            + Send,
+    >,
+>;
+
+struct RestoredPlanMode {
+    config_options: Vec<SessionConfigOption>,
+    modes: Option<SessionModeState>,
+    plan: String,
+}
+
+type PlanModeRestoration<'a> = Pin<Box<dyn Future<Output = Result<RestoredPlanMode>> + Send + 'a>>;
+
+async fn restore_plan_execution_mode(
+    connection: &ConnectionTo<Agent>,
+    session_id: SessionId,
+    mut state: RestoredPlanMode,
+    permission_sent: oneshot::Receiver<bool>,
+) -> Result<RestoredPlanMode> {
+    ensure!(
+        permission_sent.await.unwrap_or(false),
+        "Claude's plan permission response could not be delivered"
+    );
+    enforce_execution_mode(
+        connection,
+        &session_id,
+        "bypassPermissions",
+        &mut state.config_options,
+        &mut state.modes,
+    )
+    .await?;
+    for option in &state.config_options {
+        if option.category == Some(SessionConfigOptionCategory::Mode)
+            && let SessionConfigKind::Select(select) = &option.kind
+        {
+            ensure!(
+                select.current_value.to_string() == "bypassPermissions",
+                "Claude did not apply the required bypassPermissions mode"
+            );
+        }
+    }
+    Ok(state)
+}
+
+impl Drop for ActivePlanImplementation {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .expect("plan implementation lock poisoned")
+            .take();
+    }
+}
+
+enum PlanPermissionAnswer {
+    Native(RequestPermissionResponse),
+    ContinueInBypass,
+}
+
+fn policy_plan_permission_answer(
+    request: &RequestPermissionRequest,
+    response: ElicitationResponse,
+    harness: HarnessKind,
+    policy: ExecutionPolicy,
+) -> Result<PlanPermissionAnswer> {
+    if harness != HarnessKind::Claude || plan_review_answer(response.clone()).0 != "implement" {
+        return Ok(PlanPermissionAnswer::Native(permission_plan_response(
+            request, response,
+        )));
+    }
+    let (mode, ids) = if policy.is_unconstrained() {
+        (
+            "bypassPermissions",
+            ["bypassPermissions", "exit-plan-bypass"],
+        )
+    } else {
+        ("auto", ["auto", "exit-plan-auto"])
+    };
+    if let Some(option) = request.options.iter().find(|option| {
+        ids.contains(&option.option_id.to_string().as_str())
+            && matches!(
+                option.kind,
+                PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+            )
+    }) {
+        return Ok(PlanPermissionAnswer::Native(
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option.option_id.clone()),
+            )),
+        ));
+    }
+    if policy.is_unconstrained() {
+        Ok(PlanPermissionAnswer::ContinueInBypass)
+    } else {
+        bail!(
+            "Cannot implement the approved plan: Claude did not offer the required {mode} mode. Update the Claude bridge or use a model supporting Auto mode."
+        )
+    }
+}
 
 pub async fn run(
     spec: LaunchSpec,
@@ -1038,6 +1152,9 @@ where
     let session_elicitations = pending_elicitations.clone();
     let next_elicitation_id = Arc::new(AtomicU64::new(1));
     let permission_policy = spec.execution_policy;
+    let permission_harness = spec.harness;
+    let plan_implementation_slot = PlanImplementationSlot::default();
+    let permission_implementation_slot = plan_implementation_slot.clone();
     let terminals = TerminalRegistry::new();
     let create_terminals = terminals.clone();
     let output_terminals = terminals.clone();
@@ -1098,6 +1215,9 @@ where
                     let value = serde_json::to_value(&request)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?;
                     let review = normalized_plan_review(id.clone(), &value);
+                    let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
+                    let implementation = permission_implementation_slot
+                        .lock().expect("plan implementation lock poisoned").clone();
                     let (answer, answer_rx) = oneshot::channel();
                     permission_elicitations
                         .lock()
@@ -1154,11 +1274,39 @@ where
                                 "could not report permission response to relay coordinator"
                             );
                         }
-                        let answer = response.map_or_else(
-                            || RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
-                            |response| permission_plan_response(&request, response),
-                        );
-                        if let Err(error) = responder.respond(answer) {
+                        let response = if cancellation.is_cancelled() { None } else { response };
+                        let mut handoff_completion = None;
+                        let selection = response.map_or_else(
+                            || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
+                            |response| policy_plan_permission_answer(&request, response, permission_harness, permission_policy),
+                        ).and_then(|selection| match selection {
+                            PlanPermissionAnswer::Native(answer) => Ok(answer),
+                            PlanPermissionAnswer::ContinueInBypass => {
+                                let (completion, permission_sent) = oneshot::channel();
+                                implementation.as_ref()
+                                    .ok_or_else(|| anyhow!("Cannot resume the approved plan without an active prompt; select bypassPermissions and submit the implementation instruction."))?
+                                    .send(PlanImplementation { plan: approved_plan, permission_sent })
+                                    .map_err(|_| anyhow!("Plan implementation was cancelled because its prompt is no longer active."))?;
+                                handoff_completion = Some(completion);
+                                Ok(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))
+                            }
+                        });
+                        let answer = match selection {
+                            Ok(answer) => answer,
+                            Err(error) => {
+                                if events.send(RuntimeEvent::Warning { message: format!("{error:#}") }).await.is_err() {
+                                    tracing::debug!(%error, "could not report failed plan implementation");
+                                }
+                                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                            }
+                        };
+                        let result = responder.respond(answer);
+                        if let Some(completion) = handoff_completion
+                            && completion.send(result.is_ok()).is_err()
+                        {
+                            tracing::debug!(%id, "plan implementation stopped before the permission response was delivered");
+                        }
+                        if let Err(error) = result {
                             tracing::debug!(
                                 %id,
                                 operation = "permission_response",
@@ -1560,6 +1708,7 @@ where
                 &events,
                 terminals,
                 session_elicitations,
+                plan_implementation_slot,
                 opened,
                 session_update_count,
                 session_updates_enabled,
@@ -1627,6 +1776,7 @@ async fn drive_connection(
     events: &mpsc::Sender<RuntimeEvent>,
     terminals: TerminalRegistry,
     pending_elicitations: PendingElicitations,
+    plan_implementation_slot: PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_update_count: Arc<AtomicU64>,
     session_updates_enabled: Arc<AtomicBool>,
@@ -1642,6 +1792,7 @@ async fn drive_connection(
         events,
         &terminals,
         &pending_elicitations,
+        &plan_implementation_slot,
         opened,
         &session_update_count,
         &session_updates_enabled,
@@ -1812,6 +1963,7 @@ async fn serve_session(
     events: &mpsc::Sender<RuntimeEvent>,
     terminals: &TerminalRegistry,
     pending_elicitations: &PendingElicitations,
+    plan_implementation_slot: &PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_update_count: &AtomicU64,
     session_updates_enabled: &AtomicBool,
@@ -1997,19 +2149,51 @@ async fn serve_session(
                     .await?;
                     continue;
                 }
-                let updates_before = session_update_count.load(Ordering::Acquire);
+                let mut updates_before = session_update_count.load(Ordering::Acquire);
                 spec.step_clock.begin_turn();
-                let prompt = connection
-                    .send_request(PromptRequest::new(session_id.clone(), prompt))
-                    .block_task();
-                tokio::pin!(prompt);
+                let mut prompt: ActivePrompt = Box::pin(
+                    connection
+                        .send_request(PromptRequest::new(session_id.clone(), prompt))
+                        .block_task(),
+                );
+                let (implementation_tx, mut implementation_rx) = mpsc::unbounded_channel();
+                *plan_implementation_slot
+                    .lock()
+                    .expect("plan implementation lock poisoned") = Some(implementation_tx);
+                let _active_implementation =
+                    ActivePlanImplementation(plan_implementation_slot.clone());
+                let mut approved_plan = None;
+                let mut implementation_deadline = None;
+                let mut mode_restoration: Option<PlanModeRestoration<'_>> = None;
+                let mut prompt_running = true;
                 let mut cancel_deadline = None;
                 let mut pending_steer: Option<PendingSteer> = None;
                 loop {
                     tokio::select! {
-                        response = &mut prompt => {
+                        biased;
+                        Some(plan) = implementation_rx.recv(), if cancel_deadline.is_none() && approved_plan.is_none() && mode_restoration.is_none() => {
+                            approved_plan = Some(plan);
+                            implementation_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
+                            emit_runtime_event(events, RuntimeEvent::Warning {
+                                message: "Plan approved; waiting for Claude to finish planning before restoring bypassPermissions.".into(),
+                            }).await?;
+                        }
+                        response = &mut prompt, if prompt_running => {
                             spec.acp_activity.mark();
                             spec.step_clock.end_turn();
+                            if approved_plan.is_some() && cancel_deadline.is_none() {
+                                if matches!(&response, Ok(response) if matches!(response.stop_reason, StopReason::EndTurn | StopReason::Cancelled)) {
+                                    prompt_running = false;
+                                    let implementation = approved_plan.take().expect("approved plan is present");
+                                    mode_restoration = Some(Box::pin(restore_plan_execution_mode(connection, session_id.clone(), RestoredPlanMode {
+                                        config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan,
+                                    }, implementation.permission_sent)));
+                                    continue;
+                                }
+                                emit_runtime_event(events, RuntimeEvent::Warning {
+                                    message: "Plan implementation stopped because Claude did not finish the planning turn successfully.".into(),
+                                }).await?;
+                            }
                             if let Some(mut pending) = pending_steer.take() {
                                 match tokio::time::timeout(
                                     Duration::from_secs(2),
@@ -2086,6 +2270,14 @@ async fn serve_session(
                             break;
                         }
                         _ = async {
+                            tokio::time::sleep_until(implementation_deadline.expect("implementation deadline branch is guarded")).await;
+                        }, if implementation_deadline.is_some() => {
+                            let message = "Plan implementation timed out while finishing planning or restoring bypassPermissions; restarting the harness without submitting the continuation.";
+                            emit_runtime_event(events, RuntimeEvent::Warning { message: message.into() }).await?;
+                            emit_runtime_event(events, RuntimeEvent::CommandInterrupted { request_id, message: message.into() }).await?;
+                            return Ok(Some(session_id.to_string()));
+                        }
+                        _ = async {
                             tokio::time::sleep_until(
                                 cancel_deadline.expect("cancel deadline branch is guarded"),
                             )
@@ -2140,6 +2332,16 @@ async fn serve_session(
                                 request_id: cancel_id,
                                 steering_prompt,
                             }) => {
+                                implementation_rx.close();
+                                approved_plan = None;
+                                implementation_deadline = None;
+                                if !prompt_running {
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    emit_runtime_event(events, RuntimeEvent::PromptFinished {
+                                        request_id, stop_reason: "Cancelled".into(),
+                                    }).await?;
+                                    break;
+                                }
                                 if steering_supported
                                     && pending_steer.is_none()
                                     && cancel_deadline.is_none()
@@ -2275,6 +2477,31 @@ async fn serve_session(
                                         %elicitation_id,
                                         "elicitation resolution receiver was already closed"
                                     );
+                                }
+                            }
+                        },
+                        restored = async {
+                            mode_restoration.as_mut().expect("mode restoration branch is guarded").await
+                        }, if mode_restoration.is_some() && requests.is_empty() => {
+                            mode_restoration = None;
+                            implementation_deadline = None;
+                            match restored {
+                                Ok(state) => {
+                                    config_options = state.config_options;
+                                    modes = state.modes;
+                                    emit_runtime_event(events, RuntimeEvent::SessionConfigured { config_options: config_options.clone() }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::SessionModesConfigured { modes: modes.clone() }).await?;
+                                    let plan = state.plan;
+                                    let continuation = format!("The user approved the following plan. Implement it now; the preceding permission cancellation was mj's mode-transition handling.\n\n{plan}");
+                                    updates_before = session_update_count.load(Ordering::Acquire);
+                                    spec.step_clock.begin_turn();
+                                    prompt = Box::pin(connection.send_request(PromptRequest::new(session_id.clone(), vec![ContentBlock::Text(TextContent::new(continuation))])).block_task());
+                                    prompt_running = true;
+                                }
+                                Err(error) => {
+                                    emit_runtime_event(events, RuntimeEvent::Warning { message: format!("Plan implementation stopped: could not restore bypassPermissions: {error:#}") }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::PromptFinished { request_id, stop_reason: PROMPT_ERROR_STOP_REASON.into() }).await?;
+                                    break;
                                 }
                             }
                         }
