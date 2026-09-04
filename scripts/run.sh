@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Rebuild the static musl worker, then build and run the host `mj`.
+# Rebuild the static musl worker, then build and run the host `mj` with the
+# daemon from that same host build.
 #
 # Plain `cargo build` targets the host (glibc) and never rebuilds the musl
 # worker under target/<triple>/. A long-lived daemon then hands container and
@@ -17,9 +18,10 @@
 # A `--release` anywhere in the arguments builds the worker in release too, so
 # the profiles the daemon compares still match.
 #
-# Note: this rebuilds binaries; it does not restart a running daemon. Run
-# `mj daemon restart` yourself to deploy a fresh controller and worker to
-# already-running sessions.
+# On Linux, a daemon already running this exact host executable stays attached.
+# If Cargo replaced the executable since the daemon started, the first daemon
+# connection gracefully replaces it; detached session workers remain active and
+# reconnect. Other hosts retain the existing protocol-version replacement.
 set -euo pipefail
 
 arch="$(uname -m)"
@@ -40,4 +42,7 @@ if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
 fi
 
 cargo build --target "$triple" -p brokk-mjolnir --bin mj "${profile_args[@]}"
+if [ -e /proc/self/exe ]; then
+  export MJ_DEV_RESTART_STALE_DAEMON=1
+fi
 exec cargo run -p brokk-mjolnir --bin mj "$@"

@@ -67,6 +67,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// on a stop sees the exit rather than its own deadline.
 const SHUTDOWN_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_millis(40);
+const DEV_RESTART_STALE_DAEMON_ENV: &str = "MJ_DEV_RESTART_STALE_DAEMON";
 /// How long force destruction waits for a cancelled lifecycle to actually
 /// stop before refusing to destroy under it. Cancellation kills the
 /// operation's child process groups and unwinds its persistence, which is
@@ -2948,10 +2949,11 @@ pub(crate) async fn connect_management() -> Result<ManagementClient> {
 }
 
 pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
+    maybe_replace_stale_development_daemon().await?;
     if let Ok(metadata) = read_metadata_any()
         && metadata.protocol_version != PROTOCOL_VERSION
     {
-        replace_incompatible_daemon(&metadata).await?;
+        replace_daemon(&metadata).await?;
     }
     if let Ok(mut client) = connect_existing().await
         && matches!(
@@ -2964,7 +2966,11 @@ pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
 
     let executable = std::env::current_exe().context("find current mj executable")?;
     let mut command = std::process::Command::new(executable);
-    command.arg("daemon-run");
+    command
+        .arg("daemon-run")
+        // This switch makes the invoking development client authoritative. It
+        // has no meaning inside the persistent daemon or its child processes.
+        .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
     let _pid = hel::hel_subprocess::spawn_detached(&mut command, &data_dir().join("daemon.log"))?;
 
     let deadline = Instant::now() + START_TIMEOUT;
@@ -2990,19 +2996,93 @@ pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
     )
 }
 
-/// Clear the way for a daemon speaking this build's protocol. Ask the running
-/// daemon to stop over the frozen management subset first — graceful for every
-/// protocol version — and only signal it when the wire is unreachable.
-async fn replace_incompatible_daemon(metadata: &DaemonMetadata) -> Result<()> {
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecutableFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn executable_file_identity(path: &Path) -> std::io::Result<ExecutableFileIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::metadata(path)?;
+    Ok(ExecutableFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
+    let current = executable_file_identity(Path::new("/proc/self/exe"))
+        .context("inspect the development client executable")?;
+    let daemon_path = PathBuf::from(format!("/proc/{pid}/exe"));
+    let daemon = match executable_file_identity(&daemon_path) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect daemon {pid} executable via {}",
+                    daemon_path.display()
+                )
+            });
+        }
+    };
+    Ok(Some(current == daemon))
+}
+
+#[cfg(target_os = "linux")]
+static DEVELOPMENT_DAEMON_REFRESH: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn maybe_replace_stale_development_daemon() -> Result<()> {
+    if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    DEVELOPMENT_DAEMON_REFRESH
+        .get_or_try_init(|| async {
+            let Ok(metadata) = read_metadata_any() else {
+                return Ok(());
+            };
+            if daemon_uses_current_executable(metadata.pid)? != Some(false) {
+                return Ok(());
+            }
+            eprintln!(
+                "Mjolnir daemon {} is using an older development build; restarting it.",
+                metadata.pid
+            );
+            replace_daemon(&metadata).await
+        })
+        .await?;
+    Ok(())
+}
+
+/// Clear the way for a different daemon executable. Ask the running daemon to
+/// stop over the frozen management subset first — graceful for every protocol
+/// version — and only signal it when the wire is unreachable.
+async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
     if let Ok(inner) = DaemonClient::connect(metadata.clone()).await
         && (ManagementClient { inner }).stop_and_wait().await.is_ok()
     {
         return Ok(());
     }
-    signal_incompatible_daemon(metadata).await
+    // Another client may have completed the replacement while this client was
+    // waiting on the old endpoint. Never signal the process named by stale
+    // metadata after the owner-only record has advanced to another daemon.
+    if read_metadata_any().is_ok_and(|current| {
+        current.pid != metadata.pid
+            || current.address != metadata.address
+            || current.token != metadata.token
+    }) {
+        return Ok(());
+    }
+    signal_daemon(metadata).await
 }
 
-async fn signal_incompatible_daemon(metadata: &DaemonMetadata) -> Result<()> {
+async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
     #[cfg(unix)]
     {
         let mut system = sysinfo::System::new();
@@ -3013,14 +3093,13 @@ async fn signal_incompatible_daemon(metadata: &DaemonMetadata) -> Result<()> {
         // The PID comes from the owner-only metadata file; the argv check
         // guards against PID recycling, not against other Mjolnir builds — old
         // daemons are exactly what this function exists to retire.
-        let is_hel_daemon = system
-            .process(sysinfo::Pid::from_u32(metadata.pid))
-            .is_some_and(|process| {
-                process
-                    .cmd()
-                    .get(1)
-                    .is_some_and(|argument| argument.to_str() == Some("daemon-run"))
-            });
+        let Some(process) = system.process(sysinfo::Pid::from_u32(metadata.pid)) else {
+            return Ok(());
+        };
+        let is_hel_daemon = process
+            .cmd()
+            .get(1)
+            .is_some_and(|argument| argument.to_str() == Some("daemon-run"));
         ensure!(
             is_hel_daemon,
             "refusing to signal PID {} because it does not look like a Mjolnir daemon (`mj daemon-run`)",
@@ -3032,12 +3111,12 @@ async fn signal_incompatible_daemon(metadata: &DaemonMetadata) -> Result<()> {
         if result != 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(error).context("stop incompatible Mjolnir daemon");
+                return Err(error).context("stop superseded Mjolnir daemon");
             }
         }
         wait_for_exit(metadata.pid).await.with_context(|| {
             format!(
-                "incompatible Mjolnir daemon {} was signalled but was still running after {}s",
+                "superseded Mjolnir daemon {} was signalled but was still running after {}s",
                 metadata.pid,
                 STOP_TIMEOUT.as_secs()
             )
@@ -4322,6 +4401,41 @@ fn session_state_label(state: SessionState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_identity_detects_an_nfs_style_replaced_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("mj");
+        let hard_link = directory.path().join("mj-hard-link");
+        let retained = directory.path().join(".nfs0000000000000001");
+
+        fs::write(&current, b"old executable").unwrap();
+        fs::hard_link(&current, &hard_link).unwrap();
+        assert_eq!(
+            executable_file_identity(&current).unwrap(),
+            executable_file_identity(&hard_link).unwrap(),
+            "two names for the same executable inode must not restart the daemon"
+        );
+
+        fs::rename(&current, &retained).unwrap();
+        fs::write(&current, b"new executable").unwrap();
+        assert_ne!(
+            executable_file_identity(&retained).unwrap(),
+            executable_file_identity(&current).unwrap(),
+            "an NFS-retained old executable must differ from its replacement"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn current_process_is_running_the_current_executable() {
+        assert_eq!(
+            daemon_uses_current_executable(std::process::id()).unwrap(),
+            Some(true)
+        );
+        assert_eq!(daemon_uses_current_executable(u32::MAX).unwrap(), None);
+    }
 
     #[test]
     fn graceful_close_retires_worker_polling_only_during_target_teardown() {
