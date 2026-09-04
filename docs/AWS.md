@@ -14,21 +14,27 @@ aws --profile <aws_profile> --region <region> ec2 run-instances \
   ...
 ```
 
-(`src/hel_targets.rs`, around the `TargetTemplate::AwsEc2` arm of
-`provision_plan`). Closing the session runs the matching, idempotent:
+Mjolnir adds two tags as part of that launch:
+
+- `dev.mj.session=<session-id>` identifies the owning Mjolnir session.
+- `dev.mj.managed=true` lets recovery discover Mjolnir-managed instances.
+
+The `run-instances` response supplies the exact instance ID. Mjolnir waits for
+that instance to enter the `running` state, then calls `describe-instances` by
+ID to read its public DNS, public IP, private DNS, or private IP according to
+`address_source`. Recovery also uses `describe-instances`, filtered by the
+managed tag and instance state, to find surviving session instances.
+
+Closing the session runs the matching, idempotent:
 
 ```console
 aws --profile <aws_profile> --region <region> ec2 terminate-instances --instance-ids <instance-id>
 ```
 
-Mjolnir reads the instance's address (public DNS, public IP, private DNS, or
-private IP, per `address_source`) out of the `run-instances` response itself;
-it does not call `describe-instances` to locate a session's instance.
-
-Mjolnir does not create any other AWS resource. It does not create a launch
+Beyond launching, tagging, describing, and terminating the session instance,
+Mjolnir does not provision AWS infrastructure. It does not create a launch
 template, security group, key pair, VPC, or IAM role, and it does not manage
-AMIs. All of that is your responsibility, prepared before you point a target
-at AWS.
+AMIs. Prepare those resources before you point a target at AWS.
 
 ## Prerequisites you set up by hand
 
@@ -46,8 +52,11 @@ at AWS.
   (typically via `cloud-init`/user data baked into the AMI or launch
   template).
 
-Mjolnir does not create or validate any of the above; it only launches instances
-from the template you name and connects to them over SSH.
+Mjolnir does not create those prerequisites. `mj setup` checks for a usable AWS
+CLI identity before offering AWS setup, `mj doctor` checks the configured
+identity and launch template, and session preflight checks the identity and
+configured launch-template version. These checks do not replace configuring
+the launch template, network, and SSH access correctly.
 
 ## Target configuration
 
@@ -68,7 +77,7 @@ address_source = "public-dns"
 # ssh_args = ["-o", "StrictHostKeyChecking=accept-new"]
 ```
 
-Keys, verified against `TargetTemplate::AwsEc2` in `src/hel_config.rs`:
+Accepted target keys:
 
 | Key | Required | Notes |
 | --- | --- | --- |
@@ -103,14 +112,29 @@ hand.
 
 ## IAM permissions
 
-Based on the actual AWS API calls in `src/hel_targets.rs` and
-`scripts/update-runson-launch-template.sh`, an IAM principal used with Mjolnir
-needs, at minimum:
+For the complete normal dashboard and session lifecycle, including instance-size
+selection, provisioning preflight, address resolution, recovery, and teardown,
+the AWS identity needs these EC2 actions:
 
-For normal session launch/teardown (`mj` itself):
-
+- `ec2:DescribeLaunchTemplateVersions`
+- `ec2:DescribeInstanceTypes`
 - `ec2:RunInstances`
+- `ec2:CreateTags` — `RunInstances` applies the two Mjolnir tags at launch.
+- `ec2:DescribeInstances` — used by the instance-running waiter, address lookup,
+  and recovery scan.
 - `ec2:TerminateInstances`
+
+`mj doctor` additionally calls `ec2:DescribeLaunchTemplates`. Setup, doctor,
+and session preflight also call `sts:GetCallerIdentity`; AWS does not require an
+explicit allow for that STS operation.
+
+This action list is not a paste-ready least-privilege policy. The
+`ec2:RunInstances` statement must authorize the launch template and the EC2
+resources it references or creates, such as the AMI, subnet, security group,
+key pair, network interface, volume, and instance. If the launch template
+attaches an IAM instance profile, the caller also needs `iam:PassRole` for that
+role. Other template choices, such as customer-managed KMS keys, can add their
+own permissions.
 
 For the optional `update-runson-launch-template.sh` maintenance script:
 
@@ -127,9 +151,9 @@ For the optional `update-runson-launch-template.sh` maintenance script:
 - `ec2:CreateLaunchTemplateVersion`
 - `ec2:ModifyLaunchTemplate`
 
-Grant only what you need: a principal that only runs sessions against an
-existing launch template needs `RunInstances`/`TerminateInstances`; the wider
-list is only needed by whoever runs the launch-template updater.
+Grant only what you need. The updater's wider write permissions belong only to
+the identity that runs that maintenance script; they are not part of ordinary
+Mjolnir session operation.
 
 ## `mj setup` and `mj doctor`
 

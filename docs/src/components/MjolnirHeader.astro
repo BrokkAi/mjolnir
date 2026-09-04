@@ -9,10 +9,10 @@ import type { StarlightRouteData } from '@astrojs/starlight/route-data';
 const { siteTitleHref } = (Astro.locals as { starlightRoute: StarlightRouteData }).starlightRoute;
 const root = siteTitleHref.endsWith('/') ? siteTitleHref : `${siteTitleHref}/`;
 const navItems = [
-  { label: 'Containers', slug: 'containers/' },
-  { label: 'Podman', slug: 'podman/' },
-  { label: 'Docker', slug: 'docker/' },
-  { label: 'Custom images', slug: 'custom-images/' },
+  { label: 'Quickstart', slug: 'quickstart/' },
+  { label: 'Configuration', slug: 'configuration/' },
+  { label: 'Targets', slug: 'targets/' },
+  { label: 'Reference', slug: 'cli-reference/' },
 ];
 const currentPath = Astro.url.pathname.replace(/\/+$/, '/');
 ---

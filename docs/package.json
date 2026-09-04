@@ -8,6 +8,7 @@
     "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
     "prebuild": "node scripts/sync-podman.mjs",
     "build": "ASTRO_TELEMETRY_DISABLED=1 astro build && node scripts/check-links.mjs",
+    "precheck": "node scripts/sync-podman.mjs",
     "check": "ASTRO_TELEMETRY_DISABLED=1 astro check",
     "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview",
     "social-card": "node scripts/render-social-card.mjs"

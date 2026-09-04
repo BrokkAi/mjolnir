@@ -46,7 +46,7 @@ installs both Linux companions.
 
 ## Get the agent-dev image
 
-mj ships a reference container image with everything a session needs
+Mjolnir ships a reference container image with everything a session needs
 pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, the
 Codex and Claude ACP bridges, and pinned DeepSeek Harness plus
 `dsh-acp-server`. It also carries Playwright's Chromium system libraries and
@@ -54,8 +54,9 @@ the pre-installed Chromium headless shell in
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools
 `perf`, `cargo-flamegraph`, `samply`, and `heaptrack`; `perf` additionally needs
-the host's `kernel.perf_event_paranoid` set to 1 or lower, or the container run
-with `--cap-add SYS_ADMIN`. Optional local coverage tooling includes the
+the host's `kernel.perf_event_paranoid` set to 1 or lower, or a host/runtime
+that already provides the required capability. Mjolnir does not expose a
+container-capability override. Optional local coverage tooling includes the
 `llvm-tools-preview` component, pinned `cargo-llvm-cov`, and `lcov` for
 `genhtml`. It's published at
 `ghcr.io/brokkai/mjolnir/agent-dev:latest`, public and
@@ -102,17 +103,21 @@ auto-installs Git, GitHub CLI, and Node the first time a session needs them.
 But that installation runs inside every new container, which slows down the
 start of each session. The default agent-dev image avoids that cost.
 
-Container targets default to `pull_policy = "auto"`. A launch never waits on a
-registry under that default: it starts from the image the host already has, and
-pulls only when the host has no copy at all. The Mjolnir daemon keeps remote
-`:latest` images current on its own, an hour at a time, and removes the dangling
-images each pull leaves behind. Versioned tags remain cached, digest references
-stay pinned, and `localhost/...` images remain local.
+Container targets default to `pull_policy = "auto"`. Podman and Docker launches
+do not wait on a registry under that default: they start from the image the host
+already has and pull only when the host has no copy at all. The Mjolnir daemon
+refreshes eligible remote `:latest` images for local or SSH Podman and local
+Docker once an hour, and removes the dangling images each pull leaves behind.
+Versioned tags remain cached, digest references stay pinned, and
+`localhost/...` images remain local. Apple container is not part of that
+background loop; it resolves `auto` and refreshes the image while provisioning
+a session.
 
 Set `pull_policy` beside `image` to `always`, `newer`, `missing`, or `never`
-when a target needs an explicit policy. An explicit `always` or `newer` still
-pulls during the launch itself, and the daemon refreshes it in the background
-too. Existing running containers are never replaced in place.
+when a target needs an explicit policy. On Podman and Docker, `always` or
+`newer` pulls during launch and remains eligible for the background refresh.
+Apple evaluates the policy only during provisioning; `always` and `newer`
+request a pull there. Existing running containers are never replaced in place.
 
 ## Git clone cache
 
@@ -168,19 +173,20 @@ mj doctor --json --smoke
 mj
 ```
 
-This opens Mjolnir's terminal surface. Press **Tab** to focus the Sessions pane,
-then **n** to start the new-session wizard.
+This opens Mjolnir's terminal surface. Press **Alt-N** from anywhere to start
+the new-session wizard.
 It walks you through picking a profile, a target, and a bundle.
 
 Before launch, you can size the container's CPU and memory allocation. The
-baseline is 8 CPUs and 32 GiB:
+wizard starts with the allocation remembered for that physical host, or with
+8 CPUs and 32 GiB when no allocation has been remembered:
 
 | Key | Effect |
 | --- | --- |
 | `+` | Doubles the current allocation |
 | `-` | Halves the current allocation |
-| `c` | Doubles CPU only |
-| `m` | Doubles memory only |
+| `c` | Adds 8 CPUs |
+| `m` | Adds 50% memory |
 | `r` | Resets to the 8-CPU/32-GiB baseline |
 
 The wizard ends on a review screen where you can add, edit, or remove

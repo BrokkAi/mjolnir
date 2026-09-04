@@ -51,3 +51,5 @@ tests/e2e/web/test-results/
 # Generated at build time from the runtime guides; see docs/scripts/sync-podman.mjs
 docs/src/content/docs/podman.md
 docs/src/content/docs/docker.md
+docs/src/content/docs/ssh.md
+docs/src/content/docs/aws.md
