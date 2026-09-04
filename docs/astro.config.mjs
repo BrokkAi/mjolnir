@@ -43,7 +43,7 @@ export default defineConfig({
           tag: 'meta',
           attrs: {
             property: 'og:image:alt',
-            content: 'Mjolnir: a terminal control plane for Codex, Claude Code, and Kimi Code sessions.',
+            content: 'Mjolnir: a terminal control plane for Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek Harness sessions.',
           },
         },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
@@ -52,7 +52,7 @@ export default defineConfig({
           tag: 'meta',
           attrs: {
             name: 'twitter:image:alt',
-            content: 'Mjolnir: a terminal control plane for Codex, Claude Code, and Kimi Code sessions.',
+            content: 'Mjolnir: a terminal control plane for Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek Harness sessions.',
           },
         },
       ],

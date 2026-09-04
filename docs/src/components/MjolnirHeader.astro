@@ -11,6 +11,7 @@ const root = siteTitleHref.endsWith('/') ? siteTitleHref : `${siteTitleHref}/`;
 const navItems = [
   { label: 'Containers', slug: 'containers/' },
   { label: 'Podman', slug: 'podman/' },
+  { label: 'Docker', slug: 'docker/' },
   { label: 'Custom images', slug: 'custom-images/' },
 ];
 const currentPath = Astro.url.pathname.replace(/\/+$/, '/');

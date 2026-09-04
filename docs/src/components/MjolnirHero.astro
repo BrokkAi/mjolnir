@@ -55,8 +55,8 @@ const hammerArt = [...hammerMask]
     <p class="hero-kicker">
       <span aria-hidden="true"></span> Mjolnir by <a href="https://brokk.ai" rel="external">Brokk</a>
     </p>
-    <h1 id="_top">The power<br /><em>frontend</em> for Codex and Claude.</h1>
-    <p class="hero-tagline">Choose who codes and who reviews. Keep the workspace and control plane on your machine, drive the session remotely, isolate work in worktrees, speak your prompts, and challenge every change before it lands.</p>
+    <h1 id="_top">The session<br /><em>control plane</em> for coding agents.</h1>
+    <p class="hero-tagline">Run long-lived agent sessions in disposable, isolated targets. Prompts queue durably, sessions checkpoint and resume, and one dashboard tracks sessions, quotas, and credentials.</p>
     {
       actions.length > 0 && (
         <div class="hero-actions">
@@ -119,14 +119,14 @@ const hammerArt = [...hammerMask]
       </div>
       <p class="hero-install-status" data-install-status aria-live="polite"></p>
     </section>
-    <ul class="hero-facts" aria-label="What Mjolnir adds to Codex and Claude">
-      <li><span>01 / TEAMS</span><strong>Codex + Claude teams</strong></li>
-      <li><span>02 / CONTROL</span><strong>Self-hosted remote control</strong></li>
-      <li><span>03 / REVIEW</span><strong>Adversarial review</strong></li>
+    <ul class="hero-facts" aria-label="What Mjolnir gives your coding agents">
+      <li><span>01 / SESSIONS</span><strong>Durable, resumable sessions</strong></li>
+      <li><span>02 / TARGETS</span><strong>Disposable containers and remote hosts</strong></li>
+      <li><span>03 / SURFACES</span><strong>Terminal dashboard and web viewer</strong></li>
     </ul>
   </div>
 
-  <div class="storm-console mj-panel" aria-label="How a Mjolnir coding team runs a delegated, reviewed turn">
+  <div class="storm-console mj-panel" aria-label="How a Mjolnir session runs in a disposable target">
     <div class="console-bar">
       <span><i></i> SESSION</span>
     </div>
@@ -134,10 +134,10 @@ const hammerArt = [...hammerMask]
       <div
         class="turn-flow"
         role="img"
-        aria-label="Your prompt goes to the coder — Codex or Claude — which owns the turn and can launch background subagents with standalone briefs; each subagent pushes its report back and the answer returns through Mjolnir. When review is enabled and a completed turn changed the workspace with its subagents drained, an independent reviewer — from the other provider on a mixed team — challenges the diff and holds the turn until review finishes."
+        aria-label="Your prompt goes to the session — any of the five supported harnesses — which owns the turn. The session runs in a disposable target, a container or remote host that is rebuilt per session, and the answer streams back to your dashboard. When the review config is enabled, an independent second opinion challenges changed turns."
       >
         <div class="flow-node flow-node--you">
-          <div><strong>YOU</strong><span>/ ONE TERMINAL</span></div>
+          <div><strong>YOU</strong><span>/ ONE DASHBOARD</span></div>
         </div>
 
         <div class="flow-link" aria-hidden="true">
@@ -146,25 +146,25 @@ const hammerArt = [...hammerMask]
         </div>
 
         <div class="flow-node flow-node--primary">
-          <div><strong>CODER</strong><span>/ OWNS THE TURN</span></div>
-          <small>Codex or Claude · plans the work · writes the briefs</small>
+          <div><strong>SESSION</strong><span>/ OWNS THE TURN</span></div>
+          <small>any of five harnesses · durable prompt queue · verified checkpoints</small>
         </div>
 
         <div class="flow-link" aria-hidden="true">
-          <i class="flow-lane flow-lane--down"><em>launches</em></i>
-          <i class="flow-lane flow-lane--up"><em>reports</em></i>
+          <i class="flow-lane flow-lane--down"><em>provisions</em></i>
+          <i class="flow-lane flow-lane--up"><em>streams</em></i>
         </div>
 
-        <div class="flow-node flow-node--subagents">
-          <div><strong>SUBAGENTS</strong><span>/ IMPLEMENT</span></div>
-          <small>fresh sessions · run in parallel</small>
+        <div class="flow-node flow-node--target">
+          <div><strong>TARGET</strong><span>/ DISPOSABLE</span></div>
+          <small>container or remote host · isolated · rebuilt per session</small>
         </div>
 
         <aside class="flow-observer">
-          <div><strong>REVIEWER</strong><span>/ CHALLENGES</span></div>
-          <small>an independent session re-reads the diff</small>
-          <small>pair providers so the reviewer is not the author</small>
-          <b>HOLDS THE TURN UNTIL CLEAN</b>
+          <div><strong>TURN REVIEW</strong><span>/ OPT-IN</span></div>
+          <small>an independent pass re-reads the diff</small>
+          <small>armed by the [review] config section</small>
+          <b>CHALLENGES CHANGED TURNS</b>
           <i class="flow-tap flow-tap--in" aria-hidden="true"></i>
           <i class="flow-tap flow-tap--out" aria-hidden="true"></i>
           <i class="flow-tap flow-tap--forge" aria-hidden="true"></i>
@@ -173,23 +173,18 @@ const hammerArt = [...hammerMask]
     </div>
     <div class="seat-board">
       <div class="seat-head">
-        <span>TEAMS / CHOOSE WHO CODES, WHO REVIEWS</span>
-        <small>SWITCH WITH CTRL+TAB</small>
+        <span>HARNESSES / PICK ONE PER SESSION</span>
+        <small>FIVE SUPPORTED</small>
       </div>
       <ul class="seat-list">
         <li>
-          <b>CODER</b>
-          <span>owns the turn and launches the subagents</span>
-          <em class="seat-route" data-seat-rotator data-agents="Codex|Claude" aria-hidden="true">Codex</em>
-        </li>
-        <li>
-          <b>REVIEWER</b>
-          <span>challenges changed turns from an independent session</span>
-          <em class="seat-route" data-seat-rotator data-agents="Claude|Codex" aria-hidden="true">Claude</em>
+          <b>HARNESS</b>
+          <span>the coding agent that owns the session's turns</span>
+          <em class="seat-route" data-seat-rotator data-agents="Codex|Claude Code|Kimi Code|Grok Build|DeepSeek Harness" aria-hidden="true">Codex</em>
         </li>
       </ul>
       <p class="seat-note">
-        Run Codex or Claude solo, or split the seats either way. Switching teams keeps the terminal, permissions, sessions, and remote workflow unchanged.
+        Every target runs any of the five. The dashboard, permissions, credential handling, and remote workflow stay the same whichever you pick.
       </p>
     </div>
   </div>
@@ -224,7 +219,7 @@ const hammerArt = [...hammerMask]
     });
   };
 
-  /* what each seat is showing right now, so no agent is drawn into two seats at once */
+  /* which harness each pill is showing right now, so none is drawn twice at once */
   const seatedAgents = new Map<HTMLElement, string>();
 
   const rotateSeats = () => {

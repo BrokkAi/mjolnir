@@ -8,13 +8,13 @@ for (const guide of [
     source: 'PODMAN.md',
     target: 'podman.md',
     title: 'Podman for Mjolnir',
-    description: 'Rootless Podman installation, verification postconditions, and remediation for hel container targets.',
+    description: 'Rootless Podman installation, verification postconditions, and remediation for Mjolnir container targets.',
   },
   {
     source: 'DOCKER.md',
     target: 'docker.md',
     title: 'Docker for Mjolnir',
-    description: 'Docker setup, OverlayFS attachments, lifecycle, and verification for hel container targets.',
+    description: 'Docker setup, OverlayFS attachments, lifecycle, and verification for Mjolnir container targets.',
   },
 ]) {
   const sourcePath = join(docsRoot, guide.source);
