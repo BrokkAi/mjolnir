@@ -2451,6 +2451,9 @@ mod tests {
             let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &test_name, "--nocapture"])
                 .env(RETIRED_WORKTREE_RESUME_TEST_CHILD, "1")
+                // A remote target needs a portable worker; any existing file
+                // satisfies the preflight so the test reaches provisioning.
+                .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
                 .env("MJ_DATA_DIR", directory.path().join("data"))
                 .env("MJ_CONFIG_DIR", directory.path().join("config"))
                 .output()
