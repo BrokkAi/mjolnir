@@ -151,6 +151,9 @@ pub enum DashboardAction {
     DestroyStopped {
         session_id: String,
     },
+    ForceDestroy {
+        session_id: String,
+    },
     RenameSession {
         session_id: String,
         title: String,
@@ -808,7 +811,7 @@ impl DashboardState {
             Mode::New(wizard) => wizard.text_input_focused(),
             Mode::Resume(wizard) => wizard.text_input_focused(),
             Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::ForceStop { .. },
+                confirmation: Confirmation::ForceStop { .. } | Confirmation::ForceDestroy { .. },
                 ..
             }) => true,
             _ => false,
@@ -863,6 +866,25 @@ impl DashboardState {
                         .filter(char::is_ascii_alphabetic)
                         .take(remaining)
                         .map(|character| character.to_ascii_uppercase()),
+                );
+            }
+            Mode::Confirm(ConfirmDialog {
+                confirmation:
+                    Confirmation::ForceDestroy {
+                        expected, typed, ..
+                    },
+                ..
+            }) => {
+                let remaining = expected
+                    .chars()
+                    .count()
+                    .saturating_sub(typed.chars().count());
+                typed.extend(
+                    pasted
+                        .chars()
+                        .filter(char::is_ascii_hexdigit)
+                        .take(remaining)
+                        .map(|character| character.to_ascii_lowercase()),
                 );
             }
             Mode::RepositoryOrigin(dialog)

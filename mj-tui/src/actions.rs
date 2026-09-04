@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
 use crate::{DashboardAction, DashboardState, Focus};
+use mj_chat::hel_text_input::{InputFilter, TextInput};
 
 /// One thing the surface can be asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub enum CommandId {
     RenameSession,
     ContainerSettings,
     StopSession,
+    ForceDestroySession,
     MarkAllRead,
     CancelOperation,
     ToggleProject,
@@ -391,6 +393,19 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: selected_session_ready,
     },
     CommandSpec {
+        id: CommandId::ForceDestroySession,
+        label: "Force destroy session",
+        description: "Permanently remove the selected session, its target, and its recovery archive.",
+        scope: Scope::Session,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        // Deliberately available while an operation runs: preempting a wedged
+        // one is what force destruction is for.
+        available: selected_session_ready,
+    },
+    CommandSpec {
         id: CommandId::TargetActions,
         label: "Target actions",
         description: "Test or rename the selected target.",
@@ -708,6 +723,21 @@ impl DashboardState {
                 }));
                 DashboardAction::None
             }
+            CommandId::ForceDestroySession => {
+                let Some(session_id) = self.selected_session().map(|session| session.id.clone())
+                else {
+                    return DashboardAction::None;
+                };
+                let expected = session_id.get(..8).unwrap_or(&session_id).to_owned();
+                self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
+                    session_id,
+                    typed: TextInput::new()
+                        .with_max_chars(expected.chars().count())
+                        .with_filter(InputFilter::AsciiHexLowercase),
+                    expected,
+                }));
+                DashboardAction::None
+            }
             CommandId::MarkAllRead => self.mark_all_read(),
             CommandId::CancelOperation => {
                 let operation = self.selected_session().and_then(|session| {
@@ -828,6 +858,22 @@ mod tests {
         assert_eq!(
             (spec(CommandId::CancelOperation).footer)(&dashboard).as_deref(),
             Some("cancel launch")
+        );
+    }
+
+    #[test]
+    fn force_destroy_needs_a_selected_session_and_survives_in_flight_operations() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(available(&dashboard, None).contains(&CommandId::ForceDestroySession));
+
+        dashboard.session_operations.insert(
+            "session-1".into(),
+            operation(SessionOperationKind::Launching, None),
+        );
+        assert!(
+            available(&dashboard, None).contains(&CommandId::ForceDestroySession),
+            "force destruction exists to preempt a wedged operation"
         );
     }
 }

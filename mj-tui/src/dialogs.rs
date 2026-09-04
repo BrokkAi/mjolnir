@@ -194,6 +194,14 @@ pub(crate) enum Confirmation {
         session_id: String,
         typed: TextInput,
     },
+    ForceDestroy {
+        session_id: String,
+        /// The short id the user must type: this confirmation also destroys
+        /// the recovery archive, so it names the session being destroyed
+        /// instead of a fixed word.
+        expected: String,
+        typed: TextInput,
+    },
     DestroyStopped {
         session_id: String,
         /// The resume dialog to restore afterwards, so confirming or
@@ -266,6 +274,7 @@ fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] 
         } => &["Cancel", "Open transcript", "Recover"],
         Confirmation::RecoverFailed { .. } => &["Cancel", "Open transcript"],
         Confirmation::ForceStop { .. } => &[],
+        Confirmation::ForceDestroy { .. } => &[],
     }
 }
 
@@ -1203,6 +1212,26 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 ),
             ],
         ),
+        Confirmation::ForceDestroy {
+            session_id,
+            expected,
+            typed,
+        } => (
+            " FORCE DESTROY · THE SESSION AND ITS RECOVERY ARCHIVE WILL BE LOST ",
+            vec![
+                Line::raw(format!("Session: {session_id}")),
+                Line::raw(""),
+                Line::raw("The target, worktree, recovery archive, and record are removed."),
+                Line::raw("Nothing from this session can be resumed or read afterwards."),
+                Line::raw(format!(
+                    "Type {expected} (this session's short id), then press Enter:"
+                )),
+                Line::styled(
+                    typed.with_cursor_marker("▏"),
+                    Style::default().fg(Color::Red),
+                ),
+            ],
+        ),
     }
 }
 
@@ -1224,6 +1253,7 @@ pub(crate) fn render_confirmation(
         Confirmation::Close { .. } | Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
         Confirmation::ForceStop { .. } => 10,
+        Confirmation::ForceDestroy { .. } => 11,
     };
     let (title, mut lines) = confirmation_body(confirmation);
     let buttons = confirmation_buttons(confirmation);
@@ -2009,6 +2039,29 @@ impl DashboardState {
                     typed.handle_key(key);
                     self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ForceStop {
                         session_id,
+                        typed,
+                    }));
+                    DashboardAction::None
+                }
+            },
+            Confirmation::ForceDestroy {
+                session_id,
+                expected,
+                mut typed,
+            } => match code {
+                KeyCode::Esc => {
+                    self.cancel_modal();
+                    DashboardAction::None
+                }
+                KeyCode::Enter if typed == expected.as_str() => {
+                    self.cancel_modal();
+                    DashboardAction::ForceDestroy { session_id }
+                }
+                _ => {
+                    typed.handle_key(key);
+                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
+                        session_id,
+                        expected,
                         typed,
                     }));
                     DashboardAction::None
@@ -2856,6 +2909,79 @@ mod tests {
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
+    }
+
+    fn running_hex_session_dashboard() -> DashboardState {
+        // Real session ids are lowercase hex; the force-destroy confirmation
+        // gates on the id's first eight characters.
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        session.id = "0123456789abcdef0123456789abcdef".into();
+        dashboard_with_session(session)
+    }
+
+    #[test]
+    fn force_destroy_confirmation_requires_the_typed_short_id() {
+        let mut dashboard = running_hex_session_dashboard();
+        through_the_palette(&mut dashboard, "force destroy");
+        assert!(matches!(
+            dashboard.mode,
+            Mode::Confirm(ConfirmDialog {
+                confirmation: Confirmation::ForceDestroy { .. },
+                ..
+            })
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("FORCE DESTROY · THE SESSION AND ITS RECOVERY ARCHIVE WILL BE LOST")
+        );
+        assert!(rendered.contains("Type 01234567 (this session's short id), then press Enter:"));
+
+        for character in "ffffffff".chars() {
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char(character))),
+                DashboardAction::None
+            );
+        }
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None,
+            "a mismatched id must not destroy"
+        );
+        for _ in 0..8 {
+            dashboard.handle_key(key(KeyCode::Backspace));
+        }
+        for character in "01234567".chars() {
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char(character))),
+                DashboardAction::None
+            );
+        }
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::ForceDestroy {
+                session_id: "0123456789abcdef0123456789abcdef".into()
+            }
+        );
+    }
+
+    #[test]
+    fn force_destroy_paste_is_filtered_to_lowercase_hex_and_capped() {
+        let mut dashboard = running_hex_session_dashboard();
+        through_the_palette(&mut dashboard, "force destroy");
+        dashboard.handle_paste("zz0123ABcD!");
+        let Mode::Confirm(ConfirmDialog {
+            confirmation: Confirmation::ForceDestroy { typed, .. },
+            ..
+        }) = &dashboard.mode
+        else {
+            panic!("expected force destroy dialog");
+        };
+        assert_eq!(typed.value(), "0123abcd");
     }
 
     fn running_dashboard_with_stop_dialog() -> DashboardState {

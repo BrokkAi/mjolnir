@@ -508,6 +508,24 @@ pub(crate) async fn apply_dashboard_action(
                 },
             );
         }
+        DashboardAction::ForceDestroy { session_id } => {
+            let request =
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
+            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
+            spawn_lifecycle_operation(
+                request,
+                context.critical_operations.clone(),
+                move |_controller, _cancelled| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .force_destroy_session(session_id)
+                            .await
+                    })?;
+                    Ok(LifecycleSuccess::ForceDestroyed)
+                },
+            );
+        }
         DashboardAction::CancelOperation { session_id, kind } => {
             if let Some(operation) = context.lifecycle_operations.get(&session_id) {
                 operation.cancelled.store(true, Ordering::Release);

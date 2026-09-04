@@ -1961,6 +1961,7 @@ pub(crate) enum LifecycleSuccess {
     Closed,
     ForceStopped,
     DestroyedStopped,
+    ForceDestroyed,
 }
 
 pub(crate) struct LifecycleUpdate {
