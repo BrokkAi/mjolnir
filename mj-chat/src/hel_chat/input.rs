@@ -308,6 +308,54 @@ pub(super) fn input_visual_rows(input: &str, width: usize) -> usize {
     input_cursor_visual_position(input, input.len(), width).1 + 1
 }
 
+/// Return the wrapped row containing a logical grapheme offset. Elicitation
+/// message scrolling uses the same word-wrap implementation as the composer,
+/// which mirrors ratatui's `Paragraph` wrapper and therefore survives a
+/// terminal resize without inventing a second wrapping policy.
+pub(super) fn wrapped_row_for_grapheme_offset(
+    line: &str,
+    width: usize,
+    grapheme_offset: usize,
+) -> usize {
+    let wrapped = wrap_input_line_with_trim(line, 0, width.max(1), true);
+    let grapheme_byte = line
+        .grapheme_indices(true)
+        .nth(grapheme_offset)
+        .map_or(line.len(), |(offset, _)| offset);
+    for (row, graphemes) in wrapped.iter().enumerate() {
+        let last = graphemes
+            .last()
+            .map_or(grapheme_byte, |grapheme| grapheme.end);
+        if grapheme_byte < last {
+            return row;
+        }
+        // `last` is an exclusive source offset. When a hard wrap starts at
+        // that exact offset, the anchor belongs to the following row; using
+        // `<=` here moved it back one visual row on every resize.
+        if grapheme_byte == last
+            && wrapped
+                .get(row + 1)
+                .and_then(|next| next.first())
+                .is_none_or(|next| next.start != grapheme_byte)
+        {
+            return row;
+        }
+    }
+    wrapped.len().saturating_sub(1)
+}
+
+/// Return a logical grapheme offset for the beginning of a wrapped row.
+pub(super) fn grapheme_offset_for_wrapped_row(line: &str, width: usize, row: usize) -> usize {
+    let wrapped = wrap_input_line_with_trim(line, 0, width.max(1), true);
+    let Some(graphemes) = wrapped.get(row) else {
+        return line.graphemes(true).count();
+    };
+    graphemes.first().map_or_else(
+        || line.graphemes(true).count(),
+        |grapheme| line[..grapheme.start].graphemes(true).count(),
+    )
+}
+
 pub(super) fn input_cursor_visual_position(
     input: &str,
     cursor: usize,
@@ -363,6 +411,19 @@ struct InputGrapheme {
 /// Mirror ratatui's `WordWrapper` layout so the terminal cursor follows the
 /// word-wrapped `Paragraph`, including whitespace discarded at wrap points.
 fn wrap_input_line(line: &str, offset: usize, width: usize) -> Vec<Vec<InputGrapheme>> {
+    wrap_input_line_with_trim(line, offset, width, false)
+}
+
+/// Word-wrap one input line with the same trim option as ratatui's
+/// `Paragraph`. Composer input uses `trim = false`; question messages use
+/// `trim = true`, which is why both callers share this implementation instead
+/// of trying to infer one policy from the other.
+fn wrap_input_line_with_trim(
+    line: &str,
+    offset: usize,
+    width: usize,
+    trim: bool,
+) -> Vec<Vec<InputGrapheme>> {
     let mut wrapped = Vec::new();
     let mut pending_line = Vec::new();
     let mut pending_word = Vec::new();
@@ -386,12 +447,18 @@ fn wrap_input_line(line: &str, offset: usize, width: usize) -> Vec<Vec<InputGrap
             whitespace,
         };
         let word_found = previous_was_non_whitespace && whitespace;
-        let untrimmed_overflow =
-            pending_line.is_empty() && word_width + whitespace_width + symbol_width > width;
+        let trimmed_overflow = pending_line.is_empty() && trim && word_width + symbol_width > width;
+        let whitespace_overflow =
+            pending_line.is_empty() && trim && whitespace_width + symbol_width > width;
+        let untrimmed_overflow = pending_line.is_empty()
+            && !trim
+            && word_width + whitespace_width + symbol_width > width;
 
-        if word_found || untrimmed_overflow {
-            pending_line.extend(pending_whitespace.drain(..));
-            line_width += whitespace_width;
+        if word_found || trimmed_overflow || whitespace_overflow || untrimmed_overflow {
+            if !pending_line.is_empty() || !trim {
+                pending_line.extend(pending_whitespace.drain(..));
+                line_width += whitespace_width;
+            }
             pending_line.append(&mut pending_word);
             line_width += word_width;
             whitespace_width = 0;
@@ -430,10 +497,13 @@ fn wrap_input_line(line: &str, offset: usize, width: usize) -> Vec<Vec<InputGrap
         previous_was_non_whitespace = !whitespace;
     }
 
-    if pending_line.is_empty() && pending_word.is_empty() && !pending_whitespace.is_empty() {
+    if pending_line.is_empty() && pending_word.is_empty() && !pending_whitespace.is_empty() && trim
+    {
         wrapped.push(Vec::new());
     }
-    pending_line.extend(pending_whitespace);
+    if !pending_line.is_empty() || !trim {
+        pending_line.extend(pending_whitespace);
+    }
     pending_line.append(&mut pending_word);
     if !pending_line.is_empty() {
         wrapped.push(pending_line);

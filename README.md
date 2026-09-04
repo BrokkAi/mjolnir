@@ -106,9 +106,10 @@ curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh |
 
 This downloads a verified release into `~/.local/bin` — no Rust toolchain
 needed. Each desktop release ships the headless `mj` controller, its separate
-`mj-desktop` application, the voice worker, and the static musl session workers
-that Mjolnir uploads into disposable targets. `mj` itself does not load native
-desktop libraries. Run `mj doctor` next. The installer also honors
+`mj-desktop` application, the voice worker, and dedicated session workers.
+Linux workers are static musl binaries that Mjolnir uploads into disposable
+targets; the macOS bundle also has a native worker for `local-bare`. `mj` itself
+does not load native desktop libraries. Run `mj doctor` next. The installer also honors
 `MJOLNIR_VERSION` to install a specific tag and `MJOLNIR_INSTALL_DIR` (or
 `INSTALL_DIR`) to choose the install directory; see `--help`.
 
@@ -118,15 +119,16 @@ npm works too:
 npm install -g @brokkai/mjolnir
 ```
 
-As does building the static headless executable from source:
+For source development, build the native controller and the much smaller
+portable worker separately:
 
 ```console
-cargo build --release --target x86_64-unknown-linux-musl
-./target/x86_64-unknown-linux-musl/release/mj
+scripts/run.sh --release -- --version
 ```
 
-Use `aarch64-unknown-linux-musl` instead on ARM64 Linux. For local development,
-plain `cargo run` builds and runs the controller for the current host.
+On Linux this builds `mj` for the host and only `mj-worker` for musl. On macOS
+both are native, which supports `local-bare` development without Zig; managed
+Linux targets require a packaged static worker or an explicit worker override.
 
 The desktop application is a separate native build. On x86-64 GNU/Linux,
 install the WebKitGTK development package for your distribution and run:

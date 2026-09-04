@@ -19,11 +19,11 @@ export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-localhost/mjolnir/agent-dev:l
 # Keep the test's imported state and archive separate from the user's Mjolnir data.
 export MJ_CONFIG_DIR="$test_root/config/mjolnir"
 export MJ_DATA_DIR="$test_root/data/mjolnir"
-export MJ_WORKER_BINARY="${MJ_WORKER_BINARY:-$repo_root/target/x86_64-unknown-linux-musl/debug/mj}"
+export MJ_WORKER_BINARY="${MJ_WORKER_BINARY:-$repo_root/target/worker/x86_64-unknown-linux-musl/debug/mj-worker}"
 
 mkdir -p "$test_root"
 cd "$repo_root"
 if [[ ! -x "$MJ_WORKER_BINARY" ]]; then
-    cargo build --target x86_64-unknown-linux-musl
+    cargo build --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
 fi
 cargo test -p brokk-mjolnir --test import_e2e imported_codex_session_resumes_natively -- --ignored --nocapture

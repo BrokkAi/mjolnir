@@ -32,6 +32,7 @@ use hel_tui::{
     PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
     resume_profile_placeholders,
 };
+use mj_chat::hel_chat::ChatElicitationDraft;
 use mj_chat::hel_selection::{
     FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
 };
@@ -338,6 +339,15 @@ pub(crate) struct ActiveDashboardImport {
     pub(crate) cancelled: Arc<AtomicBool>,
 }
 
+/// A local form snapshot together with the relay frontier at which it was
+/// captured. A projection older than that frontier must not invalidate a
+/// freshly saved draft while an attachment is still settling.
+#[derive(Debug)]
+struct CachedQuestionDraft {
+    draft: ChatElicitationDraft,
+    captured_event_ordinal: u64,
+}
+
 /// Everything one dashboard run owns.
 pub(crate) struct DashboardContext {
     terminal: TerminalGuard,
@@ -355,6 +365,11 @@ pub(crate) struct DashboardContext {
     /// keep running while another pane has the keyboard, so switching back is
     /// a redraw rather than a rebuild.
     pub(crate) active_chat: Option<mj_chat::hel_chat::ActiveChat>,
+    /// In-memory form drafts for sessions that are not currently attached.
+    /// Each value retains its complete request identity (and may contain one
+    /// primary and one deferred reviewer form), so an id reused by a changed
+    /// form cannot inherit old answers.
+    question_drafts: BTreeMap<String, Vec<CachedQuestionDraft>>,
     /// Session-manager attachment is asynchronous: an actor may need to
     /// answer from a worker or relay before a chat can be built.
     pub(crate) opening_chat_session: Option<String>,
@@ -587,6 +602,8 @@ pub(crate) async fn run_dashboard_for_workspace(
                             && let Some(chat) = context.visible_chat()
                         {
                             chat_outcome = chat.detach();
+                        } else if apply_global_focus_cycle(&mut context.dashboard, &event, command) {
+                            action = DashboardAction::None;
                         } else {
                             action = context.dashboard.dispatch_command(command);
                         }
@@ -817,6 +834,7 @@ impl DashboardContext {
         }
         session.viewed_through_event_ordinal = through;
         self.dashboard.set_state(self.controller.state.clone());
+        self.reconcile_question_drafts();
         if self.read_receipt_in_flight.is_some() {
             self.pending_read_receipts
                 .entry(session_id)
@@ -842,6 +860,7 @@ impl DashboardContext {
                 .or_insert(through);
         }
         self.dashboard.set_state(self.controller.state.clone());
+        self.reconcile_question_drafts();
         if self.read_receipt_in_flight.is_none()
             && let Some((session_id, through)) = self.pending_read_receipts.pop_first()
         {
@@ -982,6 +1001,7 @@ impl DashboardContext {
             notices,
             events: Some(event::EventStream::new()),
             active_chat: None,
+            question_drafts: BTreeMap::new(),
             opening_chat_session: None,
             pending_chat_session: None,
             startup: StartupSession::idle(),
@@ -1284,7 +1304,12 @@ impl DashboardContext {
         self.materialized_projections_in_flight.remove(&session_id);
         match result {
             Ok(detail) => {
-                self.dashboard.apply_prepared_materialized_session(*detail);
+                if self.dashboard.apply_prepared_materialized_session(*detail) {
+                    // Only a projection that passed the dashboard's ordinal
+                    // guard may answer whether a cached request is still
+                    // pending. Startup summaries deliberately do not do so.
+                    self.reconcile_question_drafts();
+                }
             }
             Err(error) => self
                 .dashboard
@@ -1397,7 +1422,17 @@ impl DashboardContext {
             dashboard,
             ..
         } = self;
-        route_selection_event(selection, dashboard.frame_surfaces(), event)
+        let focus_question = match &event {
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                question_click_focuses(dashboard.modal_open(), dashboard.frame_surfaces(), mouse)
+            }
+            _ => false,
+        };
+        let routed = route_selection_event(selection, dashboard.frame_surfaces(), event);
+        if focus_question {
+            dashboard.focus_prompt();
+        }
+        routed
     }
 
     /// Copies the finished selection to the system and terminal clipboards.
@@ -1528,8 +1563,80 @@ impl DashboardContext {
     ///
     /// The conversation being replaced is saved first: it holds unsent input
     /// and a read position that a quit or a crash would otherwise lose.
+    fn save_active_question_draft(&mut self) {
+        let Some(chat) = self.active_chat.as_ref() else {
+            return;
+        };
+        let session_id = chat.session_id().to_owned();
+        let drafts = chat.elicitation_drafts();
+        if !drafts.is_empty() {
+            let captured_event_ordinal = chat.latest_event_ordinal();
+            self.question_drafts.insert(
+                session_id,
+                drafts
+                    .into_iter()
+                    .map(|draft| CachedQuestionDraft {
+                        draft,
+                        captured_event_ordinal,
+                    })
+                    .collect(),
+            );
+        } else {
+            // A request was answered or removed while this session was away;
+            // retaining its old entry would make a later attach look like a
+            // new pending request.
+            self.question_drafts.remove(&session_id);
+        }
+    }
+
+    fn reconcile_question_drafts(&mut self) {
+        self.question_drafts.retain(|session_id, drafts| {
+            if !self.controller.state.sessions.contains_key(session_id) {
+                return false;
+            }
+            let Some((projection_ordinal, pending)) =
+                self.dashboard.pending_elicitations(session_id)
+            else {
+                // A startup summary has no complete pending-request list yet;
+                // keep the cache until its accepted full projection arrives.
+                return true;
+            };
+            drafts.retain(|draft| {
+                if !question_draft_projection_is_current(
+                    draft.captured_event_ordinal,
+                    projection_ordinal,
+                ) {
+                    // The active feed may have captured a newer local form
+                    // than the dashboard's last accepted full projection.
+                    return true;
+                }
+                // Reviewer requests live in the sidecar review projection,
+                // not in the primary materialized session. The attached chat
+                // validates those by source/role when it is restored.
+                draft.draft.reviewer() || pending.iter().any(|request| draft.draft.matches(request))
+            });
+            !drafts.is_empty()
+        });
+    }
+
+    fn restore_question_draft(
+        &mut self,
+        session_id: &str,
+        chat: &mut mj_chat::hel_chat::ActiveChat,
+    ) {
+        let Some(drafts) = self.question_drafts.remove(session_id) else {
+            return;
+        };
+        // ActiveChat defers reviewer restoration when the reviewer stream has
+        // not surfaced its form yet. A false result here means the projection
+        // has no matching pending request, so retaining the entry would allow
+        // a stale answer to return on a later attach.
+        chat.restore_elicitation_drafts(drafts.into_iter().map(|cached| cached.draft).collect());
+    }
+
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
         self.dashboard.select_active_session(session_id);
+        self.save_active_question_draft();
         if self
             .active_chat
             .as_ref()
@@ -2072,6 +2179,7 @@ impl DashboardContext {
         }
         self.controller.state.sessions = sessions;
         self.dashboard.set_state(self.controller.state.clone());
+        self.reconcile_question_drafts();
         self.refresh_chat_context();
         self.controller_changed = true;
         self.refresh_poll_targets();
@@ -2335,6 +2443,34 @@ impl DashboardContext {
             self.critical_operations.clone(),
         )
     }
+}
+
+fn question_draft_projection_is_current(
+    captured_event_ordinal: u64,
+    projection_ordinal: u64,
+) -> bool {
+    projection_ordinal >= captured_event_ordinal
+}
+
+/// Whether a left press belongs to the visible question rather than to a
+/// genuine dashboard modal. `ElicitationMessage` is the question's marker;
+/// its presence lets the generic `ModalBody` surface cover the answer area
+/// without making every dashboard dialog focus the composer.
+fn question_click_focuses(
+    dashboard_modal_open: bool,
+    surfaces: &FrameSurfaces,
+    mouse: &MouseEvent,
+) -> bool {
+    !dashboard_modal_open
+        && surfaces.surface(SurfaceId::ElicitationMessage).is_some()
+        && surfaces
+            .surface_at(mouse.column, mouse.row)
+            .is_some_and(|surface| {
+                matches!(
+                    surface.id,
+                    SurfaceId::ElicitationMessage | SurfaceId::ModalBody
+                )
+            })
 }
 
 /// A lifecycle started by another attached surface reaches this UI through
@@ -2653,6 +2789,26 @@ fn global_chord_event(dashboard: &DashboardState, event: &Event) -> Option<Comma
     }
     let id = hel_tui::global_chord(key)?;
     dashboard.global_chord_allowed(id).then_some(id)
+}
+
+/// Applies the one global command whose direction depends on the pressed
+/// event. Keeping this branch shared with the event loop makes Shift-F6 test
+/// the same reverse path as the live dashboard, rather than only testing key
+/// registration in `mj-tui`.
+fn apply_global_focus_cycle(
+    dashboard: &mut DashboardState,
+    event: &Event,
+    command: CommandId,
+) -> bool {
+    if command != CommandId::CycleFocus {
+        return false;
+    }
+    let reverse = matches!(
+        event,
+        Event::Key(key) if key.modifiers.contains(KeyModifiers::SHIFT)
+    );
+    dashboard.cycle_focus(reverse);
+    true
 }
 
 pub(crate) fn resume_progress_notice(
@@ -3079,6 +3235,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_a_visible_question_focuses_the_composer_from_modal_body_clicks() {
+        let mut surfaces = FrameSurfaces::new();
+        surfaces.push(SurfaceFrame::fixed(
+            SurfaceId::ElicitationMessage,
+            Rect::new(10, 5, 20, 4),
+        ));
+        surfaces.push(SurfaceFrame::fixed(
+            SurfaceId::ModalBody,
+            Rect::new(10, 9, 20, 4),
+        ));
+        let message_click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let body_click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(question_click_focuses(false, &surfaces, &message_click));
+        assert!(question_click_focuses(false, &surfaces, &body_click));
+        assert!(!question_click_focuses(true, &surfaces, &body_click));
+
+        let mut real_modal = FrameSurfaces::new();
+        real_modal.push(SurfaceFrame::fixed(
+            SurfaceId::ModalBody,
+            Rect::new(10, 5, 20, 4),
+        ));
+        assert!(!question_click_focuses(false, &real_modal, &message_click));
+        assert!(!question_click_focuses(false, &real_modal, &body_click));
+    }
+
     /// A surface that scrolls its own rows still gets highlighted, but its
     /// text is not read back from the frame: most of the selection is off it,
     /// and the surface's own row cache is what holds those rows.
@@ -3253,6 +3445,26 @@ mod tests {
             Some(CommandId::Refresh),
             "refreshing is allowed over a modal"
         );
+    }
+
+    #[test]
+    fn f6_global_path_cycles_forward_and_shift_f6_reverses_it() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_sessions();
+        let forward = Event::Key(function_key(6));
+        let command = global_chord_event(&dashboard, &forward).expect("F6 is global");
+        assert_eq!(command, CommandId::CycleFocus);
+        assert!(apply_global_focus_cycle(&mut dashboard, &forward, command));
+        assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
+
+        let reverse = Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(6),
+            crossterm::event::KeyModifiers::SHIFT,
+        ));
+        let command = global_chord_event(&dashboard, &reverse).expect("Shift-F6 is global");
+        assert_eq!(command, CommandId::CycleFocus);
+        assert!(apply_global_focus_cycle(&mut dashboard, &reverse, command));
+        assert_eq!(dashboard.focus(), hel_tui::Focus::Sessions);
     }
 
     /// Resume is a chord like new session: the pane letter it used to answer

@@ -11,6 +11,10 @@ publish = true
 [lib]
 name = "mj_worker"
 
+[[bin]]
+name = "mj-worker"
+path = "src/main.rs"
+
 [features]
 default = []
 test-hooks = ["hel/test-hooks"]
@@ -19,16 +23,22 @@ test-hooks = ["hel/test-hooks"]
 workspace = true
 
 [dependencies]
-hel.workspace = true
+hel = { workspace = true, features = ["worker"] }
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+mimalloc = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

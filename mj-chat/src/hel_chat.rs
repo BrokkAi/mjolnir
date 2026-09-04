@@ -63,6 +63,7 @@ use autocomplete::{
 };
 use config_picker::ConfigPicker;
 use elicitation::ElicitationDialog;
+pub use elicitation::ElicitationDraft;
 use history::{HistorySearch, HistorySearchRequest};
 pub use rendering::truncate_line_to_width;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};
@@ -126,6 +127,39 @@ pub struct ChatRegions {
     pub prompt: Rect,
     pub footer: Option<Rect>,
     pub overlay: Rect,
+}
+
+/// The local form state saved while the dashboard attaches another session.
+/// The reviewer metadata is part of the identity because reviewer answers are
+/// delivered to a different harness than primary-agent answers.
+#[derive(Debug, Clone)]
+pub struct ChatElicitationDraft {
+    form: ElicitationDraft,
+    reviewer: bool,
+    reviewer_role: Option<String>,
+}
+
+impl ChatElicitationDraft {
+    #[must_use]
+    pub fn matches(&self, request: &ElicitationRequest) -> bool {
+        self.form.matches(request)
+    }
+
+    pub(super) fn request(&self) -> &ElicitationRequest {
+        // This accessor stays crate-private; hosts only need `matches` while
+        // ChatState uses it to reconcile delayed reviewer streams.
+        self.form.request()
+    }
+
+    #[must_use]
+    pub fn reviewer(&self) -> bool {
+        self.reviewer
+    }
+
+    #[must_use]
+    pub fn reviewer_role(&self) -> Option<&str> {
+        self.reviewer_role.as_deref()
+    }
 }
 
 /// What one terminal event asked the chat to do.
@@ -357,6 +391,10 @@ pub struct ChatState {
     active_agent_terminals: Vec<ActiveAgentTerminal>,
     claimed_agent_terminals: BTreeMap<String, i64>,
     elicitation: Option<ElicitationDialog>,
+    /// The latest primary pending forms, retained while a reviewer form owns
+    /// the display so the primary can surface immediately when that review
+    /// request is answered or withdrawn.
+    pending_elicitations: Vec<ElicitationRequest>,
     /// The second-opinion view, when one is open. It owns the frame while it
     /// is up, so the composer and the elicitation dialog stand down.
     second_opinion: Option<SecondOpinion>,
@@ -417,9 +455,10 @@ pub struct ChatState {
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
     pub(super) frame_surfaces: FrameSurfaces,
-    /// The last frame's surfaces replace everything behind them, because a
-    /// modal owned the frame. A host that composes the chat with its own
-    /// panes reads this to decide whether to merge or replace.
+    /// Whether the last frame's surfaces replace everything behind them. The
+    /// host uses this only for chat-local modals that truly own the frame;
+    /// questions stay in the session content area and remain mergeable with
+    /// navigator surfaces.
     pub(super) frame_surfaces_exclusive: bool,
     /// The row space transcript selections are measured in, re-pinned by every
     /// frame the engine is not holding a transcript selection through.
@@ -467,6 +506,7 @@ impl ChatState {
             active_agent_terminals: Vec::new(),
             claimed_agent_terminals: BTreeMap::new(),
             elicitation: None,
+            pending_elicitations: Vec::new(),
             second_opinion: None,
             reviewer_area: None,
             split_action_areas: Vec::new(),
@@ -709,19 +749,48 @@ impl ChatState {
     }
 
     fn sync_elicitation(&mut self, pending: &[ElicitationRequest]) {
+        self.pending_elicitations = pending.to_vec();
         // A reviewer's form is not in the primary's pending list, so the
         // primary's projection must not take it down.
         if self.elicitation_is_reviewers {
             return;
         }
-        if self
-            .elicitation
-            .as_ref()
-            .is_some_and(|dialog| pending.iter().any(|request| request.id == dialog.id()))
-        {
-            return;
+        if let Some(dialog) = self.elicitation.as_ref() {
+            if pending.iter().any(|request| request == dialog.request()) {
+                return;
+            }
+            // An answer or cancellation removed the request. Drop the local
+            // form immediately so no later relay snapshot can resurrect it.
+            self.elicitation = None;
         }
         self.elicitation = pending.first().cloned().map(ElicitationDialog::new);
+    }
+
+    /// Reconcile the reviewer form against the sidecar's latest pending
+    /// requests. The primary projection intentionally cannot do this because
+    /// reviewer requests are kept in a different stream.
+    pub(super) fn reconcile_reviewer_elicitation(
+        &mut self,
+        pending: &[(Option<String>, ElicitationRequest)],
+    ) {
+        if !self.reviewer_elicitation_open() {
+            return;
+        }
+        let matches = self.elicitation.as_ref().is_some_and(|dialog| {
+            pending.iter().any(|(role, request)| {
+                role.as_deref() == self.elicitation_role.as_deref() && request == dialog.request()
+            })
+        });
+        if !matches {
+            self.elicitation = None;
+            self.elicitation_is_reviewers = false;
+            self.elicitation_role = None;
+            self.elicitation = self
+                .pending_elicitations
+                .first()
+                .cloned()
+                .map(ElicitationDialog::new);
+        }
     }
 
     /// Puts a form the reviewer is waiting on in front of the user.
@@ -751,6 +820,72 @@ impl ChatState {
     /// Whether a reviewer's form is currently on screen.
     pub(super) fn reviewer_elicitation_open(&self) -> bool {
         self.elicitation_is_reviewers && self.elicitation.is_some()
+    }
+
+    pub(super) fn elicitation_source(&self) -> (bool, Option<&str>) {
+        (
+            self.elicitation_is_reviewers,
+            self.elicitation_role.as_deref(),
+        )
+    }
+
+    pub(super) fn pending_reviewer_matches(&self, draft: &ChatElicitationDraft) -> bool {
+        if !draft.reviewer {
+            return false;
+        }
+        match (self.second_opinion(), self.turn_review()) {
+            (Some(view), _) => view.reviewer().is_some_and(|reviewer| {
+                reviewer
+                    .pending_elicitations()
+                    .iter()
+                    .any(|request| request == draft.request())
+            }),
+            (None, Some(review)) => {
+                review
+                    .pending_elicitations()
+                    .into_iter()
+                    .any(|(role, request)| {
+                        draft.reviewer_role() == Some(role.as_str()) && request == *draft.request()
+                    })
+            }
+            (None, None) => false,
+        }
+    }
+
+    /// Take a process-local snapshot before this chat is replaced by another
+    /// session. The snapshot carries reviewer routing metadata as well as the
+    /// form values, because those answers do not all go to the primary agent.
+    pub(super) fn elicitation_draft(&self) -> Option<ChatElicitationDraft> {
+        let dialog = self.elicitation.as_ref()?;
+        Some(ChatElicitationDraft {
+            form: dialog.draft(),
+            reviewer: self.elicitation_is_reviewers,
+            reviewer_role: self.elicitation_role.clone(),
+        })
+    }
+
+    /// Restore a matching snapshot onto the currently pending request. A
+    /// request must already be present in the newly attached projection; this
+    /// prevents a late attach or an externally answered form from reviving a
+    /// stale draft.
+    pub(super) fn restore_elicitation_draft(&mut self, draft: ChatElicitationDraft) -> bool {
+        let Some(request) = self
+            .elicitation
+            .as_ref()
+            .map(|dialog| dialog.request().clone())
+        else {
+            return false;
+        };
+        if self.elicitation_source() != (draft.reviewer, draft.reviewer_role.as_deref()) {
+            return false;
+        }
+        let Some(dialog) = ElicitationDialog::from_draft(request, draft.form) else {
+            return false;
+        };
+        self.elicitation = Some(dialog);
+        self.elicitation_is_reviewers = draft.reviewer;
+        self.elicitation_role = draft.reviewer_role;
+        true
     }
 
     fn restore_elicitation(&mut self, request: ElicitationRequest) {
@@ -2502,6 +2637,90 @@ mod tests {
                 },
             }],
         }
+    }
+
+    #[test]
+    fn restored_question_drafts_keep_distinct_answers_and_reject_changed_requests() {
+        let request = text_elicitation();
+        let drafts = ["first session", "second session"].map(|answer| {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.restore_elicitation(request.clone());
+            chat.elicitation.as_mut().unwrap().paste(answer);
+            chat.elicitation_draft().unwrap()
+        });
+        for (draft, answer) in drafts.into_iter().zip(["first session", "second session"]) {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            assert!(!chat.restore_elicitation_draft(draft.clone()));
+            let mut changed = request.clone();
+            changed.message = "A different question with the same id".into();
+            chat.restore_elicitation(changed);
+            assert!(!chat.restore_elicitation_draft(draft.clone()));
+            chat.sync_elicitation(std::slice::from_ref(&request));
+            assert!(chat.restore_elicitation_draft(draft.clone()));
+            chat.handle_key(key(KeyCode::Enter));
+            assert_eq!(
+                chat.handle_key(key(KeyCode::Enter)),
+                ChatAction::RespondElicitation {
+                    request: request.clone(),
+                    response: ElicitationResponse::Accept {
+                        content: BTreeMap::from([(
+                            "branch".into(),
+                            hel::hel_elicitation::ElicitationValue::String(answer.into())
+                        )])
+                    },
+                }
+            );
+            chat.sync_elicitation(&[]);
+            assert!(!chat.restore_elicitation_draft(draft));
+        }
+    }
+
+    #[test]
+    fn restored_question_drafts_cannot_change_the_answer_recipient() {
+        let request = text_elicitation();
+        let mut reviewer = ChatState::new(&snapshot(), &[]);
+        reviewer.show_review_role_elicitation(Some("reviewer-a".into()), request.clone());
+        let draft = reviewer.elicitation_draft().unwrap();
+        let mut primary = ChatState::new(&snapshot(), &[]);
+        primary.restore_elicitation(request.clone());
+        assert!(!primary.restore_elicitation_draft(draft.clone()));
+        let mut other_reviewer = ChatState::new(&snapshot(), &[]);
+        other_reviewer.show_review_role_elicitation(Some("reviewer-b".into()), request);
+        assert!(!other_reviewer.restore_elicitation_draft(draft));
+    }
+
+    #[test]
+    fn reviewer_form_reconciliation_drops_stale_forms_and_resurfaces_primary() {
+        let request = hel::hel_elicitation::ElicitationRequest {
+            id: "reviewer-form-1".into(),
+            message: "Allow reading /etc?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        };
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        assert!(chat.show_review_role_elicitation(Some("reviewer-a".into()), request.clone()));
+
+        chat.reconcile_reviewer_elicitation(&[(Some("reviewer-a".into()), request.clone())]);
+        assert!(chat.reviewer_elicitation_open());
+
+        let changed = hel::hel_elicitation::ElicitationRequest {
+            message: "Allow reading /var?".into(),
+            ..request.clone()
+        };
+        chat.reconcile_reviewer_elicitation(&[(Some("reviewer-a".into()), changed.clone())]);
+        assert!(!chat.reviewer_elicitation_open());
+
+        chat.sync_elicitation(std::slice::from_ref(&request));
+        chat.elicitation = None;
+        assert!(chat.show_review_role_elicitation(Some("reviewer-a".into()), changed));
+        chat.reconcile_reviewer_elicitation(&[]);
+        assert!(!chat.reviewer_elicitation_open());
+        assert!(
+            chat.elicitation.is_some(),
+            "primary pending form resurfaced"
+        );
+        assert!(!chat.elicitation_is_reviewers);
     }
 
     /// A pending elicitation is durable projection state, rebuilt from the

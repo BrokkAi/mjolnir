@@ -76,6 +76,8 @@ Worker upgrades still wait without a busy-time ceiling. Once quiet, they preflig
 
 Validation passed with `cargo fmt --all -- --check`, the complete `cargo test` suite, and `cargo clippy --all-targets -- -D warnings`. The isolated restart chaos harness completed five generations and proved the standalone supervisor retained its managed lease through process-tree teardown. On `precision-3260`, disposable session `2173ea20a4152880d663a6bc9eefc865` returned `LIVE_OK`; its launch record selected `managed_remote`, the Kimi ACP process used `/home/jonathan/.cache/mjolnir/harnesses/kimi/kimi-0.41.0/bin/kimi`, its cwd was the disposable project root, and a nonblocking exclusive-lock probe confirmed the lease was held. The session was stopped after validation; its isolated archived state and shared managed Kimi cache were retained rather than force-deleted.
 
+During integration, current master moved the portable target CLI from `mj` into the dedicated `mj-worker` binary. The hidden `prepare-harness` command was ported to that target-side entry point, and the complete test suite, Clippy, musl worker build, and restart chaos harness all passed again on the merged tree.
+
 One unrelated limitation remains visible: the user's ordinary development daemon cannot currently restart its phone server because of an existing dual-rustls-provider panic. That did not affect the isolated managed-harness validation and is not changed by this work.
 
 ## Context and Orientation
@@ -154,3 +156,5 @@ The npm recipe assets are packaged with `brokk-mj-worker` and embedded or copied
 Revision note (2026-09-04): Initial implementation plan created after repository inspection and product decisions; added the required live tmux validation on `precision-3260`.
 
 Revision note (2026-09-04): Recorded the completed implementation, pre-start preparation discovered by live testing, final validation evidence, and the unrelated development-daemon rustls limitation.
+
+Revision note (2026-09-04): Integrated the dedicated portable-worker split from master and revalidated the combined tree and musl chaos artifact.

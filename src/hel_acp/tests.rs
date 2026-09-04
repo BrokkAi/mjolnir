@@ -928,18 +928,24 @@ fn claude_exit_plan_mode_request_is_detected_and_mapped() {
     );
     assert!(review.message.contains("Add --version flag"));
 
-    // Implement approves with the least-privileged edit option, never a
-    // bypass-permissions option.
+    // Guardian implementations use Auto rather than manual edit approvals.
     let mut implement = BTreeMap::new();
     implement.insert(
         PLAN_REVIEW_ACTION.into(),
         ElicitationValue::String("implement".into()),
     );
-    let approved =
-        permission_plan_response(&request, ElicitationResponse::Accept { content: implement });
+    let PlanPermissionAnswer::Native(approved) = policy_plan_permission_answer(
+        &request,
+        ElicitationResponse::Accept { content: implement },
+        HarnessKind::Claude,
+        ExecutionPolicy::ConfiguredApprovals,
+    )
+    .unwrap() else {
+        panic!("Auto is offered by this bridge");
+    };
     assert_eq!(
         serde_json::to_value(approved).unwrap()["outcome"]["optionId"],
-        "default"
+        "auto"
     );
 
     // Declining keeps planning by selecting the reject option instead of

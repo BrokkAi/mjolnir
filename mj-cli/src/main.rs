@@ -14,10 +14,6 @@ mod pollers;
 mod server;
 mod workspace_selector;
 
-#[cfg(all(target_os = "linux", target_env = "musl"))]
-#[global_allocator]
-static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use std::io;
 use std::path::PathBuf;
 
@@ -35,13 +31,8 @@ use crossterm::terminal::{
 use hel::hel_config::{HelConfig, config_path};
 #[cfg(test)]
 use hel::hel_targets::ProcessExecutor;
-use hel::hel_worker_launch::WorkerLaunchConfig;
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_setup::{SetupOutcome, run_setup_dialog};
-use mj_worker::hel_worker_runtime::{
-    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor,
-    run_daemon,
-};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -72,9 +63,6 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
-    /// Internal target-side worker commands.
-    #[command(hide = true)]
-    Worker(WorkerArgs),
     /// Internal controller-side local Git broker.
     #[command(hide = true)]
     Broker(BrokerArgs),
@@ -199,129 +187,10 @@ enum SetupPlatform {
     Macos,
 }
 
-#[derive(Debug, Args)]
-struct WorkerArgs {
-    #[command(subcommand)]
-    command: WorkerCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum WorkerCommand {
-    /// Own an ACP bridge and durable session event log.
-    Run {
-        #[arg(long)]
-        root: PathBuf,
-        #[arg(long)]
-        config: PathBuf,
-    },
-    /// Prepare an exact managed harness without starting a session worker.
-    PrepareHarness {
-        #[arg(long)]
-        config: PathBuf,
-    },
-    /// Proxy JSON-lines between stdio and a detached worker.
-    Proxy {
-        #[arg(long)]
-        root: PathBuf,
-    },
-    /// Supervise the ACP bridge process tree for a worker daemon.
-    AcpSupervisor {
-        #[arg(long)]
-        spec: PathBuf,
-    },
-    /// Build a target-side archive for verified controller transfer.
-    ExportCheckpoint {
-        /// Export specification path, or `-` to read it from standard input.
-        #[arg(long)]
-        spec: PathBuf,
-    },
-    /// Seal target-owned checkpoint inputs while ACP dispatch is frozen.
-    #[command(hide = true)]
-    CaptureCheckpoint,
-    /// Package a sealed checkpoint after ACP dispatch has resumed.
-    #[command(hide = true)]
-    PackCheckpoint,
-    /// Restore a verified archive into a freshly cloned target.
-    RestoreCheckpoint {
-        #[arg(long)]
-        spec: PathBuf,
-    },
-    /// Restore controller-side local repository bootstrap snapshots.
-    RestoreRepositories {
-        #[arg(long)]
-        spec: PathBuf,
-    },
-    /// Install one streamed resource directory on a remote target.
-    InstallResource {
-        #[arg(long)]
-        destination: PathBuf,
-    },
-    /// Serve project memory tools over MCP stdio.
-    MemoryMcp {
-        #[arg(long)]
-        root: PathBuf,
-    },
-    /// Serve the turn review's specialist-dispatch tool over MCP stdio.
-    ReviewMcp {
-        #[arg(long)]
-        socket: PathBuf,
-    },
-    /// Bridge controller Git services to this worker over stdio.
-    GitBridge {
-        #[arg(long)]
-        root: PathBuf,
-    },
-    /// Expose one bridged repository as a Git ext transport.
-    GitProxy {
-        #[arg(long)]
-        root: PathBuf,
-        #[arg(long)]
-        repository: String,
-        service: String,
-    },
-}
-
-/// Record why a worker died where the controller can find it. The daemon's
-/// stdout/stderr go to worker.log; this file is the structured summary read
-/// by `Controller` diagnosis when a worker becomes unreachable.
-fn write_worker_exit_record(root: &std::path::Path, reason: &str) {
-    // Session teardown removes the worker root; recreating it here would
-    // resurrect a closed session's state directory.
-    if !root.is_dir() {
-        return;
-    }
-    let record = serde_json::json!({
-        "reason": reason,
-        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "version": env!("CARGO_PKG_VERSION"),
-    });
-    let bytes = match serde_json::to_vec_pretty(&record) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("Mjolnir: could not serialize worker exit record: {error}");
-            return;
-        }
-    };
-    if let Err(error) = std::fs::write(root.join("worker-exit.json"), bytes) {
-        eprintln!("Mjolnir: could not write worker exit record: {error}");
-    }
-}
-
-/// Capture panics as last words too; the default hook then prints the
-/// backtrace to stderr, which the launch redirect lands in worker.log.
-fn install_worker_last_words(root: &std::path::Path) {
-    let root = root.to_path_buf();
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        write_worker_exit_record(&root, &format!("panic: {info}"));
-        default_hook(info);
-    }));
-}
-
 fn main() -> Result<()> {
     mj_controller::hel_server::install_rustls_crypto_provider();
     let cli = Cli::parse();
-    let is_user_process = !matches!(&cli.command, Some(Command::Worker(_) | Command::Broker(_)));
+    let is_user_process = !matches!(&cli.command, Some(Command::Broker(_)));
     let log = if is_user_process {
         Some(logging::ControllerLog::start(command_name(
             cli.command.as_ref(),
@@ -388,7 +257,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Recover(_)) => "recover",
         Some(Command::Checkpoint(_)) => "checkpoint",
         Some(Command::Login(_)) => "login",
-        Some(Command::Worker(_)) => "worker",
         Some(Command::Broker(_)) => "broker",
     }
 }
@@ -416,62 +284,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Worker(args)) => match args.command {
-            WorkerCommand::Run { root, config } => {
-                lead_process_group();
-                install_worker_last_words(&root);
-                let result = run_daemon(root.clone(), WorkerLaunchConfig::read(&config)?).await;
-                if let Err(error) = &result {
-                    write_worker_exit_record(&root, &format!("{error:#}"));
-                }
-                result
-            }
-            WorkerCommand::PrepareHarness { config } => {
-                prepare_managed_harness(WorkerLaunchConfig::read(&config)?).await
-            }
-            WorkerCommand::Proxy { root } => proxy(root).await,
-            WorkerCommand::AcpSupervisor { spec } => {
-                run_acp_supervisor(AcpSupervisorSpec::read(&spec)?).await
-            }
-            WorkerCommand::ExportCheckpoint { spec } => {
-                let checkpoint = hel::hel_checkpoint::export_from_spec_file(&spec)?;
-                println!("{}", serde_json::to_string(&checkpoint)?);
-                Ok(())
-            }
-            WorkerCommand::CaptureCheckpoint => {
-                let checkpoint =
-                    hel::hel_checkpoint::capture_from_spec_reader(&mut std::io::stdin().lock())?;
-                println!("{}", serde_json::to_string(&checkpoint)?);
-                Ok(())
-            }
-            WorkerCommand::PackCheckpoint => {
-                let checkpoint =
-                    hel::hel_checkpoint::pack_from_spec_reader(&mut std::io::stdin().lock())?;
-                println!("{}", serde_json::to_string(&checkpoint)?);
-                Ok(())
-            }
-            WorkerCommand::RestoreCheckpoint { spec } => {
-                hel::hel_checkpoint::restore_from_spec_file(&spec)
-            }
-            WorkerCommand::RestoreRepositories { spec } => {
-                hel::hel_checkpoint::restore_repositories_from_spec_file(&spec)
-            }
-            WorkerCommand::InstallResource { destination } => {
-                hel::hel_resources::install_resource_stream(std::io::stdin(), &destination)
-            }
-            WorkerCommand::MemoryMcp { root } => hel::hel_project_memory::run_mcp_stdio(&root),
-            WorkerCommand::ReviewMcp { socket } => hel::hel_review::mcp::run_mcp_stdio(&socket),
-            WorkerCommand::GitBridge { root } => {
-                mj_controller::hel_git_proxy::run_worker_bridge(&root).await
-            }
-            WorkerCommand::GitProxy {
-                root,
-                repository,
-                service,
-            } => mj_controller::hel_git_proxy::run_worker_proxy(&root, &repository, &service).await,
-        }
-        .map(|()| DashboardExit::Normal),
-        Some(Command::Broker(args)) => mj_controller::hel_git_proxy::run_broker(&args.spec)
+        Some(Command::Broker(args)) => hel::hel_git_proxy::run_broker(&args.spec)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
@@ -1251,42 +1064,6 @@ mod tests {
         release_tx.send(()).unwrap();
     }
 
-    /// The controller streams a checkpoint spec by asking the worker to read
-    /// `--spec -`, so that dash has to survive argument parsing as a value.
-    #[test]
-    fn export_checkpoint_accepts_a_dash_for_a_streamed_spec() {
-        let cli = Cli::try_parse_from(["hel", "worker", "export-checkpoint", "--spec", "-"])
-            .expect("a streamed spec is a valid export argument");
-        let Some(Command::Worker(WorkerArgs {
-            command: WorkerCommand::ExportCheckpoint { spec },
-        })) = cli.command
-        else {
-            panic!("export-checkpoint did not parse as a worker command");
-        };
-        assert_eq!(spec, PathBuf::from("-"));
-    }
-
-    #[test]
-    fn two_phase_checkpoint_worker_commands_parse_without_file_arguments() {
-        for (name, expected) in [
-            ("capture-checkpoint", "capture"),
-            ("pack-checkpoint", "pack"),
-        ] {
-            let cli = Cli::try_parse_from(["hel", "worker", name]).unwrap();
-            let Some(Command::Worker(WorkerArgs { command })) = cli.command else {
-                panic!("{name} did not parse as a worker command");
-            };
-            assert!(
-                matches!(
-                    (command, expected),
-                    (WorkerCommand::CaptureCheckpoint, "capture")
-                        | (WorkerCommand::PackCheckpoint, "pack")
-                ),
-                "{name} parsed as the wrong worker command"
-            );
-        }
-    }
-
     #[test]
     fn login_uses_the_sole_profile_and_otherwise_demands_a_choice() {
         let mut config = HelConfig::default();
@@ -1323,12 +1100,12 @@ mod tests {
     }
 
     #[test]
-    fn cli_name_and_worker_shape_are_stable() {
+    fn cli_name_and_controller_shape_are_stable() {
         use clap::CommandFactory;
         let command = Cli::command();
         assert_eq!(command.get_name(), "mj");
         assert!(
-            command
+            !command
                 .get_subcommands()
                 .any(|sub| sub.get_name() == "worker")
         );

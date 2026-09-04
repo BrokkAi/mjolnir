@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::hel_git_proxy::{GitBrokerSpec, broker_is_alive, running_broker_pid};
 use hel::hel_archive::{
     ArchiveInput, BundleManifest, GitCollectionSpec, GitHistoryMode, SessionManifest, SystemGit,
     TargetManifest, collect_git_snapshot, write_archive_atomic,
 };
 use hel::hel_checkpoint::RepositoryRestoreSpec;
 use hel::hel_config::{ProjectBundle, TargetTemplate, atomic_write, data_dir};
+use hel::hel_git_proxy::{GitBrokerSpec, broker_is_alive, running_broker_pid};
 use hel::hel_local_git::canonical_repository;
 use hel::hel_projection::canonical_session_from_materialized;
 use hel::hel_state::{HelState, SessionRecord, SessionState, TargetLocator};
@@ -2555,7 +2555,7 @@ mod tests {
     #[test]
     fn retiring_a_session_stops_its_running_broker_and_reports_nothing() {
         if let Some(pid_path) = std::env::var_os(BROKER_STAND_IN_PID_PATH) {
-            let _slot = crate::hel_git_proxy::claim_broker_pid_file(Path::new(&pid_path)).unwrap();
+            let _slot = hel::hel_git_proxy::claim_broker_pid_file(Path::new(&pid_path)).unwrap();
             // Retirement is what ends this process; the sleep only bounds the
             // damage when it fails to.
             std::thread::sleep(Duration::from_secs(60));

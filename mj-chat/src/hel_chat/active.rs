@@ -26,7 +26,7 @@ use mj_controller::hel_session_manager::{
 };
 
 use super::autocomplete::render_autocomplete;
-use super::elicitation::render_elicitation;
+use super::elicitation::render_elicitation_in;
 use super::history::{highlighted_input_lines, history_scope_name, history_search_footer};
 use super::input::{input_cursor_visual_position, input_visual_rows, set_input_cursor};
 use super::remote::{
@@ -40,8 +40,8 @@ use super::second_opinion::{
 };
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
 use super::{
-    ChatAction, ChatEventOutcome, ChatRegions, ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS,
-    Notices, SessionHeaderIdentity, queued_prompt_preview,
+    ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatRegions, ChatSessionContext, ChatState,
+    MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity, queued_prompt_preview,
 };
 
 /// Durable chat-side state that a host process must ask the daemon to store.
@@ -418,6 +418,10 @@ pub struct ActiveChat {
     /// display bookkeeping and nothing more.
     reviewed_roles: BTreeSet<String>,
     persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
+    /// A cached question may arrive in the newly attached review stream a few
+    /// ticks after the chat itself opens. Keep it here until that exact source
+    /// form surfaces, instead of dropping it or applying it to the primary.
+    deferred_elicitation_draft: Option<ChatElicitationDraft>,
 }
 
 impl ActiveChat {
@@ -628,6 +632,7 @@ impl ActiveChat {
             resuming_reviewer: None,
             reviewed_roles: BTreeSet::new(),
             persistence,
+            deferred_elicitation_draft: None,
         };
         if chat.state.second_opinion_split() {
             chat.poll_reviewer_events();
@@ -637,6 +642,65 @@ impl ActiveChat {
 
     pub fn session_id(&self) -> &str {
         self.session.session_id()
+    }
+
+    /// Snapshot every pending question so the host can retain local answers
+    /// while this single warm chat is replaced by another session.
+    pub fn elicitation_draft(&self) -> Option<ChatElicitationDraft> {
+        self.elicitation_drafts().into_iter().next()
+    }
+
+    /// Snapshot every local question that may need to survive this chat's
+    /// replacement. A reviewer form can be deferred while the sidecar stream
+    /// catches up, so it lives alongside the currently visible form.
+    pub fn elicitation_drafts(&self) -> Vec<ChatElicitationDraft> {
+        let mut drafts = self
+            .state
+            .elicitation_draft()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(draft) = self.deferred_elicitation_draft.clone() {
+            drafts.push(draft);
+        }
+        drafts
+    }
+
+    /// Restore all matching drafts collected before this session was
+    /// detached. The state machine decides whether each request is currently
+    /// visible or must wait for the reviewer stream.
+    pub fn restore_elicitation_drafts(&mut self, drafts: Vec<ChatElicitationDraft>) {
+        for draft in drafts {
+            let _ = self.restore_elicitation_draft(draft);
+        }
+    }
+
+    /// Restore a draft only when the newly attached projection is already
+    /// showing the exact same pending request.
+    pub fn restore_elicitation_draft(&mut self, draft: ChatElicitationDraft) -> bool {
+        if self.state.restore_elicitation_draft(draft.clone()) {
+            true
+        } else if self.state.pending_reviewer_matches(&draft) {
+            // The review projection is present, but its native form has not
+            // yet been surfaced by `surface_reviewer_elicitations`.
+            self.deferred_elicitation_draft = Some(draft);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn apply_deferred_elicitation_draft(&mut self) {
+        let Some(draft) = self.deferred_elicitation_draft.take() else {
+            return;
+        };
+        if !self.state.restore_elicitation_draft(draft.clone()) {
+            // Keep it only while the review projection still names this exact
+            // request. An answer, removal, or changed request invalidates it
+            // immediately, including when the primary currently has no form.
+            if self.state.pending_reviewer_matches(&draft) {
+                self.deferred_elicitation_draft = Some(draft);
+            }
+        }
     }
 
     /// Whether a second opinion is open on this session.
@@ -831,6 +895,11 @@ impl ActiveChat {
         self.state.set_turn_review(view);
         if self.state.turn_review().is_none() {
             self.reviewed_roles.clear();
+            // The daemon's review projection is also the authority for
+            // reviewer elicitations. Reconcile here so a form disappears as
+            // soon as an external answer closes the review, even when no
+            // reviewer journal event arrives afterward.
+            self.surface_reviewer_elicitations();
             return;
         }
         // One reader per role, started the first time the daemon names it.
@@ -839,6 +908,7 @@ impl ActiveChat {
                 self.poll_turn_review_role(&role);
             }
         }
+        self.surface_reviewer_elicitations();
     }
 
     /// Mirrors `[review]` into the view, from the config the dashboard drains.
@@ -1029,6 +1099,8 @@ impl ActiveChat {
             return;
         }
         self.session_open = apply_session_view(&mut self.state, view);
+        self.apply_deferred_elicitation_draft();
+        self.surface_reviewer_elicitations();
         if !self.session_open && !self.session_retiring {
             self.begin_session_reconnect();
         }
@@ -1084,6 +1156,7 @@ impl ActiveChat {
                 let view = session.view();
                 self.session = session;
                 self.session_open = apply_session_view(&mut self.state, Ok(view));
+                self.apply_deferred_elicitation_draft();
                 if self.session_open {
                     self.reconnect_notice_pending_sync = true;
                     self.state.set_notice("Reconnected to session relay");
@@ -1709,8 +1782,9 @@ impl ActiveChat {
                     .into_iter()
                     .map(|(role, request)| (Some(role), request))
                     .collect(),
-                (None, None) => return,
+                (None, None) => Vec::new(),
             };
+        self.state.reconcile_reviewer_elicitation(&pending);
         for (role, request) in pending {
             // A reviewer's plan decision is the reviewer proposing work, not
             // the plan under review. It is never shown as the primary's
@@ -1727,6 +1801,7 @@ impl ActiveChat {
                 return;
             }
         }
+        self.apply_deferred_elicitation_draft();
     }
 
     /// Reads the reviewer's journal from where the pane left off.
@@ -2282,7 +2357,7 @@ pub(super) fn render_in(
             .push(SurfaceFrame::fixed(SurfaceId::PromptInput, prompt_inner));
         // The cursor belongs to whatever has focus, so the composer only shows one
         // while the keyboard is driving it.
-        if chat.history_search.is_none() && prompt_focused {
+        if chat.history_search.is_none() && prompt_focused && chat.elicitation.is_none() {
             set_input_cursor(
                 frame,
                 prompt_inner,
@@ -2329,11 +2404,26 @@ pub(super) fn render_in(
         return;
     }
     if let Some(dialog) = chat.elicitation.as_ref() {
-        // The dialog owns the frame's interaction while it is up, so the chat
-        // behind it stops being selectable and the dialog registers its own
-        // surfaces in its place.
+        // The question owns only the session content area while it is up. The
+        // navigator and support panes remain in the host's surface registry,
+        // so they stay clickable even while this form is waiting for an answer.
         chat.frame_surfaces.clear();
-        render_elicitation(frame, dialog, &mut chat.frame_surfaces);
+        let question_area = Rect::new(
+            transcript_area.x,
+            transcript_area.y,
+            transcript_area.width,
+            prompt_area
+                .bottom()
+                .saturating_sub(transcript_area.y)
+                .max(transcript_area.height),
+        );
+        render_elicitation_in(
+            frame,
+            dialog,
+            &mut chat.frame_surfaces,
+            question_area,
+            prompt_focused,
+        );
     }
 }
 
@@ -2382,6 +2472,7 @@ pub(super) fn render_chat_footer(
         footer_area,
     );
     if let Some(search) = chat.history_search.as_ref()
+        && chat.elicitation.is_none()
         && footer_area.width > 0
     {
         let prefix = format!("reverse-i-search [{}]: ", history_scope_name(search.scope));
@@ -2537,13 +2628,13 @@ mod tests {
         snapshot,
     };
     use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigOptionCategory};
-    use hel::hel_elicitation::ElicitationRequest;
+    use hel::hel_elicitation::{ElicitationField, ElicitationFieldKind, ElicitationRequest};
     use hel::hel_transcript::ChatRole;
     use hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST;
     use hel::hel_worker::{SequencedEvent, WorkerEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
     use std::collections::BTreeMap;
 
     fn managed_view(session: MaterializedSession) -> ManagedSessionView {
@@ -2622,7 +2713,7 @@ mod tests {
     }
 
     #[test]
-    fn an_elicitation_overlays_the_chat_instead_of_replacing_it() {
+    fn an_elicitation_is_bounded_to_the_chat_content_area() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.entries.push(ChatEntry::plain(
             1,
@@ -2660,10 +2751,8 @@ mod tests {
 
         let popup_top = row_of("Overlaid dialog");
         row_of("Visible dialog message");
-        // The chat underneath still shows through beyond the modal's blank
-        // halo, but content beneath that halo is deliberately obscured.
-        assert!(row_of("Conversation") < popup_top);
-        assert!(row_of("│ UNDER") < popup_top);
+        // The question occupies the conversation bands, so the underlying
+        // transcript cannot be selected or read through it.
         assert!(
             !lines
                 .iter()
@@ -2719,7 +2808,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_elicitation_replaces_the_chats_surfaces_with_its_own() {
+    fn an_open_elicitation_replaces_only_chat_surfaces_with_its_own() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
             ElicitationRequest {
@@ -2733,8 +2822,8 @@ mod tests {
 
         drawn_transcript(&mut chat, 80, 24);
 
-        // The dialog owns the frame while it is up, so no drag reaches the
-        // chat underneath it and only the dialog's own panes are selectable.
+        // No drag reaches the hidden chat underneath it, while the host can
+        // still append navigator and support-pane surfaces around this chat.
         let surfaces = chat.frame_surfaces();
         let message = surfaces
             .surface(SurfaceId::ElicitationMessage)
@@ -2849,6 +2938,84 @@ mod tests {
             chat.state.notice().as_deref(),
             Some("Reconnected to session relay")
         );
+    }
+
+    #[tokio::test]
+    async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
+        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "session-deferred-review",
+            74,
+        );
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        let request = ElicitationRequest {
+            id: "reviewer-deferred-1".into(),
+            message: "Allow the reviewer to continue?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        };
+        let mut reviewer = ChatState::new(&snapshot(), &[]);
+        assert!(reviewer.show_review_role_elicitation(Some("reviewer-a".into()), request.clone(),));
+        let reviewer_draft = reviewer
+            .elicitation_draft()
+            .expect("reviewer form can be snapshotted");
+
+        // The primary form is visible while the sidecar has not surfaced its
+        // form yet. A session switch must retain both local snapshots so the
+        // reviewer answer is restored when its stream catches up.
+        chat.state.restore_elicitation(request);
+        chat.deferred_elicitation_draft = Some(reviewer_draft);
+        let drafts = chat.elicitation_drafts();
+        assert_eq!(drafts.len(), 2);
+        assert!(drafts.iter().any(|draft| !draft.reviewer()));
+        assert!(
+            drafts
+                .iter()
+                .any(|draft| draft.reviewer() && draft.reviewer_role() == Some("reviewer-a"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_external_review_removal_closes_its_visible_question() {
+        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "session-review-removed",
+            76,
+        );
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        let request = ElicitationRequest {
+            id: "reviewer-removed-1".into(),
+            message: "Allow the reviewer to continue?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        };
+        assert!(
+            chat.state
+                .show_review_role_elicitation(Some("reviewer-a".into()), request)
+        );
+        assert!(chat.state.reviewer_elicitation_open());
+
+        // A missing runtime review is authoritative even when the journal
+        // poll that used to carry the form has no more events.
+        chat.apply_review_view(None);
+        assert!(!chat.state.reviewer_elicitation_open());
+        assert!(chat.elicitation_draft().is_none());
     }
 
     /// A Codex session exposes plan mode through its `collaboration_mode`
@@ -3747,6 +3914,72 @@ mod tests {
             cursor.y > 16 && cursor.y < 21,
             "the cursor sits inside the prompt region: {cursor:?}"
         );
+
+        let boolean_question = ElicitationRequest {
+            id: "boolean-question".into(),
+            message: "Should I continue?".into(),
+            title: None,
+            description: None,
+            fields: vec![ElicitationField {
+                id: "continue".into(),
+                title: "Continue".into(),
+                description: None,
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::Boolean { default: None },
+            }],
+        };
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            boolean_question,
+        ));
+        let mut question_terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        question_terminal
+            .draw(|frame| render_in(frame, &mut chat, regions, true, false))
+            .expect("draw question");
+        question_terminal
+            .backend_mut()
+            .assert_cursor_position((0, 0));
+
+        let text_question = ElicitationRequest {
+            id: "text-question".into(),
+            message: "What should I call it?".into(),
+            title: None,
+            description: None,
+            fields: vec![ElicitationField {
+                id: "name".into(),
+                title: "Name".into(),
+                description: None,
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::Text {
+                    default: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                    format: None,
+                },
+            }],
+        };
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            text_question,
+        ));
+        let mut text_terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        text_terminal
+            .draw(|frame| render_in(frame, &mut chat, regions, true, false))
+            .expect("draw text question");
+        let question_cursor = text_terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("question cursor position");
+        assert!(
+            question_cursor.y < regions.prompt.bottom(),
+            "the text question owns its cursor: {question_cursor:?}"
+        );
+        assert_ne!(question_cursor, Position::new(0, 0));
     }
 
     /// A conversation long enough that opening it converts the tail only.

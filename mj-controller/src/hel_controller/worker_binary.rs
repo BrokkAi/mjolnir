@@ -688,6 +688,24 @@ fn worker_sibling_names(controller: &Path) -> Vec<std::ffi::OsString> {
     names
 }
 
+/// A local-bare session runs on the controller host, so it may use the native
+/// worker built or packaged beside `mj`. Managed targets never consider this
+/// name because a macOS or glibc binary is not portable into Linux targets.
+fn select_native_worker(
+    controller: &Path,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<(PathBuf, &'static str)> {
+    let directory = controller.parent()?;
+    if let (Some(profile), Some(target_dir)) = (directory.file_name(), directory.parent()) {
+        let development_worker = target_dir.join("worker").join(profile).join("mj-worker");
+        if is_file(&development_worker) {
+            return Some((development_worker, "isolated native development worker"));
+        }
+    }
+    let packaged_worker = directory.join("mj-worker");
+    is_file(&packaged_worker).then_some((packaged_worker, "native worker beside mj"))
+}
+
 /// Choose a worker binary that ships beside the controller or in a development
 /// musl sibling directory. `is_file` probes the filesystem; tests pass a
 /// hand-written probe. The static musl sibling is probed before the worker in
@@ -713,6 +731,18 @@ fn select_sibling_worker(
     // is probed before the same-directory worker (which is the controller
     // itself in a development checkout).
     if let (Some(profile), Some(target_dir)) = (directory.file_name(), directory.parent()) {
+        candidates.push((
+            target_dir
+                .join("worker")
+                .join(triple)
+                .join(profile)
+                .join("mj-worker"),
+            "isolated development musl worker",
+        ));
+        candidates.push((
+            target_dir.join(triple).join(profile).join("mj-worker"),
+            "development musl worker",
+        ));
         for name in &names {
             candidates.push((
                 target_dir.join(triple).join(profile).join(name),
@@ -794,15 +824,12 @@ fn worker_binary_prerequisite_for_current(
             source: source.into(),
         });
     }
-    // The native branches survive a replaced controller: they copy
-    // /proc/self/exe, which still names the running image.
-    if cfg!(all(target_os = "linux", target_env = "musl"))
-        && ((arch == "x86_64" && cfg!(target_arch = "x86_64"))
-            || (arch == "aarch64" && cfg!(target_arch = "aarch64")))
+    if requirement == WorkerBinaryRequirement::LocalHost
+        && let Some((path, source)) = select_native_worker(current, is_file)
     {
         return Ok(WorkerBinaryAvailability::Local {
-            path: stable_running_executable(current)?,
-            source: "native musl mj binary".into(),
+            path,
+            source: source.into(),
         });
     }
     if !controller_replaced
@@ -811,16 +838,6 @@ fn worker_binary_prerequisite_for_current(
         return Ok(WorkerBinaryAvailability::Local {
             path,
             source: source.into(),
-        });
-    }
-    if requirement == WorkerBinaryRequirement::LocalHost
-        && cfg!(target_os = "linux")
-        && ((arch == "x86_64" && cfg!(target_arch = "x86_64"))
-            || (arch == "aarch64" && cfg!(target_arch = "aarch64")))
-    {
-        return Ok(WorkerBinaryAvailability::Local {
-            path: stable_running_executable(current)?,
-            source: "native Linux mj binary".into(),
         });
     }
     if let Some(template) = hel::hel_config::env_override("WORKER_URL") {
@@ -926,56 +943,6 @@ pub(super) fn preflight_worker_binary(template: &hel::hel_config::TargetTemplate
         Some(error) => Err(error).context("preflight the worker binary before resuming"),
         None => Ok(()),
     }
-}
-
-fn stable_running_executable(current: &Path) -> Result<PathBuf> {
-    if current.is_file() {
-        return Ok(current.to_path_buf());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let proc_exe = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
-        let directory = data_dir().join("workers").join("running");
-        let cached = directory.join(format!("hel-{}", std::process::id()));
-        materialize_running_executable(current, &proc_exe, &cached)
-    }
-    #[cfg(not(target_os = "linux"))]
-    bail!(
-        "resolved Mjolnir controller executable is no longer readable: {}",
-        current.display()
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn materialize_running_executable(
-    current: &Path,
-    proc_exe: &Path,
-    cached: &Path,
-) -> Result<PathBuf> {
-    if !proc_exe.is_file() {
-        bail!(
-            "resolved Mjolnir controller executable is no longer readable: {}",
-            current.display()
-        );
-    }
-    let parent = cached
-        .parent()
-        .context("worker executable cache has no parent")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create worker executable cache {}", parent.display()))?;
-    std::fs::copy(proc_exe, cached).with_context(|| {
-        format!(
-            "copy running mj executable from {} after {} was replaced",
-            proc_exe.display(),
-            current.display()
-        )
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(cached, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(cached.to_path_buf())
 }
 
 pub(super) fn worker_binary_for(
@@ -2368,7 +2335,8 @@ fn worker_binary_probe_failure(
             Some(format!(
                 "worker binary {binary} fails to run in the target: {detail}; \
                  if this is a loader/glibc error, provide a musl worker \
-                 (cargo build --release --target <arch>-unknown-linux-musl, \
+                 (cargo build --release --target <arch>-unknown-linux-musl \
+                  -p brokk-mj-worker --bin mj-worker, \
                  or set MJ_WORKER_BINARY/MJ_WORKER_DIR)"
             ))
         }
@@ -2504,18 +2472,66 @@ mod tests {
     }
 
     #[test]
-    fn dev_checkout_prefers_the_musl_sibling_over_the_glibc_controller() {
+    fn dev_checkout_prefers_the_dedicated_musl_worker() {
         let controller = PathBuf::from("target/debug/mj");
-        let musl = PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj");
-        // Both the controller (glibc) and its musl sibling exist on disk.
-        let present = [controller.clone(), musl.clone()];
+        let musl = PathBuf::from("target/worker/x86_64-unknown-linux-musl/debug/mj-worker");
+        let shared_target_worker =
+            PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj-worker");
+        let legacy = PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj");
+        let present = [
+            controller.clone(),
+            musl.clone(),
+            shared_target_worker,
+            legacy,
+        ];
         let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
             present.iter().any(|p| p == path)
         });
         assert_eq!(
             selected,
-            Some((musl, "development musl sibling")),
-            "the static musl sibling must win over the glibc controller itself"
+            Some((musl, "isolated development musl worker")),
+            "the dedicated worker must win over legacy artifacts"
+        );
+    }
+
+    #[test]
+    fn local_bare_may_use_a_native_worker_beside_the_controller() {
+        let controller = PathBuf::from("target/debug/mj");
+        let worker = PathBuf::from("target/debug/mj-worker");
+        let selected = worker_binary_prerequisite_for_current(
+            std::env::consts::ARCH,
+            WorkerBinaryRequirement::LocalHost,
+            &controller,
+            &|path| path == controller || path == worker,
+        )
+        .unwrap();
+        assert_eq!(
+            selected,
+            WorkerBinaryAvailability::Local {
+                path: worker,
+                source: "native worker beside mj".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn local_bare_prefers_the_isolated_native_development_worker() {
+        let controller = PathBuf::from("target/debug/mj");
+        let worker = PathBuf::from("target/worker/debug/mj-worker");
+        let packaged = PathBuf::from("target/debug/mj-worker");
+        let selected = worker_binary_prerequisite_for_current(
+            std::env::consts::ARCH,
+            WorkerBinaryRequirement::LocalHost,
+            &controller,
+            &|path| path == controller || path == worker || path == packaged,
+        )
+        .unwrap();
+        assert_eq!(
+            selected,
+            WorkerBinaryAvailability::Local {
+                path: worker,
+                source: "isolated native development worker".into(),
+            }
         );
     }
 
@@ -2848,27 +2864,6 @@ mod tests {
         assert!(failure.contains("provide a musl worker"), "{failure}");
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn replaced_running_executable_is_materialized_for_worker_upload() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempfile::tempdir().unwrap();
-        let replaced = directory.path().join("hel (deleted)");
-        let proc_exe = directory.path().join("proc-exe");
-        let cached = directory.path().join("workers/running/hel-1");
-        std::fs::write(&proc_exe, b"running executable").unwrap();
-
-        assert_eq!(
-            materialize_running_executable(&replaced, &proc_exe, &cached).unwrap(),
-            cached
-        );
-        assert_eq!(std::fs::read(&cached).unwrap(), b"running executable");
-        assert_eq!(
-            std::fs::metadata(&cached).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-    }
     /// A worker that died leaves an exit record behind. Starting a new worker
     /// must clear it first, or the startup connect loop reads the previous
     /// death as this worker's and gives up on a healthy daemon.

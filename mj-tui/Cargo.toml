@@ -12,7 +12,7 @@ publish = true
 workspace = true
 
 [dependencies]
-hel.workspace = true
+hel = { workspace = true, features = ["controller"] }
 mj-controller.workspace = true
 mj-chat.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

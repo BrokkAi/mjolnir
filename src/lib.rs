@@ -1,6 +1,7 @@
 //! Hel's reusable controller, worker, and session-management core.
 
 pub mod clock;
+#[cfg(feature = "controller")]
 pub mod termination;
 
 pub mod hel_acp;
@@ -8,17 +9,22 @@ pub mod hel_archive;
 pub mod hel_checkpoint;
 pub mod hel_config;
 pub mod hel_credentials;
+#[cfg(feature = "controller")]
 pub mod hel_database;
 pub mod hel_diff;
 pub mod hel_elicitation;
+pub mod hel_git_proxy;
 pub mod hel_harness_runtime;
+#[cfg(feature = "controller")]
 pub mod hel_local_git;
 pub mod hel_project_memory;
+#[cfg(feature = "controller")]
 pub mod hel_projection;
 pub mod hel_resources;
 pub mod hel_review;
 pub mod hel_second_opinion;
 pub mod hel_skills;
+#[cfg(feature = "controller")]
 pub mod hel_state;
 pub mod hel_subprocess;
 pub mod hel_targets;

@@ -255,6 +255,8 @@ mod tests {
         assert!(rendered.contains("Command palette"), "{rendered}");
         assert!(rendered.contains("F2"), "{rendered}");
         assert!(rendered.contains("Composer"), "{rendered}");
+        assert!(rendered.contains("F6 / Shift-F6"), "{rendered}");
+        assert!(rendered.contains("Shift-Tab or Shift-F6"), "{rendered}");
     }
 
     /// Help opens over whatever is on screen, so a half-filled wizard has to

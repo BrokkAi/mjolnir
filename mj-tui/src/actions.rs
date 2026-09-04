@@ -447,9 +447,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::CycleFocus,
         label: "Next pane",
-        description: "Move the keyboard down the layout; Shift-Tab reverses it.",
+        description: "Move the keyboard down the layout; Shift-Tab or Shift-F6 reverses it.",
         scope: Scope::Pane,
-        keys: &[KeyHint::plain(KeyCode::Tab, "Tab")],
+        keys: &[
+            KeyHint::plain(KeyCode::Tab, "Tab"),
+            KeyHint::plain(KeyCode::F(6), "F6 / Shift-F6"),
+        ],
         footer: footer_word!("pane"),
         footer_group: FooterGroup::Pane,
         footer_rank: 1,
@@ -569,6 +572,7 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::ResumeDialog,
     CommandId::MarkAllRead,
     CommandId::CycleFocusedPaneSize,
+    CommandId::CycleFocus,
     CommandId::TogglePanePreset,
     CommandId::QuitDetach,
     CommandId::CancelOperation,

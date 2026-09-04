@@ -17,11 +17,10 @@ path = "src/main.rs"
 
 [features]
 default = []
-test-hooks = ["hel/test-hooks", "mj-worker/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"]
+test-hooks = ["hel/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"]
 
 [dependencies]
-hel.workspace = true
-mj-worker.workspace = true
+hel = { workspace = true, features = ["controller"] }
 mj-controller.workspace = true
 mj-chat.workspace = true
 hel-tui.workspace = true
@@ -44,9 +43,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-
-[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
-mimalloc = "0.1"
 
 [dev-dependencies]
 libc = "0.2"

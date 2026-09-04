@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hel::hel_config::HelConfig;
+use hel::hel_elicitation::ElicitationRequest;
 use hel::hel_state::{
     HelState, MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary,
     SessionRecord, SessionResourceAllocation, SessionState, TranscriptBody, TranscriptItem,
@@ -62,6 +63,14 @@ pub(crate) struct SessionDetail {
     pub(crate) transcript: Option<TranscriptSnapshot>,
     pub(crate) transcript_hydration: TranscriptHydration,
     pub(crate) queued_prompts: Vec<hel::hel_worker::QueuedPrompt>,
+    /// Form requests the agent is currently waiting for. This comes from the
+    /// complete materialized projection and drives the dashboard's attention
+    /// indicator without opening a live chat connection.
+    pub(crate) pending_elicitations: Vec<ElicitationRequest>,
+    /// Ordinal paired with `pending_elicitations`. Summary reads can advance
+    /// the general materialized ordinal without carrying a pending-request
+    /// list, so keep this freshness boundary separate.
+    pub(crate) pending_elicitations_applied_event_ordinal: Option<u64>,
     /// What the last projection derived, so the next one only rescans the
     /// transcript items that changed.
     pub(crate) projection: MaterializedProjectionCache,
@@ -216,6 +225,7 @@ pub struct PreparedMaterializedSessionDetail {
     pub(crate) unread_session_restarts: usize,
     pub(crate) transcript: TranscriptSnapshot,
     pub(crate) queued_prompts: Vec<hel::hel_worker::QueuedPrompt>,
+    pub(crate) pending_elicitations: Vec<ElicitationRequest>,
     pub(crate) projection: MaterializedProjectionCache,
 }
 
@@ -391,6 +401,7 @@ impl PreparedMaterializedSessionDetail {
                 created_at_ms: prompt.queued_at_ms,
             })
             .collect();
+        let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
         let session_title = session
@@ -420,6 +431,7 @@ impl PreparedMaterializedSessionDetail {
             unread_session_restarts,
             transcript,
             queued_prompts,
+            pending_elicitations,
             projection: MaterializedProjectionCache {
                 transcript: session.transcript,
                 agent_messages,
@@ -806,6 +818,8 @@ impl DashboardState {
         detail.transcript = Some(prepared.transcript);
         detail.transcript_hydration = TranscriptHydration::Ready;
         detail.queued_prompts = prepared.queued_prompts;
+        detail.pending_elicitations = prepared.pending_elicitations;
+        detail.pending_elicitations_applied_event_ordinal = Some(prepared.applied_event_ordinal);
         detail.projection = prepared.projection;
         if let Some(title) = prepared.session_title.as_ref()
             && let Some(record) = self.state.sessions.get_mut(&prepared.session_id)
@@ -1072,6 +1086,98 @@ mod tests {
         assert_eq!(
             dashboard.session_details["session-1"].unread_agent_messages,
             0
+        );
+    }
+
+    #[test]
+    fn full_materialized_projection_carries_pending_questions_into_session_detail() {
+        let mut session = materialized_session_for("session-1", Vec::new());
+        let request = ElicitationRequest::from_acp_params(
+            "request-1",
+            serde_json::json!({
+                "mode": "form",
+                "sessionId": "session-1",
+                "message": "Choose a path",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"}
+                    }
+                }
+            }),
+        )
+        .expect("valid test question");
+        session.pending_elicitations = vec![request.clone()];
+        let mut dashboard = dashboard_with_session(running_session());
+
+        dashboard.apply_materialized_session(&session);
+
+        assert_eq!(
+            dashboard.session_details["session-1"].pending_elicitations,
+            vec![request]
+        );
+        assert_eq!(dashboard.pending_input_count(), 1);
+
+        let mut answered = session;
+        answered.applied_event_ordinal += 1;
+        answered.pending_elicitations.clear();
+        dashboard.apply_materialized_session(&answered);
+        assert!(
+            dashboard.session_details["session-1"]
+                .pending_elicitations
+                .is_empty()
+        );
+        assert_eq!(dashboard.pending_input_count(), 0);
+    }
+
+    #[test]
+    fn pending_question_ordinal_stays_paired_when_a_newer_summary_arrives() {
+        let mut session = materialized_session_for("session-1", Vec::new());
+        session.applied_event_ordinal = 5;
+        session.pending_elicitations = vec![
+            ElicitationRequest::from_acp_params(
+                "request-1",
+                serde_json::json!({
+                    "mode": "form",
+                    "sessionId": "session-1",
+                    "message": "Choose a path",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}}
+                    }
+                }),
+            )
+            .expect("valid test question"),
+        ];
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.apply_materialized_session(&session);
+        assert_eq!(
+            dashboard
+                .pending_elicitations("session-1")
+                .map(|(ordinal, _)| ordinal),
+            Some(5)
+        );
+
+        let summary = MaterializedSessionSummary {
+            session_id: "session-1".into(),
+            applied_event_ordinal: 6,
+            last_activity_at_ms: None,
+            execution: MaterializedExecutionState::Idle,
+            session_title: None,
+            last_agent_message: None,
+            last_user_message: None,
+            last_agent_message_follows_last_user: false,
+            agent_message_latest_content_ordinals: Vec::new(),
+            session_restart_event_ordinals: Vec::new(),
+        };
+        dashboard.apply_prepared_materialized_session_summary(
+            PreparedMaterializedSessionSummary::from_materialized(summary, 0),
+        );
+        assert_eq!(
+            dashboard
+                .pending_elicitations("session-1")
+                .map(|(ordinal, _)| ordinal),
+            Some(5)
         );
     }
 

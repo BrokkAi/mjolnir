@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # Rebuild the static musl worker, then build and run the host `mj` with the
-# daemon from that same host build.
+# daemon from that same host build. Linux builds only the target-side worker
+# with musl; macOS builds both binaries for the native target so local-bare
+# development remains available without a Linux cross toolchain.
 #
 # Plain `cargo build` targets the host (glibc) and never rebuilds the musl
 # worker under target/<triple>/. A long-lived daemon then hands container and
@@ -24,8 +26,8 @@
 # reconnect. Other hosts retain the existing protocol-version replacement.
 set -euo pipefail
 
-arch="$(uname -m)"
-triple="${arch}-unknown-linux-musl"
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
 
 # Match the run's profile so the daemon finds a current sibling: it looks for
 # the musl worker beside the controller under the same profile directory.
@@ -36,12 +38,32 @@ for arg in "$@"; do
   fi
 done
 
-if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
-  echo "The $triple target is not installed. Run: rustup target add $triple" >&2
-  exit 1
-fi
+case "$(uname -s)" in
+  Linux)
+    case "$(uname -m)" in
+      x86_64 | amd64) arch=x86_64 ;;
+      aarch64 | arm64) arch=aarch64 ;;
+      *)
+        echo "Unsupported Linux architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+    triple="${arch}-unknown-linux-musl"
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+      echo "The $triple target is not installed. Run: rustup target add $triple" >&2
+      exit 1
+    fi
+    cargo build --target-dir target/worker --target "$triple" -p brokk-mj-worker --bin mj-worker "${profile_args[@]}"
+    ;;
+  Darwin)
+    cargo build --target-dir target/worker -p brokk-mj-worker --bin mj-worker "${profile_args[@]}"
+    ;;
+  *)
+    echo "scripts/run.sh supports Linux and macOS hosts" >&2
+    exit 1
+    ;;
+esac
 
-cargo build --target "$triple" -p brokk-mjolnir --bin mj "${profile_args[@]}"
 if [ -e /proc/self/exe ]; then
   export MJ_DEV_RESTART_STALE_DAEMON=1
 fi

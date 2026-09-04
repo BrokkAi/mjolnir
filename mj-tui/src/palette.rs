@@ -423,6 +423,24 @@ mod tests {
         assert!(stop < anywhere, "{lines:#?}");
     }
 
+    #[test]
+    fn palette_exposes_both_focus_cycle_directions() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::F(2)));
+
+        let lines = drawn(&mut dashboard, 120, 44);
+        let next = row_of(&lines, "Next pane").expect("Next pane command");
+        assert!(lines[next].contains("F6 / Shift-F6"), "{lines:#?}");
+        assert!(
+            spec(CommandId::CycleFocus)
+                .description
+                .contains("Shift-Tab or Shift-F6"),
+            "{}",
+            spec(CommandId::CycleFocus).description
+        );
+    }
+
     /// `e` used to open the session edit dialog. The palette replaced it, and
     /// the key is unbound rather than left doing something else.
     #[test]

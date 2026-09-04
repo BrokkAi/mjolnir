@@ -28,7 +28,9 @@ include = [
 name = "hel"
 
 [features]
-default = []
+default = ["controller"]
+controller = ["dep:rusqlite", "dep:signal-hook"]
+worker = []
 test-hooks = []
 
 [workspace]
@@ -62,7 +64,7 @@ rust-version = "1.96"
 # `node scripts/release-version.mjs check` (run in CI) fails when these fall
 # behind the workspace version.
 [workspace.dependencies]
-hel = { path = ".", package = "brokk-mj-core", version = "2.0.0" }
+hel = { path = ".", package = "brokk-mj-core", version = "2.0.0", default-features = false }
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.0.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.0.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.0.0" }
@@ -92,10 +94,10 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Resolves the IANA zone name (e.g. "Europe/Paris") to append to reset times.
 iana-time-zone = "0.1"
 libc = "0.2"
-signal-hook = "0.3"
+signal-hook = { version = "0.3", optional = true }
 rayon = "1"
 regex = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 serde_yaml = "0.9"

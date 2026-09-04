@@ -18,7 +18,7 @@ jobs:
         run: node scripts/release-version.mjs check "$GITHUB_REF_NAME"
 
   # Session workers run inside disposable Linux targets (containers and
-  # instances), so they are static musl builds of the mj binary regardless of
+  # instances), so they are static musl builds of the dedicated worker binary
   # the controller's platform. Desktop bundles ship both architectures beside
   # the controller as mj-worker-<triple>, which is where the controller's
   # worker lookup expects them.
@@ -43,11 +43,11 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --locked --no-default-features --bin mj --target x86_64-unknown-linux-musl
+        run: cargo build --release --locked -p brokk-mj-worker --bin mj-worker --target x86_64-unknown-linux-musl
 
       - name: Verify static binary
         run: |
-          binary=target/x86_64-unknown-linux-musl/release/mj
+          binary=target/x86_64-unknown-linux-musl/release/mj-worker
           if readelf -lW "$binary" | grep 'Requesting program interpreter' >/dev/null; then
             echo 'Worker unexpectedly has a dynamic program interpreter' >&2
             exit 1
@@ -62,7 +62,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mj-worker-x86_64-unknown-linux-musl
-          path: target/x86_64-unknown-linux-musl/release/mj
+          path: target/x86_64-unknown-linux-musl/release/mj-worker
           if-no-files-found: error
 
   build-worker-arm64:
@@ -86,11 +86,11 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
           CC_aarch64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --locked --no-default-features --bin mj --target aarch64-unknown-linux-musl
+        run: cargo build --release --locked -p brokk-mj-worker --bin mj-worker --target aarch64-unknown-linux-musl
 
       - name: Verify static binary
         run: |
-          binary=target/aarch64-unknown-linux-musl/release/mj
+          binary=target/aarch64-unknown-linux-musl/release/mj-worker
           if readelf -lW "$binary" | grep 'Requesting program interpreter' >/dev/null; then
             echo 'Worker unexpectedly has a dynamic program interpreter' >&2
             exit 1
@@ -105,7 +105,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mj-worker-aarch64-unknown-linux-musl
-          path: target/aarch64-unknown-linux-musl/release/mj
+          path: target/aarch64-unknown-linux-musl/release/mj-worker
           if-no-files-found: error
 
   build-linux:
@@ -145,8 +145,8 @@ jobs:
           cp "target/x86_64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/mj-desktop" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
-          cp workers/mj-worker-x86_64-unknown-linux-musl/mj "$name/mj-worker-x86_64-unknown-linux-musl"
-          cp workers/mj-worker-aarch64-unknown-linux-musl/mj "$name/mj-worker-aarch64-unknown-linux-musl"
+          cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
+          cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
@@ -205,8 +205,8 @@ jobs:
           cp "target/aarch64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/mj-desktop" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
-          cp workers/mj-worker-x86_64-unknown-linux-musl/mj "$name/mj-worker-x86_64-unknown-linux-musl"
-          cp workers/mj-worker-aarch64-unknown-linux-musl/mj "$name/mj-worker-aarch64-unknown-linux-musl"
+          cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
+          cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
@@ -236,14 +236,14 @@ jobs:
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
 
-      - name: Build x86_64 controller and desktop binaries
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target x86_64-apple-darwin
+      - name: Build x86_64 controller, local worker, and desktop binaries
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop --target x86_64-apple-darwin
 
       - name: Build x86_64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-apple-darwin
 
-      - name: Build aarch64 controller and desktop binaries
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target aarch64-apple-darwin
+      - name: Build aarch64 controller, local worker, and desktop binaries
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop --target aarch64-apple-darwin
 
       - name: Build aarch64 voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-apple-darwin
@@ -256,6 +256,11 @@ jobs:
             target/aarch64-apple-darwin/release/mj \
             -output target/universal-apple-darwin/release/mj
           lipo -info target/universal-apple-darwin/release/mj
+          lipo -create \
+            target/x86_64-apple-darwin/release/mj-worker \
+            target/aarch64-apple-darwin/release/mj-worker \
+            -output target/universal-apple-darwin/release/mj-worker
+          lipo -info target/universal-apple-darwin/release/mj-worker
           lipo -create \
             target/x86_64-apple-darwin/release/mj-desktop \
             target/aarch64-apple-darwin/release/mj-desktop \
@@ -278,11 +283,12 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-universal-apple-darwin"
           mkdir "$name"
           cp target/universal-apple-darwin/release/mj "$name/"
+          cp target/universal-apple-darwin/release/mj-worker "$name/"
           cp target/universal-apple-darwin/release/mj-desktop "$name/"
           cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
-          cp workers/mj-worker-x86_64-unknown-linux-musl/mj "$name/mj-worker-x86_64-unknown-linux-musl"
-          cp workers/mj-worker-aarch64-unknown-linux-musl/mj "$name/mj-worker-aarch64-unknown-linux-musl"
-          chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
+          cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
+          cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
+          chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
