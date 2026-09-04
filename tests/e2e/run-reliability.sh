@@ -30,10 +30,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z $scenario || -z $seed || $# -ne 1 ]]; then
-    echo "usage: $0 --scenario multi-client-happy-path --seed NUMBER /path/to/hel" >&2
+    echo "usage: $0 --scenario {multi-client-happy-path|active-stop} --seed NUMBER /path/to/hel" >&2
     exit 2
 fi
-if [[ $scenario != multi-client-happy-path ]]; then
+if [[ $scenario != multi-client-happy-path && $scenario != active-stop ]]; then
     echo "unknown reliability scenario: $scenario" >&2
     exit 2
 fi

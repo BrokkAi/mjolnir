@@ -2417,13 +2417,13 @@ async function runSessionAction(dataset, errorNode, extra) {
     navigate({ name: 'conversation', sessionId: dataset.id });
     return;
   }
-  if (
-    dataset.action === 'close' &&
-    !confirm(
-      'Save a recovery copy, stop, and destroy this session target? Queued prompts will be preserved.',
-    )
-  ) {
-    return;
+  if (dataset.action === 'close') {
+    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    const active = session?.chat_phase === 'running';
+    const question = active
+      ? 'Stop active session?\n\nThe current turn will be interrupted. Mjolnir will then save a recovery copy and destroy the target.'
+      : 'Stop session?\n\nMjolnir will save a recovery copy and destroy the target.';
+    if (!confirm(question)) return;
   }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {

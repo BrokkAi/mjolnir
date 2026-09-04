@@ -44,6 +44,8 @@ jobs:
       run: MJ_CHAOS_ISOLATED=1 tests/e2e/run-test-hook-chaos.sh ./target/x86_64-unknown-linux-musl/debug/mj --seed "$RELIABILITY_SEED"
     - name: Run worker topology deaths
       run: MJ_CHAOS_ISOLATED=1 MJ_CHAOS_ARTIFACT_DIR=target/reliability-artifacts/worker-topology tests/e2e/session_restart_chaos.sh ./target/x86_64-unknown-linux-musl/debug/mj
+    - name: Stop and recover an active turn without a barrier wait
+      run: tests/e2e/run-reliability.sh --scenario active-stop --seed "$RELIABILITY_SEED" ./target/x86_64-unknown-linux-musl/debug/mj
     - name: Upload crash evidence
       if: always()
       uses: actions/upload-artifact@v7

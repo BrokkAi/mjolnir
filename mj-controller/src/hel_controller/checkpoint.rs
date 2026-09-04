@@ -37,7 +37,9 @@ use super::{
     scp_command_spec, ssh_command_spec, target_kind, target_profile_home,
 };
 
-/// How long an ordinary checkpoint waits for ACP to admit its barrier.
+/// How long an idle relay may fail to admit a barrier before its worker is
+/// treated as wedged. Busy recovery checkpoints defer immediately, and a
+/// confirmed active close interrupts immediately.
 const CHECKPOINT_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 /// After a wedged ACP forces a worker restart, wait as long as native-session
 /// startup: session/load of a long kimi transcript can outlast 30s.
@@ -770,7 +772,7 @@ impl Controller {
                 {
                     tracing::warn!(
                         session_id,
-                        "ACP did not admit the checkpoint barrier; restarting the worker and retrying: {error:#}"
+                        "checkpoint requires a worker restart; restarting and retrying: {error:#}"
                     );
                     let connection = self
                         .restart_worker_for_checkpoint(
@@ -1218,16 +1220,18 @@ enum BarrierBusyPolicy {
     /// end at the deadline, and the deadline means "wedged", which restarts
     /// the worker and kills the work in flight.
     DeferWhileRunning,
-    /// Wait the session out. Close seals the relay, so it has no later
-    /// attempt to defer to.
-    WaitThrough,
+    /// Interrupt the active turn immediately. Close has already asked the
+    /// person whether to stop it, so waiting for the turn to finish only makes
+    /// Stop look hung. Returning the restart marker here reuses the same
+    /// journal-recovery path as an unreachable barrier without its timeout.
+    InterruptWhileRunning,
 }
 
 impl BarrierBusyPolicy {
     fn of(exclusivity: LatchExclusivity) -> Self {
         match exclusivity {
             LatchExclusivity::ReleaseAfterLatch => Self::DeferWhileRunning,
-            LatchExclusivity::HoldThroughClose => Self::WaitThrough,
+            LatchExclusivity::HoldThroughClose => Self::InterruptWhileRunning,
         }
     }
 }
@@ -1257,8 +1261,8 @@ async fn wait_for_checkpoint_barrier(
 /// keep waiting.
 ///
 /// The deadline means "wedged": it restarts the worker, which kills whatever
-/// the harness had in flight. A session that is simply working is not wedged,
-/// so a caller that can try again later leaves rather than waits.
+/// the harness had in flight. A checkpoint that can try again later defers as
+/// soon as it sees work; a confirmed Stop interrupts that work immediately.
 fn checkpoint_barrier_wait_ended(
     snapshot: &ManagedSessionSnapshot,
     command_id: &str,
@@ -1268,10 +1272,13 @@ fn checkpoint_barrier_wait_ended(
     if snapshot.operational.execution == RelayExecutionState::Closed {
         return Some(CheckpointBarrierUnreachable::runtime_stopped().into());
     }
-    if busy == BarrierBusyPolicy::DeferWhileRunning
-        && snapshot.operational.execution == RelayExecutionState::Running
-    {
-        return Some(CheckpointDeferred::harness_busy().into());
+    if snapshot.operational.execution == RelayExecutionState::Running {
+        return Some(match busy {
+            BarrierBusyPolicy::DeferWhileRunning => CheckpointDeferred::harness_busy().into(),
+            BarrierBusyPolicy::InterruptWhileRunning => {
+                CheckpointBarrierUnreachable::active_turn(command_id).into()
+            }
+        });
     }
     out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into())
 }
@@ -1293,6 +1300,12 @@ impl CheckpointBarrierUnreachable {
     fn not_admitted(command_id: &str) -> Self {
         Self(format!(
             "ACP relay did not reach checkpoint barrier {command_id}"
+        ))
+    }
+
+    fn active_turn(command_id: &str) -> Self {
+        Self(format!(
+            "active ACP turn interrupted before checkpoint barrier {command_id}"
         ))
     }
 }
@@ -2478,7 +2491,7 @@ mod tests {
     /// again later leaves at once instead of waiting out the deadline, which
     /// would restart the worker and kill the turn in flight.
     #[test]
-    fn a_working_session_defers_a_recovery_barrier_instead_of_wedging_it() {
+    fn a_working_session_defers_recovery_but_interrupts_for_close() {
         let cursor = RelayCursor {
             ordinal: 7,
             digest: "a".repeat(64),
@@ -2498,29 +2511,26 @@ mod tests {
             !checkpoint_barrier_needs_worker_restart(&deferred),
             "a deferred copy must never restart the worker: {deferred:#}"
         );
-
-        // Close cannot defer to a later attempt, so it waits the session out
-        // and only the deadline ends its wait.
-        assert!(
-            checkpoint_barrier_wait_ended(
-                &snapshot,
-                "checkpoint-1",
-                BarrierBusyPolicy::WaitThrough,
-                false,
-            )
-            .is_none()
+        assert_eq!(
+            BarrierBusyPolicy::of(LatchExclusivity::HoldThroughClose),
+            BarrierBusyPolicy::InterruptWhileRunning
         );
-        let wedged = checkpoint_barrier_wait_ended(
+
+        // Stop has explicit confirmation to interrupt an active turn, so it
+        // selects the existing restart path immediately instead of spending
+        // the barrier timeout waiting for that turn.
+        let interrupted = checkpoint_barrier_wait_ended(
             &snapshot,
             "checkpoint-1",
-            BarrierBusyPolicy::WaitThrough,
-            true,
+            BarrierBusyPolicy::InterruptWhileRunning,
+            false,
         )
-        .expect("the deadline ends the wait");
+        .expect("an active close interrupts without waiting for the deadline");
         assert!(
-            checkpoint_barrier_needs_worker_restart(&wedged),
-            "{wedged:#}"
+            checkpoint_barrier_needs_worker_restart(&interrupted),
+            "{interrupted:#}"
         );
+        assert!(!checkpoint_was_deferred(&interrupted), "{interrupted:#}");
 
         // An idle session that never admits the barrier is the real wedge,
         // whatever the policy.
@@ -2882,7 +2892,7 @@ mod tests {
             connection,
             &barrier_command_id,
             CHECKPOINT_BARRIER_TIMEOUT,
-            BarrierBusyPolicy::WaitThrough,
+            BarrierBusyPolicy::InterruptWhileRunning,
         )
         .await
         .unwrap();

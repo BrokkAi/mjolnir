@@ -3200,6 +3200,41 @@ if (sent.path !== "/api/actions" || sent.body.workspace_id !== "workspace-b") {
         );
     }
 
+    #[test]
+    fn embedded_viewer_warns_before_stopping_an_active_session() {
+        let source = viewer_source("async function runSessionAction", "sessions.onclick =");
+        let setup = r#"
+const pendingActions = new Set();
+const snapshot = {
+  sessions: [
+    { id: "active", chat_phase: "running" },
+    { id: "idle", chat_phase: "idle" },
+  ],
+};
+const questions = [];
+function confirm(question) { questions.push(question); return false; }
+function navigate() {}
+"#;
+        let checks = r#"
+const errorNode = { textContent: "" };
+await runSessionAction({ action: "close", id: "active" }, errorNode);
+await runSessionAction({ action: "close", id: "idle" }, errorNode);
+if (!questions[0].startsWith("Stop active session?\n\n")) {
+  throw new Error(`active close warning was ${JSON.stringify(questions[0])}`);
+}
+if (!questions[0].includes("current turn will be interrupted")) {
+  throw new Error(`active close omitted interruption: ${JSON.stringify(questions[0])}`);
+}
+if (!questions[1].startsWith("Stop session?\n\n")) {
+  throw new Error(`idle close warning was ${JSON.stringify(questions[1])}`);
+}
+"#;
+        run_viewer_script(
+            "active-session-stop-confirmation",
+            &format!("{setup}\n{source}\n{checks}"),
+        );
+    }
+
     /// The projection publishes what the browser needs to group and filter
     /// without publishing what the redaction contract keeps back. A project
     /// key groups two sessions in one project together and says nothing about
