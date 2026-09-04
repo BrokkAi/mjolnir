@@ -1737,8 +1737,14 @@ fn quota_remaining_percent(window: &QuotaWindow) -> Option<u8> {
 
 const EMPTY_QUOTA_COLOR: Color = Color::DarkGray;
 const EMPTY_QUOTA_CELL: &str = "░";
+const QUOTA_CHART_LEFT_BORDER: &str = "▕";
+const QUOTA_CHART_RIGHT_BORDER: &str = "▏";
 // Both bar kinds occupy the same column, so they must agree on the cell count.
 const QUOTA_BAR_CELLS: usize = 10;
+
+fn quota_chart_border_style() -> Style {
+    Style::default().fg(Color::DarkGray).bg(Color::Black)
+}
 
 fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
     const CELLS: usize = QUOTA_BAR_CELLS;
@@ -1758,28 +1764,30 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
         21..=50 => Color::Yellow,
         _ => Color::Green,
     };
-    let bar_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let bar_style = Style::default()
+        .fg(color)
+        .bg(Color::Black)
+        .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled("█".repeat(full_cells), bar_style),
         Span::styled(partial.to_string(), bar_style),
         Span::styled(
             EMPTY_QUOTA_CELL.repeat(empty_cells),
-            Style::default().fg(EMPTY_QUOTA_COLOR),
+            Style::default().fg(EMPTY_QUOTA_COLOR).bg(Color::Black),
         ),
+        // This replaces the separator before the percentage, keeping the
+        // line's width unchanged while closing the chart on its right edge.
+        Span::styled(QUOTA_CHART_RIGHT_BORDER, quota_chart_border_style()),
         Span::styled(
-            format!(" {remaining:>3}%"),
+            format!("{remaining:>3}%"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ])
 }
 
-/// Renders the API label centered in a field of the same depleted-quota
-/// shading the bars use, with the label cells left unshaded.
-///
-/// The depleted bar has no background color to copy: it is `EMPTY_QUOTA_COLOR`
-/// seen through a glyph that covers about a quarter of each cell, so its
-/// apparent shade exists only in the eye. Reusing the glyph reproduces that
-/// shade exactly under any terminal theme or font, which a fixed color cannot.
+/// Renders the API label centered in depleted-quota glyphs, with the label
+/// cells left unshaded. This is a usage-pricing marker rather than a capacity
+/// chart, so it keeps the terminal background and does not receive chart rails.
 fn api_quota_bar() -> Line<'static> {
     let label = mj_controller::hel_quota::API_LABEL;
     let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
@@ -1902,22 +1910,49 @@ struct QuotaTableRow {
     profile: String,
     harness: String,
     weekly: Line<'static>,
+    weekly_chart: bool,
     weekly_reset: String,
     five_hour: Line<'static>,
+    five_hour_chart: bool,
     five_hour_reset: String,
 }
 
 impl QuotaTableRow {
-    fn into_row(self) -> Row<'static> {
+    fn into_row(self, widths: [u16; 6]) -> Row<'static> {
         Row::new([
             Cell::from(self.profile),
-            Cell::from(self.harness),
+            Cell::from(cell_before_quota_chart(
+                self.harness,
+                widths[1],
+                self.weekly_chart,
+            )),
             Cell::from(self.weekly),
-            Cell::from(self.weekly_reset),
+            Cell::from(cell_before_quota_chart(
+                self.weekly_reset,
+                widths[3],
+                self.five_hour_chart,
+            )),
             Cell::from(self.five_hour),
             Cell::from(self.five_hour_reset),
         ])
     }
+}
+
+/// Uses the last of a table separator's two cells as the left chart rail.
+/// The following chart therefore starts in exactly the same column as before.
+fn cell_before_quota_chart(text: String, width: u16, chart_follows: bool) -> Line<'static> {
+    if !chart_follows {
+        return Line::raw(text);
+    }
+    let text = crate::widgets::truncate_text(&text, usize::from(width));
+    let padding = usize::from(width)
+        .saturating_sub(Line::raw(text.as_str()).width())
+        .saturating_add(1);
+    Line::from(vec![
+        Span::raw(text),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(QUOTA_CHART_LEFT_BORDER, quota_chart_border_style()),
+    ])
 }
 
 fn quota_column_width(
@@ -1944,13 +1979,15 @@ pub(crate) fn render_quotas(
         .profiles
         .iter()
         .map(|(id, profile)| {
-            let (weekly, weekly_reset, five_hour, five_hour_reset) =
+            let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
                 if profile.kind == HarnessKind::Deepseek {
                     (
                         api_quota_bar(),
                         String::new(),
                         Line::default(),
                         String::new(),
+                        false,
+                        false,
                     )
                 } else if dashboard.quota_refreshing.contains(id) {
                     (
@@ -1958,16 +1995,24 @@ pub(crate) fn render_quotas(
                         String::new(),
                         Line::default(),
                         String::new(),
+                        false,
+                        false,
                     )
                 } else {
                     match dashboard.quotas.get(id) {
                         Some(quota) if quota.error.is_none() => {
                             let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
+                            let weekly = quota_bar(quota.weekly_window());
+                            let five_hour = five_hour_quota_bar(quota);
+                            let weekly_chart = !weekly.spans.is_empty();
+                            let five_hour_chart = !five_hour.spans.is_empty();
                             (
-                                quota_bar(quota.weekly_window()),
+                                weekly,
                                 weekly_reset,
-                                five_hour_quota_bar(quota),
+                                five_hour,
                                 five_hour_reset,
+                                weekly_chart,
+                                five_hour_chart,
                             )
                         }
                         Some(quota) => (
@@ -1979,12 +2024,16 @@ pub(crate) fn render_quotas(
                             String::new(),
                             Line::default(),
                             String::new(),
+                            false,
+                            false,
                         ),
                         None => (
                             Line::raw("refreshing…"),
                             String::new(),
                             Line::default(),
                             String::new(),
+                            false,
+                            false,
                         ),
                     }
                 };
@@ -1992,8 +2041,10 @@ pub(crate) fn render_quotas(
                 profile: id.clone(),
                 harness: profile.kind.display_name().into(),
                 weekly,
+                weekly_chart,
                 weekly_reset,
                 five_hour,
+                five_hour_chart,
                 five_hour_reset,
             }
         })
@@ -2026,7 +2077,7 @@ pub(crate) fn render_quotas(
     } else {
         BorderType::Plain
     };
-    let widths = [
+    let content_widths = [
         quota_column_width(
             "Profile",
             rows.iter()
@@ -2053,27 +2104,35 @@ pub(crate) fn render_quotas(
                 .map(|row| Line::raw(row.five_hour_reset.as_str()).width()),
             24,
         ),
-    ]
-    .map(Constraint::Length);
+    ];
+    // Fold the old two-cell inter-column spacing into every non-final column.
+    // Rows can then paint either of those cells as a chart rail without moving
+    // any column or changing the table's total width.
+    let widths: [Constraint; 6] = std::array::from_fn(|index| {
+        Constraint::Length(content_widths[index].saturating_add(if index < 5 { 2 } else { 0 }))
+    });
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type)
         .title(title);
     let block = size.map_or(block.clone(), |size| block.title(pane_size_controls(size)));
-    let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
-        .column_spacing(2)
-        .header(
-            Row::new(["Profile", "Harness", "Weekly", "Resets", "5H", "Resets"])
-                .style(Style::default().add_modifier(Modifier::BOLD)),
-        )
-        .row_highlight_style(if quotas_focused {
-            Style::default().bg(Color::DarkGray).fg(Color::White)
-        } else {
-            Style::default()
-        })
-        .highlight_symbol(if quotas_focused { "› " } else { "  " })
-        .highlight_spacing(HighlightSpacing::Always)
-        .block(block);
+    let table = Table::new(
+        rows.into_iter().map(|row| row.into_row(content_widths)),
+        widths,
+    )
+    .column_spacing(0)
+    .header(
+        Row::new(["Profile", "Harness", "Weekly", "Resets", "5H", "Resets"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(if quotas_focused {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    } else {
+        Style::default()
+    })
+    .highlight_symbol(if quotas_focused { "› " } else { "  " })
+    .highlight_spacing(HighlightSpacing::Always)
+    .block(block);
     let mut offset = dashboard.quota_scroll.get();
     if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Quota) {
         let row_heights = vec![1; dashboard.config.profiles.len()];
@@ -5243,11 +5302,19 @@ mod tests {
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>(),
-            "███████▎░░  73%"
+            "███████▎░░▏ 73%"
         );
         assert_eq!(bar.spans[0].style.fg, Some(Color::Green));
         assert_eq!(bar.spans[2].style.fg, Some(Color::DarkGray));
-        assert_eq!(bar.spans[2].style.bg, None);
+        assert!(
+            bar.spans[..4]
+                .iter()
+                .all(|span| span.style.bg == Some(Color::Black))
+        );
+        assert_eq!(bar.spans[3].style.fg, Some(Color::DarkGray));
+        let before = cell_before_quota_chart("Codex".into(), 7, true);
+        assert_eq!(before.to_string(), "Codex   ▕");
+        assert_eq!(before.spans[2].style, quota_chart_border_style());
         assert!(quota_bar(None).spans.is_empty());
     }
 
@@ -5267,13 +5334,13 @@ mod tests {
 
         let rendered: String = api.spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(rendered, "░░░API░░░░");
-        // The padding must be the bar's own glyph and color, so the two match
-        // whatever the terminal maps them to.
+        // The usage-priced marker keeps the depleted bar's glyph and
+        // foreground, but is not a chart and therefore does not paint the
+        // chart's black background.
         for padding in [&api.spans[0], &api.spans[2]] {
             assert_eq!(padding.style.fg, shading.style.fg);
-            assert_eq!(padding.style.bg, shading.style.bg);
+            assert_eq!(padding.style.bg, None);
         }
-        // A painted background would not match a glyph-shaded cell.
         assert!(api.spans.iter().all(|span| span.style.bg.is_none()));
     }
 
@@ -5465,6 +5532,8 @@ mod tests {
             .iter()
             .find(|line| line.contains("codex-1"))
             .expect("quota row");
+        assert!(row.contains("▕███████▎░░▏ 73%"), "{row:?}");
+        assert!(row.contains("▕███████░░░▏ 70%"), "{row:?}");
         let weekly_percent = cell_column(row, "73%");
         let weekly_reset = cell_column(row, "2d");
         let five_hour_percent = cell_column(row, "70%");
