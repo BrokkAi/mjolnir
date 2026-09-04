@@ -36,6 +36,16 @@ use hel::hel_config::{HelConfig, TargetTemplate, validate_id};
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
 use hel::hel_state::{HelState, SessionState};
 
+/// Select the process-wide rustls provider before any TLS configuration is built.
+///
+/// Dependency feature unification can enable both rustls providers. Rustls
+/// deliberately refuses to guess in that case, so each executable that links
+/// the controller installs the ring provider at process startup. A provider
+/// installed even earlier is already sufficient and remains in place.
+pub fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub const COOKIE_NAME: &str = "hel_viewer_session";
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const EPHEMERAL_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -2580,6 +2590,14 @@ mod tests {
     use hel::hel_state::{STATE_VERSION, SessionRecord};
 
     #[test]
+    fn unified_tls_backends_use_the_selected_crypto_provider() {
+        install_rustls_crypto_provider();
+
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        let _builder = rustls::ServerConfig::builder();
+    }
+
+    #[test]
     fn minted_desktop_cookie_validates_and_names_a_viewer() {
         let key = vec![7u8; COOKIE_KEY_BYTES];
         let value = mint_desktop_session_cookie(&key).unwrap();
@@ -3196,6 +3214,41 @@ if (sent.path !== "/api/actions" || sent.body.workspace_id !== "workspace-b") {
 "#;
         run_viewer_script(
             "resume-workspace-destination",
+            &format!("{setup}\n{source}\n{checks}"),
+        );
+    }
+
+    #[test]
+    fn embedded_viewer_warns_before_stopping_an_active_session() {
+        let source = viewer_source("async function runSessionAction", "sessions.onclick =");
+        let setup = r#"
+const pendingActions = new Set();
+const snapshot = {
+  sessions: [
+    { id: "active", chat_phase: "running" },
+    { id: "idle", chat_phase: "idle" },
+  ],
+};
+const questions = [];
+function confirm(question) { questions.push(question); return false; }
+function navigate() {}
+"#;
+        let checks = r#"
+const errorNode = { textContent: "" };
+await runSessionAction({ action: "close", id: "active" }, errorNode);
+await runSessionAction({ action: "close", id: "idle" }, errorNode);
+if (!questions[0].startsWith("Stop active session?\n\n")) {
+  throw new Error(`active close warning was ${JSON.stringify(questions[0])}`);
+}
+if (!questions[0].includes("current turn will be interrupted")) {
+  throw new Error(`active close omitted interruption: ${JSON.stringify(questions[0])}`);
+}
+if (!questions[1].startsWith("Stop session?\n\n")) {
+  throw new Error(`idle close warning was ${JSON.stringify(questions[1])}`);
+}
+"#;
+        run_viewer_script(
+            "active-session-stop-confirmation",
             &format!("{setup}\n{source}\n{checks}"),
         );
     }

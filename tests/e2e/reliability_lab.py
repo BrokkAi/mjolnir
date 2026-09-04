@@ -336,7 +336,7 @@ class Lab:
                 "MJ_CONFIG_DIR": str(self.config),
                 "MJ_DATA_DIR": str(self.data),
                 "MJ_CHAOS_ISOLATED": "1",
-                "RUST_LOG": "hel=debug,hel_cli=debug",
+                "RUST_LOG": "hel=debug,mj=debug,mj_controller=debug",
             }
         )
         env.pop("MJ_DAEMON_EXIT_WHEN_IDLE", None)
@@ -351,7 +351,15 @@ class Lab:
             listener.bind(("127.0.0.1", 0))
             return int(listener.getsockname()[1])
 
-    def prepare(self, *, phone_tls: bool = False, fake_acp_delay_ms: int = 0) -> int:
+    def prepare(
+        self,
+        *,
+        phone_tls: bool = False,
+        fake_acp_delay_ms: int = 0,
+        fake_acp_prompt_delay_ms: int | None = None,
+    ) -> int:
+        if fake_acp_prompt_delay_ms is None:
+            fake_acp_prompt_delay_ms = fake_acp_delay_ms
         self.git_output(["init", "--initial-branch=main"], self.project)
         self.git_output(["config", "user.name", "Hel Reliability"], self.project)
         self.git_output(["config", "user.email", "reliability@invalid"], self.project)
@@ -388,7 +396,7 @@ def delay():
         time.sleep(delay_ms / 1000)
 
 def wait_for_prompt_cancel():
-    delay_ms = int(os.environ.get("MJ_FAKE_ACP_DELAY_MS", "0"))
+    delay_ms = int(os.environ.get("MJ_FAKE_ACP_PROMPT_DELAY_MS", "0"))
     if delay_ms <= 0:
         return False
     ready, _, _ = select.select([sys.stdin], [], [], delay_ms / 1000)
@@ -513,7 +521,7 @@ tailscale_detect = false
 kind = "codex"
 home = {json.dumps(str(self.profile))}
 executable = {json.dumps(str(bridge))}
-environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, PATH = {json.dumps(str(fixture_bin))} }}
+environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, PATH = {json.dumps(str(fixture_bin))} }}
 
 [bundles.fixture]
 primary_repo = "fixture"
@@ -891,10 +899,157 @@ kind = "local-bare"
         self.trace["outcome"] = "passed"
         self.write_trace()
 
+    def run_active_stop(self) -> None:
+        # The prompt outlives the old 30-second close grace period. A passing
+        # run therefore proves Stop took the confirmed interruption path; it
+        # cannot accidentally pass by waiting for the fake agent to finish.
+        port = self.prepare(fake_acp_prompt_delay_ms=60_000)
+        client = self.start_tui("tui-1")
+        client.wait_for("Workspaces")
+        client.send(b"\r\r")
+        client.wait_for("Sessions")
+        code, _ = self.wait_daemon_status(port)
+        self.base_url = f"http://127.0.0.1:{port}"
+        status, _ = self.request("POST", "/auth/session", {"code": code})
+        if status != 204:
+            raise ScenarioFailure(f"web login returned {status}")
+
+        workspace = self.snapshot()["workspaces"][0]
+        title = f"active-stop-{self.seed}"
+        status, _ = self.request(
+            "POST",
+            "/api/actions",
+            {
+                "action": "new",
+                "workspace_id": workspace["id"],
+                "profile_id": "fake",
+                "bundle_id": "fixture",
+                "target_id": "localhost",
+                "title": title,
+                "project_directory": str(self.project),
+            },
+        )
+        if status != 202:
+            raise ScenarioFailure(f"new action returned {status}")
+        running = self.wait_snapshot(
+            lambda value: any(
+                item.get("title") == title and item.get("state") == "running"
+                for item in value.get("sessions", [])
+            ),
+            "running active-stop session",
+        )
+        session = next(item for item in running["sessions"] if item["title"] == title)
+        session_id = str(session["id"])
+
+        prompt = f"active stop seed={self.seed}"
+        status, _ = self.request(
+            "POST",
+            "/api/actions",
+            {"action": "prompt", "session_id": session_id, "text": prompt},
+        )
+        if status != 202:
+            raise ScenarioFailure(f"prompt action returned {status}")
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("chat_phase")
+            == "running",
+            "active prompt before Stop",
+        )
+        self.record_action("active-prompt", session_id=session_id, text=prompt)
+
+        started = time.monotonic()
+        status, _ = self.request(
+            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+        )
+        if status != 202:
+            raise ScenarioFailure(f"active close action returned {status}")
+        stopped = self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("state") == "stopped",
+            "active session to stop without the barrier grace period",
+        )
+        elapsed = time.monotonic() - started
+        if elapsed >= 15:
+            raise ScenarioFailure(
+                f"active Stop took {elapsed:.3f}s; expected interruption before the old 30s barrier timeout"
+            )
+        stopped_session = self.session(stopped, session_id) or {}
+        if not stopped_session.get("capabilities", {}).get("resume"):
+            raise ScenarioFailure("active Stop did not leave a resumable recovery archive")
+        self.record_action("active-stop", session_id=session_id, elapsed_seconds=elapsed)
+
+        marker = "active ACP turn interrupted before checkpoint barrier"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            logs = self.data / "logs"
+            text = "\n".join(
+                path.read_text(errors="replace") for path in logs.glob("*.log")
+            )
+            if marker in text:
+                break
+            time.sleep(0.05)
+        else:
+            raise ScenarioFailure("controller log did not record active-turn preemption")
+
+        status, _ = self.request(
+            "POST",
+            "/api/actions",
+            {
+                "action": "resume",
+                "session_id": session_id,
+                "workspace_id": workspace["id"],
+                "profile_id": "fake",
+                "target_id": "localhost",
+                "queue": "start",
+            },
+        )
+        if status != 202:
+            raise ScenarioFailure(f"resume after active Stop returned {status}")
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("state") == "running",
+            "session resumed from active Stop archive",
+        )
+        status, transcript = self.request("GET", f"/api/conversations/{session_id}")
+        if status != 200 or not isinstance(transcript, dict):
+            raise ScenarioFailure(f"resumed transcript returned {status}: {transcript!r}")
+        lines = [
+            line
+            for entry in transcript.get("entries", [])
+            for line in entry.get("lines", [])
+        ]
+        if lines.count(prompt) != 1:
+            raise ScenarioFailure(
+                f"interrupted prompt was not recovered exactly once: {lines!r}"
+            )
+        (self.root / "browser-transcript.json").write_text(
+            json.dumps(transcript, indent=2, sort_keys=True) + "\n"
+        )
+
+        status, _ = self.request(
+            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+        )
+        if status != 202:
+            raise ScenarioFailure(f"cleanup close returned {status}")
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("state") == "stopped",
+            "resumed session cleanup",
+        )
+        client.quit()
+        self.record_process("stopped", "tui-1", client.process.pid)
+        self.stop_daemon()
+        self.integrity()
+        leaks = self.owned_pids()
+        if leaks:
+            raise ScenarioFailure(f"owned processes remained after active Stop: {leaks}")
+        self.capture_process_tree()
+        self.trace["finished_at"] = self.timestamp()
+        self.trace["outcome"] = "passed"
+        self.write_trace()
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", required=True)
+    parser.add_argument(
+        "--scenario", choices=["multi-client-happy-path", "active-stop"], required=True
+    )
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--hel", required=True, type=pathlib.Path)
     return parser.parse_args()
@@ -905,7 +1060,10 @@ def main() -> int:
     lab = Lab(args.hel, args.scenario, args.seed)
     print(f"reliability: artifacts={lab.root}", flush=True)
     try:
-        lab.run()
+        if args.scenario == "active-stop":
+            lab.run_active_stop()
+        else:
+            lab.run()
     except BaseException as error:
         lab.capture_process_tree()
         lab.trace["finished_at"] = lab.timestamp()
@@ -929,7 +1087,7 @@ def main() -> int:
     lab.preserve_runtime()
     lab.remove_runtime()
     print(
-        f"reliability: passed scenario={args.scenario} seed={args.seed} clients=3 leaks=0",
+        f"reliability: passed scenario={args.scenario} seed={args.seed} leaks=0",
         flush=True,
     )
     return 0

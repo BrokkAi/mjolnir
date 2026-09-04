@@ -182,6 +182,10 @@ pub(crate) enum Confirmation {
     },
     Close {
         session_id: String,
+        /// Whether the latest relay projection has a turn in flight. The
+        /// controller checks authoritatively at close time; this only chooses
+        /// the warning the person sees.
+        active_turn: bool,
         /// Whether a second opinion is open on this session. Stopping tears
         /// the target down, and the reviewer's conversation goes with it.
         reviewer_conversation: bool,
@@ -1123,13 +1127,23 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
         }
         Confirmation::Close {
             session_id,
+            active_turn,
             reviewer_conversation,
         } => {
-            let mut lines = vec![
-                Line::raw(format!("Session: {session_id}")),
-                Line::raw(""),
-                Line::raw("Mjolnir will verify a recovery copy before destroying the target."),
-            ];
+            let mut lines = vec![Line::raw(format!("Session: {session_id}")), Line::raw("")];
+            if *active_turn {
+                lines.extend([
+                    Line::styled(
+                        "Mjolnir will interrupt the current turn.",
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Line::raw("It will then save a recovery copy and destroy the target."),
+                ]);
+            } else {
+                lines.push(Line::raw(
+                    "Mjolnir will verify a recovery copy before destroying the target.",
+                ));
+            }
             if *reviewer_conversation {
                 // The reviewer's native session lives on the target, and a v1
                 // checkpoint is single session, so resuming cannot bring it
@@ -1143,7 +1157,11 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                     "Its review is kept for reference; a later one starts a new conversation.",
                 ));
             }
-            (" Stop session? ", lines)
+            if *active_turn {
+                (" Stop active session? ", lines)
+            } else {
+                (" Stop session? ", lines)
+            }
         }
         Confirmation::DestroyStopped { session_id, .. } => (
             " Permanently destroy stopped session? ",
@@ -3119,9 +3137,46 @@ mod tests {
     }
 
     #[test]
+    fn stopping_an_active_turn_names_and_explains_the_interruption() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .expect("session detail")
+            .current_turn_started_at = Some(1_000);
+
+        open_stop_dialog(&mut dashboard);
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("expected stop confirmation");
+        };
+        let Confirmation::Close { active_turn, .. } = &dialog.confirmation else {
+            panic!("expected close confirmation");
+        };
+        assert!(*active_turn);
+        let (title, lines) = confirmation_body(&dialog.confirmation);
+        assert_eq!(title, " Stop active session? ");
+        assert!(
+            lines.iter().any(|line| line.spans.iter().any(|span| {
+                span.content
+                    .contains("Mjolnir will interrupt the current turn")
+            })),
+            "active stop did not explain its interruption: {lines:?}"
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::Close {
+                session_id: "session-1".into()
+            }
+        );
+    }
+
+    #[test]
     fn stopping_a_session_warns_about_a_review_it_would_end() {
         let quiet = confirmation_lines(&Confirmation::Close {
             session_id: "session-1".into(),
+            active_turn: false,
             reviewer_conversation: false,
         });
         assert!(
@@ -3131,6 +3186,7 @@ mod tests {
 
         let warned = confirmation_lines(&Confirmation::Close {
             session_id: "session-1".into(),
+            active_turn: false,
             reviewer_conversation: true,
         });
         assert!(
@@ -3143,6 +3199,7 @@ mod tests {
         assert_eq!(
             confirmation_buttons(&Confirmation::Close {
                 session_id: "session-1".into(),
+                active_turn: false,
                 reviewer_conversation: true,
             }),
             &["Cancel", "Stop"]
@@ -3168,12 +3225,14 @@ mod tests {
         let confirmations = [
             Confirmation::Close {
                 session_id: "session-1".into(),
+                active_turn: false,
                 reviewer_conversation: false,
             },
             // The warning adds rows, so the taller variant has to keep its
             // buttons on screen too.
             Confirmation::Close {
                 session_id: "session-1".into(),
+                active_turn: true,
                 reviewer_conversation: true,
             },
             Confirmation::DestroyStopped {

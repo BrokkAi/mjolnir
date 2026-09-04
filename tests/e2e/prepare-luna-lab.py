@@ -26,7 +26,7 @@ def main() -> int:
         "MJ_CONFIG_DIR": str(lab.config),
         "MJ_DATA_DIR": str(lab.data),
         "MJ_CHAOS_ISOLATED": "1",
-        "RUST_LOG": "hel=debug,hel_cli=debug",
+        "RUST_LOG": "hel=debug,mj=debug,mj_controller=debug",
         "MJ_LUNA_ARTIFACTS": str(lab.root),
         "MJ_LUNA_RUNTIME_ROOT": str(lab.runtime_root),
         "MJ_LUNA_PORT": str(port),
