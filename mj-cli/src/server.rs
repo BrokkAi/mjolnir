@@ -1905,14 +1905,15 @@ fn viewer_operation(
             // how much the controller tears down behind it.
             crate::daemon::RuntimeLifecycleKind::Close
             | crate::daemon::RuntimeLifecycleKind::ForceStop
-            | crate::daemon::RuntimeLifecycleKind::DestroyStopped => ViewerOperationKind::Stop,
+            | crate::daemon::RuntimeLifecycleKind::DestroyStopped
+            | crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Stop,
         },
         started_at_epoch_seconds: view.started_at_epoch_seconds,
         stages: view
             .active_stages
             .iter()
             .map(|(stage, started_at)| ViewerOperationStage {
-                label: stage.label().to_owned(),
+                label: stage.label(),
                 started_at_epoch_seconds: *started_at,
             })
             .collect(),

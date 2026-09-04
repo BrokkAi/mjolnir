@@ -31,8 +31,13 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        self.close_session_controlled_with_manager(session_id, executor, None)
-            .await
+        if self
+            .close_session_controlled_with_manager(session_id, executor, None)
+            .await?
+        {
+            self.cleanup_stopped_target(session_id, executor)?;
+        }
+        Ok(())
     }
 
     pub async fn close_session_managed_controlled(
@@ -40,7 +45,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.close_session_controlled_with_manager(session_id, executor, Some(manager))
             .await
     }
@@ -50,7 +55,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let previous = self
             .state
             .sessions
@@ -145,13 +150,13 @@ impl Controller {
         }
         latched.relay.release();
 
-        if let Err(error) =
-            self.destroy_after_verified_checkpoint(session_id, &artifact.metadata, executor)
-        {
-            self.record_interrupted_close(session_id, &error)?;
-            return Err(error);
+        match self.destroy_after_verified_checkpoint(session_id, &artifact.metadata, executor) {
+            Ok(deferred) => Ok(deferred),
+            Err(error) => {
+                self.record_interrupted_close(session_id, &error)?;
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     /// Resume the durable closing state after a controller restart. If the
@@ -164,7 +169,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let (state, verified) = {
             let session = self
                 .state
@@ -223,7 +228,7 @@ impl Controller {
         session_id: &str,
         verified: &CheckpointMetadata,
         executor: &impl CommandExecutor,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.destroy_after_verified_checkpoint_with(
             session_id,
             verified,
@@ -238,7 +243,7 @@ impl Controller {
         verified: &CheckpointMetadata,
         executor: &impl CommandExecutor,
         persist: impl Fn(&SessionRecord) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let session = self
             .state
             .sessions
@@ -297,44 +302,22 @@ impl Controller {
             .as_ref()
             .context("session has no target")?;
         let backend = backend_locator(locator, &destroying, &self.config)?;
-        if let Err(cleanup_error) = hel_targets::close_plan(&backend, session_id)?.execute(executor)
-        {
-            match hel_targets::cleanup_target_is_confirmed_absent(&backend, session_id, executor) {
-                Ok(true) => {
-                    tracing::warn!(
-                        session_id,
-                        error = format!("{cleanup_error:#}"),
-                        "target cleanup command failed, but the target was confirmed absent"
-                    );
-                }
-                Ok(false) => {
-                    tracing::error!(
-                        session_id,
-                        error = format!("{cleanup_error:#}"),
-                        "target cleanup failed and the target is still present"
-                    );
-                    return Err(cleanup_error);
-                }
-                Err(probe_error) => {
-                    tracing::error!(
-                        session_id,
-                        cleanup_error = format!("{cleanup_error:#}"),
-                        probe_error = format!("{probe_error:#}"),
-                        "target cleanup failed and exact absence could not be confirmed"
-                    );
-                    return Err(cleanup_error.context(format!(
-                        "target cleanup failed and exact absence could not be confirmed: {probe_error:#}"
-                    )));
-                }
-            }
-        }
+        let deferred = if let Some(plan) = hel_targets::quiesce_plan(&backend, session_id)? {
+            plan.execute(executor)?;
+            true
+        } else {
+            execute_target_cleanup(&backend, session_id, executor)?;
+            false
+        };
         if let Some(worktree) = &destroying.managed_worktree {
             retire_managed_worktree(executor, worktree)
                 .context("retire managed raw-session worktree after verified close")?;
         }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Stopped;
-        record.target = None;
+        if !deferred {
+            record.target = None;
+        }
         record.updated_at = now();
         record.last_error = None;
         persist_session_record_transition_or_restore(
@@ -343,12 +326,70 @@ impl Controller {
             &destroying,
             "persist stopped state after target cleanup",
             &persist,
+        )?;
+        Ok(deferred)
+    }
+
+    /// Finish storage cleanup for a stopped Podman target retained by the
+    /// quiescence transition. The locator stays durable until every command
+    /// succeeds, making daemon restart and explicit retry idempotent.
+    pub fn cleanup_stopped_target(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        self.cleanup_stopped_target_with(
+            session_id,
+            executor,
+            hel::hel_database::save_lifecycle_session,
+        )
+    }
+
+    fn cleanup_stopped_target_with(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        persist: impl Fn(&SessionRecord) -> Result<()>,
+    ) -> Result<()> {
+        let previous = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .clone();
+        ensure!(
+            previous.state == SessionState::Stopped,
+            "refusing deferred cleanup for active session {session_id}"
+        );
+        let Some(locator) = previous.target.as_ref() else {
+            return Ok(());
+        };
+        let backend = backend_locator(locator, &previous, &self.config)?;
+        ensure!(
+            hel_targets::quiesce_plan(&backend, session_id)?.is_some(),
+            "session {session_id} retained a non-Podman target after stopping"
+        );
+        execute_target_cleanup(&backend, session_id, executor)?;
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.target = None;
+        record.updated_at = now();
+        record.last_error = None;
+        persist_session_record_transition_or_restore(
+            &mut self.state,
+            session_id,
+            &previous,
+            "persist completion of deferred Podman target cleanup",
+            &persist,
         )
     }
 
     /// Tear down the current target without taking a fresh checkpoint, then
     /// leave the logical session resumable from its latest verified archive.
-    pub fn force_stop(&mut self, session_id: &str, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn force_stop(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<bool> {
         self.force_stop_with(
             session_id,
             executor,
@@ -361,7 +402,7 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
         persist: impl Fn(&SessionRecord) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let session = self
             .state
             .sessions
@@ -381,9 +422,15 @@ impl Controller {
         verify_installed_checkpoint_gate(session_id, checkpoint)
             .context("verify the recovery archive before force stopping")?;
         retire_git_broker(session_id).context("stop the session's local Git broker")?;
+        let mut deferred = false;
         if let Some(locator) = &session.target {
             let backend = backend_locator(locator, &session, &self.config)?;
-            hel_targets::close_plan(&backend, session_id)?.execute(executor)?;
+            if let Some(plan) = hel_targets::quiesce_plan(&backend, session_id)? {
+                plan.execute(executor)?;
+                deferred = true;
+            } else {
+                execute_target_cleanup(&backend, session_id, executor)?;
+            }
         }
         if let Some(worktree) = &session.managed_worktree {
             retire_managed_worktree(executor, worktree)
@@ -391,7 +438,9 @@ impl Controller {
         }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Stopped;
-        record.target = None;
+        if !deferred {
+            record.target = None;
+        }
         record.updated_at = now();
         record.last_error = None;
         record.last_checkpoint_error = None;
@@ -401,7 +450,8 @@ impl Controller {
             &session,
             "persist stopped state after force stopping the current target",
             &persist,
-        )
+        )?;
+        Ok(deferred)
     }
 
     /// Permanently destroy an inactive session and every artifact Hel owns for it.
@@ -444,6 +494,44 @@ impl Controller {
         self.state.destroy_stopped_session(session_id)?;
         Ok(())
     }
+}
+
+fn execute_target_cleanup(
+    backend: &hel_targets::TargetLocator,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    if let Err(cleanup_error) = hel_targets::close_plan(backend, session_id)?.execute(executor) {
+        match hel_targets::cleanup_target_is_confirmed_absent(backend, session_id, executor) {
+            Ok(true) => {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{cleanup_error:#}"),
+                    "target cleanup command failed, but the target was confirmed absent"
+                );
+            }
+            Ok(false) => {
+                tracing::error!(
+                    session_id,
+                    error = format!("{cleanup_error:#}"),
+                    "target cleanup failed and the target is still present"
+                );
+                return Err(cleanup_error);
+            }
+            Err(probe_error) => {
+                tracing::error!(
+                    session_id,
+                    cleanup_error = format!("{cleanup_error:#}"),
+                    probe_error = format!("{probe_error:#}"),
+                    "target cleanup failed and exact absence could not be confirmed"
+                );
+                return Err(cleanup_error.context(format!(
+                    "target cleanup failed and exact absence could not be confirmed: {probe_error:#}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_close_checkpoint_started(record: &mut SessionRecord, updated_at: String) {
@@ -557,6 +645,114 @@ mod tests {
         let stopped = &controller.state.sessions[session_id];
         assert_eq!(stopped.state, SessionState::Stopped);
         assert!(stopped.target.is_none());
+    }
+
+    #[test]
+    fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
+        struct RecordingExecutor {
+            commands: RefCell<Vec<CommandSpec>>,
+        }
+
+        impl CommandExecutor for RecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.borrow_mut().push(command.clone());
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+        let container_id = hel_targets::resource_name(session_id).unwrap();
+        let volume = format!("{container_id}-workspace");
+        let mut session = checkpoint_test_session(session_id);
+        session.target_template_id = "podman".into();
+        session.state = SessionState::Closing;
+        session.target = Some(TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage: hel::hel_state::PodmanWorkspaceLocator::Volume {
+                name: volume.clone(),
+            },
+        });
+        session.checkpoint = Some(checkpoint.clone());
+        let mut config = HelConfig::default();
+        config.targets.insert(
+            "podman".into(),
+            TargetTemplate::LocalPodman {
+                container: ConfigContainer {
+                    image: "test:latest".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: hel::hel_config::PodmanWorkspaceStorage::PodmanVolume,
+                },
+            },
+        );
+        let mut controller = Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        };
+        let executor = RecordingExecutor {
+            commands: RefCell::new(Vec::new()),
+        };
+        let persisted = RefCell::new(Vec::new());
+
+        let deferred = controller
+            .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &executor, |record| {
+                persisted
+                    .borrow_mut()
+                    .push((record.state, record.target.is_some()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(deferred);
+        assert_eq!(
+            persisted.borrow().as_slice(),
+            &[
+                (SessionState::Destroying, true),
+                (SessionState::Stopped, true)
+            ]
+        );
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].args[1].contains("podman stop --time 0"));
+        assert!(!commands[0].args[1].contains("podman rm"));
+        drop(commands);
+
+        controller
+            .cleanup_stopped_target_with(session_id, &executor, |record| {
+                assert_eq!(record.state, SessionState::Stopped);
+                assert!(record.target.is_none());
+                Ok(())
+            })
+            .unwrap();
+
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 4);
+        assert_eq!(
+            commands[1].stage,
+            Some(hel_targets::ProvisionStage::RemovingContainer)
+        );
+        assert_eq!(
+            commands[2].stage,
+            Some(hel_targets::ProvisionStage::RemovingStorage)
+        );
+        assert_eq!(
+            commands[3].stage,
+            Some(hel_targets::ProvisionStage::CleaningCache)
+        );
+        assert!(commands[2].args.contains(&volume));
+        assert!(controller.state.sessions[session_id].target.is_none());
     }
     #[test]
     fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
@@ -825,6 +1021,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );

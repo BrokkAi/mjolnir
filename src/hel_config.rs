@@ -137,7 +137,7 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -594,6 +594,41 @@ pub struct ContainerTemplate {
     pub memory: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "PodmanWorkspaceStorage::is_default")]
+    pub workspace_storage: PodmanWorkspaceStorage,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PodmanWorkspaceStorage {
+    #[default]
+    PodmanVolume,
+    HostHelper {
+        root: PathBuf,
+        helper: Vec<String>,
+    },
+    ContainerLayer,
+}
+
+impl PodmanWorkspaceStorage {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::PodmanVolume)
+    }
+
+    fn validate(&self, template_id: &str) -> Result<()> {
+        let Self::HostHelper { root, helper } = self else {
+            return Ok(());
+        };
+        if !root.is_absolute() {
+            bail!("target template {template_id:?} workspace storage root must be absolute");
+        }
+        if helper.is_empty() || helper.iter().any(|argument| argument.is_empty()) {
+            bail!(
+                "target template {template_id:?} workspace storage helper must contain non-empty arguments"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -730,9 +765,17 @@ impl TargetTemplate {
         validate_id("target template", id)?;
         match self {
             Self::LocalBare => Ok(()),
-            Self::LocalPodman { container }
-            | Self::LocalDocker { container }
-            | Self::AppleContainer { container } => container.validate(id),
+            Self::LocalPodman { container } => {
+                container.validate(id)?;
+                container.workspace_storage.validate(id)
+            }
+            Self::LocalDocker { container } | Self::AppleContainer { container } => {
+                container.validate(id)?;
+                if !container.workspace_storage.is_default() {
+                    bail!("target template {id:?} workspace storage is only supported by Podman");
+                }
+                Ok(())
+            }
             Self::AwsEc2 {
                 aws_profile,
                 region,
@@ -776,7 +819,8 @@ impl TargetTemplate {
             }
             Self::SshPodman { ssh, container, .. } => {
                 ssh.validate(id)?;
-                container.validate(id)
+                container.validate(id)?;
+                container.workspace_storage.validate(id)
             }
         }
     }
@@ -921,8 +965,14 @@ impl HelConfig {
         }
         reject_removed_profile_overrides(&contents)?;
         reject_non_bare_permissions(&contents)?;
-        let config: Self = toml::from_str(&contents)
+        let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        // Version 2 only adds Podman workspace storage. Version-1 Podman
+        // targets acquire the portable named-volume default in memory and the
+        // file is upgraded the next time an ordinary config save occurs.
+        if config.version == 1 {
+            config.version = CONFIG_VERSION;
+        }
         config.validate()?;
         Ok(config)
     }
@@ -1353,6 +1403,7 @@ mod tests {
                         cpus: None,
                         memory: None,
                         environment: BTreeMap::new(),
+                        workspace_storage: Default::default(),
                     },
                 },
             )]),
@@ -1398,6 +1449,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );
@@ -1672,6 +1724,53 @@ mod tests {
                         .ends_with(".tmp")
                 })
         );
+    }
+
+    #[test]
+    fn version_one_podman_config_upgrades_to_isolated_workspace_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "version = 1\n\n[targets.podman]\nkind = \"local-podman\"\nimage = \"ubuntu:24.04\"\n",
+        )
+        .unwrap();
+
+        let config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.version, CONFIG_VERSION);
+        let TargetTemplate::LocalPodman { container } = &config.targets["podman"] else {
+            panic!("version-one Podman target changed kind")
+        };
+        assert_eq!(
+            container.workspace_storage,
+            PodmanWorkspaceStorage::PodmanVolume
+        );
+        assert!(fs::read_to_string(path).unwrap().starts_with("version = 1"));
+    }
+
+    #[test]
+    fn explicit_container_layer_and_host_helper_storage_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = sample_config();
+        if let TargetTemplate::LocalPodman { container } =
+            config.targets.get_mut("podman-default").unwrap()
+        {
+            container.workspace_storage = PodmanWorkspaceStorage::HostHelper {
+                root: PathBuf::from("/srv/mj-workspaces"),
+                helper: vec!["sudo".into(), "-n".into(), "/opt/mj-helper".into()],
+            };
+        }
+        config.save_to(&path).unwrap();
+        assert_eq!(HelConfig::load_from(&path).unwrap(), config);
+
+        if let TargetTemplate::LocalPodman { container } =
+            config.targets.get_mut("podman-default").unwrap()
+        {
+            container.workspace_storage = PodmanWorkspaceStorage::ContainerLayer;
+        }
+        config.save_to(&path).unwrap();
+        assert_eq!(HelConfig::load_from(&path).unwrap(), config);
     }
 
     #[test]
@@ -2142,6 +2241,7 @@ mod tests {
             cpus: None,
             memory: None,
             environment: BTreeMap::new(),
+            workspace_storage: Default::default(),
         };
         let podman = TargetTemplate::LocalPodman {
             container: container.clone(),

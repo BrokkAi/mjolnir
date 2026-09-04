@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::hel_config::ImagePullPolicy;
+use crate::hel_config::{HarnessKind, ImagePullPolicy};
 
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
@@ -72,19 +72,29 @@ pub enum ProvisionStage {
     Syncing,
     Restoring,
     Starting,
+    Installing(HarnessKind),
     Compacting,
+    StoppingTarget,
+    RemovingContainer,
+    RemovingStorage,
+    CleaningCache,
 }
 
 impl ProvisionStage {
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Provisioning => "Provision",
-            Self::Booting => "Boot",
-            Self::Cloning => "Clone",
-            Self::Syncing => "Sync",
-            Self::Restoring => "Restore",
-            Self::Starting => "Start",
-            Self::Compacting => "Compact",
+            Self::Provisioning => "Provision".into(),
+            Self::Booting => "Boot".into(),
+            Self::Cloning => "Clone".into(),
+            Self::Syncing => "Sync".into(),
+            Self::Restoring => "Restore".into(),
+            Self::Starting => "Start".into(),
+            Self::Installing(harness) => format!("Installing {}", harness.display_name()),
+            Self::Compacting => "Compact".into(),
+            Self::StoppingTarget => "Stop target".into(),
+            Self::RemovingContainer => "Remove container".into(),
+            Self::RemovingStorage => "Remove container storage".into(),
+            Self::CleaningCache => "Clean cache".into(),
         }
     }
 }
@@ -1420,6 +1430,18 @@ impl ProjectBundleSpec {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PodmanWorkspaceStorage {
+    PodmanVolume,
+    HostHelper {
+        root: String,
+        helper: Vec<String>,
+    },
+    #[default]
+    ContainerLayer,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerTemplate {
     pub image: String,
@@ -1427,6 +1449,8 @@ pub struct ContainerTemplate {
     pub pull_policy: ImagePullPolicy,
     #[serde(default)]
     pub extra_run_args: Vec<String>,
+    #[serde(default)]
+    pub workspace_storage: PodmanWorkspaceStorage,
 }
 
 impl ImagePullPolicy {
@@ -1631,6 +1655,21 @@ fn default_ssh_prefix() -> String {
     ".local/share/hel/workspaces".to_owned()
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PodmanWorkspaceLocator {
+    #[default]
+    ContainerLayer,
+    Volume {
+        name: String,
+    },
+    HostPath {
+        path: String,
+        helper: Vec<String>,
+        resource: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TargetLocator {
@@ -1639,6 +1678,8 @@ pub enum TargetLocator {
     },
     LocalPodman {
         container_id: String,
+        #[serde(default)]
+        workspace_storage: PodmanWorkspaceLocator,
     },
     LocalDocker {
         container_id: String,
@@ -1660,6 +1701,8 @@ pub enum TargetLocator {
     SshPodman {
         ssh: SshTarget,
         container_id: String,
+        #[serde(default)]
+        workspace_storage: PodmanWorkspaceLocator,
     },
 }
 
@@ -1695,6 +1738,35 @@ pub fn resource_name(session_id: &str) -> Result<String> {
         "mj-{readable}-{:02x}{:02x}{:02x}",
         digest[0], digest[1], digest[2]
     ))
+}
+
+pub fn podman_workspace_locator(
+    template: &ContainerTemplate,
+    session_id: &str,
+) -> Result<PodmanWorkspaceLocator> {
+    let resource = format!("{}-workspace", resource_name(session_id)?);
+    match &template.workspace_storage {
+        PodmanWorkspaceStorage::PodmanVolume => {
+            Ok(PodmanWorkspaceLocator::Volume { name: resource })
+        }
+        PodmanWorkspaceStorage::HostHelper { root, helper } => {
+            let root = Path::new(root);
+            ensure!(
+                root.is_absolute(),
+                "Podman workspace storage root must be absolute"
+            );
+            ensure!(
+                !helper.is_empty() && helper.iter().all(|argument| !argument.is_empty()),
+                "Podman workspace storage helper must contain non-empty arguments"
+            );
+            Ok(PodmanWorkspaceLocator::HostPath {
+                path: root.join(&resource).to_string_lossy().into_owned(),
+                helper: helper.clone(),
+                resource,
+            })
+        }
+        PodmanWorkspaceStorage::ContainerLayer => Ok(PodmanWorkspaceLocator::ContainerLayer),
+    }
 }
 
 pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<String> {
@@ -1750,12 +1822,12 @@ pub fn provision_plan(
         }
         TargetTemplate::LocalPodman(container) => {
             validate_container_template(container)?;
-            commands.push(container_run(
-                "podman",
+            commands.push(podman_container_run(
                 container,
                 &name,
                 session_id,
                 additional_mounts,
+                None,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -1870,20 +1942,13 @@ pub fn provision_plan(
         TargetTemplate::SshPodman { ssh, container } => {
             validate_ssh(ssh)?;
             validate_container_template(container)?;
-            let mut run = vec!["podman".to_owned()];
-            run.extend(container_run_args(
-                "podman",
+            commands.push(podman_container_run(
                 container,
                 &name,
                 session_id,
                 additional_mounts,
+                Some(ssh),
             )?);
-            commands.push(
-                ssh_command_owned(ssh, run)
-                    .purpose("start remote Podman container")
-                    .stage(ProvisionStage::Provisioning)
-                    .creates_target(),
-            );
             commands.extend(
                 install_git_plan(ExecutionBoundary::SshPodman {
                     ssh,
@@ -1950,7 +2015,14 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
     validate_container_template(container)?;
 
     let mut run = vec![engine.to_owned()];
-    run.extend(container_run_args(engine, container, &name, smoke_id, &[])?);
+    run.extend(container_run_args(
+        engine,
+        container,
+        &name,
+        smoke_id,
+        &[],
+        None,
+    )?);
     let exec = vec![
         engine.to_owned(),
         "exec".to_owned(),
@@ -2094,7 +2166,7 @@ pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<Comma
         TargetLocator::LocalBare { .. } => {
             CommandSpec::new(binary, ["worker", "proxy", "--root", root.as_str()])
         }
-        TargetLocator::LocalPodman { container_id } => container_exec(
+        TargetLocator::LocalPodman { container_id, .. } => container_exec(
             "podman",
             container_id,
             [&binary, "worker", "proxy", "--root", &root],
@@ -2112,7 +2184,9 @@ pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<Comma
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             ssh_command(ssh, [&binary, "worker", "proxy", "--root", &root])
         }
-        TargetLocator::SshPodman { ssh, container_id } => ssh_command(
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command(
             ssh,
             [
                 "podman",
@@ -2145,7 +2219,7 @@ pub fn target_recovery_plan(
 ) -> Result<Option<TargetRecoveryPlan>> {
     verify_locator(locator, session_id)?;
     let (exists, inspect, start) = match locator {
-        TargetLocator::LocalPodman { container_id } => (
+        TargetLocator::LocalPodman { container_id, .. } => (
             CommandSpec::new("podman", ["container", "exists", container_id])
                 .purpose("check for Mjolnir session container"),
             CommandSpec::new("podman", ["container", "inspect", container_id])
@@ -2169,7 +2243,7 @@ pub fn target_recovery_plan(
             CommandSpec::new("docker", ["start", container_id])
                 .purpose("start stopped Mjolnir Docker session container"),
         ),
-        TargetLocator::SshPodman { ssh, container_id } => (
+        TargetLocator::SshPodman { ssh, container_id, .. } => (
             ssh_command(ssh, ["podman", "container", "exists", container_id])
                 .purpose("check for remote Mjolnir session container"),
             ssh_command(ssh, ["podman", "container", "inspect", container_id])
@@ -2313,7 +2387,9 @@ pub fn command_on_locator(
             let program = args.next().expect("checked non-empty target command");
             CommandSpec::new(program, args)
         }
-        TargetLocator::LocalPodman { container_id } => container_exec("podman", container_id, args),
+        TargetLocator::LocalPodman { container_id, .. } => {
+            container_exec("podman", container_id, args)
+        }
         TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
         TargetLocator::AppleContainer { container_id } => {
             container_exec("container", container_id, args)
@@ -2321,7 +2397,9 @@ pub fn command_on_locator(
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             ssh_command_owned(ssh, args)
         }
-        TargetLocator::SshPodman { ssh, container_id } => {
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let mut remote = vec![
                 "podman".to_owned(),
                 "exec".to_owned(),
@@ -2416,7 +2494,7 @@ printf '%s\n' "$usage" | awk '{ total += $1 * 1024 } END { print total + 0 }'
 pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<SessionResourceProbe> {
     verify_locator(locator, session_id)?;
     let (memory, disk) = match locator {
-        TargetLocator::LocalPodman { container_id } => (
+        TargetLocator::LocalPodman { container_id, .. } => (
             container_exec(
                 "podman",
                 container_id,
@@ -2460,7 +2538,9 @@ pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<Sessi
                 .purpose("sample local Docker container writable disk"),
             ),
         ),
-        TargetLocator::SshPodman { ssh, container_id } => (
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => (
             ssh_command(
                 ssh,
                 [
@@ -2871,6 +2951,12 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
     let session_profile_home = format!(".local/share/hel/profiles/{session_id}");
+    if matches!(
+        locator,
+        TargetLocator::LocalPodman { .. } | TargetLocator::SshPodman { .. }
+    ) {
+        return podman_cleanup_plan(locator, session_id);
+    }
     let command = match locator {
         TargetLocator::LocalBare { .. } => {
             // The daemon dies before its root does: a survivor's next durable
@@ -2884,11 +2970,7 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
                 "stop the local Mjolnir worker and remove exact local Mjolnir worker state",
             )
         }
-        TargetLocator::LocalPodman { container_id } => {
-            let script = "status=0; podman rm --force --ignore \"$1\" || status=$?; rm -rf -- \"$HOME/.cache/mjolnir/git/sessions/$2\"; exit \"$status\"";
-            CommandSpec::new("sh", ["-c", script, "mj-close", container_id, session_id])
-                .purpose("remove local Podman session container and Git cache snapshot")
-        }
+        TargetLocator::LocalPodman { .. } => unreachable!("handled above"),
         TargetLocator::LocalDocker { container_id } => {
             let script = r#"status=0
 if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$1" 2>/dev/null); then
@@ -2961,18 +3043,185 @@ exit "$status""#;
                 "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state",
             )
         }
-        TargetLocator::SshPodman { ssh, container_id } => {
-            let script = "status=0; podman rm --force --ignore \"$1\" || status=$?; rm -rf -- \"$HOME/.cache/mjolnir/git/sessions/$2\"; exit \"$status\"";
-            ssh_command(
-                ssh,
-                ["sh", "-c", script, "mj-close", container_id, session_id],
-            )
-            .purpose("remove exact remote Podman session container and Git cache snapshot")
-        }
+        TargetLocator::SshPodman { .. } => unreachable!("handled above"),
     };
     Ok(CommandPlan {
         description: format!("close Mjolnir session {session_id}"),
         commands: vec![command],
+    })
+}
+
+const PODMAN_CONTAINER_IDENTITY_SCRIPT: &str = r#"set -eu
+container=$1
+session=$2
+if identity=$(podman container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null); then
+    [ "$identity" = "true|$session" ] || {
+        echo 'refusing to operate on a Podman container Mjolnir does not own for this session' >&2
+        exit 2
+    }
+elif ! podman info >/dev/null 2>&1; then
+    echo 'could not determine whether the Podman session container exists' >&2
+    exit 1
+else
+    exit 0
+fi
+"#;
+
+/// Stop a Podman target without deleting its potentially large writable layer.
+/// A successful return means the exact owned container is absent or not running.
+pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<CommandPlan>> {
+    verify_locator(locator, session_id)?;
+    let (ssh, container_id) = match locator {
+        TargetLocator::LocalPodman { container_id, .. } => (None, container_id),
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => (Some(ssh), container_id),
+        _ => return Ok(None),
+    };
+    let script = format!(
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}\nif podman container inspect \"$container\" >/dev/null 2>&1; then\n    podman stop --time 0 --ignore \"$container\" >/dev/null\n    running=$(podman container inspect --format '{{{{.State.Running}}}}' \"$container\")\n    [ \"$running\" = false ] || {{ echo 'Podman session container is still running' >&2; exit 1; }}\nfi\n"
+    );
+    let command = match ssh {
+        Some(ssh) => ssh_command(
+            ssh,
+            [
+                "sh",
+                "-c",
+                script.as_str(),
+                "mj-quiesce",
+                container_id,
+                session_id,
+            ],
+        ),
+        None => CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                script.as_str(),
+                "mj-quiesce",
+                container_id,
+                session_id,
+            ],
+        ),
+    }
+    .purpose("stop exact Podman session container without removing storage")
+    .stage(ProvisionStage::StoppingTarget);
+    Ok(Some(CommandPlan {
+        description: format!("quiesce Mjolnir session {session_id}"),
+        commands: vec![command],
+    }))
+}
+
+fn podman_cleanup_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
+    let (ssh, container_id, workspace_storage) = match locator {
+        TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage,
+        } => (None, container_id, workspace_storage),
+        TargetLocator::SshPodman {
+            ssh,
+            container_id,
+            workspace_storage,
+        } => (Some(ssh), container_id, workspace_storage),
+        _ => unreachable!("Podman cleanup requires a Podman locator"),
+    };
+    let remove_container_script = format!(
+        "{PODMAN_CONTAINER_IDENTITY_SCRIPT}\npodman rm --force --ignore \"$container\" >/dev/null\n"
+    );
+    let at_host = |args: Vec<String>| match ssh {
+        Some(ssh) => ssh_command_owned(ssh, args),
+        None => {
+            let mut args = args;
+            CommandSpec::new(args.remove(0), args)
+        }
+    };
+    let mut commands = vec![
+        at_host(vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            remove_container_script,
+            "mj-remove-container".to_owned(),
+            container_id.clone(),
+            session_id.to_owned(),
+        ])
+        .purpose("remove exact stopped Podman session container")
+        .stage(ProvisionStage::RemovingContainer),
+    ];
+    match workspace_storage {
+        PodmanWorkspaceLocator::ContainerLayer => {}
+        PodmanWorkspaceLocator::Volume { name } => {
+            let script = r#"set -eu
+volume=$1
+session=$2
+if identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null); then
+    [ "$identity" = "true|$session" ] || {
+        echo 'refusing to remove a Podman volume Mjolnir does not own for this session' >&2
+        exit 2
+    }
+    podman volume rm --force "$volume" >/dev/null
+elif ! podman info >/dev/null 2>&1; then
+    echo 'could not determine whether the Podman workspace volume exists' >&2
+    exit 1
+fi
+"#;
+            commands.push(
+                at_host(vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    script.to_owned(),
+                    "mj-remove-volume".to_owned(),
+                    name.clone(),
+                    session_id.to_owned(),
+                ])
+                .purpose("remove exact Podman session workspace volume")
+                .stage(ProvisionStage::RemovingStorage),
+            );
+        }
+        PodmanWorkspaceLocator::HostPath {
+            helper, resource, ..
+        } => {
+            let helper = join_remote_command(helper);
+            let script = format!(
+                r#"set -eu
+resource=$1
+state=$({helper} status "$resource")
+case $state in
+    present) {helper} destroy "$resource" ;;
+    absent) ;;
+    *) echo "workspace helper returned invalid status $state for $resource" >&2; exit 1 ;;
+esac
+[ "$({helper} status "$resource")" = absent ] || {{
+    echo "workspace helper did not destroy $resource" >&2
+    exit 1
+}}
+"#
+            );
+            commands.push(
+                at_host(vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    script,
+                    "mj-remove-host-workspace".to_owned(),
+                    resource.clone(),
+                ])
+                .purpose("remove exact helper-managed Podman session workspace")
+                .stage(ProvisionStage::RemovingStorage),
+            );
+        }
+    }
+    commands.push(
+        at_host(vec![
+            "rm".to_owned(),
+            "-rf".to_owned(),
+            "--".to_owned(),
+            format!(".cache/mjolnir/git/sessions/{session_id}"),
+        ])
+        .purpose("remove Podman session Git cache snapshot")
+        .stage(ProvisionStage::CleaningCache),
+    );
+    Ok(CommandPlan {
+        description: format!("clean up stopped Mjolnir session {session_id}"),
+        commands,
     })
 }
 
@@ -2988,7 +3237,7 @@ pub fn cleanup_target_is_confirmed_absent(
     executor: &impl CommandExecutor,
 ) -> Result<bool> {
     verify_locator(locator, session_id)?;
-    let (command, is_docker) = match locator {
+    let (command, status_is_answer) = match locator {
         TargetLocator::AppleContainer { .. } => (
             CommandSpec::new("container", ["list", "--all", "--quiet"])
                 .purpose("confirm exact Apple session container is absent"),
@@ -3008,10 +3257,25 @@ pub fn cleanup_target_is_confirmed_absent(
             .purpose("confirm exact Docker session resources are absent"),
             true,
         ),
+        TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage,
+        } => (
+            podman_absence_command(None, container_id, workspace_storage, session_id),
+            true,
+        ),
+        TargetLocator::SshPodman {
+            ssh,
+            container_id,
+            workspace_storage,
+        } => (
+            podman_absence_command(Some(ssh), container_id, workspace_storage, session_id),
+            true,
+        ),
         _ => return Ok(false),
     };
     let output = executor.execute(&command)?;
-    if is_docker {
+    if status_is_answer {
         return match output.status {
             0 => Ok(true),
             1 => Ok(false),
@@ -3036,6 +3300,63 @@ pub fn cleanup_target_is_confirmed_absent(
         unreachable!("engine selected from locator")
     };
     Ok(!listed.lines().any(|id| id.trim() == container_id))
+}
+
+fn podman_absence_command(
+    ssh: Option<&SshTarget>,
+    container_id: &str,
+    workspace_storage: &PodmanWorkspaceLocator,
+    session_id: &str,
+) -> CommandSpec {
+    let storage_check = match workspace_storage {
+        PodmanWorkspaceLocator::ContainerLayer => "exit 0".to_owned(),
+        PodmanWorkspaceLocator::Volume { .. } => r#"podman volume exists "$3"
+case $? in
+    0) exit 1 ;;
+    1) exit 0 ;;
+    *) exit 2 ;;
+esac"#
+            .to_owned(),
+        PodmanWorkspaceLocator::HostPath { helper, .. } => {
+            let helper = join_remote_command(helper);
+            format!(
+                r#"state=$({helper} status "$3") || exit 2
+case $state in
+    absent) exit 0 ;;
+    present) exit 1 ;;
+    *) exit 2 ;;
+esac"#
+            )
+        }
+    };
+    let script = format!(
+        r#"podman container exists "$1"
+case $? in
+    0) exit 1 ;;
+    1) ;;
+    *) exit 2 ;;
+esac
+{storage_check}"#
+    );
+    let storage = match workspace_storage {
+        PodmanWorkspaceLocator::ContainerLayer => "-",
+        PodmanWorkspaceLocator::Volume { name } => name,
+        PodmanWorkspaceLocator::HostPath { resource, .. } => resource,
+    };
+    let args = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        script,
+        "mj-confirm-podman-absent".to_owned(),
+        container_id.to_owned(),
+        session_id.to_owned(),
+        storage.to_owned(),
+    ];
+    match ssh {
+        Some(ssh) => ssh_command_owned(ssh, args),
+        None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+    }
+    .purpose("confirm exact Podman session resources are absent")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3177,11 +3498,156 @@ fn container_run(
 ) -> Result<CommandSpec> {
     Ok(CommandSpec::new(
         engine,
-        container_run_args(engine, template, name, session_id, additional_mounts)?,
+        container_run_args(engine, template, name, session_id, additional_mounts, None)?,
     )
     .purpose("start session container")
     .stage(ProvisionStage::Provisioning)
     .creates_target())
+}
+
+const PODMAN_VOLUME_RUN_SCRIPT: &str = r#"set -eu
+session=$1
+container=$2
+volume=$3
+shift 3
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$status" -ne 0 ]; then
+        if identity=$(podman container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null) && [ "$identity" = "true|$session" ]; then
+            podman rm --force "$container" >/dev/null 2>&1 || true
+        fi
+        if identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null) && [ "$identity" = "true|$session" ]; then
+            podman volume rm --force "$volume" >/dev/null 2>&1 || true
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+if identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null); then
+    [ "$identity" = "true|$session" ] || {
+        echo "refusing foreign Podman volume $volume" >&2
+        exit 1
+    }
+else
+    podman info >/dev/null
+    podman volume create --label "dev.mj.managed=true" --label "dev.mj.session=$session" "$volume" >/dev/null
+    identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume")
+    [ "$identity" = "true|$session" ] || {
+        echo "Podman volume $volume does not carry the expected Mjolnir identity" >&2
+        exit 1
+    }
+fi
+"$@"
+"#;
+
+fn podman_host_helper_run_script(helper: &[String]) -> String {
+    let helper = join_remote_command(helper);
+    format!(
+        r#"set -eu
+session=$1
+container=$2
+resource=$3
+shift 3
+cleanup() {{
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$status" -ne 0 ]; then
+        if identity=$(podman container inspect --format '{{{{index .Config.Labels "dev.mj.managed"}}}}|{{{{index .Config.Labels "dev.mj.session"}}}}' "$container" 2>/dev/null) && [ "$identity" = "true|$session" ]; then
+            podman rm --force "$container" >/dev/null 2>&1 || true
+        fi
+        {helper} destroy "$resource" >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+}}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+state=$({helper} status "$resource")
+case $state in
+    absent) {helper} create "$resource" ;;
+    present) ;;
+    *) echo "workspace helper returned invalid status $state for $resource" >&2; exit 1 ;;
+esac
+[ "$({helper} status "$resource")" = present ] || {{
+    echo "workspace helper did not create $resource" >&2
+    exit 1
+}}
+"$@"
+"#
+    )
+}
+
+fn podman_container_run(
+    template: &ContainerTemplate,
+    name: &str,
+    session_id: &str,
+    additional_mounts: &[AdditionalMount],
+    ssh: Option<&SshTarget>,
+) -> Result<CommandSpec> {
+    let workspace = podman_workspace_locator(template, session_id)?;
+    let run_args = container_run_args(
+        "podman",
+        template,
+        name,
+        session_id,
+        additional_mounts,
+        Some(&workspace),
+    )?;
+    let mut wrapped = match &workspace {
+        PodmanWorkspaceLocator::ContainerLayer => {
+            let mut command = vec!["podman".to_owned()];
+            command.extend(run_args);
+            command
+        }
+        PodmanWorkspaceLocator::Volume { name: volume } => {
+            let mut command = vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                PODMAN_VOLUME_RUN_SCRIPT.to_owned(),
+                "mj-podman-run".to_owned(),
+                session_id.to_owned(),
+                name.to_owned(),
+                volume.clone(),
+                "podman".to_owned(),
+            ];
+            command.extend(run_args);
+            command
+        }
+        PodmanWorkspaceLocator::HostPath {
+            helper, resource, ..
+        } => {
+            let mut command = vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                podman_host_helper_run_script(helper),
+                "mj-podman-run".to_owned(),
+                session_id.to_owned(),
+                name.to_owned(),
+                resource.clone(),
+                "podman".to_owned(),
+            ];
+            command.extend(run_args);
+            command
+        }
+    };
+    let command = match ssh {
+        Some(ssh) => ssh_command_owned(ssh, wrapped),
+        None => {
+            let program = wrapped.remove(0);
+            CommandSpec::new(program, wrapped)
+        }
+    };
+    let purpose = match (&workspace, ssh) {
+        (PodmanWorkspaceLocator::ContainerLayer, Some(_)) => "start remote Podman container",
+        (PodmanWorkspaceLocator::ContainerLayer, None) => "start session container",
+        (_, Some(_)) => "start remote Podman container with isolated workspace storage",
+        (_, None) => "start Podman container with isolated workspace storage",
+    };
+    Ok(command
+        .purpose(purpose)
+        .stage(ProvisionStage::Provisioning)
+        .creates_target())
 }
 
 const DOCKER_OVERLAY_RUN_SCRIPT: &str = r#"set -eu
@@ -3269,7 +3735,14 @@ fn docker_container_run(
     session_id: &str,
     additional_mounts: &[AdditionalMount],
 ) -> Result<CommandSpec> {
-    let run_args = container_run_args("docker", template, name, session_id, additional_mounts)?;
+    let run_args = container_run_args(
+        "docker",
+        template,
+        name,
+        session_id,
+        additional_mounts,
+        None,
+    )?;
     let writable = additional_mounts
         .iter()
         .enumerate()
@@ -3306,6 +3779,7 @@ fn container_run_args(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    podman_workspace: Option<&PodmanWorkspaceLocator>,
 ) -> Result<Vec<String>> {
     validate_additional_mounts(additional_mounts)?;
     let mut args = vec!["run".to_owned()];
@@ -3334,6 +3808,19 @@ fn container_run_args(
         session_id,
     ));
     args.extend(template.extra_run_args.clone());
+    if engine == "podman" {
+        match podman_workspace.unwrap_or(&PodmanWorkspaceLocator::ContainerLayer) {
+            PodmanWorkspaceLocator::ContainerLayer => {}
+            PodmanWorkspaceLocator::Volume { name } => args.extend([
+                "--volume".to_owned(),
+                format!("{name}:{CONTAINER_WORKSPACE}:rw,U"),
+            ]),
+            PodmanWorkspaceLocator::HostPath { path, .. } => args.extend([
+                "--volume".to_owned(),
+                format!("{path}:{CONTAINER_WORKSPACE}:rw"),
+            ]),
+        }
+    }
     for (ordinal, mount) in additional_mounts.iter().enumerate() {
         let source = mount.source.to_string_lossy();
         let destination = mount.destination.to_string_lossy();

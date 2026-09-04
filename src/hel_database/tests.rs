@@ -311,6 +311,7 @@ fn session(id: &str, bundle: &str) -> SessionRecord {
         state: SessionState::Stopped,
         target: Some(TargetLocator::LocalPodman {
             container_id: "container-1".into(),
+            workspace_storage: Default::default(),
         }),
         native_session_id: Some("native-1".into()),
         acp_session_title: Some("Agent title".into()),
@@ -510,6 +511,89 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
             )
             .unwrap(),
         "local-docker"
+    );
+}
+
+#[test]
+fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_layer() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.target = Some(TargetLocator::LocalPodman {
+        container_id: "hel-session-1".into(),
+        workspace_storage: crate::hel_state::PodmanWorkspaceLocator::Volume {
+            name: "hel-session-1-workspace".into(),
+        },
+    });
+
+    save_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"],
+        record
+    );
+
+    let connection = open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE session_targets SET workspace_storage = NULL WHERE session_id = 'session-1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let loaded = load_state_from(&database).unwrap();
+    let Some(TargetLocator::LocalPodman {
+        workspace_storage, ..
+    }) = loaded.sessions["session-1"].target.as_ref()
+    else {
+        panic!("Podman locator changed kind")
+    };
+    assert_eq!(
+        workspace_storage,
+        &crate::hel_state::PodmanWorkspaceLocator::ContainerLayer
+    );
+}
+
+#[test]
+fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.target = Some(TargetLocator::LocalPodman {
+        container_id: "hel-session-1".into(),
+        workspace_storage: crate::hel_state::PodmanWorkspaceLocator::Volume {
+            name: "hel-session-1-workspace".into(),
+        },
+    });
+    save_session_to(&database, &record).unwrap();
+
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE session_targets DROP COLUMN workspace_storage;
+             DELETE FROM schema_migrations WHERE version > 21;
+             PRAGMA user_version = 21;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+
+    let loaded = load_state_from(&database).unwrap();
+    let Some(TargetLocator::LocalPodman {
+        workspace_storage, ..
+    }) = loaded.sessions["session-1"].target.as_ref()
+    else {
+        panic!("Podman locator changed kind")
+    };
+    assert_eq!(
+        workspace_storage,
+        &crate::hel_state::PodmanWorkspaceLocator::ContainerLayer
+    );
+    assert_eq!(
+        open(&database)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
     );
 }
 
@@ -868,6 +952,11 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
     ] {
         connection
             .execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+            .unwrap();
+    }
+    if version < 22 {
+        connection
+            .execute_batch("ALTER TABLE session_targets DROP COLUMN workspace_storage;")
             .unwrap();
     }
     connection
@@ -3666,6 +3755,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
         .execute_batch(
             "DELETE FROM schema_migrations WHERE version > 20;
              PRAGMA user_version = 20;
+             ALTER TABLE session_targets DROP COLUMN workspace_storage;
              CREATE TABLE turn_review_settings (
                  workspace_id TEXT PRIMARY KEY,
                  auto_review INTEGER NOT NULL,

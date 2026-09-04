@@ -2635,6 +2635,7 @@ mod tests {
                             cpus: None,
                             memory: None,
                             environment: BTreeMap::from([("TOKEN".into(), "secret-target".into())]),
+                            workspace_storage: Default::default(),
                         },
                     },
                 ),

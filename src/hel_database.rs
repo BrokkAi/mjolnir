@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
+use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::hel_config::data_dir;
@@ -27,7 +28,7 @@ use crate::hel_workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 /// A deterministic projection integrity violation. Retrying cannot fix it, so
 /// callers must report it separately from transport failures.
@@ -3954,7 +3955,7 @@ fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) -> Result<(
 }
 
 fn insert_target(tx: &Transaction<'_>, session_id: &str, target: &TargetLocator) -> Result<()> {
-    let (kind, host, resource, address, workspace, worker_id) = match target {
+    let (kind, host, resource, address, workspace, worker_id, workspace_storage) = match target {
         TargetLocator::LocalBare { worker_root } => (
             "local-bare",
             None,
@@ -3962,14 +3963,19 @@ fn insert_target(tx: &Transaction<'_>, session_id: &str, target: &TargetLocator)
             None,
             Some(path_to_blob(worker_root)),
             None,
+            None,
         ),
-        TargetLocator::LocalPodman { container_id } => (
+        TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage,
+        } => (
             "local-podman",
             None,
             Some(container_id.as_str()),
             None,
             None,
             None,
+            Some(serde_json::to_string(workspace_storage)?),
         ),
         TargetLocator::LocalDocker { container_id } => (
             "local-docker",
@@ -3978,11 +3984,13 @@ fn insert_target(tx: &Transaction<'_>, session_id: &str, target: &TargetLocator)
             None,
             None,
             None,
+            None,
         ),
         TargetLocator::AppleContainer { container_id } => (
             "apple-container",
             None,
             Some(container_id.as_str()),
+            None,
             None,
             None,
             None,
@@ -3997,6 +4005,7 @@ fn insert_target(tx: &Transaction<'_>, session_id: &str, target: &TargetLocator)
             address.as_deref(),
             None,
             None,
+            None,
         ),
         TargetLocator::SshBare {
             host,
@@ -4009,27 +4018,33 @@ fn insert_target(tx: &Transaction<'_>, session_id: &str, target: &TargetLocator)
             None,
             Some(path_to_blob(workspace)),
             worker_id.as_deref(),
+            None,
         ),
-        TargetLocator::SshPodman { host, container_id } => (
+        TargetLocator::SshPodman {
+            host,
+            container_id,
+            workspace_storage,
+        } => (
             "ssh-podman",
             Some(host.as_str()),
             Some(container_id.as_str()),
             None,
             None,
             None,
+            Some(serde_json::to_string(workspace_storage)?),
         ),
     };
     tx.execute(
-        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![session_id, kind, host, resource, address, workspace, worker_id],
+        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![session_id, kind, host, resource, address, workspace, worker_id, workspace_storage],
     )?;
     Ok(())
 }
 
 fn load_targets(connection: &Connection, state: &mut HelState) -> Result<()> {
     let mut statement = connection.prepare(
-        "SELECT session_id, kind, host, resource_id, address, workspace, worker_id
+        "SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage
          FROM session_targets",
     )?;
     let rows = statement.query_map([], |row| {
@@ -4040,12 +4055,22 @@ fn load_targets(connection: &Connection, state: &mut HelState) -> Result<()> {
         let address: Option<String> = row.get(4)?;
         let workspace = row.get_ref(5)?.blob_or_null()?.map(blob_to_path);
         let worker_id: Option<String> = row.get(6)?;
+        let workspace_storage = row
+            .get::<_, Option<String>>(7)?
+            .map(|serialized| {
+                serde_json::from_str(&serialized).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
         let target = match kind.as_str() {
             "local-bare" => TargetLocator::LocalBare {
                 worker_root: workspace.unwrap(),
             },
             "local-podman" => TargetLocator::LocalPodman {
                 container_id: resource.unwrap(),
+                workspace_storage,
             },
             "local-docker" => TargetLocator::LocalDocker {
                 container_id: resource.unwrap(),
@@ -4065,6 +4090,7 @@ fn load_targets(connection: &Connection, state: &mut HelState) -> Result<()> {
             "ssh-podman" => TargetLocator::SshPodman {
                 host: host.unwrap(),
                 container_id: resource.unwrap(),
+                workspace_storage,
             },
             _ => unreachable!("target kind constrained by schema"),
         };

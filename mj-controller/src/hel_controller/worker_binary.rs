@@ -11,7 +11,10 @@ use crate::hel_session_manager::{
     ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh,
     WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
 };
-use hel::hel_config::{ExecutionPolicy, ProjectBundle, ProjectRepository, atomic_write, data_dir};
+use hel::hel_config::{
+    ExecutionPolicy, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write,
+    data_dir,
+};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
 use hel::hel_targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
@@ -982,7 +985,7 @@ fn target_architecture(
 ) -> Result<&'static str> {
     let command = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("uname", ["-m"]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "uname", "-m"])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -993,9 +996,9 @@ fn target_architecture(
         }
         hel_targets::TargetLocator::AwsEc2 { ssh, .. }
         | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh_command_spec(ssh, ["uname", "-m"]),
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "uname", "-m"])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "uname", "-m"]),
     }
     .purpose("detect target architecture");
     let output = execute_checked(executor, command)?;
@@ -1100,6 +1103,22 @@ const CLAUDE_AGENT_ACP_FALLBACK_VERSION: &str = "0.73.0";
 const DEEPSEEK_HARNESS_FALLBACK_VERSION: &str = "0.1.1-rc.2";
 
 const DEEPSEEK_ACP_FALLBACK_VERSION: &str = "0.10.0";
+
+/// Stage shown after the worker is reachable and while its ACP bridge becomes
+/// ready. Default launchers that can fetch their own harness name that work;
+/// explicit executables and DSH only have a process to start.
+pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage {
+    if profile.executable.is_none()
+        && matches!(
+            profile.kind,
+            HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Grok
+        )
+    {
+        ProvisionStage::Installing(profile.kind)
+    } else {
+        ProvisionStage::Starting
+    }
+}
 
 pub(super) fn bridge_launch(
     harness: hel::hel_config::HarnessKind,
@@ -1380,7 +1399,7 @@ fn install_worker_files(
                 execute_checked(executor, command)?;
             }
         }
-        hel_targets::TargetLocator::LocalPodman { container_id }
+        hel_targets::TargetLocator::LocalPodman { container_id, .. }
         | hel_targets::TargetLocator::LocalDocker { container_id }
         | hel_targets::TargetLocator::AppleContainer { container_id } => {
             let engine = match locator {
@@ -1478,7 +1497,9 @@ fn install_worker_files(
                 profile_stage,
             )?;
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             // The worker binary is 10-30 MB and identical across sessions, so
             // keep it in a content-addressed cache on the remote host and copy
             // it over the wire only once per unique binary.
@@ -1698,7 +1719,7 @@ fn installed_worker_binary_replacement_plan(
             CommandSpec::new("chmod", ["700", &installed])
                 .purpose("make replaced Mjolnir worker executable"),
         ],
-        hel_targets::TargetLocator::LocalPodman { container_id }
+        hel_targets::TargetLocator::LocalPodman { container_id, .. }
         | hel_targets::TargetLocator::LocalDocker { container_id }
         | hel_targets::TargetLocator::AppleContainer { container_id } => {
             let engine = match locator {
@@ -1751,7 +1772,9 @@ fn installed_worker_binary_replacement_plan(
             ssh_command_spec(ssh, ["chmod", "700", &installed])
                 .purpose("make replaced Mjolnir worker executable"),
         ],
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let upload = format!(".cache/mjolnir/uploads/{session_id}-hel.next");
             vec![
                 ssh_command_spec(ssh, ["mkdir", "-p", ".cache/mjolnir/uploads"])
@@ -1800,7 +1823,7 @@ fn installed_file_digest_command(
 ) -> CommandSpec {
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sha256sum", [path]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sha256sum", path])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -1813,9 +1836,9 @@ fn installed_file_digest_command(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sha256sum", path])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sha256sum", path])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sha256sum", path]),
     }
     .purpose(purpose)
 }
@@ -1835,7 +1858,7 @@ fn worker_launch_refresh_plan(
     let expected_sha256 = format!("{:x}", Sha256::digest(&body));
     let replace = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", "-i", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -1849,7 +1872,9 @@ fn worker_launch_refresh_plan(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => ssh_command_spec(
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(
             ssh,
             ["podman", "exec", "-i", container_id, "sh", "-c", &script],
         ),
@@ -2013,7 +2038,7 @@ fn stop_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str) 
     let script = hel_targets::stop_worker_daemon_script(worker_root);
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2026,9 +2051,9 @@ fn stop_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str) 
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
     }
     .purpose("stop Mjolnir worker daemon")
 }
@@ -2037,7 +2062,7 @@ fn worker_liveness_command(locator: &hel_targets::TargetLocator, worker_root: &s
     let script = hel_targets::worker_daemon_liveness_script(worker_root);
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2050,9 +2075,9 @@ fn worker_liveness_command(locator: &hel_targets::TargetLocator, worker_root: &s
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
     }
     .purpose("probe Mjolnir worker daemon liveness")
 }
@@ -2110,7 +2135,7 @@ fn start_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str)
         hel_targets::TargetLocator::LocalBare { .. } => {
             CommandSpec::new("sh", ["-c", &detached_script])
         }
-        hel_targets::TargetLocator::LocalPodman { container_id } => CommandSpec::new(
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => CommandSpec::new(
             "podman",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
@@ -2126,7 +2151,9 @@ fn start_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str)
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &detached_script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => ssh_command_spec(
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(
             ssh,
             [
                 "podman",
@@ -2175,7 +2202,7 @@ fn worker_binary_probe_failure(
         hel_targets::TargetLocator::LocalBare { .. } => {
             CommandSpec::new(binary.clone(), ["--version"])
         }
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, &binary, "--version"])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2188,7 +2215,9 @@ fn worker_binary_probe_failure(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, [binary.as_str(), "--version"])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => ssh_command_spec(
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(
             ssh,
             ["podman", "exec", container_id, binary.as_str(), "--version"],
         ),
@@ -2231,7 +2260,7 @@ pub(super) fn worker_last_words(
     );
     let command = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        hel_targets::TargetLocator::LocalPodman { container_id } => {
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => {
             CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
         }
         hel_targets::TargetLocator::LocalDocker { container_id } => {
@@ -2244,9 +2273,9 @@ pub(super) fn worker_last_words(
         | hel_targets::TargetLocator::SshBare { ssh, .. } => {
             ssh_command_spec(ssh, ["sh", "-c", &script])
         }
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
-            ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script])
-        }
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
     }
     .purpose("collect worker last words");
     let output = match executor.execute(&command) {
@@ -2394,6 +2423,7 @@ mod tests {
             cpus: None,
             memory: None,
             environment: BTreeMap::new(),
+            workspace_storage: Default::default(),
         }
     }
 
@@ -2735,6 +2765,7 @@ mod tests {
             },
             hel_targets::TargetLocator::LocalPodman {
                 container_id: "container-1".into(),
+                workspace_storage: Default::default(),
             },
         ] {
             let executor = RecordingExecutor {
@@ -2869,7 +2900,10 @@ mod tests {
                 },
             ]),
         };
-        let locator = hel_targets::TargetLocator::LocalPodman { container_id };
+        let locator = hel_targets::TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage: Default::default(),
+        };
 
         stop_worker_after_target_recovery(&executor, &locator, session, "/worker/root").unwrap();
 
@@ -2945,6 +2979,7 @@ mod tests {
                     ssh_args: Vec::new(),
                 },
                 container_id: "container-1".into(),
+                workspace_storage: Default::default(),
             },
             digest,
         }
@@ -3080,6 +3115,7 @@ mod tests {
         let container_id = hel_targets::resource_name(session).unwrap();
         let locator = hel_targets::TargetLocator::LocalPodman {
             container_id: container_id.clone(),
+            workspace_storage: Default::default(),
         };
         let executor = RecordingExecutor {
             commands: RefCell::new(Vec::new()),
@@ -3136,6 +3172,40 @@ mod tests {
         assert!(deepseek_arguments[1].contains("Mjolnir needs @deepseek-ai/dsh"));
         assert!(!deepseek_arguments[1].contains("Hel"));
     }
+
+    #[test]
+    fn readiness_stage_names_only_install_capable_default_harnesses() {
+        let profile = |kind, executable| hel::hel_config::HarnessProfile {
+            kind,
+            home: PathBuf::from("/profiles/test"),
+            executable,
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+
+        for harness in [
+            HarnessKind::Codex,
+            HarnessKind::Claude,
+            HarnessKind::Kimi,
+            HarnessKind::Grok,
+        ] {
+            assert_eq!(
+                bridge_readiness_stage(&profile(harness, None)),
+                ProvisionStage::Installing(harness)
+            );
+        }
+        assert_eq!(
+            bridge_readiness_stage(&profile(HarnessKind::Deepseek, None)),
+            ProvisionStage::Starting
+        );
+        assert_eq!(
+            bridge_readiness_stage(&profile(
+                HarnessKind::Codex,
+                Some(PathBuf::from("/opt/bin/codex-acp")),
+            )),
+            ProvisionStage::Starting
+        );
+    }
     #[test]
     fn codex_execution_environment_follows_the_target_policy() {
         let mut podman_environment =
@@ -3172,6 +3242,7 @@ mod tests {
         };
         let managed = hel_targets::TargetLocator::LocalPodman {
             container_id: "container".into(),
+            workspace_storage: Default::default(),
         };
 
         let mut environment = BTreeMap::new();
@@ -3333,6 +3404,7 @@ mod tests {
         };
         let podman = hel_targets::TargetLocator::LocalPodman {
             container_id: "container".into(),
+            workspace_storage: Default::default(),
         };
 
         assert_eq!(
@@ -3565,6 +3637,7 @@ mod tests {
     fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
         let target = hel_targets::TargetLocator::LocalPodman {
             container_id: "container".into(),
+            workspace_storage: Default::default(),
         };
         for (kind, instructions) in [
             (hel::hel_config::HarnessKind::Codex, "AGENTS.md"),
@@ -3624,6 +3697,7 @@ mod tests {
             staged.path(),
             &hel_targets::TargetLocator::LocalPodman {
                 container_id: "container".into(),
+                workspace_storage: Default::default(),
             },
         )
         .unwrap();

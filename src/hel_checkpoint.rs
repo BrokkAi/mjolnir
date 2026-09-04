@@ -2192,7 +2192,9 @@ fn checkpoint_stdin_command(
             let mut args = args;
             CommandSpec::new(args.remove(0), args)
         }
-        TargetLocator::LocalPodman { container_id } => container_exec("podman", container_id, args),
+        TargetLocator::LocalPodman { container_id, .. } => {
+            container_exec("podman", container_id, args)
+        }
         TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
         TargetLocator::AppleContainer { container_id } => {
             container_exec("container", container_id, args)
@@ -2200,7 +2202,9 @@ fn checkpoint_stdin_command(
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             ssh_command(ssh, args)
         }
-        TargetLocator::SshPodman { ssh, container_id } => {
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let mut remote = vec![
                 "podman".into(),
                 "exec".into(),
@@ -2233,7 +2237,9 @@ pub fn export_command(
             let mut args = args;
             CommandSpec::new(args.remove(0), args)
         }
-        TargetLocator::LocalPodman { container_id } => container_exec("podman", container_id, args),
+        TargetLocator::LocalPodman { container_id, .. } => {
+            container_exec("podman", container_id, args)
+        }
         TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
         TargetLocator::AppleContainer { container_id } => {
             container_exec("container", container_id, args)
@@ -2241,7 +2247,9 @@ pub fn export_command(
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             ssh_command(ssh, args)
         }
-        TargetLocator::SshPodman { ssh, container_id } => {
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let mut remote = vec![
                 "podman".into(),
                 "exec".into(),
@@ -2274,7 +2282,9 @@ pub fn restore_command(
             let mut args = args;
             CommandSpec::new(args.remove(0), args)
         }
-        TargetLocator::LocalPodman { container_id } => container_exec("podman", container_id, args),
+        TargetLocator::LocalPodman { container_id, .. } => {
+            container_exec("podman", container_id, args)
+        }
         TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
         TargetLocator::AppleContainer { container_id } => {
             container_exec("container", container_id, args)
@@ -2282,7 +2292,9 @@ pub fn restore_command(
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             ssh_command(ssh, args)
         }
-        TargetLocator::SshPodman { ssh, container_id } => {
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let mut remote = vec![
                 "podman".into(),
                 "exec".into(),
@@ -2417,7 +2429,7 @@ pub fn transfer_plan(
             CommandSpec::new("cp", [remote_archive, local.as_str()])
                 .purpose("copy local bare checkpoint"),
         ],
-        TargetLocator::LocalPodman { container_id } => vec![
+        TargetLocator::LocalPodman { container_id, .. } => vec![
             CommandSpec::new(
                 "podman",
                 ["cp", &format!("{container_id}:{remote_archive}"), &local],
@@ -2441,7 +2453,9 @@ pub fn transfer_plan(
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             vec![scp_command(ssh, remote_archive, &local).purpose("download checkpoint over SSH")]
         }
-        TargetLocator::SshPodman { ssh, container_id } => {
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let staging = remote_staging_path(session_id)?;
             vec![
                 ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
@@ -2479,7 +2493,7 @@ fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Resu
             CommandSpec::new("rm", ["-f", "--", remote])
                 .purpose("remove local bare checkpoint staging"),
         ],
-        TargetLocator::LocalPodman { container_id } => vec![container_exec(
+        TargetLocator::LocalPodman { container_id, .. } => vec![container_exec(
             "podman",
             container_id,
             ["rm", "-f", "--", remote],
@@ -2497,7 +2511,9 @@ fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Resu
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             vec![ssh_command(ssh, ["rm", "-f", "--", remote])]
         }
-        TargetLocator::SshPodman { ssh, container_id } => vec![
+        TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => vec![
             ssh_command(
                 ssh,
                 ["podman", "exec", container_id, "rm", "-f", "--", remote],
@@ -2734,6 +2750,7 @@ mod tests {
             },
             TargetLocator::LocalPodman {
                 container_id: name.clone(),
+                workspace_storage: Default::default(),
             },
             TargetLocator::AppleContainer {
                 container_id: name.clone(),
@@ -2752,6 +2769,7 @@ mod tests {
             TargetLocator::SshPodman {
                 ssh: ssh(),
                 container_id: name,
+                workspace_storage: Default::default(),
             },
         ]
     }

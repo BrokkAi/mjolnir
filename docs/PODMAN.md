@@ -35,7 +35,49 @@ podman unshare cat /proc/self/uid_map
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and
-removes that exact container with `podman rm --force` only after checkpointing.
+mounts a dedicated named volume at `/workspace`. Each session gets a different
+volume, so concurrent builds never share a Cargo target directory. On stop,
+Mjolnir first takes and verifies the checkpoint, stops the exact container, and
+marks the session stopped. It then removes the container, workspace volume, and
+Git-cache snapshot in a supervised background operation. A slow storage removal
+therefore does not keep the session logically running, and its current cleanup
+stage remains visible. No extra host service or privileged helper is required
+for this default.
+
+`workspace_storage` can override that policy on a Podman target:
+
+```toml
+# Default; this line can be omitted.
+workspace_storage = { kind = "podman-volume" }
+
+# Legacy behavior: keep /workspace in the container writable layer.
+workspace_storage = { kind = "container-layer" }
+```
+
+The container-layer mode exists for compatibility. It makes `podman rm` delete
+the whole workspace tree and can therefore make cleanup slow after large
+builds.
+
+### Optional host-managed workspace storage
+
+Hosts with native fast dataset deletion can opt into a small helper protocol.
+For example, the repository's
+[`mj-zfs-workspace-helper.sh`](../examples/mj-zfs-workspace-helper.sh) creates
+one ZFS child dataset per session. Copy it to a root-owned host path, edit its
+fixed dataset and mount roots, and grant the Podman user passwordless sudo for
+that helper command only. Then configure the target with the helper's mount
+root and argv:
+
+```toml
+workspace_storage = { kind = "host-helper", root = "/mnt/nvme/mj-workspaces", helper = ["sudo", "-n", "/usr/local/libexec/mj-zfs-workspace-helper"] }
+```
+
+Mjolnir invokes `HELPER create RESOURCE`, `HELPER status RESOURCE`, and
+`HELPER destroy RESOURCE`. The example validates the deterministic resource
+name and confines all operations beneath fixed roots; it is an example rather
+than an installed component. The helper-created directory is mounted as the
+session's complete `/workspace`, not as a shared Cargo cache.
+
 The default `pull_policy = "auto"` starts a session from the image the host
 already has, and pulls only when the host has no copy at all. Instead of pulling
 during a launch, the daemon runs `podman pull` for every remote `:latest` image

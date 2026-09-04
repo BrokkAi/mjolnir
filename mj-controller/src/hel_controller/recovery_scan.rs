@@ -499,6 +499,7 @@ fn candidates_from_container_json(
             let locator = match template {
                 TargetTemplate::LocalPodman { .. } => TargetLocator::LocalPodman {
                     container_id: generated,
+                    workspace_storage: Default::default(),
                 },
                 TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
                     container_id: generated,
@@ -509,6 +510,7 @@ fn candidates_from_container_json(
                 TargetTemplate::SshPodman { ssh, .. } => TargetLocator::SshPodman {
                     host: ssh.host.clone(),
                     container_id: generated,
+                    workspace_storage: Default::default(),
                 },
                 _ => return None,
             };
@@ -770,9 +772,10 @@ fn recovery_backend_locator(
                 worker_root: worker_root.to_string_lossy().into_owned(),
             }
         }
-        (TargetTemplate::LocalPodman { .. }, TargetLocator::LocalPodman { container_id }) => {
+        (TargetTemplate::LocalPodman { .. }, TargetLocator::LocalPodman { container_id, .. }) => {
             hel_targets::TargetLocator::LocalPodman {
                 container_id: container_id.clone(),
+                workspace_storage: Default::default(),
             }
         }
         (TargetTemplate::LocalDocker { .. }, TargetLocator::LocalDocker { container_id }) => {
@@ -789,6 +792,7 @@ fn recovery_backend_locator(
             hel_targets::TargetLocator::SshPodman {
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
+                workspace_storage: Default::default(),
             }
         }
         (TargetTemplate::SshBare { ssh, .. }, TargetLocator::SshBare { workspace, .. }) => {
@@ -973,6 +977,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let json = serde_json::json!([
@@ -1000,6 +1005,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let session = "0123456789abcdef0123456789abcdef";

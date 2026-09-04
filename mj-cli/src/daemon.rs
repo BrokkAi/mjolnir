@@ -183,6 +183,7 @@ pub(crate) enum RuntimeLifecycleKind {
     Resume,
     ForceStop,
     DestroyStopped,
+    Cleanup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -621,6 +622,7 @@ enum LifecycleKind {
     Resume,
     ForceStop,
     DestroyStopped,
+    Cleanup,
 }
 
 /// Whether a lifecycle has exclusive ownership of the worker target, so the
@@ -648,6 +650,7 @@ struct ActiveLifecycle {
 #[derive(Debug, Clone)]
 enum DaemonLifecycleResult {
     Done,
+    DeferredCleanup,
 }
 
 impl From<LifecycleKind> for RuntimeLifecycleKind {
@@ -658,6 +661,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::Resume => Self::Resume,
             LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped => Self::DestroyStopped,
+            LifecycleKind::Cleanup => Self::Cleanup,
         }
     }
 }
@@ -1198,11 +1202,14 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match outcome? {
             DaemonLifecycleResult::Done => Ok(()),
+            DaemonLifecycleResult::DeferredCleanup => {
+                unreachable!("session creation cannot schedule target cleanup")
+            }
         }
     }
 
     pub(crate) async fn close_session(self: &Arc<Self>, session_id: String) -> Result<()> {
-        let already_stopped = blocking({
+        let (already_stopped, needs_cleanup) = blocking({
             let session_id = session_id.clone();
             move || {
                 let controller = Controller::load()?;
@@ -1210,45 +1217,169 @@ impl RuntimeState {
                     .state
                     .sessions
                     .get(&session_id)
-                    .is_some_and(|session| session.state == SessionState::Stopped))
+                    .map_or((false, false), |session| {
+                        (
+                            session.state == SessionState::Stopped,
+                            session.state == SessionState::Stopped && session.target.is_some(),
+                        )
+                    }))
             }
         })
         .await?;
         if already_stopped {
+            if needs_cleanup {
+                self.start_deferred_cleanup(session_id)?;
+            }
             return Ok(());
         }
-        self.run_lifecycle(
-            session_id,
-            LifecycleKind::Close,
+        let operation_session_id = session_id.clone();
+        let result = self
+            .run_lifecycle(
+                operation_session_id,
+                LifecycleKind::Close,
+                |state, session_id, cancelled| async move {
+                    let _recovery_reservation = tokio::task::spawn_blocking({
+                        let observer = state.recovery_observer.clone();
+                        let session_id = session_id.clone();
+                        let cancelled = cancelled.clone();
+                        move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
+                    })
+                    .await
+                    .context("reserve recovery for daemon close task")??;
+                    let mut controller = tokio::task::spawn_blocking(Controller::load)
+                        .await
+                        .context("load controller for daemon close task")??;
+                    let executor = DaemonStageReportingExecutor::new(
+                        CancellableProcessExecutor::new(cancelled),
+                        state.clone(),
+                        session_id.clone(),
+                    );
+                    let deferred = controller
+                        .close_session_managed_controlled(
+                            &session_id,
+                            &executor,
+                            &state.session_manager,
+                        )
+                        .await?;
+                    Ok(if deferred {
+                        DaemonLifecycleResult::DeferredCleanup
+                    } else {
+                        DaemonLifecycleResult::Done
+                    })
+                },
+            )
+            .await?;
+        if matches!(result, DaemonLifecycleResult::DeferredCleanup) {
+            self.start_deferred_cleanup(session_id)?;
+        }
+        Ok(())
+    }
+
+    fn start_deferred_cleanup(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<
+        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
+    > {
+        let result = self.start_or_join_lifecycle(
+            session_id.clone(),
+            LifecycleKind::Cleanup,
             |state, session_id, cancelled| async move {
-                let _recovery_reservation = tokio::task::spawn_blocking({
-                    let observer = state.recovery_observer.clone();
-                    let session_id = session_id.clone();
-                    let cancelled = cancelled.clone();
-                    move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
+                blocking(move || {
+                    let mut controller = Controller::load()?;
+                    let executor = DaemonStageReportingExecutor::new(
+                        CancellableProcessExecutor::new(cancelled),
+                        state,
+                        session_id.clone(),
+                    );
+                    controller.cleanup_stopped_target(&session_id, &executor)?;
+                    Ok(DaemonLifecycleResult::Done)
                 })
                 .await
-                .context("reserve recovery for daemon close task")??;
-                let mut controller = tokio::task::spawn_blocking(Controller::load)
-                    .await
-                    .context("load controller for daemon close task")??;
-                let executor = DaemonStageReportingExecutor::new(
-                    CancellableProcessExecutor::new(cancelled),
-                    state.clone(),
-                    session_id.clone(),
-                );
-                controller
-                    .close_session_managed_controlled(
-                        &session_id,
-                        &executor,
-                        &state.session_manager,
-                    )
-                    .await?;
-                Ok(DaemonLifecycleResult::Done)
             },
-        )
-        .await?;
-        Ok(())
+        )?;
+        let caller_result = result.clone();
+        let channel = result.clone();
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(error) = Self::wait_lifecycle_result(result).await {
+                tracing::warn!(%session_id, error = format!("{error:#}"), "deferred Podman cleanup failed");
+                state.push_notice(
+                    &session_id,
+                    format!("Container storage cleanup failed and can be retried: {error:#}"),
+                );
+            }
+            state.remove_completed_lifecycle(&channel);
+        });
+        Ok(caller_result)
+    }
+
+    fn resume_retained_cleanups(self: &Arc<Self>) {
+        let session_ids = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.state == SessionState::Stopped && session.target.is_some()
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            if let Err(error) = self.start_deferred_cleanup(session_id.clone()) {
+                tracing::warn!(%session_id, error = format!("{error:#}"), "could not resume deferred Podman cleanup");
+                self.push_notice(
+                    &session_id,
+                    format!("Could not resume container storage cleanup: {error:#}"),
+                );
+            }
+        }
+    }
+
+    async fn wait_for_deferred_cleanup(self: &Arc<Self>, session_id: &str) -> Result<()> {
+        let existing = {
+            let lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            lifecycle.get(session_id).and_then(|active| {
+                (active.kind == LifecycleKind::Cleanup).then(|| active.result.clone())
+            })
+        };
+        let result = match existing {
+            Some(result) => result,
+            None => {
+                let needs_cleanup = blocking({
+                    let session_id = session_id.to_owned();
+                    move || {
+                        let controller = Controller::load()?;
+                        Ok(controller
+                            .state
+                            .sessions
+                            .get(&session_id)
+                            .is_some_and(|session| {
+                                session.state == SessionState::Stopped && session.target.is_some()
+                            }))
+                    }
+                })
+                .await?;
+                if !needs_cleanup {
+                    return Ok(());
+                }
+                self.start_deferred_cleanup(session_id.to_owned())?
+            }
+        };
+        let channel = result.clone();
+        let outcome = Self::wait_lifecycle_result(result).await;
+        self.remove_completed_lifecycle(&channel);
+        match outcome? {
+            DaemonLifecycleResult::Done => Ok(()),
+            DaemonLifecycleResult::DeferredCleanup => {
+                unreachable!("cleanup cannot schedule another cleanup")
+            }
+        }
     }
 
     /// Resume a session, and return nothing.
@@ -1263,6 +1394,7 @@ impl RuntimeState {
         request: ResumeSessionRequest,
     ) -> Result<()> {
         let session_id = request.session_id.clone();
+        self.wait_for_deferred_cleanup(&session_id).await?;
         // Whether it is already running is a boolean. Answering it used to
         // load the entire projection so it could be handed back as the reply.
         let already_running = blocking({
@@ -1345,33 +1477,48 @@ impl RuntimeState {
         let channel = result.clone();
         let result = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);
-        let DaemonLifecycleResult::Done = result?;
+        match result? {
+            DaemonLifecycleResult::Done => {}
+            DaemonLifecycleResult::DeferredCleanup => {
+                unreachable!("session resume cannot schedule target cleanup")
+            }
+        }
         Ok(())
     }
 
     async fn force_stop_session(self: &Arc<Self>, session_id: String) -> Result<()> {
-        self.run_lifecycle(
-            session_id,
-            LifecycleKind::ForceStop,
-            |state, session_id, cancelled| async move {
-                blocking(move || {
-                    let mut controller = Controller::load()?;
-                    let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
-                        state,
-                        session_id.clone(),
-                    );
-                    controller.force_stop(&session_id, &executor)?;
-                    Ok(DaemonLifecycleResult::Done)
-                })
-                .await
-            },
-        )
-        .await?;
+        let operation_session_id = session_id.clone();
+        let result = self
+            .run_lifecycle(
+                operation_session_id,
+                LifecycleKind::ForceStop,
+                |state, session_id, cancelled| async move {
+                    blocking(move || {
+                        let mut controller = Controller::load()?;
+                        let executor = DaemonStageReportingExecutor::new(
+                            CancellableProcessExecutor::new(cancelled),
+                            state,
+                            session_id.clone(),
+                        );
+                        let deferred = controller.force_stop(&session_id, &executor)?;
+                        Ok(if deferred {
+                            DaemonLifecycleResult::DeferredCleanup
+                        } else {
+                            DaemonLifecycleResult::Done
+                        })
+                    })
+                    .await
+                },
+            )
+            .await?;
+        if matches!(result, DaemonLifecycleResult::DeferredCleanup) {
+            self.start_deferred_cleanup(session_id)?;
+        }
         Ok(())
     }
 
     async fn destroy_stopped_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        self.wait_for_deferred_cleanup(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();
             move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
@@ -1413,12 +1560,12 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Cancel and join every lifecycle owner before the daemon closes its
-    /// session manager and database writer. The operations already run
-    /// concurrently; awaiting their result feeds sequentially only observes
-    /// completion and never serializes the work itself.
+    /// Let storage cleanup drain briefly, then cancel and join every lifecycle
+    /// owner before the daemon closes its session manager and database writer.
+    /// One shared deadline bounds all cleanup tasks rather than granting eight
+    /// seconds to each session serially.
     async fn cancel_and_wait_lifecycles(&self) -> Result<()> {
-        let pending = {
+        let mut pending = {
             let lifecycle = self
                 .lifecycle
                 .lock()
@@ -1427,17 +1574,70 @@ impl RuntimeState {
                 .iter()
                 .filter(|(_, active)| active.result.borrow().is_none())
                 .map(|(session_id, active)| {
-                    active.cancelled.store(true, Ordering::Release);
-                    (session_id.clone(), active.result.clone())
+                    if active.kind != LifecycleKind::Cleanup {
+                        active.cancelled.store(true, Ordering::Release);
+                    }
+                    let stage = active
+                        .active_stages
+                        .keys()
+                        .next_back()
+                        .map(|stage| stage.label())
+                        .unwrap_or_else(|| "container cleanup".to_owned());
+                    (
+                        session_id.clone(),
+                        active.kind,
+                        stage,
+                        active.cancelled.clone(),
+                        active.result.clone(),
+                    )
                 })
                 .collect::<Vec<_>>()
         };
-        for (session_id, mut result) in pending {
-            while result.borrow_and_update().is_none() {
-                result.changed().await.with_context(|| {
-                    format!("lifecycle owner stopped without a result for session {session_id}")
-                })?;
+        let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        for (session_id, kind, stage, cancelled, result) in &mut pending {
+            if *kind != LifecycleKind::Cleanup || result.borrow().is_some() {
+                continue;
             }
+            tracing::info!(%session_id, %stage, "daemon shutdown is waiting for deferred cleanup");
+            self.set_lifecycle_notice(
+                session_id,
+                &format!("Daemon shutdown is waiting for {stage}"),
+            );
+            let finished = tokio::time::timeout_at(cleanup_deadline, async {
+                while result.borrow_and_update().is_none() {
+                    result.changed().await.with_context(|| {
+                        format!("cleanup owner stopped without a result for session {session_id}")
+                    })?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+            match finished {
+                Ok(result) => result?,
+                Err(_) => {
+                    tracing::warn!(%session_id, %stage, "deferred cleanup exceeded the daemon shutdown drain deadline");
+                    cancelled.store(true, Ordering::Release);
+                }
+            }
+        }
+        let join_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        for (session_id, _, stage, cancelled, mut result) in pending {
+            cancelled.store(true, Ordering::Release);
+            let joined = tokio::time::timeout_at(join_deadline, async {
+                while result.borrow_and_update().is_none() {
+                    result.changed().await.with_context(|| {
+                        format!("lifecycle owner stopped without a result for session {session_id}")
+                    })?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+            if joined.is_err() {
+                bail!(
+                    "timed out cancelling lifecycle owner for session {session_id} while {stage}"
+                );
+            }
+            joined.expect("checked timeout")?;
         }
         Ok(())
     }
@@ -1643,7 +1843,20 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         let _stage = command
             .stage
             .map(|stage| ProvisionStageGuard::new(self, stage));
-        self.inner.execute(command)
+        let started = std::time::Instant::now();
+        let result = self.inner.execute(command);
+        tracing::info!(
+            session_id = %self.session_id,
+            stage = command
+                .stage
+                .map(ProvisionStage::label)
+                .unwrap_or_else(|| "command".to_owned()),
+            purpose = %command.purpose,
+            duration_ms = started.elapsed().as_millis(),
+            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
+            "session command stage finished"
+        );
+        result
     }
 
     fn execute_with_stdin(
@@ -1654,7 +1867,20 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         let _stage = command
             .stage
             .map(|stage| ProvisionStageGuard::new(self, stage));
-        self.inner.execute_with_stdin(command, input)
+        let started = std::time::Instant::now();
+        let result = self.inner.execute_with_stdin(command, input);
+        tracing::info!(
+            session_id = %self.session_id,
+            stage = command
+                .stage
+                .map(ProvisionStage::label)
+                .unwrap_or_else(|| "command".to_owned()),
+            purpose = %command.purpose,
+            duration_ms = started.elapsed().as_millis(),
+            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
+            "session streaming command stage finished"
+        );
+        result
     }
 
     fn cancellation_requested(&self) -> bool {
@@ -2742,6 +2968,7 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
         worker_upgrades.observer(),
         workspaces,
     ));
+    state.resume_retained_cleanups();
     let cancellation = hel::termination::Coordinator::install().token();
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
@@ -2840,10 +3067,20 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
                 }
                 completed = interrupted_close_rx.recv() => {
                     if let Some(completed) = completed {
+                        let recovered = completed.result.is_ok();
                         if let Err(error) = completed.result {
                             tracing::warn!(session_id = %completed.session_id, %error, "daemon could not resume interrupted close");
                         }
                         refresh_runtime_controller(&state).await;
+                        if recovered && completed.deferred_cleanup
+                            && let Err(error) = state.start_deferred_cleanup(completed.session_id.clone())
+                        {
+                            tracing::warn!(session_id = %completed.session_id, error = format!("{error:#}"), "could not continue cleanup after interrupted close");
+                            state.push_notice(
+                                &completed.session_id,
+                                format!("Could not continue container storage cleanup: {error:#}"),
+                            );
+                        }
                     }
                 }
                 accepted = listener.accept() => {
@@ -4641,6 +4878,46 @@ mod tests {
                 .is_empty()
         );
         release.notify_one();
+        assert!(matches!(
+            RuntimeState::wait_lifecycle_result(result).await.unwrap(),
+            DaemonLifecycleResult::Done
+        ));
+    }
+
+    #[tokio::test]
+    async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
+        let state = test_runtime_state();
+        let saw_early_cancellation = Arc::new(AtomicBool::new(false));
+        let result = state
+            .start_or_join_lifecycle("session-1".into(), LifecycleKind::Cleanup, {
+                let saw_early_cancellation = saw_early_cancellation.clone();
+                move |state, session_id, cancelled| async move {
+                    let executor = DaemonStageReportingExecutor::new(
+                        hel::hel_targets::ProcessExecutor,
+                        state,
+                        session_id,
+                    );
+                    executor.stage_started(ProvisionStage::RemovingStorage);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    saw_early_cancellation
+                        .store(cancelled.load(Ordering::Acquire), Ordering::Release);
+                    executor.stage_finished(ProvisionStage::RemovingStorage);
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        let visible = state.active_lifecycles();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].kind, RuntimeLifecycleKind::Cleanup);
+        assert_eq!(
+            visible[0].active_stages[0].0,
+            ProvisionStage::RemovingStorage
+        );
+
+        state.cancel_and_wait_lifecycles().await.unwrap();
+        assert!(!saw_early_cancellation.load(Ordering::Acquire));
         assert!(matches!(
             RuntimeState::wait_lifecycle_result(result).await.unwrap(),
             DaemonLifecycleResult::Done

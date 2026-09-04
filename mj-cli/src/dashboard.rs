@@ -1933,9 +1933,8 @@ impl DashboardContext {
                 crate::daemon::RuntimeLifecycleKind::Close
                 | crate::daemon::RuntimeLifecycleKind::ForceStop => SessionOperationKind::Stopping,
                 crate::daemon::RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
-                crate::daemon::RuntimeLifecycleKind::DestroyStopped => {
-                    SessionOperationKind::Destroying
-                }
+                crate::daemon::RuntimeLifecycleKind::DestroyStopped
+                | crate::daemon::RuntimeLifecycleKind::Cleanup => SessionOperationKind::Destroying,
             };
             mark_active_chat_retiring_for_remote_lifecycle(
                 self.active_chat.as_mut(),
@@ -2738,6 +2737,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: std::collections::BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );
@@ -3601,6 +3601,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     environment: std::collections::BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         );

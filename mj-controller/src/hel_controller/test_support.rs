@@ -124,6 +124,7 @@ pub(super) fn resume_compatibility_config() -> HelConfig {
                 cpus: None,
                 memory: None,
                 environment: BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         },
     );

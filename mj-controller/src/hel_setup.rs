@@ -562,6 +562,7 @@ fn build_config_with_runtimes(
             cpus: None,
             memory: None,
             environment: BTreeMap::new(),
+            workspace_storage: Default::default(),
         };
         let (target_id, target) = match runtime {
             RuntimeKind::Podman => ("podman", TargetTemplate::LocalPodman { container }),
@@ -612,6 +613,7 @@ fn build_config_with_runtimes(
                     cpus: None,
                     memory: None,
                     environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
                 },
             },
         };
@@ -1185,6 +1187,7 @@ fn smoke_target(runtime: RuntimeKind, image: &str) -> RuntimeTargetTemplate {
         image: image.to_owned(),
         pull_policy: Default::default(),
         extra_run_args: vec![],
+        workspace_storage: Default::default(),
     };
     match runtime {
         RuntimeKind::Podman => RuntimeTargetTemplate::LocalPodman(container),

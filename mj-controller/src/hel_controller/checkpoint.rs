@@ -1688,7 +1688,7 @@ pub(super) fn upload_checkpoint_spec(
                 .with_context(|| format!("copy checkpoint specification to {remote}"))?;
             Ok(())
         }
-        hel_targets::TargetLocator::LocalPodman { container_id } => execute_checked(
+        hel_targets::TargetLocator::LocalPodman { container_id, .. } => execute_checked(
             executor,
             CommandSpec::new(
                 "podman",
@@ -1733,7 +1733,9 @@ pub(super) fn upload_checkpoint_spec(
             scp_command_spec(ssh, local, remote, false).purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
-        hel_targets::TargetLocator::SshPodman { ssh, container_id } => {
+        hel_targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => {
             let staging = format!(".local/share/hel/uploads/{session_id}-checkpoint.json");
             execute_checked(
                 executor,
@@ -2282,6 +2284,7 @@ mod tests {
     fn checkpoint_export_streams_its_spec_instead_of_uploading_it() {
         let locator = hel_targets::TargetLocator::LocalPodman {
             container_id: hel_targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+            workspace_storage: Default::default(),
         };
         let spec = export_spec_fixture();
         let executor = ExportExecutor::new(0, "");
@@ -2312,6 +2315,7 @@ mod tests {
     fn an_export_that_cannot_read_stdin_falls_back_to_uploading_the_spec() {
         let locator = hel_targets::TargetLocator::LocalPodman {
             container_id: hel_targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+            workspace_storage: Default::default(),
         };
         let executor = ExportExecutor::new(
             1,
@@ -2342,6 +2346,7 @@ mod tests {
     fn a_failing_export_is_not_retried_as_an_old_worker() {
         let locator = hel_targets::TargetLocator::LocalPodman {
             container_id: hel_targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+            workspace_storage: Default::default(),
         };
         let executor = ExportExecutor::new(1, "Error: repository 'app' is missing\n");
 
@@ -2369,6 +2374,7 @@ mod tests {
     fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
         let locator = hel_targets::TargetLocator::LocalPodman {
             container_id: hel_targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+            workspace_storage: Default::default(),
         };
         let spec = export_spec_fixture();
         let executor = ExportExecutor::new(
@@ -2410,6 +2416,7 @@ mod tests {
     fn a_schema_mismatch_after_uploading_the_spec_still_replaces_the_worker_binary() {
         let locator = hel_targets::TargetLocator::LocalPodman {
             container_id: hel_targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+            workspace_storage: Default::default(),
         };
         struct FileThenRefreshExecutor {
             purposes: RefCell<Vec<String>>,

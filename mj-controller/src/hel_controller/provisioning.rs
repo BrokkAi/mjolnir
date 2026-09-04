@@ -29,8 +29,8 @@ use super::backend::{
 };
 use super::checkpoint::upload_checkpoint_spec;
 use super::git_cache;
-use super::readiness::{connect_started_worker, wait_for_native_session};
-use super::worker_binary::{start_worker, worker_probe_diagnosis};
+use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
+use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_diagnosis};
 use super::{Controller, execute_checked, now, target_kind};
 
 const INHERITED_GIT_SETTINGS: &[&str] = &[
@@ -513,14 +513,27 @@ impl Controller {
                 LocalBootstrap::Seed,
             )?;
         }
-        let executor = &StagedExecutor::new(executor, ProvisionStage::Starting);
-        start_worker(executor, backend, worker_root)?;
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let profile = self
+            .config
+            .profiles
+            .get(&session.last_profile)
+            .with_context(|| format!("unknown profile {}", session.last_profile))?;
+        let readiness_stage = bridge_readiness_stage(profile);
         let reconnect = &hel_targets::reconnect_plan(backend, session_id)?.commands[0];
         let readiness = async {
-            let mut relay =
+            let mut relay = {
+                let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+                start_worker(executor, backend, worker_root)?;
                 connect_started_worker(reconnect, session_id, executor, backend, worker_root)
-                    .await?;
-            let native_session_id = wait_for_native_session(&mut relay, executor).await?;
+                    .await?
+            };
+            let native_session_id =
+                wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
             Ok(Some(native_session_id))
         }
         .await;
@@ -1028,9 +1041,13 @@ fn provisioned_locator(
         // A bare project directory belongs to the user: provisioning creates
         // nothing that a failure could leak.
         hel_targets::TargetTemplate::LocalBare => return None,
-        hel_targets::TargetTemplate::LocalPodman(_) => hel_targets::TargetLocator::LocalPodman {
-            container_id: container_id()?,
-        },
+        hel_targets::TargetTemplate::LocalPodman(container) => {
+            hel_targets::TargetLocator::LocalPodman {
+                container_id: container_id()?,
+                workspace_storage: hel_targets::podman_workspace_locator(container, session_id)
+                    .ok()?,
+            }
+        }
         hel_targets::TargetTemplate::LocalDocker(_) => hel_targets::TargetLocator::LocalDocker {
             container_id: container_id()?,
         },
@@ -1039,10 +1056,12 @@ fn provisioned_locator(
                 container_id: container_id()?,
             }
         }
-        hel_targets::TargetTemplate::SshPodman { ssh, .. } => {
+        hel_targets::TargetTemplate::SshPodman { ssh, container } => {
             hel_targets::TargetLocator::SshPodman {
                 ssh: ssh.clone(),
                 container_id: container_id()?,
+                workspace_storage: hel_targets::podman_workspace_locator(container, session_id)
+                    .ok()?,
             }
         }
         hel_targets::TargetTemplate::SshBare { ssh, .. } => hel_targets::TargetLocator::SshBare {
@@ -1829,6 +1848,7 @@ mod tests {
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
             extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
         })
     }
 
@@ -1934,6 +1954,7 @@ mod tests {
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 extra_run_args: Vec::new(),
+                workspace_storage: Default::default(),
             }),
             hel_targets::TargetTemplate::AwsEc2(hel_targets::AwsTemplate {
                 profile: "default".into(),
@@ -2141,6 +2162,7 @@ mod tests {
         let ephemeral = [
             hel_targets::TargetLocator::LocalPodman {
                 container_id: "abcdef012345".into(),
+                workspace_storage: Default::default(),
             },
             hel_targets::TargetLocator::AppleContainer {
                 container_id: "abcdef012346".into(),
@@ -2156,6 +2178,7 @@ mod tests {
             hel_targets::TargetLocator::SshPodman {
                 ssh: ssh.clone(),
                 container_id: "abcdef012347".into(),
+                workspace_storage: Default::default(),
             },
         ];
         for locator in &ephemeral {
@@ -2223,6 +2246,7 @@ mod tests {
                 cpus: None,
                 memory: None,
                 environment: BTreeMap::new(),
+                workspace_storage: Default::default(),
             },
         };
         let yolo = TargetTemplate::SshBare {
@@ -2292,6 +2316,7 @@ mod tests {
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
             extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
         };
         vec![
             hel_targets::TargetTemplate::LocalPodman(container.clone()),
@@ -2326,10 +2351,10 @@ mod tests {
             // Remote commands reach the target posix-quoted.
             let removal = executor
                 .commands()
-                .last()
-                .unwrap()
-                .join(" ")
-                .replace('\'', "");
+                .into_iter()
+                .map(|arguments| arguments.join(" ").replace('\'', ""))
+                .find(|command| command.contains("rm --force") && command.contains(&name))
+                .expect("cleanup removes the exact provisioned container");
             assert!(removal.contains("rm --force"), "{removal}");
             assert!(removal.contains(&name), "{removal}");
         }
@@ -2346,6 +2371,7 @@ mod tests {
             provision_target_creation(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
                 Ok(TargetLocator::LocalPodman {
                     container_id: hel_targets::resource_name(PROVISIONED_SESSION)?,
+                    workspace_storage: Default::default(),
                 })
             })
             .unwrap();
@@ -2402,7 +2428,12 @@ mod tests {
         let reported = format!("{error:#}");
         assert!(reported.contains("never reported an address"), "{reported}");
         assert!(reported.contains("cleanup succeeded"), "{reported}");
-        let removal = executor.commands().last().unwrap().join(" ");
+        let removal = executor
+            .commands()
+            .into_iter()
+            .map(|arguments| arguments.join(" "))
+            .find(|command| command.contains("podman rm --force --ignore"))
+            .expect("cleanup removes the provisioned Podman container");
         assert!(removal.contains("podman rm --force --ignore"), "{removal}");
     }
 
