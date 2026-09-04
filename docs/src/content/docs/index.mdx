@@ -1,19 +1,106 @@
 ---
-title: Mjolnir docs
-description: Documentation for Mjolnir, a terminal control plane for coding-agent sessions.
+title: Mjolnir — the session control plane for coding agents
+description: Run durable Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek Harness sessions across local worktrees, containers, SSH hosts, and EC2 instances.
 template: splash
 hero:
   title: Mjolnir
-  tagline: Run long-lived coding-agent sessions in disposable, isolated targets.
+  tagline: Run long-lived coding-agent sessions across local and remote targets.
+  actions:
+    - text: Start a session
+      link: quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: Configuration reference
+      link: configuration/
+      icon: open-book
+      variant: minimal
 ---
 
-This site holds Mjolnir's Starlight documentation. Right now it covers container
-targets:
+import { Image } from 'astro:assets';
+import dashboard from '../../assets/screenshots/dashboard.svg';
 
-- [Container targets](/containers/)
-- [Podman for Mjolnir](/podman/)
-- [Docker for Mjolnir](/docker/)
-- [Custom container images](/custom-images/)
+<section class="home-section">
+  <p class="section-label">One operating plane</p>
+  <h2>Keep every coding session working when you walk away.</h2>
+  <p>Mjolnir runs many Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek Harness sessions at once. Prompts queue on the target, sessions survive a closed terminal, and one local daemon coordinates their state, capacity, credentials, and recovery.</p>
+  <div class="role-grid">
+    <div class="role-grid__inner">
+      <article>
+        <small>01 / SESSION</small>
+        <h3>The harness owns the turn</h3>
+        <p>Pick one profile per session. Its native model, modes, tools, and transcript stay available through ACP.</p>
+        <code>session://durable</code>
+      </article>
+      <article>
+        <small>02 / TARGET</small>
+        <h3>Choose the execution boundary</h3>
+        <p>Use an existing local or SSH worktree when you need host access, or contain unrestricted work in a container or disposable EC2 instance.</p>
+        <code>target://selected</code>
+      </article>
+      <article>
+        <small>03 / CONTROL</small>
+        <h3>You keep the whole fleet in view</h3>
+        <p>Read live work, queue prompts, watch quota and host capacity, and resume from a verified checkpoint.</p>
+        <code>control://local</code>
+      </article>
+    </div>
+  </div>
+</section>
 
-For everything else — installation, configuration, targets, and usage — see
-the [Mjolnir README on GitHub](https://github.com/BrokkAi/mjolnir#readme).
+<section class="home-section">
+  <p class="section-label">The current surface</p>
+  <h2>Sessions, conversation, targets, and quota on one screen.</h2>
+  <p>The terminal opens on the session that spoke most recently. Every support pane stays visible, resizes independently, and shares the same daemon-owned state with the authenticated web viewer and desktop app.</p>
+  <figure class="shot">
+    <a class="shot__zoom" href={dashboard.src} aria-label="Open the full-size Mjolnir terminal dashboard screenshot">
+      <Image src={dashboard} alt="Mjolnir 2.0 terminal dashboard with three active sessions, conversation and prompt regions, local target capacity, four profile quota rows, and contextual shortcuts." />
+    </a>
+    <figcaption>A frame rendered by Mjolnir itself. The documentation capture is regenerated from the production Ratatui renderer as the interface changes.</figcaption>
+  </figure>
+</section>
+
+<section class="home-section">
+  <p class="section-label">Why Mjolnir</p>
+  <h2>Built for more than one agent in one terminal.</h2>
+  <p>The control plane becomes useful when sessions outlive terminals, accounts have different quota, or work needs to move between machines without turning every target into a pet server.</p>
+  <div class="capability-grid">
+    <div class="capability-grid__inner">
+      <a href="sessions/">
+        <span>01 / QUEUE</span><h3>Durable sessions</h3><p>Queued prompts keep their order on the target and continue while every control surface is detached.</p>
+      </a>
+      <a href="targets/">
+        <span>02 / EXECUTE</span><h3>Local and remote targets</h3><p>Run locally, in Podman or Docker, over SSH, with Apple container, or on an EC2 instance.</p>
+      </a>
+      <a href="profiles/">
+        <span>03 / CAPACITY</span><h3>Profiles and quota</h3><p>Keep several accounts per harness and see their usable capacity in one consistent view.</p>
+      </a>
+      <a href="web-viewer/">
+        <span>04 / REMOTE</span><h3>Web and desktop</h3><p>Open the same daemon-owned sessions in a browser, on a phone over Tailscale, or in the native shell.</p>
+      </a>
+      <a href="durability/">
+        <span>05 / RECOVER</span><h3>Verified checkpoints</h3><p>Stop only after byte-for-byte verification, then resume into a freshly provisioned target.</p>
+      </a>
+      <a href="cli-reference/">
+        <span>06 / AUTOMATE</span><h3>Agent-operable checks</h3><p>Use machine-readable doctor output and self-contained setup instructions to converge a host.</p>
+      </a>
+    </div>
+  </div>
+</section>
+
+<section class="home-section">
+  <p class="section-label">Converge before launch</p>
+  <h2>Let the checks tell you when a target is ready.</h2>
+  <p>Setup discovers local harness homes and runtimes. Doctor reports every prerequisite with a concrete remediation; its smoke mode proves configured runtimes can actually start and clean up their test workloads.</p>
+  <div class="command-strip" aria-label="Verify Mjolnir prerequisites"><span>❯</span><code>mj doctor --json --smoke</code><small>VERIFY TARGETS</small></div>
+</section>
+
+<section class="home-section">
+  <div class="docs-callout">
+    <div>
+      <p class="section-label">First session</p>
+      <h2>Go from install to a detached agent.</h2>
+      <p>Follow the quickstart through discovery, target checks, profile login, session creation, prompt delivery, and a clean detach. Then use the reference sections to grow beyond the generated configuration.</p>
+    </div>
+    <a href="quickstart/">Open the quickstart <span aria-hidden="true">→</span></a>
+  </div>
+</section>

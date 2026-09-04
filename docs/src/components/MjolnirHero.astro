@@ -56,7 +56,7 @@ const hammerArt = [...hammerMask]
       <span aria-hidden="true"></span> Mjolnir by <a href="https://brokk.ai" rel="external">Brokk</a>
     </p>
     <h1 id="_top">The session<br /><em>control plane</em> for coding agents.</h1>
-    <p class="hero-tagline">Run long-lived agent sessions in disposable, isolated targets. Prompts queue durably, sessions checkpoint and resume, and one dashboard tracks sessions, quotas, and credentials.</p>
+    <p class="hero-tagline">Run long-lived agent sessions across local worktrees, containers, SSH hosts, and EC2 instances. Prompts queue durably, sessions checkpoint and resume, and one dashboard tracks sessions, quotas, and credentials.</p>
     {
       actions.length > 0 && (
         <div class="hero-actions">
@@ -74,22 +74,14 @@ const hammerArt = [...hammerMask]
         <p id="install-mjolnir">Install Mjolnir</p>
         <div class="hero-install-tabs" role="tablist" aria-label="Installation methods">
           <button id="install-curl-tab" type="button" role="tab" aria-selected="true" aria-controls="install-curl-panel" tabindex="0">curl</button>
-          <button id="install-homebrew-tab" type="button" role="tab" aria-selected="false" aria-controls="install-homebrew-panel" tabindex="-1">Homebrew</button>
           <button id="install-npm-tab" type="button" role="tab" aria-selected="false" aria-controls="install-npm-panel" tabindex="-1">npm</button>
           <button id="install-npx-tab" type="button" role="tab" aria-selected="false" aria-controls="install-npx-panel" tabindex="-1">npx</button>
-          <button id="install-cargo-tab" type="button" role="tab" aria-selected="false" aria-controls="install-cargo-panel" tabindex="-1">Cargo</button>
           <button id="install-archive-tab" type="button" role="tab" aria-selected="false" aria-controls="install-archive-panel" tabindex="-1">Archive</button>
-          <button id="install-source-tab" type="button" role="tab" aria-selected="false" aria-controls="install-source-panel" tabindex="-1">Source</button>
         </div>
       </div>
       <div id="install-curl-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-curl-tab">
         <span aria-hidden="true">❯</span>
         <code title="curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash">curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash</code>
-        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
-      </div>
-      <div id="install-homebrew-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-homebrew-tab" hidden>
-        <span aria-hidden="true">❯</span>
-        <code title="brew install brokkai/tap/mjolnir">brew install brokkai/tap/mjolnir</code>
         <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
       </div>
       <div id="install-npm-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-npm-tab" hidden>
@@ -102,31 +94,21 @@ const hammerArt = [...hammerMask]
         <code title="npx -y @brokkai/mjolnir">npx -y @brokkai/mjolnir</code>
         <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy run command">Copy</button>
       </div>
-      <div id="install-cargo-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-cargo-tab" hidden>
-        <span aria-hidden="true">❯</span>
-        <code title="cargo install --locked brokk-mjolnir brokk-mj-voice-worker">cargo install --locked brokk-mjolnir brokk-mj-voice-worker</code>
-        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
-      </div>
       <div id="install-archive-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-archive-tab" hidden>
         <span aria-hidden="true">→</span>
         <span class="hero-install-description">Download a release archive for your platform</span>
         <a class="hero-install-link" href="https://github.com/BrokkAi/mjolnir/releases" rel="external">Releases</a>
       </div>
-      <div id="install-source-panel" class="hero-install-command" role="tabpanel" aria-labelledby="install-source-tab" hidden>
-        <span aria-hidden="true">❯</span>
-        <code title="git clone https://github.com/BrokkAi/mjolnir.git && cd mjolnir && cargo build --release">git clone https://github.com/BrokkAi/mjolnir.git &amp;&amp; cd mjolnir &amp;&amp; cargo build --release</code>
-        <button type="button" class="hero-install-copy" data-install-copy aria-label="Copy install command">Copy</button>
-      </div>
       <p class="hero-install-status" data-install-status aria-live="polite"></p>
     </section>
     <ul class="hero-facts" aria-label="What Mjolnir gives your coding agents">
       <li><span>01 / SESSIONS</span><strong>Durable, resumable sessions</strong></li>
-      <li><span>02 / TARGETS</span><strong>Disposable containers and remote hosts</strong></li>
+      <li><span>02 / TARGETS</span><strong>Flexible local and remote execution</strong></li>
       <li><span>03 / SURFACES</span><strong>Terminal dashboard and web viewer</strong></li>
     </ul>
   </div>
 
-  <div class="storm-console mj-panel" aria-label="How a Mjolnir session runs in a disposable target">
+  <div class="storm-console mj-panel" aria-label="How a Mjolnir session runs on its selected target">
     <div class="console-bar">
       <span><i></i> SESSION</span>
     </div>
@@ -134,7 +116,7 @@ const hammerArt = [...hammerMask]
       <div
         class="turn-flow"
         role="img"
-        aria-label="Your prompt goes to the session — any of the five supported harnesses — which owns the turn. The session runs in a disposable target, a container or remote host that is rebuilt per session, and the answer streams back to your dashboard. When the review config is enabled, an independent second opinion challenges changed turns."
+        aria-label="Your prompt goes to the session — any of the five supported harnesses — which owns the turn. The session runs on a selected local worktree, container, SSH host, or EC2 instance, and the answer streams back to your dashboard. Managed targets are rebuilt per session; raw local and SSH targets use existing hosts. When the review config is enabled, an independent second opinion challenges changed turns."
       >
         <div class="flow-node flow-node--you">
           <div><strong>YOU</strong><span>/ ONE DASHBOARD</span></div>
@@ -151,13 +133,13 @@ const hammerArt = [...hammerMask]
         </div>
 
         <div class="flow-link" aria-hidden="true">
-          <i class="flow-lane flow-lane--down"><em>provisions</em></i>
-          <i class="flow-lane flow-lane--up"><em>streams</em></i>
+          <i class="flow-lane flow-lane--down"><em>runs on</em></i>
+          <i class="flow-lane flow-lane--up"><em>reports</em></i>
         </div>
 
         <div class="flow-node flow-node--target">
-          <div><strong>TARGET</strong><span>/ DISPOSABLE</span></div>
-          <small>container or remote host · isolated · rebuilt per session</small>
+          <div><strong>TARGET</strong><span>/ SELECTED</span></div>
+          <small>local worktree · container · SSH host · EC2 instance</small>
         </div>
 
         <aside class="flow-observer">
@@ -184,7 +166,7 @@ const hammerArt = [...hammerMask]
         </li>
       </ul>
       <p class="seat-note">
-        Every target runs any of the five. The dashboard, permissions, credential handling, and remote workflow stay the same whichever you pick.
+        Every target runs any of the five. The dashboard and session workflow stay consistent; isolation, approvals, resources, and credentials follow the selected target and profile.
       </p>
     </div>
   </div>

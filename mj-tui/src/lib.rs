@@ -49,6 +49,8 @@ mod widgets;
 mod wizards;
 
 #[cfg(test)]
+mod docs_screenshots;
+#[cfg(test)]
 mod test_support;
 
 pub use crate::actions::{CommandId, global_chord};

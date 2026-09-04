@@ -1,0 +1,115 @@
+---
+title: Quickstart
+description: Configure Mjolnir, check the installation, and start your first harness session.
+---
+
+import { Image } from 'astro:assets';
+import shotDashboard from '../../assets/screenshots/dashboard.svg';
+import shotNewSession from '../../assets/screenshots/new-session.svg';
+
+This walkthrough takes a fresh installation from its first launch to a running agent session. Start in the repository you want Mjolnir to recognize:
+
+```sh
+cd path/to/your/repository
+mj
+```
+
+## 1. Complete first-run setup
+
+On first launch, Mjolnir opens a terminal setup dialog and creates a named workspace. It looks for supported harness homes and existing credentials, detects the current GitHub repository when possible, and proposes every usable local container runtime as a target.
+
+Review the detected profiles and targets before confirming. Mjolnir writes the result to your per-user `config.toml` in the operating system's configuration directory; on a typical Linux installation it is `~/.config/mjolnir/config.toml`. Nothing is provisioned remotely during this discovery step.
+
+The normal dashboard then opens. Its session list, Conversation and Prompt regions, target capacity, and profile quota stay visible together.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir dashboard layout">
+    <Image src={shotDashboard} alt="Mjolnir terminal dashboard showing three running session summaries, unopened Conversation and Prompt regions, target capacity, profile quota, and shortcut footer" />
+  </a>
+  <figcaption>The dashboard keeps sessions, conversation state, infrastructure capacity, and account quota on one screen.</figcaption>
+</figure>
+
+You can revise every generated value later. See [configuration](/configuration/) for the file location and schema, [profiles](/profiles/) for harness credentials, and [targets](/targets/) for execution environments.
+
+## 2. Check the installation
+
+Exit or detach from the dashboard with `Alt+Q`, then run:
+
+```sh
+mj doctor
+```
+
+For machine-readable output, use:
+
+```sh
+mj doctor --json
+```
+
+Fix errors until the relevant profiles and targets report ready. If a harness profile needs authentication, run:
+
+```sh
+mj login --profile <profile-id>
+```
+
+Claude Code profiles can use the long-lived setup-token flow:
+
+```sh
+mj login --profile <profile-id> --setup-token
+```
+
+The login command is profile-aware: it runs the correct harness authentication flow and stores credentials in that profile's home. See [profiles](/profiles/) for isolation and authentication details, or [troubleshooting](/troubleshooting/) if `doctor` still reports a failure.
+
+## 3. Create a session
+
+Launch `mj` again and press `Alt+N` from anywhere on the dashboard. The new-session wizard walks through:
+
+1. A harness profile.
+2. A target on which the session will run, including its resource size when that target is resizable.
+3. A project bundle, or an absolute project directory for a bare target.
+4. A final review, where supported targets can also receive attached directories.
+
+<figure class="shot">
+  <a class="shot__zoom" href={shotNewSession.src} aria-label="Open the full-size screenshot: new-session profile selection">
+    <Image src={shotNewSession} alt="Mjolnir new-session wizard at the profile-selection step over the terminal dashboard" />
+  </a>
+  <figcaption>The four-step wizard starts with a harness profile, then resolves the target and project before launch.</figcaption>
+</figure>
+
+Press `Enter` to confirm. Mjolnir provisions the selected target in the background, starts the harness, and returns focus to the Prompt pane when the session is ready. The Sessions pane shows launch progress and reports failures instead of freezing the interface.
+
+See [sessions](/sessions/) for lifecycle and persistence, and [targets](/targets/) for the differences between local, container, SSH, and EC2 execution.
+
+## 4. Send the first prompt
+
+Type a message in the Prompt pane and press `Enter`. While the harness is working you can type another message and press `Enter` to queue it. Press `Esc` to cancel the active turn without stopping the session.
+
+Useful controls for the first run:
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Move through Sessions, Prompt, Targets, and Quota |
+| `Page Up` / `Page Down` | Scroll the transcript from any focus |
+| `F1` | Open contextual help |
+| `F2` | Open the searchable command palette |
+| `Alt+N` | Create another session |
+| `Alt+Q` | Detach this terminal |
+
+The [terminal surface guide](/terminal-surface/) covers pane sizing, the full composer keymap, the command palette, and `!` shell commands.
+
+## 5. Detach and reconnect
+
+Press `Alt+Q` when you are ready to leave the terminal. Detaching closes only this dashboard: the daemon and sessions keep running, active turns continue, and queued prompts remain queued.
+
+Reconnect with:
+
+```sh
+mj
+```
+
+Mjolnir reopens the session whose agent spoke most recently and places the cursor in its Prompt pane. To reach the same sessions from a browser, print the viewer address and access code with:
+
+```sh
+mj daemon status
+```
+
+See the [web viewer](/web-viewer/) for browser and phone access. For workspace selection, scripting, daemon operations, and every command-line flag, use the [CLI reference](/cli-reference/).

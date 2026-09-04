@@ -101,7 +101,7 @@ not supported; use WSL2.
 ## Install
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
 ```
 
 This downloads a verified release into `~/.local/bin` — no Rust toolchain
