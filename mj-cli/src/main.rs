@@ -567,6 +567,18 @@ async fn run_workspace_dashboard(
                         }
                     }
                 }
+                workspace_selector::SelectorOutcome::ForceDelete(workspace_id) => {
+                    selected_workspace_id = Some(workspace_id.clone());
+                    match daemon.force_delete_workspace(workspace_id).await {
+                        Ok(()) => {
+                            notices.clear();
+                            selected_workspace_id = None;
+                            workspaces = daemon.list_workspaces().await?;
+                        }
+                        Err(error) => notices
+                            .set_failure(format!("Could not force-delete workspace: {error:#}")),
+                    }
+                }
                 workspace_selector::SelectorOutcome::RecoverDraft {
                     workspace_id,
                     draft_id,

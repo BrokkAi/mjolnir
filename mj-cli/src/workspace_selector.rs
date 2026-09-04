@@ -30,6 +30,7 @@ pub(crate) enum SelectorOutcome {
         name: String,
     },
     Delete(String),
+    ForceDelete(String),
     RecoverDraft {
         workspace_id: String,
         draft_id: String,
@@ -42,6 +43,46 @@ enum EditMode {
     Rename { workspace_id: String },
 }
 
+/// A pending delete, staged by `D`, so no deletion leaves the selector
+/// unconfirmed.
+///
+/// The counts come from the snapshot the selector already renders; the daemon
+/// re-checks authoritatively before deleting. An empty workspace confirms
+/// with Enter alone; a workspace with active sessions or drafts is a
+/// force-delete and requires typing the exact workspace name.
+struct ConfirmDelete {
+    workspace_id: String,
+    name: String,
+    active: usize,
+    drafts: usize,
+}
+
+fn confirm_delete_requires_typed_name(confirm: &ConfirmDelete) -> bool {
+    confirm.active + confirm.drafts > 0
+}
+
+fn confirm_delete_allows_enter(confirm: &ConfirmDelete, input: &TextInput) -> bool {
+    !confirm_delete_requires_typed_name(confirm) || input.trim() == confirm.name
+}
+
+fn delete_prompt(confirm: &ConfirmDelete, input: &TextInput) -> String {
+    if !confirm_delete_requires_typed_name(confirm) {
+        return format!(
+            "Delete workspace {}? Enter confirm · Esc cancel",
+            confirm.name
+        );
+    }
+    format!(
+        "Force-delete {} ({} active session{}, {} draft{})? Type the workspace name, then Enter: {}",
+        confirm.name,
+        confirm.active,
+        if confirm.active == 1 { "" } else { "s" },
+        confirm.drafts,
+        if confirm.drafts == 1 { "" } else { "s" },
+        input.with_cursor_marker("▌"),
+    )
+}
+
 pub(crate) fn select_workspace(
     workspaces: &[SelectorWorkspace],
     suggested_name: &str,
@@ -51,6 +92,7 @@ pub(crate) fn select_workspace(
     let mut terminal = TerminalGuard::enter()?;
     let mut selected = initial_selection(workspaces, selected_workspace_id);
     let mut editing: Option<EditMode> = None;
+    let mut confirming: Option<ConfirmDelete> = None;
     let mut input = TextInput::new().with_max_chars(64);
 
     loop {
@@ -111,7 +153,8 @@ pub(crate) fn select_workspace(
                 right,
             );
 
-            let (footer_text, footer_style) = selector_footer(editing.as_ref(), &input, notices);
+            let (footer_text, footer_style) =
+                selector_footer(editing.as_ref(), confirming.as_ref(), &input, notices);
             frame.render_widget(Paragraph::new(footer_text).style(footer_style), footer);
         })?;
 
@@ -151,6 +194,39 @@ pub(crate) fn select_workspace(
             }
             continue;
         }
+        if let Some(confirm) = &confirming {
+            match key.code {
+                KeyCode::Esc => {
+                    confirming = None;
+                    input.clear();
+                }
+                KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    confirming = None;
+                    input.clear();
+                }
+                KeyCode::Enter if confirm_delete_allows_enter(confirm, &input) => {
+                    let workspace_id = confirm.workspace_id.clone();
+                    let force = confirm_delete_requires_typed_name(confirm);
+                    return Ok(if force {
+                        SelectorOutcome::ForceDelete(workspace_id)
+                    } else {
+                        SelectorOutcome::Delete(workspace_id)
+                    });
+                }
+                // A mismatched Enter keeps the confirm state; the footer keeps
+                // showing what has to be typed.
+                KeyCode::Enter => {}
+                _ if confirm_delete_requires_typed_name(confirm) => {
+                    input.handle_key(key);
+                }
+                _ => {}
+            }
+            continue;
+        }
 
         match key.code {
             KeyCode::Esc => return Ok(SelectorOutcome::Cancel),
@@ -176,9 +252,18 @@ pub(crate) fn select_workspace(
                 input.set_value(&workspaces[selected].listing.workspace.name);
             }
             KeyCode::Char('d' | 'D') if selected < workspaces.len() => {
-                return Ok(SelectorOutcome::Delete(
-                    workspaces[selected].listing.workspace.id.clone(),
-                ));
+                let candidate = &workspaces[selected];
+                confirming = Some(ConfirmDelete {
+                    workspace_id: candidate.listing.workspace.id.clone(),
+                    name: candidate.listing.workspace.name.clone(),
+                    active: candidate
+                        .snapshot
+                        .sessions
+                        .iter()
+                        .filter(|session| session.active)
+                        .count(),
+                    drafts: candidate.snapshot.drafts.len(),
+                });
             }
             KeyCode::Char('v' | 'V') if selected < workspaces.len() => {
                 if let Some(draft) = workspaces[selected].snapshot.drafts.first() {
@@ -208,6 +293,7 @@ fn initial_selection(
 
 fn selector_footer(
     editing: Option<&EditMode>,
+    confirming: Option<&ConfirmDelete>,
     input: &TextInput,
     notices: &Notices,
 ) -> (String, Style) {
@@ -220,9 +306,12 @@ fn selector_footer(
             format!("Rename workspace: {}", input.with_cursor_marker("▌")),
             Style::default(),
         ),
-        None => match notices.current() {
-            Some(notice) => (notice, Style::default().fg(Color::Yellow)),
-            None => (SELECTOR_HINTS.into(), Style::default()),
+        None => match confirming {
+            Some(confirm) => (delete_prompt(confirm, input), Style::default()),
+            None => match notices.current() {
+                Some(notice) => (notice, Style::default().fg(Color::Yellow)),
+                None => (SELECTOR_HINTS.into(), Style::default()),
+            },
         },
     }
 }
@@ -329,7 +418,7 @@ mod tests {
             "Could not delete workspace: workspace is not empty (1 active sessions, 0 drafts)",
         );
 
-        let (text, style) = selector_footer(None, &TextInput::new(), &notices);
+        let (text, style) = selector_footer(None, None, &TextInput::new(), &notices);
 
         assert!(text.starts_with("Could not delete workspace:"));
         assert_eq!(style.fg, Some(Color::Yellow));
@@ -346,5 +435,67 @@ mod tests {
 
         assert_eq!(initial_selection(&workspaces, Some("plandiag")), 1);
         assert_eq!(initial_selection(&workspaces, Some("deleted")), 0);
+    }
+
+    fn confirm_for(name: &str, active: usize, drafts: usize) -> ConfirmDelete {
+        ConfirmDelete {
+            workspace_id: format!("id-{name}"),
+            name: name.into(),
+            active,
+            drafts,
+        }
+    }
+
+    #[test]
+    fn delete_prompt_distinguishes_empty_and_force_workspaces() {
+        let empty = confirm_for("Bifrost", 0, 0);
+        assert_eq!(
+            delete_prompt(&empty, &TextInput::new()),
+            "Delete workspace Bifrost? Enter confirm · Esc cancel"
+        );
+
+        let force = confirm_for("Bifrost", 2, 1);
+        let prompt = delete_prompt(&force, &TextInput::new());
+        assert!(
+            prompt.starts_with(
+                "Force-delete Bifrost (2 active sessions, 1 draft)? \
+                 Type the workspace name, then Enter: "
+            ),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn force_delete_requires_the_exact_workspace_name() {
+        let force = confirm_for("Bifrost", 1, 0);
+        assert!(confirm_delete_requires_typed_name(&force));
+        for wrong in ["bifrost", "Bifrost2", "Bifrost-extra", ""] {
+            assert!(
+                !confirm_delete_allows_enter(&force, &TextInput::from_value(wrong)),
+                "{wrong:?} must not confirm a force delete"
+            );
+        }
+        assert!(confirm_delete_allows_enter(
+            &force,
+            &TextInput::from_value("Bifrost")
+        ));
+        // Surrounding whitespace is accidental typing, not a different name.
+        assert!(confirm_delete_allows_enter(
+            &force,
+            &TextInput::from_value("  Bifrost  ")
+        ));
+
+        let empty = confirm_for("Bifrost", 0, 0);
+        assert!(!confirm_delete_requires_typed_name(&empty));
+        assert!(confirm_delete_allows_enter(&empty, &TextInput::new()));
+    }
+
+    #[test]
+    fn a_pending_delete_confirmation_uses_the_prompt_footer() {
+        let notices = Notices::default();
+        let confirm = confirm_for("Bifrost", 0, 0);
+        let (text, style) = selector_footer(None, Some(&confirm), &TextInput::new(), &notices);
+        assert_eq!(text, "Delete workspace Bifrost? Enter confirm · Esc cancel");
+        assert_eq!(style.fg, None);
     }
 }

@@ -1934,6 +1934,7 @@ impl DashboardContext {
                 | crate::daemon::RuntimeLifecycleKind::ForceStop => SessionOperationKind::Stopping,
                 crate::daemon::RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
                 crate::daemon::RuntimeLifecycleKind::DestroyStopped
+                | crate::daemon::RuntimeLifecycleKind::ForceDestroy
                 | crate::daemon::RuntimeLifecycleKind::Cleanup => SessionOperationKind::Destroying,
             };
             mark_active_chat_retiring_for_remote_lifecycle(
@@ -2209,6 +2210,8 @@ impl DashboardContext {
             self.dashboard.finish_session_operation(&session_id);
             spawn_lifecycle_reload(
                 LifecycleReload { update, operation },
+                self.workspace_id.clone(),
+                self.client_id.clone(),
                 self.dashboard_io_tx.clone(),
             );
         }

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing Mjolnir release tag to package, in the form vX.Y.Z
+        description: Existing Mjolnir release tag, in the form vX.Y.Z[-PRERELEASE]
         required: true
         type: string
       publish:

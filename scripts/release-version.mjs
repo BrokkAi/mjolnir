@@ -52,7 +52,9 @@ function expectedManifest(manifest) {
 const command = process.argv[2];
 const releaseTag = process.argv[3];
 if (command !== "sync" && command !== "check") {
-  console.error("usage: node scripts/release-version.mjs <sync|check> [vX.Y.Z]");
+  console.error(
+    "usage: node scripts/release-version.mjs <sync|check> [vX.Y.Z[-PRERELEASE]]",
+  );
   process.exit(2);
 }
 if (command === "sync" && releaseTag) {
@@ -71,9 +73,14 @@ if (command === "check") {
     process.exit(1);
   }
   if (releaseTag) {
-    const match = /^v(\d+\.\d+\.\d+)$/.exec(releaseTag);
+    const match =
+      /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/.exec(
+        releaseTag,
+      );
     if (!match) {
-      console.error(`release tag must look like vX.Y.Z, got: ${releaseTag}`);
+      console.error(
+        `release tag must look like vX.Y.Z or vX.Y.Z-PRERELEASE, got: ${releaseTag}`,
+      );
       process.exit(1);
     }
     if (match[1] !== version) {

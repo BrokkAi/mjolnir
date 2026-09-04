@@ -3579,6 +3579,107 @@ fn workspace_crud_preserves_history_and_blocks_active_sessions_and_drafts() {
 }
 
 #[test]
+fn force_delete_workspace_drops_drafts_and_preserves_stopped_histories() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Force").unwrap();
+
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    assign_new_session_workspace_at(&database, "session-1", &workspace.id).unwrap();
+    let materialized = materialized_session("session-1");
+    save_materialized_session_to(&database, &materialized).unwrap();
+    record_prompt_to(
+        &database,
+        "session-1",
+        "project-1",
+        1,
+        Some("2026-09-03T00:00:00Z"),
+        "remember this prompt",
+    )
+    .unwrap();
+    save_detached_draft_at(
+        &database,
+        &workspace.id,
+        None,
+        "terminal",
+        Some(42),
+        "unfinished",
+    )
+    .unwrap();
+
+    force_delete_workspace_at(&database, &workspace.id).unwrap();
+
+    assert!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    let preserved = load_state_from(&database).unwrap();
+    assert_eq!(preserved.sessions["session-1"].workspace_id, workspace.id);
+    assert_eq!(
+        preserved.sessions["session-1"].checkpoint,
+        session("session-1", "project-1").checkpoint
+    );
+    assert_eq!(
+        load_materialized_session_from(&database, "session-1")
+            .unwrap()
+            .unwrap(),
+        materialized
+    );
+    assert_eq!(
+        search_prompts_from(
+            &database,
+            "session-1",
+            "project-1",
+            HistoryScope::Session,
+            "remember this prompt",
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert!(
+        list_workspaces_from(&database)
+            .unwrap()
+            .iter()
+            .all(|candidate| candidate.id != workspace.id)
+    );
+}
+
+#[test]
+fn force_delete_workspace_refuses_remaining_active_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Active").unwrap();
+    let mut active = session("session-active", "project-1");
+    active.workspace_id = workspace.id.clone();
+    active.state = SessionState::Running;
+    save_session_to(&database, &active).unwrap();
+    save_detached_draft_at(
+        &database,
+        &workspace.id,
+        None,
+        "terminal",
+        Some(42),
+        "unfinished",
+    )
+    .unwrap();
+
+    let error = force_delete_workspace_at(&database, &workspace.id).unwrap_err();
+    assert!(
+        error.to_string().contains("1 active sessions remain"),
+        "{error:#}"
+    );
+    assert_eq!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .len(),
+        1,
+        "a refused deletion must not drop the workspace's drafts"
+    );
+}
+
+#[test]
 fn only_resumable_sessions_can_move_to_a_new_workspace() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

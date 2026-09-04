@@ -25,6 +25,9 @@ pub enum InputFilter {
     #[default]
     Any,
     AsciiAlphabeticUppercase,
+    /// Session ids are lowercase hex; typing one to confirm a destructive
+    /// action must not survive stray characters or capitals.
+    AsciiHexLowercase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -447,6 +450,12 @@ impl TextInput {
                     }
                     character = character.to_ascii_uppercase();
                 }
+                InputFilter::AsciiHexLowercase => {
+                    if !character.is_ascii_hexdigit() {
+                        continue;
+                    }
+                    character = character.to_ascii_lowercase();
+                }
             }
             if self
                 .max_chars
@@ -567,5 +576,14 @@ mod tests {
             .with_filter(InputFilter::AsciiAlphabeticUppercase);
         input.insert_str("s-t0op");
         assert_eq!(input.value(), "STOP");
+    }
+
+    #[test]
+    fn hex_confirmation_drops_non_hex_characters_and_lowercases() {
+        let mut input = TextInput::new()
+            .with_max_chars(8)
+            .with_filter(InputFilter::AsciiHexLowercase);
+        input.insert_str("zz0123ABcD!");
+        assert_eq!(input.value(), "0123abcd");
     }
 }

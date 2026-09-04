@@ -23,10 +23,14 @@ version bump must regenerate it. CI diffs the checked-in report against a fresh
 
 ## What a tag triggers
 
-A `vX.Y.Z` tag triggers the GitHub release and docs workflows.
+A `vX.Y.Z` or `vX.Y.Z-PRERELEASE` tag triggers the GitHub release workflow.
+Prerelease tags create a GitHub prerelease, and npm publishes them under the
+`next` dist-tag rather than moving `latest`.
 
 The release workflow verifies that the tag matches every workspace version
-before building artifacts. CI's branch and pull request triggers do not match
+before building artifacts. It creates the GitHub Release as a draft, attaches
+all assets, and only then publishes it so immutable releases cannot expose a
+partially uploaded asset set. CI's branch and pull request triggers do not match
 tags, so a release relies on the tagged commit having passed CI on master. Run
 the required formatting, Clippy, build, test, license, and release-version
 validations against the clean release commit before creating the tag.
@@ -90,7 +94,7 @@ off and inspect its `.crate` artifact.
 ## npm publishing
 
 `publish-npm.yml` packages an existing GitHub Release into `@brokkai/mjolnir`
-and its five platform packages. It verifies the release checksums, then
+and its three platform packages. It verifies the release checksums, then
 publishes every platform package before the root wrapper.
 
 Publishing runs automatically once a GitHub Release is published. Both the

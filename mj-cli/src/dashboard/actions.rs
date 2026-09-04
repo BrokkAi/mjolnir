@@ -295,6 +295,8 @@ pub(crate) async fn apply_dashboard_action(
                     memory,
                     additional_mounts,
                     mount_history,
+                    workspace_id: context.workspace_id.clone(),
+                    client_id: context.client_id.clone(),
                 },
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
@@ -503,6 +505,24 @@ pub(crate) async fn apply_dashboard_action(
                             .await
                     })?;
                     Ok(LifecycleSuccess::DestroyedStopped)
+                },
+            );
+        }
+        DashboardAction::ForceDestroy { session_id } => {
+            let request =
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
+            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
+            spawn_lifecycle_operation(
+                request,
+                context.critical_operations.clone(),
+                move |_controller, _cancelled| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        daemon::connect_or_start()
+                            .await?
+                            .force_destroy_session(session_id)
+                            .await
+                    })?;
+                    Ok(LifecycleSuccess::ForceDestroyed)
                 },
             );
         }
