@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -23,7 +23,7 @@ use crate::hel_archive::{
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
     collect_git_snapshot, ensure_no_symlink_ancestors, has_origin_refs, is_secret_like_path,
     read_archive_verified, restore_git_snapshot, validate_component, verify_archive_streaming,
-    write_archive_hashed,
+    write_archive_hashed, write_archive_hashed_borrowed,
 };
 use crate::hel_config::HarnessKind;
 use crate::hel_targets::{
@@ -1323,13 +1323,19 @@ pub fn export_checkpoint_with_git(
         spec.protocol_version,
         CHECKPOINT_EXPORT_PROTOCOL_VERSION
     );
-    let mut resolved = spec.clone();
-    resolved.relay_root = resolve_target_path(&resolved.relay_root)?;
-    resolved.harness_home = resolve_target_path(&resolved.harness_home)?;
-    resolved.workspace_root = resolve_target_path(&resolved.workspace_root)?;
-    resolved.output_path = resolve_target_path(&resolved.output_path)?;
-    let spec = &resolved;
-    validate_export_spec(spec)?;
+    let relay_root = resolve_target_path(&spec.relay_root)?;
+    let harness_home = resolve_target_path(&spec.harness_home)?;
+    let workspace_root = resolve_target_path(&spec.workspace_root)?;
+    let output_path = resolve_target_path(&spec.output_path)?;
+    spec.canonical_session.validate()?;
+    validate_checkpoint_source(
+        &spec.session,
+        &relay_root,
+        &harness_home,
+        &workspace_root,
+        &spec.repositories,
+    )?;
+    validate_stage_path(&relay_root, &output_path, "checkpoint archive")?;
     let event_frontier = spec.canonical_session.event_frontier;
     let event_frontier_digest = spec.canonical_session.event_frontier_digest.clone();
     // A session that never accepted a prompt legitimately has no native
@@ -1337,36 +1343,29 @@ pub fn export_checkpoint_with_git(
     // impossible to close cleanly.
     let prompted = canonical_session_contains_prompt(&spec.canonical_session);
     let native_started = std::time::Instant::now();
-    let native_artifacts = collect_checkpoint_native_artifacts(
-        &spec.session,
-        &spec.relay_root,
-        &spec.harness_home,
-        !prompted,
-    )?;
+    let native_artifacts =
+        collect_checkpoint_native_artifacts(&spec.session, &relay_root, &harness_home, !prompted)?;
     let native_ms = native_started.elapsed().as_millis() as u64;
     let repositories_started = std::time::Instant::now();
-    let repositories =
-        collect_checkpoint_repositories(&spec.workspace_root, &spec.repositories, git)?;
+    let repositories = collect_checkpoint_repositories(&workspace_root, &spec.repositories, git)?;
     let repositories_ms = repositories_started.elapsed().as_millis() as u64;
     // The export runs while the relay's barrier freezes ACP dispatch, so it
     // hashes the archive it just wrote instead of structurally re-reading it.
-    // `CheckpointTransfer::execute` performs the one full structural verify,
-    // on the copy the controller actually installs.
+    // `CheckpointTransfer::execute` checks the controller's copy against this
+    // digest; resume/import performs full structural verification when read.
     let archive_started = std::time::Instant::now();
-    let sha256 = write_archive_hashed(
-        &spec.output_path,
-        &ArchiveInput {
-            session: spec.session.clone(),
-            target: spec.target.clone(),
-            bundle: spec.bundle.clone(),
-            canonical_session: spec.canonical_session.clone(),
-            native_artifacts,
-            repositories,
-        },
+    let sha256 = write_archive_hashed_borrowed(
+        &output_path,
+        &spec.session,
+        &spec.target,
+        &spec.bundle,
+        &spec.canonical_session,
+        &native_artifacts,
+        &repositories,
     )?;
     let archive_ms = archive_started.elapsed().as_millis() as u64;
     Ok(TargetCheckpoint {
-        path: spec.output_path.clone(),
+        path: output_path,
         sha256,
         event_frontier,
         event_frontier_digest,
@@ -1543,18 +1542,6 @@ fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> Resu
     )
 }
 
-fn validate_export_spec(spec: &CheckpointExportSpec) -> Result<()> {
-    spec.canonical_session.validate()?;
-    validate_checkpoint_source(
-        &spec.session,
-        &spec.relay_root,
-        &spec.harness_home,
-        &spec.workspace_root,
-        &spec.repositories,
-    )?;
-    validate_stage_path(&spec.relay_root, &spec.output_path, "checkpoint archive")
-}
-
 fn validate_capture_spec(spec: &CheckpointCaptureSpec) -> Result<()> {
     validate_checkpoint_source(
         &spec.session,
@@ -1603,9 +1590,9 @@ pub fn canonical_session_contains_prompt(snapshot: &CanonicalSessionSnapshot) ->
         .any(|item| matches!(&item.body, CanonicalTranscriptBody::User { .. }))
 }
 
-/// Rollouts whose `session_meta` header named a different session. Codex
-/// writes that header once, when it creates the file, so a negative verdict
-/// never turns positive and is safe to remember across exports.
+/// Rollouts whose `session_meta` header named a different resumable thread.
+/// Codex writes that header once, when it creates the file, so a negative
+/// verdict never turns positive and is safe to remember across exports.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodexScanCache {
@@ -2056,9 +2043,10 @@ fn kimi_session_artifact(relative: &Path, session_id: &str) -> bool {
         )
 }
 
-/// Content-probe fallback for continuation rollouts, whose filename carries a
-/// different file UUID than the session they belong to. Opening every rollout
-/// costs gigabytes of reads on a busy `~/.codex`, so two gates come first.
+/// Content-probe fallback for a root rollout whose filename no longer carries
+/// its resumable thread ID, for example after Codex archives or renames it.
+/// Opening every rollout costs gigabytes of reads on a busy `~/.codex`, so two
+/// gates come first.
 ///
 /// The mtime floor is filesystem truth: rollout filenames encode ambiguous
 /// local time, historical rollouts are never rewritten, and hel's own restore
@@ -2085,7 +2073,7 @@ fn codex_probe_selects(
     {
         return false;
     }
-    if codex_rollout_has_session_id(path, session_id) {
+    if codex_rollout_has_thread_id(path, session_id) {
         return true;
     }
     if let Some(cache) = probe.cache.as_mut() {
@@ -2094,7 +2082,7 @@ fn codex_probe_selects(
     false
 }
 
-fn codex_rollout_has_session_id(path: &Path, session_id: &str) -> bool {
+fn codex_rollout_has_thread_id(path: &Path, thread_id: &str) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
     };
@@ -2114,10 +2102,17 @@ fn codex_rollout_has_session_id(path: &Path, session_id: &str) -> bool {
         // A rollout carries exactly one `session_meta` header, so the first one
         // settles the question without parsing the rest of the file.
         if record.get("type").and_then(Value::as_str) == Some("session_meta") {
-            return record
-                .pointer("/payload/session_id")
-                .and_then(Value::as_str)
-                == Some(session_id);
+            let Some(payload) = record.get("payload") else {
+                return false;
+            };
+            // Modern Codex stores the resumable thread ID in `id` and a shared
+            // session-tree ID in `session_id`. Child agents therefore have the
+            // same `session_id` as the root but must not be archived as roots.
+            // Only old records with no `id` field use the legacy fallback.
+            if let Some(id) = payload.get("id") {
+                return id.as_str() == Some(thread_id);
+            }
+            return payload.get("session_id").and_then(Value::as_str) == Some(thread_id);
         }
     }
     false
@@ -2314,12 +2309,13 @@ pub struct CheckpointTransfer<'a> {
     pub session_id: &'a str,
     pub remote_archive: &'a str,
     pub destination: &'a Path,
-    pub expected_event_frontier: Option<u64>,
-    pub expected_event_frontier_digest: Option<&'a str>,
+    pub expected_sha256: &'a str,
+    pub expected_event_frontier: u64,
+    pub expected_event_frontier_digest: &'a str,
 }
 
-/// Unforgeable outside this module: proof that a controller-local archive was
-/// verified after its atomic install.
+/// Unforgeable outside this module: proof that a controller-local archive has
+/// the exact digest reported by the target after its atomic install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCheckpoint {
     session_id: String,
@@ -2359,33 +2355,17 @@ impl CheckpointTransfer<'_> {
         transfer_plan(self.locator, self.session_id, self.remote_archive, &path)?
             .execute(executor)
             .context("download target checkpoint")?;
-        let verified = verify_archive_streaming(&path).context("verify downloaded checkpoint")?;
+        let sha256 = checkpoint_sha256(&path).context("hash downloaded checkpoint")?;
         ensure!(
-            verified.manifest.session.id == self.session_id,
-            "checkpoint session mismatch"
+            sha256 == self.expected_sha256,
+            "target and controller checkpoint checksums differ"
         );
-        let canonical_session = verified.canonical_session;
-        let event_frontier = canonical_session.event_frontier;
-        let event_frontier_digest = canonical_session.event_frontier_digest;
-        if let Some(expected) = self.expected_event_frontier {
-            ensure!(
-                event_frontier == expected,
-                "checkpoint event frontier mismatch"
-            );
-        }
-        if let Some(expected) = self.expected_event_frontier_digest {
-            ensure!(
-                event_frontier_digest == expected,
-                "checkpoint event frontier digest mismatch"
-            );
-        }
-        let sha256 = verified.archive_sha256;
         temporary
             .persist(self.destination)
             .map_err(|error| error.error)?;
-        // The bytes were already verified in this same directory and the rename
-        // is atomic, so installation only has to make the copy private and
-        // durable; re-reading it would hash the same archive a second time.
+        // The bytes were already checksum-verified in this same directory and
+        // the rename is atomic, so installation only has to make the copy
+        // private and durable; re-reading it would hash the same archive again.
         let post_install = (|| -> Result<()> {
             restrict_permissions(self.destination)?;
             sync_directory(parent)
@@ -2397,8 +2377,8 @@ impl CheckpointTransfer<'_> {
             session_id: self.session_id.to_owned(),
             archive_path: self.destination.to_path_buf(),
             sha256,
-            event_frontier,
-            event_frontier_digest,
+            event_frontier: self.expected_event_frontier,
+            event_frontier_digest: self.expected_event_frontier_digest.to_owned(),
         })
     }
 
@@ -2409,6 +2389,22 @@ impl CheckpointTransfer<'_> {
         );
         cleanup_plan(self.locator, self.session_id, self.remote_archive)
     }
+}
+
+pub fn checkpoint_sha256(path: &Path) -> Result<String> {
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub fn transfer_plan(
@@ -2848,8 +2844,9 @@ mod tests {
     /// Unix milliseconds encoded in `NATIVE`, a UUIDv7.
     const NATIVE_CREATED_MS: i64 = 0x0190_aabb_ccdd;
     const OTHER_NATIVE: &str = "0190aabb-ccdd-7eef-9000-ffffffffffff";
+    const THIRD_NATIVE: &str = "0190aabb-ccdd-7eef-9000-eeeeeeeeeeee";
 
-    fn write_rollout(path: &Path, session_id: &str) {
+    fn write_legacy_rollout(path: &Path, session_id: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             path,
@@ -2858,6 +2855,57 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    fn write_modern_rollout(path: &Path, id: &str, session_id: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"session_id\":\"{session_id}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn codex_collection_keeps_only_the_root_thread_from_a_session_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let archived_root = temp
+            .path()
+            .join("archived_sessions/rollout-renamed-root.jsonl");
+        let child = temp.path().join("sessions/2026/08/10/rollout-child.jsonl");
+        let descendant = temp
+            .path()
+            .join("sessions/2026/08/10/rollout-descendant.jsonl");
+        write_modern_rollout(&archived_root, NATIVE, NATIVE);
+        write_modern_rollout(&child, OTHER_NATIVE, NATIVE);
+        write_modern_rollout(&descendant, THIRD_NATIVE, NATIVE);
+
+        let artifacts =
+            collect_native_artifacts(HarnessKind::Codex, temp.path(), NATIVE, false).unwrap();
+
+        assert_eq!(
+            artifacts
+                .iter()
+                .map(|artifact| artifact.relative_path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from(
+                "archived_sessions/rollout-renamed-root.jsonl"
+            )]
+        );
+    }
+
+    #[test]
+    fn codex_modern_rollout_never_falls_back_to_the_session_tree_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("sessions/2026/08/10/rollout-child.jsonl");
+        write_modern_rollout(&child, OTHER_NATIVE, NATIVE);
+
+        let artifacts =
+            collect_native_artifacts(HarnessKind::Codex, temp.path(), NATIVE, true).unwrap();
+
+        assert!(artifacts.is_empty());
     }
 
     fn set_modified_ms(path: &Path, millis: i64) {
@@ -2894,7 +2942,7 @@ mod tests {
     fn codex_content_probe_skips_rollouts_older_than_the_session() {
         let temp = tempfile::tempdir().unwrap();
         let rollout = temp.path().join("sessions/2026/08/10/rollout-fork.jsonl");
-        write_rollout(&rollout, NATIVE);
+        write_legacy_rollout(&rollout, NATIVE);
 
         let artifacts =
             collect_native_artifacts(HarnessKind::Codex, temp.path(), NATIVE, false).unwrap();
@@ -2915,7 +2963,7 @@ mod tests {
             .path()
             .join("sessions/2026/08/10")
             .join(format!("rollout-{NATIVE}.jsonl"));
-        write_rollout(&rollout, OTHER_NATIVE);
+        write_legacy_rollout(&rollout, OTHER_NATIVE);
         set_modified_ms(&rollout, 1_000_000_000_000);
 
         let artifacts =
@@ -2929,7 +2977,7 @@ mod tests {
         let foreign = temp
             .path()
             .join("sessions/2026/08/10/rollout-foreign.jsonl");
-        write_rollout(&foreign, OTHER_NATIVE);
+        write_legacy_rollout(&foreign, OTHER_NATIVE);
         let mut cache = CodexScanCache::empty(NATIVE);
 
         let artifacts = collect_native_artifacts_cached(
@@ -2947,9 +2995,9 @@ mod tests {
                 .contains(Path::new("sessions/2026/08/10/rollout-foreign.jsonl"))
         );
 
-        write_rollout(&foreign, NATIVE);
+        write_legacy_rollout(&foreign, NATIVE);
         let later = temp.path().join("sessions/2026/08/10/rollout-later.jsonl");
-        write_rollout(&later, NATIVE);
+        write_legacy_rollout(&later, NATIVE);
         let artifacts = collect_native_artifacts_cached(
             HarnessKind::Codex,
             temp.path(),
@@ -2994,7 +3042,7 @@ mod tests {
         let (spec, _) = fixture(temp.path());
         let cache_path = spec.relay_root.join(CODEX_SCAN_CACHE_FILE);
         fs::write(&cache_path, b"{not json").unwrap();
-        write_rollout(
+        write_legacy_rollout(
             &spec
                 .harness_home
                 .join("sessions/2026/08/09/rollout-x.jsonl"),
@@ -3855,6 +3903,112 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing measurement against a real Codex archive and harness home"]
+    fn codex_root_archive_throughput() {
+        const BASELINE_MS: u128 = 46_124;
+        let source = std::env::var_os("MJ_CHECKPOINT_BENCH_ARCHIVE")
+            .map(PathBuf::from)
+            .expect("set MJ_CHECKPOINT_BENCH_ARCHIVE");
+        let harness_home = std::env::var_os("MJ_CHECKPOINT_BENCH_HARNESS_HOME")
+            .map(PathBuf::from)
+            .expect("set MJ_CHECKPOINT_BENCH_HARNESS_HOME");
+        let metadata = verify_archive_streaming(&source).unwrap();
+        assert_eq!(metadata.manifest.session.harness_kind, HarnessKind::Codex);
+        assert!(
+            metadata.manifest.payloads.iter().all(|payload| {
+                !matches!(
+                    &payload.role,
+                    PayloadRole::GitBundle { .. }
+                        | PayloadRole::GitStagedPatch { .. }
+                        | PayloadRole::GitUnstagedPatch { .. }
+                        | PayloadRole::GitUntrackedTar { .. }
+                ) || payload.size == 0
+            }),
+            "benchmark source must use metadata-only repository capture"
+        );
+
+        // Prime the persistent negative verdicts exactly as a prior checkpoint
+        // does. The timed run models the repeat-checkpoint path.
+        let native_session_id = &metadata.manifest.session.native_session_id;
+        let mut scan_cache = CodexScanCache::empty(native_session_id);
+        let warm = collect_native_artifacts_cached(
+            HarnessKind::Codex,
+            &harness_home,
+            native_session_id,
+            false,
+            Some(&mut scan_cache),
+        )
+        .unwrap();
+        assert_eq!(
+            warm.len(),
+            1,
+            "benchmark must capture only the root rollout"
+        );
+        drop(warm);
+
+        let output_directory = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
+        let output = output_directory.path().join("export.hel.zip");
+        let installed = output_directory.path().join("installed.hel.zip");
+        let started = std::time::Instant::now();
+        let collect_started = std::time::Instant::now();
+        let native_artifacts = collect_native_artifacts_cached(
+            HarnessKind::Codex,
+            &harness_home,
+            native_session_id,
+            false,
+            Some(&mut scan_cache),
+        )
+        .unwrap();
+        let native_bytes = native_artifacts
+            .iter()
+            .map(|artifact| artifact.data.len() as u64)
+            .sum::<u64>();
+        let collect_ms = collect_started.elapsed().as_millis();
+        let repositories = metadata
+            .manifest
+            .repositories
+            .iter()
+            .map(|repository| RepositorySnapshot {
+                metadata: repository.metadata.clone(),
+                committed_bundle: Vec::new(),
+                staged_patch: Vec::new(),
+                unstaged_patch: Vec::new(),
+                untracked_tar: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let archive_started = std::time::Instant::now();
+        let sha256 = write_archive_hashed_borrowed(
+            &output,
+            &metadata.manifest.session,
+            &metadata.manifest.target,
+            &metadata.manifest.bundle,
+            &metadata.canonical_session,
+            &native_artifacts,
+            &repositories,
+        )
+        .unwrap();
+        let archive_ms = archive_started.elapsed().as_millis();
+        let copy_started = std::time::Instant::now();
+        fs::copy(&output, &installed).unwrap();
+        let copy_ms = copy_started.elapsed().as_millis();
+        let checksum_started = std::time::Instant::now();
+        let installed_sha256 = checkpoint_sha256(&installed).unwrap();
+        let checksum_ms = checksum_started.elapsed().as_millis();
+        let total_ms = started.elapsed().as_millis();
+        assert_eq!(installed_sha256, sha256);
+        eprintln!(
+            "Codex root archive benchmark: native_bytes={native_bytes} archive_bytes={} collect_ms={collect_ms} archive_ms={archive_ms} copy_ms={copy_ms} checksum_ms={checksum_ms} total_ms={total_ms} target_ms={}",
+            fs::metadata(&installed).unwrap().len(),
+            BASELINE_MS / 10
+        );
+        assert!(
+            total_ms <= BASELINE_MS / 10,
+            "root-only repeat export took {total_ms}ms; 10x target is {}ms",
+            BASELINE_MS / 10
+        );
+    }
+
+    #[test]
     fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() {
         let temp = tempfile::tempdir().unwrap();
         let (spec, _) = fixture(temp.path());
@@ -4227,8 +4381,9 @@ mod tests {
             session_id: SESSION,
             remote_archive: "/var/lib/hel/workers/source.hel.zip",
             destination: &destination,
-            expected_event_frontier: Some(1),
-            expected_event_frontier_digest: Some(&spec.canonical_session.event_frontier_digest),
+            expected_sha256: &target.sha256,
+            expected_event_frontier: 1,
+            expected_event_frontier_digest: &spec.canonical_session.event_frontier_digest,
         }
         .execute(&CopyExecutor {
             source,
@@ -4351,20 +4506,21 @@ mod tests {
     }
 
     #[test]
-    fn transfer_rejects_a_same_ordinal_frontier_digest_mismatch() {
+    fn transfer_rejects_a_target_checksum_mismatch() {
         let temp = tempfile::tempdir().unwrap();
         let (spec, source) = fixture(temp.path());
         export_checkpoint(&spec).unwrap();
         let destination = temp.path().join("controller/session.hel.zip");
-        let unexpected_digest = "b".repeat(64);
+        let unexpected_sha256 = "b".repeat(64);
 
         let error = CheckpointTransfer {
             locator: &locators()[0],
             session_id: SESSION,
             remote_archive: "/var/lib/hel/workers/source.hel.zip",
             destination: &destination,
-            expected_event_frontier: Some(1),
-            expected_event_frontier_digest: Some(&unexpected_digest),
+            expected_sha256: &unexpected_sha256,
+            expected_event_frontier: 1,
+            expected_event_frontier_digest: &spec.canonical_session.event_frontier_digest,
         }
         .execute(&CopyExecutor {
             source,
@@ -4372,7 +4528,7 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("event frontier digest mismatch"));
+        assert!(format!("{error:#}").contains("checkpoint checksums differ"));
         assert!(!destination.exists());
     }
 
@@ -4864,7 +5020,29 @@ mod tests {
     fn restore_writes_native_artifacts_privately_under_the_harness_home() {
         let temp = tempfile::tempdir().unwrap();
         let (spec, _) = fixture(temp.path());
+        let child_relative = PathBuf::from("sessions/2026/08/09/rollout-child.jsonl");
+        write_modern_rollout(
+            &spec.harness_home.join(&child_relative),
+            OTHER_NATIVE,
+            NATIVE,
+        );
         export_checkpoint(&spec).unwrap();
+        let archive = read_archive_verified(&spec.output_path).unwrap();
+        assert_eq!(archive.canonical_session().unwrap(), spec.canonical_session);
+        assert_eq!(
+            archive
+                .manifest
+                .payloads
+                .iter()
+                .filter_map(|payload| match &payload.role {
+                    PayloadRole::NativeArtifact { relative_path } => Some(relative_path.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from(format!(
+                "sessions/2026/08/09/rollout-{NATIVE}.jsonl"
+            ))]
+        );
         let harness_home = temp.path().join("restored-native-harness");
 
         restore_checkpoint(
@@ -4884,6 +5062,7 @@ mod tests {
 
         let restored = harness_home.join(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl"));
         assert_eq!(fs::read(&restored).unwrap(), b"native");
+        assert!(!harness_home.join(child_relative).exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -5023,13 +5202,16 @@ mod tests {
         let destination = temp.path().join("session.hel.zip");
         fs::write(&destination, b"previous").unwrap();
         let locator = &locators()[0];
+        let expected_sha256 = "0".repeat(64);
+        let expected_digest = "a".repeat(64);
         let result = CheckpointTransfer {
             locator,
             session_id: SESSION,
             remote_archive: "/var/lib/hel/workers/source.hel.zip",
             destination: &destination,
-            expected_event_frontier: None,
-            expected_event_frontier_digest: None,
+            expected_sha256: &expected_sha256,
+            expected_event_frontier: 0,
+            expected_event_frontier_digest: &expected_digest,
         }
         .execute(&CopyExecutor {
             source: corrupt,

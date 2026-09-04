@@ -19,7 +19,8 @@ use hel::hel_checkpoint::{
     CHECKPOINT_EXPORT_PROTOCOL_VERSION, CHECKPOINT_STAGING_PROTOCOL_VERSION, CapturedCheckpoint,
     CheckpointCaptureSpec, CheckpointExportSpec, CheckpointPackSpec, CheckpointRepositoryCapture,
     CheckpointRepositorySpec, CheckpointTransfer, canonical_session_contains_prompt,
-    capture_stdin_command, export_command, export_stdin_command, pack_stdin_command,
+    capture_stdin_command, checkpoint_sha256, export_command, export_stdin_command,
+    pack_stdin_command,
 };
 use hel::hel_config::sessions_dir;
 use hel::hel_projection::canonical_session_from_materialized;
@@ -477,8 +478,8 @@ impl Controller {
         }
     }
 
-    /// Create, verify, and durably install a recovery archive before allowing
-    /// the relay to garbage-collect through its event frontier.
+    /// Create, checksum, and durably install a recovery archive before
+    /// allowing the relay to garbage-collect through its event frontier.
     pub async fn create_recovery_checkpoint_managed_controlled(
         &self,
         session_id: &str,
@@ -985,15 +986,16 @@ impl Controller {
                 session_id,
                 remote_archive: &remote_archive,
                 destination: &destination,
-                expected_event_frontier: Some(target_checkpoint.event_frontier),
-                expected_event_frontier_digest: Some(&target_checkpoint.event_frontier_digest),
+                expected_sha256: &target_checkpoint.sha256,
+                expected_event_frontier: target_checkpoint.event_frontier,
+                expected_event_frontier_digest: &target_checkpoint.event_frontier_digest,
             };
             let transfer_started = Instant::now();
             let verified = transfer.execute(executor)?;
             tracing::info!(
                 session_id,
-                transfer_and_verify_ms = transfer_started.elapsed().as_millis() as u64,
-                "checkpoint archive transferred and verified"
+                transfer_and_checksum_ms = transfer_started.elapsed().as_millis() as u64,
+                "checkpoint archive transferred and checksum-verified"
             );
             let installed_archive = verified.archive_path().to_path_buf();
             let validate_transferred = || -> Result<()> {
@@ -1843,57 +1845,29 @@ pub(super) fn verify_installed_checkpoint_gate(
     session_id: &str,
     checkpoint: &CheckpointMetadata,
 ) -> Result<()> {
-    let archive = verify_archive_streaming(&checkpoint.archive_path).with_context(|| {
+    let sha256 = checkpoint_sha256(&checkpoint.archive_path).with_context(|| {
         format!(
-            "re-open installed checkpoint {} before target cleanup",
+            "hash installed checkpoint {} before target cleanup",
             checkpoint.archive_path.display()
         )
     })?;
     ensure!(
-        archive.archive_sha256 == checkpoint.sha256,
+        sha256 == checkpoint.sha256,
         "refusing target cleanup for session {session_id}: installed checkpoint SHA changed"
-    );
-    ensure!(
-        archive.manifest.session.id == session_id,
-        "refusing target cleanup for session {session_id}: installed checkpoint belongs to session {}",
-        archive.manifest.session.id
-    );
-    let canonical = archive.canonical_session;
-    ensure!(
-        canonical.event_frontier == checkpoint.event_frontier,
-        "refusing target cleanup for session {session_id}: installed checkpoint frontier changed from {} to {}",
-        checkpoint.event_frontier,
-        canonical.event_frontier
     );
     Ok(())
 }
 
 fn verify_checkpoint_artifact(session_id: &str, artifact: &CheckpointArtifact) -> Result<()> {
-    let archive = verify_archive_streaming(&artifact.metadata.archive_path).with_context(|| {
+    let sha256 = checkpoint_sha256(&artifact.metadata.archive_path).with_context(|| {
         format!(
-            "re-open completed checkpoint {}",
+            "hash completed checkpoint {}",
             artifact.metadata.archive_path.display()
         )
     })?;
     ensure!(
-        archive.archive_sha256 == artifact.metadata.sha256,
-        "completed checkpoint SHA changed before persistence"
-    );
-    ensure!(
-        archive.manifest.session.id == session_id,
-        "completed checkpoint belongs to session {} instead of {session_id}",
-        archive.manifest.session.id
-    );
-    let canonical = archive.canonical_session;
-    ensure!(
-        canonical.event_frontier == artifact.metadata.event_frontier,
-        "completed checkpoint frontier changed from {} to {}",
-        artifact.metadata.event_frontier,
-        canonical.event_frontier
-    );
-    ensure!(
-        canonical.event_frontier_digest == artifact.event_frontier_digest,
-        "completed checkpoint frontier digest changed before persistence"
+        sha256 == artifact.metadata.sha256,
+        "completed checkpoint SHA changed before persistence for session {session_id}"
     );
     Ok(())
 }
@@ -2023,7 +1997,7 @@ mod tests {
         assert!(directory.path().join("notes.hel.zip").exists());
     }
     #[test]
-    fn recovery_artifact_final_verification_checks_the_latched_digest() {
+    fn recovery_artifact_final_verification_checks_the_archive_digest() {
         let directory = tempfile::tempdir().unwrap();
         let session_id = "1123456789abcdef0123456789abcdef";
         let metadata = write_checkpoint_gate_archive(directory.path(), session_id, 7);
@@ -2034,12 +2008,12 @@ mod tests {
         };
 
         verify_checkpoint_artifact(session_id, &artifact).unwrap();
-        artifact.event_frontier_digest = "b".repeat(64);
+        artifact.metadata.sha256 = "b".repeat(64);
         assert!(
             verify_checkpoint_artifact(session_id, &artifact)
                 .unwrap_err()
                 .to_string()
-                .contains("frontier digest changed")
+                .contains("checkpoint SHA changed")
         );
     }
     /// A snapshot of a session whose checkpoint barrier is open but not yet
@@ -3568,7 +3542,7 @@ mod tests {
         assert!(detail.contains("rollback database write failed"));
     }
     #[test]
-    fn installed_checkpoint_gate_reopens_and_checks_sha_session_and_frontier() {
+    fn installed_checkpoint_gate_reopens_and_checks_sha() {
         let directory = tempfile::tempdir().unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
@@ -3582,21 +3556,6 @@ mod tests {
                 .to_string()
                 .contains("SHA changed")
         );
-        assert!(
-            verify_installed_checkpoint_gate("1123456789abcdef0123456789abcdef", &checkpoint)
-                .unwrap_err()
-                .to_string()
-                .contains("belongs to session")
-        );
-        let mut wrong_frontier = checkpoint.clone();
-        wrong_frontier.event_frontier += 1;
-        assert!(
-            verify_installed_checkpoint_gate(session_id, &wrong_frontier)
-                .unwrap_err()
-                .to_string()
-                .contains("frontier changed")
-        );
-
         std::fs::write(
             &checkpoint.archive_path,
             b"changed after first verification",
@@ -3607,7 +3566,7 @@ mod tests {
                 "{:#}",
                 verify_installed_checkpoint_gate(session_id, &checkpoint).unwrap_err()
             )
-            .contains("re-open installed checkpoint")
+            .contains("installed checkpoint SHA changed")
         );
     }
     #[test]

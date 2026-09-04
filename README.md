@@ -413,14 +413,18 @@ is idle (at most every ten minutes), and `mj checkpoint --session <id>`
 forces one. "Idle" includes work the agent starts on its own: when Claude Code
 picks a task back up after a background command finishes, the session shows as
 running and a recovery copy waits until that work ends, and the composer's Esc
-cancels only a prompt you sent. Recovery archives are verified end to end; a
-normal Stop writes and verifies the archive before any teardown, and refuses
-teardown if verification fails. Explicit force-destroy is the data-loss escape
-hatch.
+cancels only a prompt you sent. Recovery archives are checked byte-for-byte
+against the target's SHA-256 before any teardown; their full structure and
+payload hashes are verified when they are read for resume or import. A normal
+Stop refuses teardown if its checksum gate fails. Explicit force-destroy is the
+data-loss escape hatch.
 
 A stopped session resumes by provisioning a fresh target from its archive,
 with its pending prompt queue intact (resume asks whether to keep or discard
-it). A session recorded under one harness can be resumed under another; Mjolnir
+it). For Codex, the archive retains the primary thread and canonical transcript,
+including child-agent results surfaced in that transcript, but not child agents'
+private rollouts; stopped child agents cannot receive follow-ups after resume.
+A session recorded under one harness can be resumed under another; Mjolnir
 condenses the transcript into a size-bounded handoff for the new harness. That
 compaction is direct, tool-free inference and does not create an ACP session.
 Mjolnir chooses a configured profile with usable quota and a current model in

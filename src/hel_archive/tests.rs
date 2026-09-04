@@ -546,7 +546,7 @@ fn payload_parts_follow_the_threshold_and_never_split_stored_payloads() {
         relative_path: PathBuf::from("rollout.jsonl"),
     };
     assert_eq!(payload_compression(&bundle), CompressionMethod::Stored);
-    assert_eq!(payload_compression(&artifact), CompressionMethod::Deflated);
+    assert_eq!(payload_compression(&artifact), CompressionMethod::Zstd);
 
     let body = vec![b'x'; 10];
     assert!(
@@ -559,21 +559,10 @@ fn payload_parts_follow_the_threshold_and_never_split_stored_payloads() {
         .is_empty()
     );
     assert!(
-        plan_payload_parts(
-            "native/rollout.jsonl",
-            &body,
-            CompressionMethod::Deflated,
-            10
-        )
-        .is_empty(),
+        plan_payload_parts("native/rollout.jsonl", &body, CompressionMethod::Zstd, 10).is_empty(),
         "a payload at the threshold stays whole"
     );
-    let parts = plan_payload_parts(
-        "native/rollout.jsonl",
-        &body,
-        CompressionMethod::Deflated,
-        4,
-    );
+    let parts = plan_payload_parts("native/rollout.jsonl", &body, CompressionMethod::Zstd, 4);
     assert_eq!(
         parts
             .iter()
@@ -593,7 +582,7 @@ fn payload_parts_follow_the_threshold_and_never_split_stored_payloads() {
 }
 
 #[test]
-fn git_bundles_are_stored_and_other_payloads_are_deflated() {
+fn git_bundles_are_stored_and_other_payloads_use_zstandard() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("stored-bundle.hel.zip");
     write_archive_atomic(&path, &input()).unwrap();
@@ -604,11 +593,11 @@ fn git_bundles_are_stored_and_other_payloads_are_deflated() {
     );
     assert_eq!(
         zip_entry_method(&path, CANONICAL_SESSION_PATH),
-        CompressionMethod::Deflated
+        CompressionMethod::Zstd
     );
     assert_eq!(
         zip_entry_method(&path, "repositories/hel/untracked.tar"),
-        CompressionMethod::Deflated
+        CompressionMethod::Zstd
     );
 
     let verified = read_archive_verified(&path).unwrap();
@@ -641,12 +630,8 @@ fn replace_untracked_tar(
         .unwrap();
     descriptor.size = tar.len() as u64;
     descriptor.sha256 = digest_bytes(&tar);
-    descriptor.parts = plan_payload_parts(
-        &descriptor.path,
-        &tar,
-        CompressionMethod::Deflated,
-        part_bytes,
-    );
+    descriptor.parts =
+        plan_payload_parts(&descriptor.path, &tar, CompressionMethod::Zstd, part_bytes);
     let descriptor = descriptor.clone();
     let payload = payloads
         .iter_mut()

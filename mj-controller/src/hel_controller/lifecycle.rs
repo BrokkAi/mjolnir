@@ -417,8 +417,8 @@ impl Controller {
             .checkpoint
             .as_ref()
             .context("force stop requires an existing recovery archive")?;
-        // Force stop skips a new checkpoint, never verification of the archive
-        // that makes the logical session resumable afterwards.
+        // Force stop skips a new checkpoint, never the checksum gate on the
+        // archive that makes the logical session resumable afterwards.
         verify_installed_checkpoint_gate(session_id, checkpoint)
             .context("verify the recovery archive before force stopping")?;
         retire_git_broker(session_id).context("stop the session's local Git broker")?;
@@ -928,8 +928,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let repository = committed_repository();
         let session_id = "0123456789abcdef0123456789abcdef";
-        let mut checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
-        checkpoint.event_frontier = 8;
+        let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
         let mut session = managed_worktree_session(repository.path(), session_id);
         let worktree = session.managed_worktree.clone().unwrap();
         session.target_template_id = "local".into();
@@ -953,6 +952,7 @@ mod tests {
             calls: RefCell::new(0),
         };
         let persisted = RefCell::new(Vec::new());
+        std::fs::write(&checkpoint.archive_path, b"changed after checkpoint").unwrap();
 
         let error = controller
             .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &executor, |record| {
@@ -961,7 +961,7 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(error.to_string().contains("checkpoint frontier changed"));
+        assert!(error.to_string().contains("checkpoint SHA changed"));
         assert_eq!(*executor.calls.borrow(), 0);
         assert!(persisted.into_inner().is_empty());
         assert!(worktree.worktree_root.is_dir());
