@@ -14,12 +14,30 @@ This is deliberately an escape hatch. Everything else in the product refuses to 
 
 ## Progress
 
-- [ ] (2026-09-04) ExecPlan recorded from the approved design.
+- [x] (2026-09-04) ExecPlan recorded from the approved design.
+- [x] (2026-09-04) M1: `HelState::destroy_session_force` and `force_delete_workspace`/`_at` with state and database behavior tests.
+- [x] (2026-09-04) M2: `Controller::force_destroy_session`/`_with` with four controller tests, including real end-to-end teardown of a local target, worktree, branch, and archive through `ProcessExecutor`.
+- [x] (2026-09-04) M3: daemon protocol 8, `ForceDestroySession`/`ForceDeleteWorkspace` actions, `ForceDestroy` lifecycle kind, `preempt_active_lifecycle`, workspace force orchestration, dashboard/server kind mappings, and daemon tests.
+- [x] (2026-09-04) M4: palette command, typed short-id confirmation with the new `InputFilter::AsciiHexLowercase`, action dispatch through the supervised lifecycle machinery, and TUI/chat tests.
+- [x] (2026-09-04) M5: selector `D` confirmation state, `SelectorOutcome::ForceDelete`, main.rs handling, and pure-helper tests.
+- [x] (2026-09-04) Validation: `cargo fmt --all -- --check`, full default-member `cargo test`, and `cargo clippy --all-targets -- -D warnings` all pass outside the sandbox; five scoped commits on the current branch.
 
 ## Surprises & Discoveries
 
 - Observation: `execute_target_cleanup` in `mj-controller/src/hel_controller/lifecycle.rs` already implements exactly the abort rule force destroy needs: when a cleanup command fails it probes whether the target is really gone; confirmed gone continues with a warning, anything else returns the error so the durable record survives for a retry.
   Evidence: the function at `mj-controller/src/hel_controller/lifecycle.rs:499` and its three-way match on `cleanup_target_is_confirmed_absent`.
+
+- Observation: `PROTOCOL_VERSION` is pinned by a test, so a bump is a two-file change until the constant and the assertion are updated together.
+  Evidence: `the_daemon_rejects_a_client_one_protocol_behind_before_dispatch` in `mj-cli/src/daemon.rs` asserts `PROTOCOL_VERSION == 7` and failed until updated to 8.
+
+- Observation: mj-cli had no `tokio` dev-dependency with `test-util`, which `#[tokio::test(start_paused = true)]` needs to advance the 8-second preemption timeout instantly; the workspace's other crates already declare it in `[dev-dependencies]`.
+  Evidence: the timeout test failed to compile until `tokio = { version = "1", features = ["test-util"] }` was added to `mj-cli/Cargo.toml`'s dev-dependencies.
+
+- Observation: invoking the `rustfmt` binary directly produces a flood of unrelated diffs because it defaults to edition 2015; `cargo fmt` (which reads edition 2024 from the manifest) matches the committed baseline exactly on a clean tree of this host.
+  Evidence: direct `rustfmt --check` failed on let-chains and async fns repo-wide, while `cargo fmt --all -- --check` reported no diff on the untouched tree.
+
+- Observation: clippy's `unused_assignments` catches dead state resets on early-return paths, which is how the selector's confirm-state cleanup was simplified before commit.
+  Evidence: `cargo clippy --all-targets -- -D warnings` flagged `confirming = None;` immediately before a `return`.
 
 ## Decision Log
 
@@ -55,9 +73,23 @@ This is deliberately an escape hatch. Everything else in the product refuses to 
   Rationale: Before this plan, `D` deleted with no confirmation at all; wiring the force path through the same state makes both paths safe and consistent.
   Date/Author: 2026-09-04 / Claude
 
+- Decision: The force-delete name gate trims surrounding whitespace before comparing.
+  Rationale: Leading or trailing spaces are accidental typing, not a different name; the name itself must still match exactly.
+  Date/Author: 2026-09-04 / Claude
+
+- Decision: The daemon's force-destroy task takes the same recovery reservation (`reserve_recovery_or_cancel`) the resume task takes.
+  Rationale: Destruction must not race a recovery copy adopting or archiving the session mid-teardown; reservation is the existing mechanism for that exclusion.
+  Date/Author: 2026-09-04 / Claude
+
 ## Outcomes & Retrospective
 
-To be written when the plan completes.
+Implemented and validated on 2026-09-04. A wedged active session can now be permanently destroyed from the dashboard (palette → "Force destroy session" → type the 8-character short id), preempting whatever lifecycle operation holds it, and a non-empty workspace can be force-deleted from the selector by typing its exact name; stopped histories remain globally resumable. The daemon protocol advanced from 7 to 8 and older daemons are replaced automatically on first contact.
+
+All planned automated tests landed and pass: core state and database behavior (3), controller force-destroy including a real end-to-end teardown and the target-survives abort (4), daemon preemption/enumeration/kind (5 plus the extended ownership and protocol tests), TUI confirmation gating, paste filtering, and palette availability (4), selector prompt and exact-name gating (4). The full default-member suite (`cargo test`) and `cargo clippy --all-targets -- -D warnings` pass outside the sandbox; `cargo fmt --all -- --check` is clean.
+
+Known limitations, recorded rather than fixed: force destroy cannot rescue a store whose config fails `validate_against_config` (for example an active session referencing a deleted target template); the startup-only interrupted-close recovery tasks are outside the lifecycle map, so a narrow race can leave a stopped row whose archive is gone (self-healing: the resume dialog's destroy tolerates a missing archive); force-deleting several containers serially holds the selector's last frame for seconds, consistent with the selector's other awaited operations.
+
+Manual interactive acceptance (creating a real session and destroying it from the palette, two attached dashboards refusing a workspace force-delete) was not run on this host; the state-machine, teardown, wire-shape, confirmation, and persistence boundaries are covered automatically as described above.
 
 ## Context and Orientation
 

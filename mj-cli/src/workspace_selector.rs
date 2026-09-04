@@ -211,8 +211,6 @@ pub(crate) fn select_workspace(
                 KeyCode::Enter if confirm_delete_allows_enter(confirm, &input) => {
                     let workspace_id = confirm.workspace_id.clone();
                     let force = confirm_delete_requires_typed_name(confirm);
-                    confirming = None;
-                    input.clear();
                     return Ok(if force {
                         SelectorOutcome::ForceDelete(workspace_id)
                     } else {
