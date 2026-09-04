@@ -55,3 +55,5 @@ libc = "0.2"
 # which is exactly what the incident it reproduces did.
 rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
+# `start_paused` drives the force-destroy preemption timeout instantly.
+tokio = { version = "1", features = ["test-util"] }

@@ -45,7 +45,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 7;
+pub(crate) const PROTOCOL_VERSION: u32 = 8;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -67,6 +67,12 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// on a stop sees the exit rather than its own deadline.
 const SHUTDOWN_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_millis(40);
+/// How long force destruction waits for a cancelled lifecycle to actually
+/// stop before refusing to destroy under it. Cancellation kills the
+/// operation's child process groups and unwinds its persistence, which is
+/// fast in practice; an operation that outlives this bound is wedged in a
+/// way destruction must not paper over.
+const FORCE_DESTROY_PREEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn metadata_path() -> PathBuf {
     data_dir().join("daemon.json")
@@ -183,6 +189,7 @@ pub(crate) enum RuntimeLifecycleKind {
     Resume,
     ForceStop,
     DestroyStopped,
+    ForceDestroy,
     Cleanup,
 }
 
@@ -406,6 +413,12 @@ enum DaemonAction {
     DestroyStoppedSession {
         session_id: String,
     },
+    ForceDestroySession {
+        session_id: String,
+    },
+    ForceDeleteWorkspace {
+        workspace_id: String,
+    },
     CancelLifecycle {
         session_id: String,
     },
@@ -622,6 +635,7 @@ enum LifecycleKind {
     Resume,
     ForceStop,
     DestroyStopped,
+    ForceDestroy,
     Cleanup,
 }
 
@@ -661,6 +675,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::Resume => Self::Resume,
             LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped => Self::DestroyStopped,
+            LifecycleKind::ForceDestroy => Self::ForceDestroy,
             LifecycleKind::Cleanup => Self::Cleanup,
         }
     }
@@ -1545,6 +1560,160 @@ impl RuntimeState {
             },
         )
         .await?;
+        Ok(())
+    }
+
+    /// Cancel any in-flight lifecycle for `session_id` and wait for it to
+    /// finish.
+    ///
+    /// Force destruction is the escape hatch for a wedged operation, so it
+    /// takes over rather than queueing behind one — but only after the running
+    /// task has stopped, because a cancelled create or close re-persists its
+    /// record as it unwinds and would otherwise resurrect the row this
+    /// operation deletes. A lifecycle that ignores cancellation for longer
+    /// than [`FORCE_DESTROY_PREEMPT_TIMEOUT`] is reported instead of destroyed
+    /// under.
+    async fn preempt_active_lifecycle(self: &Arc<Self>, session_id: &str) -> Result<()> {
+        let mut result = {
+            let lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let Some(active) = lifecycle.get(session_id) else {
+                return Ok(());
+            };
+            if !active.result.borrow().is_none() {
+                return Ok(());
+            }
+            active.cancelled.store(true, Ordering::Release);
+            active.result.clone()
+        };
+        let finished = tokio::time::timeout(FORCE_DESTROY_PREEMPT_TIMEOUT, async {
+            loop {
+                if result.borrow().is_some() {
+                    return Ok(());
+                }
+                if result.changed().await.is_err() {
+                    return Err(());
+                }
+            }
+        })
+        .await;
+        match finished {
+            // The loop only returns once the watch holds a result or its
+            // sender died; distinguish those two, and the timeout separately.
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(())) => bail!(
+                "daemon lifecycle operation stopped without a result for session {session_id}"
+            ),
+            Err(_) => bail!(
+                "session {session_id} still has an operation that did not stop after cancellation; try again"
+            ),
+        }
+    }
+
+    /// Permanently destroy a session from any state, cancelling whatever
+    /// lifecycle operation holds it first. Data loss is the caller's confirmed
+    /// decision; see [`Controller::force_destroy_session`].
+    pub(crate) async fn force_destroy_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        self.preempt_active_lifecycle(&session_id).await?;
+        let exists = blocking({
+            let session_id = session_id.clone();
+            move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
+        })
+        .await?;
+        if !exists {
+            return Ok(());
+        }
+        self.run_lifecycle(
+            session_id,
+            LifecycleKind::ForceDestroy,
+            |state, session_id, cancelled| async move {
+                let _recovery_reservation = tokio::task::spawn_blocking({
+                    let observer = state.recovery_observer.clone();
+                    let session_id = session_id.clone();
+                    let cancelled = cancelled.clone();
+                    move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
+                })
+                .await
+                .context("reserve recovery for daemon force-destroy task")??;
+                blocking({
+                    let session_id = session_id.clone();
+                    move || {
+                        let mut controller = Controller::load()?;
+                        let executor = DaemonStageReportingExecutor::new(
+                            CancellableProcessExecutor::new(cancelled),
+                            state,
+                            session_id.clone(),
+                        );
+                        controller.force_destroy_session(&session_id, &executor)?;
+                        Ok(DaemonLifecycleResult::Done)
+                    }
+                })
+                .await
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Force-delete a workspace: destroy every active session in it (see
+    /// [`RuntimeState::force_destroy_session`]), drop its detached drafts, and
+    /// remove the workspace row. Stopped histories stay globally resumable.
+    ///
+    /// Attached clients and in-flight resumes into the workspace still refuse
+    /// the deletion: those are live interfaces, not wedges. A session that
+    /// fails to destroy stops the sequence with the remainder named, so the
+    /// operation can be retried without losing progress.
+    pub(crate) async fn force_delete_workspace(
+        self: &Arc<Self>,
+        workspace_id: String,
+    ) -> Result<()> {
+        ensure!(
+            !self
+                .attachments()
+                .values()
+                .any(|attachment| attachment.workspace_id == workspace_id),
+            "workspace still has attached clients"
+        );
+        ensure!(
+            !self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .any(|active| {
+                    active.result.borrow().is_none()
+                        && active.resume_workspace_id.as_deref() == Some(workspace_id.as_str())
+                }),
+            "workspace has a session resume in progress"
+        );
+        let sessions = blocking({
+            let workspace_id = workspace_id.clone();
+            move || {
+                let controller = Controller::load()?;
+                Ok(active_sessions_for_force_destruction(
+                    &controller,
+                    &workspace_id,
+                ))
+            }
+        })
+        .await?;
+        for (index, session_id) in sessions.iter().enumerate() {
+            if let Err(error) = self.force_destroy_session(session_id.clone()).await {
+                let remaining = sessions.len() - index - 1;
+                bail!(
+                    "force-destroying session {session_id} failed: {error:#}; \
+                     {remaining} session(s) in the workspace remain"
+                );
+            }
+        }
+        blocking({
+            let workspace_id = workspace_id.clone();
+            move || hel::hel_database::force_delete_workspace(&workspace_id)
+        })
+        .await?;
+        refresh_runtime_workspaces(self).await?;
         Ok(())
     }
 
@@ -2684,6 +2853,26 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected destroy-stopped reply {reply:?}"),
+        }
+    }
+
+    pub(crate) async fn force_destroy_session(&mut self, session_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::ForceDestroySession { session_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected force-destroy reply {reply:?}"),
+        }
+    }
+
+    pub(crate) async fn force_delete_workspace(&mut self, workspace_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::ForceDeleteWorkspace { workspace_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected force-delete-workspace reply {reply:?}"),
         }
     }
 
@@ -4010,6 +4199,14 @@ async fn handle_action(
             state.destroy_stopped_session(session_id).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::ForceDestroySession { session_id } => {
+            state.force_destroy_session(session_id).await?;
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::ForceDeleteWorkspace { workspace_id } => {
+            state.force_delete_workspace(workspace_id).await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::CancelLifecycle { session_id } => {
             state.cancel_lifecycle(&session_id)?;
             Ok(DaemonReply::Done)
@@ -4036,6 +4233,26 @@ fn ensure_no_active_lifecycle(state: &RuntimeState) -> Result<()> {
         "cannot rename configuration while a session lifecycle operation is active"
     );
     Ok(())
+}
+
+/// The workspace's active session ids, oldest first, so force deletion
+/// destroys them in a deterministic order and partial failures name what is
+/// left.
+fn active_sessions_for_force_destruction(
+    controller: &Controller,
+    workspace_id: &str,
+) -> Vec<String> {
+    let mut sessions: Vec<&SessionRecord> = controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id && session.state.is_active())
+        .collect();
+    sessions.sort_by(|a, b| a.compare_by_creation(b));
+    sessions
+        .into_iter()
+        .map(|session| session.id.clone())
+        .collect()
 }
 
 fn install_renamed_controller(state: &RuntimeState, controller: Controller) {
@@ -4126,6 +4343,10 @@ mod tests {
         ));
         assert!(lifecycle_owns_worker_target(
             LifecycleKind::ForceStop,
+            Some(SessionState::Running)
+        ));
+        assert!(lifecycle_owns_worker_target(
+            LifecycleKind::ForceDestroy,
             Some(SessionState::Running)
         ));
     }
@@ -4495,7 +4716,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
-        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(PROTOCOL_VERSION, 8);
         let state = test_runtime_state();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -4922,5 +5143,109 @@ mod tests {
             RuntimeState::wait_lifecycle_result(result).await.unwrap(),
             DaemonLifecycleResult::Done
         ));
+    }
+
+    #[test]
+    fn force_destruction_enumerates_only_the_workspaces_active_sessions_oldest_first() {
+        let mut oldest = runtime_test_session("oldest", "workspace-a", SessionState::Provisioning);
+        oldest.created_at = "2026-09-01T00:00:00Z".into();
+        let newest = runtime_test_session("newest", "workspace-a", SessionState::Error);
+        let elsewhere = runtime_test_session("elsewhere", "workspace-b", SessionState::Running);
+        let history = runtime_test_session("history", "workspace-a", SessionState::Stopped);
+        let controller = Controller {
+            config: HelConfig::default(),
+            state: hel::hel_state::HelState {
+                sessions: [oldest, newest, elsewhere, history]
+                    .into_iter()
+                    .map(|session| (session.id.clone(), session))
+                    .collect(),
+                ..hel::hel_state::HelState::default()
+            },
+        };
+
+        assert_eq!(
+            active_sessions_for_force_destruction(&controller, "workspace-a"),
+            vec!["oldest".to_owned(), "newest".to_owned()]
+        );
+        assert_eq!(
+            active_sessions_for_force_destruction(&controller, "workspace-b"),
+            vec!["elsewhere".to_owned()]
+        );
+    }
+
+    #[test]
+    fn force_destroy_serializes_as_its_own_lifecycle_kind() {
+        assert_eq!(
+            serde_json::to_string(&RuntimeLifecycleKind::ForceDestroy).unwrap(),
+            "\"force_destroy\""
+        );
+    }
+
+    #[tokio::test]
+    async fn force_destruction_preempts_a_running_lifecycle_and_waits_for_it() {
+        let state = test_runtime_state();
+        let release = Arc::new(tokio::sync::Notify::new());
+        state
+            .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+                let release = release.clone();
+                move |_state, _session_id, _cancelled| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        let preempt_state = state.clone();
+        let preempted =
+            tokio::spawn(async move { preempt_state.preempt_active_lifecycle("session-1").await });
+        tokio::task::yield_now().await;
+        {
+            let lifecycle = state
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            assert!(
+                lifecycle
+                    .get("session-1")
+                    .expect("lifecycle entry")
+                    .cancelled
+                    .load(Ordering::Acquire),
+                "preemption must cancel the running operation"
+            );
+        }
+
+        release.notify_one();
+        preempted
+            .await
+            .expect("preempt task")
+            .expect("a cancelled-and-finished lifecycle lets force destruction proceed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_destruction_preemption_times_out_without_destroying() {
+        let state = test_runtime_state();
+        state
+            .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+                |_state, _session_id, _cancelled| async move {
+                    // A lifecycle that ignores cancellation forever.
+                    std::future::pending::<()>().await;
+                    #[allow(unreachable_code)]
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        let error = state
+            .preempt_active_lifecycle("session-1")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not stop after cancellation"),
+            "{error:#}"
+        );
     }
 }

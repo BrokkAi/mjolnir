@@ -1906,6 +1906,7 @@ fn viewer_operation(
             crate::daemon::RuntimeLifecycleKind::Close
             | crate::daemon::RuntimeLifecycleKind::ForceStop
             | crate::daemon::RuntimeLifecycleKind::DestroyStopped
+            | crate::daemon::RuntimeLifecycleKind::ForceDestroy
             | crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Stop,
         },
         started_at_epoch_seconds: view.started_at_epoch_seconds,
