@@ -18,7 +18,7 @@
 //! synchronous review: findings can never land out of the blue in the middle
 //! of the next conversation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -175,8 +175,15 @@ impl TurnReview {
     pub(super) fn pending_elicitations(
         &self,
     ) -> Vec<(String, hel::hel_elicitation::ElicitationRequest)> {
+        let active_roles = self
+            .view
+            .roles
+            .iter()
+            .map(|role| role.role.as_str())
+            .collect::<BTreeSet<_>>();
         self.panes
             .iter()
+            .filter(|(role, _)| active_roles.contains(role.as_str()))
             .flat_map(|(role, pane)| {
                 pane.pending_elicitations()
                     .iter()

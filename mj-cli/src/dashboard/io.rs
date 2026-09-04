@@ -1149,6 +1149,12 @@ impl DashboardContext {
                 self.dashboard.set_opening_session(None);
                 match *result {
                     Ok(chat) => {
+                        let mut chat = chat;
+                        // The old warm chat continued receiving feed updates
+                        // while this attach was in flight. Capture its latest
+                        // local form state just before replacing it.
+                        self.save_active_question_draft();
+                        self.restore_question_draft(&session_id, &mut chat);
                         self.active_chat = Some(chat);
                         // The context travelled with the attach, which is
                         // asynchronous; anything the surface learned while it

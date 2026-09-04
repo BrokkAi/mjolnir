@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::hel_selection::{
     ContentPos, FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId, extract_rows,
@@ -20,7 +20,11 @@ use hel::hel_elicitation::{
     ElicitationValue, validate_field_value,
 };
 
+use super::input::{
+    grapheme_offset_for_wrapped_row, input_cursor_visual_position, wrapped_row_for_grapheme_offset,
+};
 use super::rendering::sanitize_terminal_text;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// How many wrapped rows of one logical line the extractor is willing to
 /// render off screen when a selection cuts it. A plan line long enough to wrap
@@ -43,6 +47,37 @@ struct DisplayField {
     custom_option: Option<usize>,
 }
 
+/// A process-local copy of an unanswered form. The request is retained in the
+/// snapshot deliberately: an id can be reused by a harness for a different
+/// form, and local answers must never be applied to that new form.
+#[derive(Debug, Clone)]
+pub struct ElicitationDraft {
+    request: ElicitationRequest,
+    values: Vec<FieldValue>,
+    option_cursors: Vec<usize>,
+    active_custom_fields: BTreeSet<usize>,
+    focus: usize,
+    message_scroll: u16,
+    /// `(source line, grapheme offset)` at the top of the viewport. Both
+    /// components are logical source coordinates; the visual row is
+    /// recomputed by the renderer for the current width.
+    message_anchor: Option<(usize, usize)>,
+    message_anchor_width: u16,
+    focus_scroll: u16,
+}
+
+impl ElicitationDraft {
+    /// Whether this snapshot belongs to exactly this pending request.
+    #[must_use]
+    pub fn matches(&self, request: &ElicitationRequest) -> bool {
+        self.request == *request
+    }
+
+    pub(super) fn request(&self) -> &ElicitationRequest {
+        &self.request
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct ElicitationDialog {
     request: ElicitationRequest,
@@ -56,6 +91,15 @@ pub(super) struct ElicitationDialog {
     message_page_height: Cell<u16>,
     message_max_scroll: Cell<u16>,
     message_area: Cell<Option<Rect>>,
+    /// The source line and grapheme offset at the top of the last rendered
+    /// message viewport. Keeping this anchor lets a resize recompute wrapped
+    /// rows at the new width without moving the reader to an unrelated part
+    /// of a long source line.
+    message_anchor: Cell<Option<(usize, usize)>>,
+    message_anchor_width: Cell<u16>,
+    /// Wrapped rows to skip in the form body when a long option list is
+    /// taller than the space left above the answer controls.
+    focus_scroll: Cell<u16>,
 }
 
 impl ElicitationDialog {
@@ -96,15 +140,47 @@ impl ElicitationDialog {
             message_page_height: Cell::new(0),
             message_max_scroll: Cell::new(0),
             message_area: Cell::new(None),
+            message_anchor: Cell::new(None),
+            message_anchor_width: Cell::new(0),
+            focus_scroll: Cell::new(0),
         }
-    }
-
-    pub(super) fn id(&self) -> &str {
-        &self.request.id
     }
 
     pub(super) fn request(&self) -> &ElicitationRequest {
         &self.request
+    }
+
+    pub(super) fn draft(&self) -> ElicitationDraft {
+        ElicitationDraft {
+            request: self.request.clone(),
+            values: self.values.clone(),
+            option_cursors: self.option_cursors.clone(),
+            active_custom_fields: self.active_custom_fields.clone(),
+            focus: self.focus,
+            message_scroll: self.message_scroll.get(),
+            message_anchor: self.message_anchor.get(),
+            message_anchor_width: self.message_anchor_width.get(),
+            focus_scroll: self.focus_scroll.get(),
+        }
+    }
+
+    pub(super) fn from_draft(request: ElicitationRequest, draft: ElicitationDraft) -> Option<Self> {
+        if draft.request != request
+            || draft.values.len() != request.fields.len()
+            || draft.option_cursors.len() != request.fields.len()
+        {
+            return None;
+        }
+        let mut dialog = Self::new(request);
+        dialog.values = draft.values;
+        dialog.option_cursors = draft.option_cursors;
+        dialog.active_custom_fields = draft.active_custom_fields;
+        dialog.focus = draft.focus.min(dialog.display_fields.len() + 2);
+        dialog.message_scroll = Cell::new(draft.message_scroll);
+        dialog.message_anchor = Cell::new(draft.message_anchor);
+        dialog.message_anchor_width = Cell::new(draft.message_anchor_width);
+        dialog.focus_scroll = Cell::new(draft.focus_scroll);
+        Some(dialog)
     }
 
     pub(super) fn paste(&mut self, text: &str) {
@@ -249,6 +325,16 @@ impl ElicitationDialog {
             current.saturating_add(delta as usize).min(maximum)
         };
         self.message_scroll.set(next as u16);
+        // A user scroll establishes a new logical anchor. Subsequent redraws
+        // and resizes retain that source position instead of repeatedly
+        // replacing it with whichever wrapped row happens to be at the top.
+        if self.message_anchor_width.get() > 0 {
+            self.message_anchor.set(Some(message_position_at_row(
+                &self.request.message,
+                self.message_anchor_width.get(),
+                next,
+            )));
+        }
     }
 
     fn move_option(&mut self, delta: isize) {
@@ -621,18 +707,41 @@ fn validated_value(
     Ok(Some(answered))
 }
 
-pub(super) fn render_elicitation(
+/// Draws an elicitation in the bounds owned by the chat surface. This is used
+/// by the combined dashboard so the question cannot cover its navigator or
+/// the other support panes.
+pub(super) fn render_elicitation_in(
     frame: &mut Frame,
     dialog: &ElicitationDialog,
     surfaces: &mut FrameSurfaces,
+    bounds: Rect,
+    focused: bool,
 ) {
-    let bounds = frame.area();
-    let area = crate::hel_modal::centered_modal_rect_percent(frame, 82, 78, bounds);
+    render_elicitation_at(frame, dialog, surfaces, bounds, focused);
+}
+
+fn render_elicitation_at(
+    frame: &mut Frame,
+    dialog: &ElicitationDialog,
+    surfaces: &mut FrameSurfaces,
+    area: Rect,
+    focused: bool,
+) {
+    // The question replaces the session content rectangle. Clear exactly that
+    // rectangle so hidden transcript text cannot show through it, while the
+    // navigator and every neighboring pane remain untouched.
+    frame.render_widget(Clear, area);
     let title = dialog.request.title.as_deref().unwrap_or("Agent question");
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {title} "))
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(if focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let focus = focus_content(dialog);
@@ -643,24 +752,31 @@ pub(super) fn render_elicitation(
     )
     .unwrap_or(u16::MAX)
     .max(1);
-    let constraints = if dialog.is_plan_review() {
-        let body_height = inner.height.saturating_sub(2);
-        let focus_height = natural_focus_height.min(body_height.saturating_sub(1));
-        let message_height = body_height.saturating_sub(focus_height);
-        [
-            Constraint::Length(message_height),
-            Constraint::Length(focus_height),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]
+    let footer_height = inner.height.min(1);
+    // In a compact question pane one button row is enough: the second row is
+    // more valuable to the message and focused control, which can each scroll
+    // their content independently.
+    let button_rows = if inner.height <= 4 { 1 } else { 2 };
+    let buttons_height = inner.height.saturating_sub(footer_height).min(button_rows);
+    let body_height = inner.height.saturating_sub(footer_height + buttons_height);
+    let (message_height, focus_height) = if dialog.is_plan_review() {
+        let focus_height = natural_focus_height
+            .min(body_height.saturating_sub(1).max(1))
+            .min(body_height);
+        (body_height.saturating_sub(focus_height), focus_height)
     } else {
-        [
-            Constraint::Length(3),
-            Constraint::Min(4),
-            Constraint::Length(2),
-            Constraint::Length(1),
-        ]
+        // Keep the answer controls inside tiny session areas too. The form
+        // body receives whatever remains after the two button rows and the
+        // footer; its own scroll keeps a focused option reachable.
+        let message_height = body_height.min(3).min(body_height.saturating_sub(1));
+        (message_height, body_height.saturating_sub(message_height))
     };
+    let constraints = [
+        Constraint::Length(message_height),
+        Constraint::Length(focus_height),
+        Constraint::Length(buttons_height),
+        Constraint::Length(footer_height),
+    ];
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
@@ -668,8 +784,32 @@ pub(super) fn render_elicitation(
     let message = Paragraph::new(dialog.request.message.as_str()).wrap(Wrap { trim: true });
     let total_lines = u16::try_from(message.line_count(chunks[0].width)).unwrap_or(u16::MAX);
     let maximum_scroll = total_lines.saturating_sub(chunks[0].height);
-    let message_scroll = dialog.message_scroll.get().min(maximum_scroll);
+    let anchored_scroll = (dialog.message_anchor_width.get() != chunks[0].width)
+        .then(|| dialog.message_anchor.get())
+        .flatten()
+        .map(|(line, row)| {
+            let source = dialog.request.message.split('\n').nth(line).unwrap_or("");
+            wrapped_prefix_rows(&dialog.request.message, chunks[0].width, line).saturating_add(
+                u16::try_from(wrapped_row_for_grapheme_offset(
+                    source,
+                    usize::from(chunks[0].width),
+                    row,
+                ))
+                .unwrap_or(u16::MAX),
+            )
+        });
+    let message_scroll = anchored_scroll
+        .unwrap_or_else(|| dialog.message_scroll.get())
+        .min(maximum_scroll);
     dialog.message_scroll.set(message_scroll);
+    if dialog.message_anchor.get().is_none() {
+        dialog.message_anchor.set(Some(message_position_at_row(
+            &dialog.request.message,
+            chunks[0].width,
+            usize::from(message_scroll),
+        )));
+    }
+    dialog.message_anchor_width.set(chunks[0].width);
     dialog.message_page_height.set(chunks[0].height);
     dialog.message_max_scroll.set(maximum_scroll);
     dialog.message_area.set(Some(chunks[0]));
@@ -683,7 +823,43 @@ pub(super) fn render_elicitation(
         usize::from(total_lines),
     ));
     surfaces.push(SurfaceFrame::fixed(SurfaceId::ModalBody, chunks[1]));
-    render_focus(frame, chunks[1], focus);
+    let focus_rows = u16::try_from(
+        Paragraph::new(focus.lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(chunks[1].width),
+    )
+    .unwrap_or(u16::MAX)
+    .max(1);
+    let focus_max_scroll = focus_rows.saturating_sub(chunks[1].height);
+    let target_row = focus.focused_row.map_or(0, |line| {
+        let prefix_rows = Paragraph::new(focus.lines[..line].to_vec())
+            .wrap(Wrap { trim: false })
+            .line_count(chunks[1].width);
+        let cursor_row = focus
+            .text_cursor
+            .filter(|(cursor_line, _)| usize::from(*cursor_line) == line)
+            .map_or(0, |(_, column)| {
+                let text = focus.lines[line].to_string();
+                let cursor_grapheme = 2usize.saturating_add(column);
+                let cursor_byte = text
+                    .grapheme_indices(true)
+                    .nth(cursor_grapheme)
+                    .map_or(text.len(), |(offset, _)| offset);
+                input_cursor_visual_position(&text, cursor_byte, usize::from(chunks[1].width)).1
+            });
+        prefix_rows.saturating_add(cursor_row)
+    });
+    let mut focus_scroll = dialog.focus_scroll.get().min(focus_max_scroll);
+    let target_row = target_row.min(usize::from(u16::MAX)) as u16;
+    if target_row < focus_scroll {
+        focus_scroll = target_row;
+    } else if target_row >= focus_scroll.saturating_add(chunks[1].height) {
+        focus_scroll = target_row
+            .saturating_sub(chunks[1].height.saturating_sub(1))
+            .min(focus_max_scroll);
+    }
+    dialog.focus_scroll.set(focus_scroll);
+    render_focus(frame, chunks[1], focus, focus_scroll, focused);
     let field_count = dialog.display_fields.len();
     let buttons = ["Submit", "Skip", "Cancel"]
         .into_iter()
@@ -716,18 +892,25 @@ pub(super) fn render_elicitation(
             .saturating_add(chunks[0].height)
             .min(total_lines);
         Some(format!(
-            "Plan {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Tab fields/buttons · ↑/↓ choose · Enter continue"
+            "F6/Shift-F6 panes · Plan {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Tab fields/buttons · ↑/↓ choose · Enter continue"
         ))
     } else {
         None
     };
-    let footer = dialog.error.as_deref().unwrap_or_else(|| {
-        scroll_help.as_deref().unwrap_or(
-            "Tab fields/buttons · ↑/↓ choose · Space toggle · Enter continue · Esc cancel",
-        )
-    });
+    let footer = if let Some(error) = dialog.error.as_deref() {
+        format!("F6/Shift-F6 panes · {error}")
+    } else if let Some(scroll_help) = scroll_help {
+        scroll_help
+    } else {
+        "F6/Shift-F6 panes · Tab fields/buttons · ↑/↓ choose · Space toggle · Enter continue · Esc cancel".to_owned()
+    };
     frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(if dialog.error.is_some() {
+        Paragraph::new(if focused {
+            footer.as_str()
+        } else {
+            "Click to answer · F6 to change pane"
+        })
+        .style(Style::default().fg(if dialog.error.is_some() && focused {
             Color::Red
         } else {
             Color::DarkGray
@@ -736,9 +919,33 @@ pub(super) fn render_elicitation(
     );
 }
 
+fn wrapped_prefix_rows(message: &str, width: u16, line_count: usize) -> u16 {
+    let mut rows = 0usize;
+    for line in message.split('\n').take(line_count) {
+        rows = rows.saturating_add(wrapped_row_count(line, width));
+    }
+    u16::try_from(rows).unwrap_or(u16::MAX)
+}
+
+fn message_position_at_row(message: &str, width: u16, row: usize) -> (usize, usize) {
+    let mut rows = 0usize;
+    for (line_index, line) in message.split('\n').enumerate() {
+        let line_rows = wrapped_row_count(line, width).max(1);
+        if row < rows.saturating_add(line_rows) {
+            return (
+                line_index,
+                grapheme_offset_for_wrapped_row(line, usize::from(width), row.saturating_sub(rows)),
+            );
+        }
+        rows = rows.saturating_add(line_rows);
+    }
+    (message.split('\n').count().saturating_sub(1), 0)
+}
+
 struct FocusContent<'a> {
     lines: Vec<Line<'a>>,
     text_cursor: Option<(u16, usize)>,
+    focused_row: Option<usize>,
     centered: bool,
 }
 
@@ -752,6 +959,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
         return FocusContent {
             lines: vec![Line::from(label)],
             text_cursor: None,
+            focused_row: None,
             centered: true,
         };
     };
@@ -774,6 +982,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
         ));
     }
     let mut text_cursor = None;
+    let mut focused_row = None;
     match (&field.kind, &dialog.values[display.field]) {
         (_, FieldValue::Text(value)) => {
             let shown = if field.secret {
@@ -787,7 +996,11 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 format!("> {shown}"),
                 Style::default().fg(Color::Cyan),
             ));
-            text_cursor = Some((input_line, value.value()[..value.cursor()].chars().count()));
+            focused_row = Some(2 + usize::from(field.description.is_some()));
+            text_cursor = Some((
+                input_line,
+                value.value()[..value.cursor()].graphemes(true).count(),
+            ));
         }
         (ElicitationFieldKind::SingleSelect { options, .. }, FieldValue::Single(selected)) => {
             let custom_active = display
@@ -809,6 +1022,9 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 } else {
                     Style::default()
                 };
+                if cursor {
+                    focused_row = Some(lines.len());
+                }
                 lines.push(Line::styled(format!("{marker} {}", option.title), style));
                 if cursor {
                     if let Some(description) = &option.description {
@@ -845,6 +1061,9 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 .custom
                 .is_some_and(|custom| dialog.active_custom_fields.contains(&custom));
             for (index, option) in options.iter().enumerate() {
+                if dialog.option_cursors[display.field] == index {
+                    focused_row = Some(lines.len());
+                }
                 let marker = if !custom_active && selected.contains(&index) {
                     "☑"
                 } else {
@@ -870,6 +1089,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             );
         }
         (ElicitationFieldKind::Boolean { .. }, FieldValue::Boolean(selected)) => {
+            focused_row = Some(lines.len());
             lines.push(Line::styled(
                 if *selected { "☑ Yes" } else { "☐ No" },
                 Style::default().fg(Color::Cyan),
@@ -877,30 +1097,60 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
         }
         _ => {}
     }
+    let focused_row = focused_row.or_else(|| text_cursor.map(|(line, _)| usize::from(line)));
     FocusContent {
         lines,
         text_cursor,
+        focused_row,
         centered: false,
     }
 }
 
-fn render_focus(frame: &mut Frame, area: Rect, content: FocusContent<'_>) {
-    let paragraph = Paragraph::new(content.lines)
+fn render_focus(
+    frame: &mut Frame,
+    area: Rect,
+    content: FocusContent<'_>,
+    scroll: u16,
+    focused: bool,
+) {
+    let paragraph = Paragraph::new(content.lines.clone())
         .wrap(Wrap { trim: false })
+        .scroll((scroll, 0))
         .alignment(if content.centered {
             Alignment::Center
         } else {
             Alignment::Left
         });
     frame.render_widget(paragraph, area);
-    if let Some((line, column)) = content.text_cursor
+    if focused
+        && let Some((line, column)) = content.text_cursor
         && area.width > 2
         && area.height > 0
     {
-        frame.set_cursor_position((
-            area.x + 2 + (column as u16).min(area.width.saturating_sub(3)),
-            area.y + line.min(area.height.saturating_sub(1)),
-        ));
+        let line = usize::from(line);
+        let prefix_rows = Paragraph::new(content.lines[..line].to_vec())
+            .wrap(Wrap { trim: false })
+            .line_count(area.width);
+        let text = content.lines[line].to_string();
+        let cursor_grapheme = 2usize.saturating_add(column);
+        let cursor_byte = text
+            .grapheme_indices(true)
+            .nth(cursor_grapheme)
+            .map_or(text.len(), |(offset, _)| offset);
+        let (cursor_column, cursor_row) =
+            input_cursor_visual_position(&text, cursor_byte, usize::from(area.width));
+        let row = prefix_rows
+            .saturating_add(cursor_row)
+            .saturating_sub(usize::from(scroll));
+        if row < usize::from(area.height) {
+            frame.set_cursor_position((
+                area.x
+                    + u16::try_from(cursor_column)
+                        .unwrap_or(u16::MAX)
+                        .min(area.width - 1),
+                area.y + u16::try_from(row).unwrap_or(u16::MAX),
+            ));
+        }
     }
 }
 
@@ -967,7 +1217,10 @@ fn render_custom_text(
         format!("> {shown}"),
         Style::default().fg(Color::Cyan),
     ));
-    *text_cursor = Some((input_line, value.value()[..value.cursor()].chars().count()));
+    *text_cursor = Some((
+        input_line,
+        value.value()[..value.cursor()].graphemes(true).count(),
+    ));
 }
 
 #[cfg(test)]
@@ -1068,10 +1321,165 @@ mod tests {
         rendered_with_surfaces(dialog, &mut FrameSurfaces::new())
     }
 
+    fn rendered_in_pane(dialog: &ElicitationDialog, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_elicitation_in(frame, dialog, &mut FrameSurfaces::new(), area, true);
+            })
+            .expect("render question pane");
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_row(buffer: &Buffer, row: u16, start: u16, end: u16) -> String {
+        (start..end)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
+        for (indent, old_width, new_width) in [
+            ("", 42, 62),
+            ("             ", 33, 57),
+            ("                       ", 57, 37),
+            (
+                "                                                                                ",
+                42,
+                62,
+            ),
+        ] {
+            let message = format!(
+                "{indent}{}",
+                (0..200)
+                    .map(|n| format!("word{n:03}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let dialog = plan_review_message(&message);
+            rendered_in_pane(&dialog, old_width, 18);
+            dialog.scroll_message(8);
+            let before = rendered_in_pane(&dialog, old_width, 18);
+            let area = dialog.message_area.get().expect("message area");
+            let before_row = buffer_row(&before, area.y, area.x, area.right());
+            let anchor = before_row.split_whitespace().next().expect("visible word");
+            let after = rendered_in_pane(&dialog, new_width, 18);
+            let area = dialog.message_area.get().expect("resized message area");
+            let after_row = buffer_row(&after, area.y, area.x, area.right());
+            assert!(
+                after_row.contains(anchor),
+                "anchor {anchor:?} disappeared from top row {after_row:?}, indent length {}",
+                indent.len()
+            );
+        }
+    }
+
+    #[test]
+    fn smallest_question_pane_keeps_other_and_its_draft_visible() {
+        let mut dialog = ElicitationDialog::new(paired_request(1, true));
+        dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        dialog.paste("custom draft");
+        let buffer = rendered_in_pane(&dialog, 60, 6);
+        let text = (0..6)
+            .map(|row| buffer_row(&buffer, row, 0, 60))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("custom draft"),
+            "focused custom input is hidden: {text}"
+        );
+        assert!(text.contains("Submit"), "submit is hidden: {text}");
+        assert!(
+            text.contains("F6/Shift-F6"),
+            "pane shortcut is hidden: {text}"
+        );
+    }
+
+    #[test]
+    fn six_row_plan_pane_keeps_text_and_page_down_actionable() {
+        let message = (0..80)
+            .map(|index| format!("plan-{index:03}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut dialog = plan_review_message(&message);
+        let before = rendered_in_pane(&dialog, 60, 6);
+        let before_text = (0..6)
+            .map(|row| buffer_row(&before, row, 0, 60))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            before_text.contains("plan-000"),
+            "plan text is hidden: {before_text}"
+        );
+        assert!(
+            before_text.contains("Submit"),
+            "submit is hidden: {before_text}"
+        );
+        assert!(
+            before_text.contains("F6/Shift-F6"),
+            "pane shortcut is hidden: {before_text}"
+        );
+
+        dialog.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+        let after = rendered_in_pane(&dialog, 60, 6);
+        let after_text = (0..6)
+            .map(|row| buffer_row(&after, row, 0, 60))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !after_text.contains("plan-000"),
+            "PageDown did not scroll: {after_text}"
+        );
+        assert!(
+            after_text.contains("plan-"),
+            "scrolled plan text is hidden: {after_text}"
+        );
+    }
+
+    #[test]
+    fn repeated_resizes_retain_one_logical_message_anchor() {
+        let message = (0..400)
+            .map(|index| format!("word-{index:03}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let dialog = plan_review_message(&message);
+        rendered_in_pane(&dialog, 42, 18);
+        dialog.scroll_message(8);
+        let anchor = dialog.message_anchor.get().expect("scroll anchor");
+        rendered_in_pane(&dialog, 34, 18);
+        assert_eq!(dialog.message_anchor.get(), Some(anchor));
+        rendered_in_pane(&dialog, 62, 18);
+        assert_eq!(dialog.message_anchor.get(), Some(anchor));
+        rendered_in_pane(&dialog, 42, 18);
+        assert_eq!(dialog.message_anchor.get(), Some(anchor));
+    }
+
+    #[test]
+    fn pane_resize_keeps_a_word_at_an_exact_wrap_boundary() {
+        let message = (0..400).map(|n| format!("w{n:04}")).collect::<String>();
+        let dialog = plan_review_message(&message);
+        rendered_in_pane(&dialog, 42, 18);
+        dialog.scroll_message(8);
+        let before = rendered_in_pane(&dialog, 42, 18);
+        let area = dialog.message_area.get().unwrap();
+        let before_row = buffer_row(&before, area.y, area.x, area.right());
+        let after = rendered_in_pane(&dialog, 34, 18);
+        let area = dialog.message_area.get().unwrap();
+        let after_row = buffer_row(&after, area.y, area.x, area.right());
+        assert!(
+            after_row.starts_with(&before_row[..8]),
+            "reading position moved from {before_row:?} to {after_row:?}"
+        );
+    }
+
     fn rendered_with_surfaces(dialog: &ElicitationDialog, surfaces: &mut FrameSurfaces) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         terminal
-            .draw(|frame| render_elicitation(frame, dialog, surfaces))
+            .draw(|frame| {
+                let area = frame.area();
+                render_elicitation_in(frame, dialog, surfaces, area, true);
+            })
             .expect("render elicitation");
         let buffer = terminal.backend().buffer();
         (buffer.area.y..buffer.area.bottom())
@@ -1153,18 +1561,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_review_blanks_two_cells_outside_every_border() {
+    fn plan_review_preserves_content_outside_scoped_bounds() {
         const WIDTH: u16 = 100;
         const HEIGHT: u16 = 30;
         let dialog = plan_review(20);
         let screen = Rect::new(0, 0, WIDTH, HEIGHT);
-        let popup = crate::hel_modal::centered_rect_percent(82, 78, screen);
-        let halo = popup
-            .outer(ratatui::layout::Margin {
-                vertical: crate::hel_modal::MODAL_SCREEN_MARGIN,
-                horizontal: crate::hel_modal::MODAL_SCREEN_MARGIN,
-            })
-            .intersection(screen);
+        let question_bounds = Rect::new(10, 5, 80, 20);
         let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
 
         terminal
@@ -1173,30 +1575,34 @@ mod tests {
                     .map(|_| Line::raw("X".repeat(usize::from(WIDTH))))
                     .collect::<Vec<_>>();
                 frame.render_widget(Paragraph::new(background), frame.area());
-                render_elicitation(frame, &dialog, &mut FrameSurfaces::new());
+                render_elicitation_in(
+                    frame,
+                    &dialog,
+                    &mut FrameSurfaces::new(),
+                    question_bounds,
+                    true,
+                );
             })
             .expect("render plan review over background");
 
         let buffer = terminal.backend().buffer();
-        for y in halo.y..halo.bottom() {
-            for x in halo.x..halo.right() {
+        for y in screen.y..screen.bottom() {
+            for x in screen.x..screen.right() {
                 let position = Position::new(x, y);
-                if !popup.contains(position) {
+                if !question_bounds.contains(position) {
                     assert_eq!(
                         buffer[(x, y)].symbol(),
-                        " ",
-                        "plan review left background visible at ({x}, {y})"
+                        "X",
+                        "scoped question changed content outside ({x}, {y})"
                     );
                 }
             }
         }
+        assert_eq!(buffer[(question_bounds.x, question_bounds.y)].symbol(), "┌");
         assert_eq!(
-            buffer[(0, 0)].symbol(),
-            "X",
-            "content beyond the halo changed"
+            buffer[(question_bounds.right() - 1, question_bounds.y)].symbol(),
+            "┐"
         );
-        assert_eq!(buffer[(popup.x, popup.y)].symbol(), "┌");
-        assert_eq!(buffer[(popup.right() - 1, popup.y)].symbol(), "┐");
     }
 
     /// The extractor maps a selection through per-line row counts, so those
@@ -1236,7 +1642,7 @@ mod tests {
     #[test]
     fn copying_a_plan_range_past_the_viewport_returns_the_unwrapped_source_lines() {
         let paragraph = "This step is long enough that the plan pane wraps it over several rows, which is exactly the fugliness copying is meant to undo.";
-        let message = (0..6)
+        let message = (0..12)
             .map(|step| format!("Step {step}: {paragraph}"))
             .collect::<Vec<_>>()
             .join("\n\n");

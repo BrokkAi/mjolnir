@@ -561,6 +561,11 @@ impl SessionRowFacts<'_> {
         )
     }
 
+    fn needs_input(&self) -> bool {
+        self.detail
+            .is_some_and(|detail| !detail.pending_elicitations.is_empty())
+    }
+
     /// The last non-empty line the agent said, or why there is none.
     fn last_agent_line(&self) -> &str {
         self.detail
@@ -642,16 +647,61 @@ fn sessions_title(workspace_name: &str, width: u16) -> Line<'static> {
     ])
 }
 
+/// The minimized navigator has no room for a separate status row, so reserve
+/// a title suffix for the number of pending questions. At narrow widths a
+/// compact form keeps that count visible while preserving the Sessions label.
+fn sessions_title_with_pending(
+    workspace_name: &str,
+    width: u16,
+    pending_count: usize,
+) -> Line<'static> {
+    let base = sessions_title(workspace_name, width);
+    if pending_count == 0 {
+        return base;
+    }
+    let budget = usize::from(pane_title_content_width(width));
+    let suffix = Span::styled(
+        format!(" · Needs input: {pending_count}"),
+        Style::default()
+            .fg(Color::LightYellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    if base.width().saturating_add(suffix.width()) <= budget {
+        let mut spans = base.spans;
+        spans.push(suffix);
+        return Line::from(spans);
+    }
+    let compact = Line::styled(
+        format!(" Sessions [{pending_count}]"),
+        Style::default()
+            .fg(Color::LightYellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    if compact.width() <= budget {
+        return compact;
+    }
+    base
+}
+
 fn sessions_block(
     focused: bool,
     workspace_name: &str,
     width: u16,
     size: PaneSize,
+    pending_count: usize,
 ) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(focus_border(focused))
-        .title(sessions_title(workspace_name, width))
+        .title(sessions_title_with_pending(
+            workspace_name,
+            width,
+            if size == PaneSize::Minimized {
+                pending_count
+            } else {
+                0
+            },
+        ))
         .title(pane_size_controls(size))
 }
 
@@ -672,6 +722,7 @@ pub(crate) fn render_sessions(
         &dashboard.workspace_name,
         area.width,
         dashboard.pane_size(SupportPane::Sessions),
+        dashboard.pending_input_count(),
     );
     let table = Table::new(
         drawn.iter().map(|row| {
@@ -803,6 +854,7 @@ fn render_sessions_grid(
         &dashboard.workspace_name,
         area.width,
         PaneSize::Minimized,
+        dashboard.pending_input_count(),
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -911,7 +963,11 @@ fn render_sessions_grid(
                         state: session.state,
                         now_epoch_seconds,
                     };
-                    let clock = facts.clock();
+                    let clock = if facts.needs_input() {
+                        "Needs input".to_owned()
+                    } else {
+                        facts.clock()
+                    };
                     let prefix = if Some(*index) == selected_index {
                         "› "
                     } else {
@@ -963,6 +1019,15 @@ fn collapsed_session_line(
         lead_width += permission.width() + 2;
         spans.push(permission);
     }
+    if facts.needs_input() {
+        const NEEDS_INPUT: &str = "Needs input";
+        spans.push(Span::styled("  ", style));
+        spans.push(Span::styled(
+            NEEDS_INPUT,
+            style.add_modifier(Modifier::BOLD),
+        ));
+        lead_width += NEEDS_INPUT.chars().count() + 2;
+    }
     spans.push(Span::styled("  ", style));
     lead_width += clock.chars().count() + 1;
     spans.push(Span::styled(
@@ -1011,6 +1076,9 @@ fn session_top_line(
     };
     let queued_prompts = detail.map_or(0, |detail| detail.queued_prompts.len());
     let mut columns = vec![target.to_owned()];
+    if detail.is_some_and(|detail| !detail.pending_elicitations.is_empty()) {
+        columns.push("Needs input".to_owned());
+    }
     if queued_prompts > 0 {
         columns.push(format!("[Q {queued_prompts}]"));
     }
@@ -2379,6 +2447,37 @@ mod tests {
         assert!((user_column..user_column + 15).all(|column| {
             buffer[(buffer.area.x + column, buffer.area.y + user_row as u16)].fg == Color::DarkGray
         }));
+    }
+
+    #[test]
+    fn pending_questions_mark_the_session_and_minimized_navigator() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut session = materialized_session_for("session-1", Vec::new());
+        session.pending_elicitations = vec![
+            hel::hel_elicitation::ElicitationRequest::from_acp_params(
+                "request-1",
+                serde_json::json!({
+                    "mode": "form",
+                    "sessionId": "session-1",
+                    "message": "Choose a path",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        }
+                    }
+                }),
+            )
+            .expect("valid test question"),
+        ];
+        dashboard.apply_materialized_session(&session);
+
+        let expanded = drawn(&mut dashboard, 120, 30).join("\n");
+        assert!(expanded.contains("Needs input"), "{expanded}");
+
+        minimize_all_panes(&mut dashboard);
+        let minimized = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(minimized.contains("Needs input: 1"), "{minimized}");
     }
 
     #[test]

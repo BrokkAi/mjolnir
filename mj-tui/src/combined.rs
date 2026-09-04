@@ -307,9 +307,9 @@ pub fn render_combined(
                 prompt_focused,
                 transcript_selected,
             );
-            // A modal inside the conversation owns the frame's interaction, so
-            // the panes behind it stop being selectable rather than staying
-            // reachable underneath.
+            // A chat-local modal may own the frame's interaction. Questions
+            // deliberately leave this flag clear so the navigator and other
+            // dashboard panes remain selectable beside the question area.
             if chat.frame_surfaces_exclusive() {
                 dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
             } else {

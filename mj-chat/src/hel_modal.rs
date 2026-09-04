@@ -94,18 +94,6 @@ pub(crate) fn centered_modal_rect(
     popup
 }
 
-/// Centers a percentage-sized modal and clears its exterior halo.
-pub(crate) fn centered_modal_rect_percent(
-    frame: &mut Frame,
-    width_percent: u16,
-    height_percent: u16,
-    area: Rect,
-) -> Rect {
-    let popup = centered_rect_percent(width_percent, height_percent, area);
-    clear_modal(frame, popup, area);
-    popup
-}
-
 /// Centers a fixed-size modal and clears its exterior halo.
 pub(crate) fn centered_modal_rect_fixed(
     frame: &mut Frame,

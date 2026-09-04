@@ -654,6 +654,29 @@ impl DashboardState {
         self.pane_size(SupportPane::Sessions) == PaneSize::Minimized
     }
 
+    /// Number of pending agent questions across the sessions shown by the
+    /// navigator. The minimized navigator uses this as its one compact
+    /// aggregate while expanded rows identify the individual sessions.
+    pub(crate) fn pending_input_count(&self) -> usize {
+        self.session_details
+            .values()
+            .map(|detail| detail.pending_elicitations.len())
+            .sum()
+    }
+
+    /// The pending questions from the latest accepted full projection. A
+    /// startup summary intentionally returns `None`, because it does not
+    /// carry the complete request list and must not invalidate a local draft.
+    pub fn pending_elicitations(
+        &self,
+        session_id: &str,
+    ) -> Option<(u64, &[hel::hel_elicitation::ElicitationRequest])> {
+        let detail = self.session_details.get(session_id)?;
+        detail
+            .pending_elicitations_applied_event_ordinal
+            .map(|ordinal| (ordinal, detail.pending_elicitations.as_slice()))
+    }
+
     fn focused_rows_visible(&self) -> bool {
         self.focus.support_pane().is_none_or(|pane| {
             pane == SupportPane::Sessions || self.pane_size(pane) != PaneSize::Minimized
