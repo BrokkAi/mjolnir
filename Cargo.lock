@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "brokk-mj-chat",
  "brokk-mj-controller",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "anyhow",
  "bzip2 0.6.1",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.0.0-rc.2"
+version = "2.0.0-rc.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
