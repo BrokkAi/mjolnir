@@ -303,6 +303,16 @@ pub(crate) fn pane_size_controls(active: PaneSize) -> Line<'static> {
     Line::from(spans).right_aligned()
 }
 
+/// Minimized panes have no right border, but keep its column as horizontal
+/// rule so their controls line up with those in a fully bordered pane.
+pub(crate) fn minimized_pane_size_controls(focused: bool) -> Line<'static> {
+    let mut controls = pane_size_controls(PaneSize::Minimized);
+    controls
+        .spans
+        .push(Span::raw(if focused { "═" } else { "─" }));
+    controls
+}
+
 /// Screen rectangles occupied by the padded control chips in a bordered
 /// pane's right-aligned title.
 pub(crate) fn pane_size_control_areas(
@@ -1533,7 +1543,11 @@ struct SummaryReading {
 /// A reading that cannot be trusted says so rather than showing a number: an
 /// unavailable probe, a sample that stopped refreshing, and a fleet reading
 /// that carries no CPU figure are all named explicitly.
-pub(crate) fn minimized_targets_line(dashboard: &DashboardState, width: u16) -> Line<'static> {
+pub(crate) fn minimized_targets_line(
+    dashboard: &DashboardState,
+    width: u16,
+    focused: bool,
+) -> Line<'static> {
     let now_epoch_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1578,7 +1592,7 @@ pub(crate) fn minimized_targets_line(dashboard: &DashboardState, width: u16) -> 
             }
         })
         .collect::<Vec<_>>();
-    summary_row("Targets", &readings, width)
+    summary_row("Targets", &readings, width, focused)
 }
 
 /// One row summarising every profile's quota, for the minimized Quota pane.
@@ -1594,7 +1608,11 @@ pub(crate) fn minimized_targets_line(dashboard: &DashboardState, width: u16) -> 
 ///
 /// Usage-priced profiles are left out of the row entirely: they bill per token
 /// and have no window to summarise, so a placeholder would only spend width.
-pub(crate) fn minimized_quota_line(dashboard: &DashboardState, width: u16) -> Line<'static> {
+pub(crate) fn minimized_quota_line(
+    dashboard: &DashboardState,
+    width: u16,
+    focused: bool,
+) -> Line<'static> {
     let readings = dashboard
         .config
         .profiles
@@ -1648,20 +1666,28 @@ pub(crate) fn minimized_quota_line(dashboard: &DashboardState, width: u16) -> Li
             })
         })
         .collect::<Vec<_>>();
-    summary_row("Quota", &readings, width)
+    summary_row("Quota", &readings, width, focused)
 }
 
 /// A minimized pane's single row, drawn as the pane's own title so it keeps
 /// the rule the full pane has. Readings are comma-separated and truncated
 /// rather than wrapped, because the row is one row.
-fn summary_row(label: &str, readings: &[SummaryReading], width: u16) -> Line<'static> {
+fn summary_row(
+    label: &str,
+    readings: &[SummaryReading],
+    width: u16,
+    focused: bool,
+) -> Line<'static> {
     // A minimized pane is still a pane, so its one row opens the way a
     // bordered one does and the rule carries on between the label and the
     // readings: `─ Quota ── claude-1 63% ────`.
-    const OPENING: &str = "─ ";
-    const DIVIDER: &str = " ── ";
-    let mut spans = vec![Span::raw(format!("{OPENING}{label}{DIVIDER}"))];
-    let mut used = OPENING.chars().count() + label.chars().count() + DIVIDER.chars().count();
+    let (opening, divider) = if focused {
+        ("═ ", " ══ ")
+    } else {
+        ("─ ", " ── ")
+    };
+    let mut spans = vec![Span::raw(format!("{opening}{label}{divider}"))];
+    let mut used = opening.chars().count() + label.chars().count() + divider.chars().count();
     // Leave room for the rule the title runs into, so the readings never push
     // it off the row and it never butts straight against a value.
     let budget = usize::from(width).saturating_sub(4);
@@ -2479,6 +2505,38 @@ mod tests {
                 }
             }
         }
+
+        dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw minimized controls");
+        let buffer = terminal.backend().buffer();
+        let target_controls = dashboard
+            .pane_size_control_areas
+            .iter()
+            .filter(|(pane, _, _)| *pane == SupportPane::Targets)
+            .collect::<Vec<_>>();
+        for ((_, _, area), glyph) in target_controls.iter().zip(['▁', '▪', '□']) {
+            assert_eq!(buffer[(area.x + 1, area.y)].symbol(), glyph.to_string());
+        }
+        let targets_area = dashboard.pane_areas.expect("pane areas")[1];
+        assert_eq!(
+            buffer[(targets_area.right() - 1, targets_area.y)].symbol(),
+            "─"
+        );
+
+        dashboard.focus = Focus::Targets;
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw focused minimized controls");
+        let focused_targets = buffer_lines(terminal.backend().buffer())
+            .into_iter()
+            .find(|line| line.contains("Targets"))
+            .expect("focused Targets row");
+        assert!(focused_targets.starts_with("═ Targets ══"));
+        assert!(focused_targets.ends_with('═'));
+        assert!(!focused_targets.contains('─'));
+        dashboard.focus = Focus::Sessions;
 
         let target_max = dashboard
             .pane_size_control_areas
