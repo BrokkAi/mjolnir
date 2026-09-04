@@ -12,9 +12,10 @@ and relevance of what they submit. Please follow the
   is running. Use the other-bug form for installation, development setup,
   packaging, updating, or documentation problems. Blank issues remain
   available when neither form fits.
-- Keep changes focused on one problem or capability. For a large ACP, Council,
-  permission, session-format, terminal-mode, or release change, open an issue
-  or discuss the direction on [Discord](https://discord.gg/geYkWUeH) first.
+- Keep changes focused on one problem or capability. For a large target,
+  session-format, execution-policy, checkpoint, worker-protocol, or release
+  change, open an issue or discuss the direction on
+  [Discord](https://discord.gg/geYkWUeH) first.
 - Do not put credentials, private source code, or unredacted private
   transcripts in issues, tests, logs, or pull requests. Report suspected
   vulnerabilities privately to
@@ -25,15 +26,18 @@ An issue is useful but not mandatory for a well-scoped pull request. Use
 
 ## Development Setup
 
-Mjolnir is a Rust 2024 workspace. The default member builds the `mj` terminal
-client without the optional native speech stack:
+Mjolnir is a Rust 2024 workspace. The default members build the headless `mj`
+controller and its terminal dashboard, without the optional native desktop and
+speech stacks:
 
 ```bash
 cargo build --release
-./target/release/mj --cwd .
+./target/release/mj
 ```
 
-The `brokk-mj-voice-worker` workspace member provides local Ctrl-R dictation.
+Bare `mj` opens the workspace dashboard; a first run opens the setup dialog
+instead. The `brokk-mj-voice-worker` workspace member provides local Alt+V
+dictation.
 On Debian or Ubuntu, install the ALSA development headers before building it:
 
 ```bash
@@ -73,30 +77,32 @@ code in the lowest crate that can hold it.
 
 ## Understand the Runtime Boundaries
 
-Mjolnir is an ACP client that owns terminal presentation, user input,
-permissions, session controls, Council orchestration, and persistence around
-one or more agent subprocesses. The detailed repository contracts are
+Mjolnir is a session control plane: a persistent per-user daemon owns the
+session store, and the terminal dashboard, the web viewer, and the one-shot
+CLI commands are all clients of it. The detailed repository contracts are
 maintained in [AGENTS.md](AGENTS.md). The most important contribution
 boundaries are:
 
-- Do not write logs to standard error while the TUI owns the terminal. Use
-  `--debug-file` or `BROKK_TUI_LOG` for Mjolnir diagnostics and
-  `--agent-stderr` or `BROKK_TUI_AGENT_STDERR` for ACP adapter output.
-- Inline mode must remain inline. A cursor-position timeout or redraw problem
-  must not terminate the session or switch the user into the fullscreen TUI.
+- Do not write logs to standard error while a surface owns the terminal.
+  Controller-facing processes log through the non-blocking rotating file
+  logger (`mj-cli/src/logging.rs`) under the Mjolnir data directory, which
+  retains ten files; never block or corrupt a surface that owns the terminal.
+- Detaching a client must never tear down sessions. The daemon and detached
+  workers keep running when the dashboard or viewer exits, and quitting a
+  surface must stay responsive while its cleanup stays bounded.
 - Permission requests must preserve the complete requested content. Long
   commands, descriptions, and option labels must remain reachable while
   wrapping, scrolling, paging, and resizing.
 - Terminal ownership and restoration must be deterministic across normal exit,
   cancellation, signals, panics, subprocess failures, and startup errors.
-- Keep model selection separate from ACP adapter selection. Council role
-  handoffs, cancellation, permissions, token usage, and transcript labels must
-  remain attributable to the correct role.
-- Headless and remote paths share the Council runtime with the TUI. Preserve
-  machine-readable output, non-blocking permission behavior, nested permission
-  identity, and shutdown semantics when changing shared code.
+- Keep relay-protocol compatibility and the separation between
+  controller-owned and worker-owned state. Cancellation, permissions, and
+  transcript behavior must remain deterministic across that boundary.
+- The terminal dashboard and the web viewer render the same `mj-chat`
+  conversation state. Preserve machine-readable daemon output and shutdown
+  semantics when changing shared code.
 - Configuration and session provenance are versioned persisted formats. Make
-  migrations, fallback behavior, and worktree ownership explicit rather than
+  migrations, fallback behavior, and workspace ownership explicit rather than
   silently reinterpreting stored state.
 - Do not add lint suppressions to make CI pass. Fix the underlying problem; if
   an external constraint genuinely requires an exception, document the
@@ -110,16 +116,22 @@ Add the smallest regression test that would have caught the problem:
   `#[cfg(test)]` block.
 - For state-machine changes, test the event transition or input handler
   directly instead of relying only on a manual TUI check.
-- Use `tests/termination_pty.rs` for terminal restoration and signal behavior.
-- Use the deterministic fixtures in `tests/e2e/` for ACP process, Council
-  handoff, tool, permission, transcript, or cancellation flows that need a
-  process boundary.
+- Use the integration tests in `mj-cli/tests/` — `termination_pty.rs` for
+  terminal restoration and signal behavior, plus the import, logging,
+  store-divergence, and worker-proxy tests beside it.
+- Use the deterministic shell/expect harness in `tests/e2e/` for flows that
+  need a process boundary — for example
+  `tests/e2e/run-reliability.sh --scenario multi-client-happy-path --seed N <mj binary>`
+  for multi-client daemon/dashboard reliability, `session_restart_chaos.sh`,
+  and the Playwright web checks under `tests/e2e/web/`.
 - Add negative controls for permission, protocol, persistence, cleanup, and
   terminal-lifecycle changes.
-- Update the relevant page in the [documentation site](docs/src/content/docs/)
-  when a user-visible command, keyboard action, setup flow, ACP adapter,
-  Council behavior, remote feature, configuration option, or limitation
-  changes. Update [README.md](README.md) when the front-door positioning,
+- Update the guides under [docs](docs/) — `PODMAN.md`, `DOCKER.md`, `SSH.md`,
+  `AWS.md`, and the pages in `docs/src/content/docs/` — when a user-visible
+  command, keyboard action, setup flow, harness, target kind, configuration
+  option, or limitation changes; `docs/scripts/sync-podman.mjs` copies the
+  Podman and Docker guides into the site during `npm run build` in `docs/`.
+  Update [README.md](README.md) when the front-door positioning,
   installation, compatibility, or primary quick start changes.
 - Update [AGENTS.md](AGENTS.md) when an implementation invariant or contributor
   checklist changes.
@@ -149,17 +161,18 @@ cargo build --release -p brokk-mj-voice-worker
 ```
 
 UI changes need proportionate manual validation in every affected surface.
-Check inline and fullscreen modes separately; for layout changes, include narrow
-and resized terminals. Also exercise headless output or the remote viewer when
-shared rendering, Council, permission, or session code affects those paths.
+Check the terminal dashboard and the web viewer separately; for layout changes,
+include narrow and resized terminals. Also exercise the viewer when shared
+rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
-CI runs the main checks on Linux, macOS, and Windows, checks the voice worker on
-Linux, validates the Android ARM64 target, and independently verifies dependency
-licenses and packaged legal files. You do not need to reproduce every runner
-locally, but consider terminal capabilities, path syntax, filesystem behavior,
-subprocesses, audio dependencies, and platform-specific packaging when changing
-portable code.
+CI builds and tests the workspace on Linux (musl), macOS, and Windows, gates
+the GNU/Linux desktop shell, runs a deterministic multi-client reliability
+scenario, checks the voice worker on Linux, and independently verifies
+dependency licenses and packaged legal files. You do not need to reproduce
+every runner locally, but consider terminal capabilities, path syntax,
+filesystem behavior, subprocesses, audio dependencies, and platform-specific
+packaging when changing portable code.
 
 ## Dependency and License Changes
 
@@ -199,7 +212,7 @@ requests consistently provide:
 - Key semantic changes rather than a list of edited files.
 - Root cause for bug fixes when it is known.
 - Before/after evidence and capability or safety boundaries for UI, session,
-  ACP, Council, permission, terminal, remote, or voice changes.
+  target, execution-policy, checkpoint, terminal, remote, or voice changes.
 - Important touch points for broad or cross-cutting changes.
 - Exact test, lint, build, packaging, benchmark, and manual-validation commands
   actually run.
@@ -210,12 +223,12 @@ pass. Do not report a check as passing based only on an expected outcome.
 
 Reviewers will pay particular attention to:
 
-- Terminal ownership, restoration, inline-mode resilience, and complete
-  permission content.
-- ACP compatibility and correct separation between Mjolnir-owned and
-  adapter-owned state.
-- Council role attribution, cancellation, and deterministic transcript and
-  tool-result behavior.
+- Terminal ownership, restoration, dashboard and viewer resilience, and
+  complete permission content.
+- Relay-protocol compatibility and correct separation between
+  controller-owned and worker-owned state.
+- Cancellation, deterministic transcript and tool-result behavior, and
+  checkpoint and recovery correctness.
 - Safe permission, worktree, session, configuration, and remote-control
   boundaries.
 - Regression tests, negative controls, and manual evidence for affected modes.
