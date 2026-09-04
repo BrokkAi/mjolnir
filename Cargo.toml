@@ -42,7 +42,7 @@ default-members = [".", "mj-worker", "mj-controller", "mj-chat", "mj-tui", "mj-c
 # inherits it with `version.workspace = true`, so the eight package versions
 # cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
-version = "2.0.0-rc.3"
+version = "2.0.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
@@ -62,11 +62,11 @@ rust-version = "1.96"
 # `node scripts/release-version.mjs check` (run in CI) fails when these fall
 # behind the workspace version.
 [workspace.dependencies]
-hel = { path = ".", package = "brokk-mj-core", version = "2.0.0-rc.3" }
-mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.0.0-rc.3" }
-mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.0.0-rc.3" }
-mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.0.0-rc.3" }
-hel-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.0.0-rc.3" }
+hel = { path = ".", package = "brokk-mj-core", version = "2.0.0" }
+mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.0.0" }
+mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.0.0" }
+mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.0.0" }
+hel-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.0.0" }
 
 [workspace.lints.clippy]
 disallowed_methods = "warn"
