@@ -2357,7 +2357,7 @@ pub(super) fn render_in(
             .push(SurfaceFrame::fixed(SurfaceId::PromptInput, prompt_inner));
         // The cursor belongs to whatever has focus, so the composer only shows one
         // while the keyboard is driving it.
-        if chat.history_search.is_none() && prompt_focused {
+        if chat.history_search.is_none() && prompt_focused && chat.elicitation.is_none() {
             set_input_cursor(
                 frame,
                 prompt_inner,
@@ -2472,6 +2472,7 @@ pub(super) fn render_chat_footer(
         footer_area,
     );
     if let Some(search) = chat.history_search.as_ref()
+        && chat.elicitation.is_none()
         && footer_area.width > 0
     {
         let prefix = format!("reverse-i-search [{}]: ", history_scope_name(search.scope));
@@ -2627,13 +2628,13 @@ mod tests {
         snapshot,
     };
     use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigOptionCategory};
-    use hel::hel_elicitation::ElicitationRequest;
+    use hel::hel_elicitation::{ElicitationField, ElicitationFieldKind, ElicitationRequest};
     use hel::hel_transcript::ChatRole;
     use hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST;
     use hel::hel_worker::{SequencedEvent, WorkerEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
     use std::collections::BTreeMap;
 
     fn managed_view(session: MaterializedSession) -> ManagedSessionView {
@@ -3914,6 +3915,72 @@ mod tests {
             cursor.y > 16 && cursor.y < 21,
             "the cursor sits inside the prompt region: {cursor:?}"
         );
+
+        let boolean_question = ElicitationRequest {
+            id: "boolean-question".into(),
+            message: "Should I continue?".into(),
+            title: None,
+            description: None,
+            fields: vec![ElicitationField {
+                id: "continue".into(),
+                title: "Continue".into(),
+                description: None,
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::Boolean { default: None },
+            }],
+        };
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            boolean_question,
+        ));
+        let mut question_terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        question_terminal
+            .draw(|frame| render_in(frame, &mut chat, regions, true, false))
+            .expect("draw question");
+        question_terminal
+            .backend_mut()
+            .assert_cursor_position((0, 0));
+
+        let text_question = ElicitationRequest {
+            id: "text-question".into(),
+            message: "What should I call it?".into(),
+            title: None,
+            description: None,
+            fields: vec![ElicitationField {
+                id: "name".into(),
+                title: "Name".into(),
+                description: None,
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::Text {
+                    default: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                    format: None,
+                },
+            }],
+        };
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            text_question,
+        ));
+        let mut text_terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        text_terminal
+            .draw(|frame| render_in(frame, &mut chat, regions, true, false))
+            .expect("draw text question");
+        let question_cursor = text_terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("question cursor position");
+        assert!(
+            question_cursor.y < regions.prompt.bottom(),
+            "the text question owns its cursor: {question_cursor:?}"
+        );
+        assert_ne!(question_cursor, Position::new(0, 0));
     }
 
     /// A conversation long enough that opening it converts the tail only.
