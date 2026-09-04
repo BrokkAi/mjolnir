@@ -313,6 +313,7 @@ fn install_worker_last_words(root: &std::path::Path) {
 }
 
 fn main() -> Result<()> {
+    mj_controller::hel_server::install_rustls_crypto_provider();
     let cli = Cli::parse();
     let is_user_process = !matches!(&cli.command, Some(Command::Worker(_) | Command::Broker(_)));
     let log = if is_user_process {

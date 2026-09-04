@@ -36,6 +36,16 @@ use hel::hel_config::{HelConfig, TargetTemplate, validate_id};
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
 use hel::hel_state::{HelState, SessionState};
 
+/// Select the process-wide rustls provider before any TLS configuration is built.
+///
+/// Dependency feature unification can enable both rustls providers. Rustls
+/// deliberately refuses to guess in that case, so each executable that links
+/// the controller installs the ring provider at process startup. A provider
+/// installed even earlier is already sufficient and remains in place.
+pub fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub const COOKIE_NAME: &str = "hel_viewer_session";
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const EPHEMERAL_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -2578,6 +2588,14 @@ mod tests {
         ProjectRepository,
     };
     use hel::hel_state::{STATE_VERSION, SessionRecord};
+
+    #[test]
+    fn unified_tls_backends_use_the_selected_crypto_provider() {
+        install_rustls_crypto_provider();
+
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        let _builder = rustls::ServerConfig::builder();
+    }
 
     #[test]
     fn minted_desktop_cookie_validates_and_names_a_viewer() {
