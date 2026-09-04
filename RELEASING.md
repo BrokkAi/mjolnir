@@ -41,8 +41,9 @@ use WSL2). Every archive contains the headless `mj` controller, the separate
 `mj-desktop` native application, the voice worker, and the two static musl
 session workers (`mj-worker-x86_64-unknown-linux-musl` and
 `mj-worker-aarch64-unknown-linux-musl`) that the controller uploads into
-disposable targets. Every archive includes the applicable licenses and notices
-and is published with a SHA-256 sidecar.
+disposable targets. The macOS archive additionally contains a universal native
+`mj-worker` for `local-bare`. Every archive includes the applicable licenses
+and notices and is published with a SHA-256 sidecar.
 
 Neither registry publish runs off the tag push. Both wait for the release
 workflow to succeed, so a version mismatch or build failure on any target stops

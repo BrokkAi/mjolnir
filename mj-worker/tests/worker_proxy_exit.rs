@@ -61,7 +61,7 @@ fn a_proxy_exits_when_its_worker_dies_while_its_client_holds_stdin_open() {
     let listener =
         UnixListener::bind(root.path().join("control.sock")).expect("bind a fake control socket");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mj-worker"));
     command
         .args(["worker", "proxy", "--root"])
         .arg(root.path())

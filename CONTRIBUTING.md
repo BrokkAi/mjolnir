@@ -35,6 +35,10 @@ cargo build --release
 ./target/release/mj
 ```
 
+Use `scripts/run.sh` when exercising sessions: on Linux it builds the native
+controller plus the dedicated musl worker, while macOS builds both binaries
+natively for `local-bare` development.
+
 Bare `mj` opens the workspace dashboard; a first run opens the setup dialog
 instead. The `brokk-mj-voice-worker` workspace member provides local Alt+V
 dictation.

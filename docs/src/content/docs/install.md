@@ -62,7 +62,11 @@ Mjolnir requires Rust 1.96 or newer. Install the headless controller from crates
 cargo install --locked brokk-mjolnir
 ```
 
-This installs only `mj`. A same-architecture Linux controller can use that executable for a `local-bare` session; `local-bare` is not currently available from a macOS controller. Container and remote targets need a target-compatible static Linux worker: install an architecture-named worker beside `mj`, point `MJ_WORKER_DIR` or `MJ_WORKER_BINARY` at one, or configure the verified `MJ_WORKER_URL` and `MJ_WORKER_SHA256` fallback. The release installer and npm package supply both supported worker architectures automatically, so use one of those complete bundles unless you intend to build and manage workers yourself.
+This installs only `mj`. Install `brokk-mj-worker` beside it to use `local-bare`; on macOS that worker is native. Container and remote targets need a target-compatible static Linux worker: install an architecture-named worker beside `mj`, point `MJ_WORKER_DIR` or `MJ_WORKER_BINARY` at one, or configure the verified `MJ_WORKER_URL` and `MJ_WORKER_SHA256` fallback. The release installer and npm package supply both supported portable worker architectures automatically, so use one of those complete bundles unless you intend to build and manage workers yourself.
+
+```sh
+cargo install --locked brokk-mjolnir brokk-mj-worker
+```
 
 Add the local dictation sidecar when voice input is wanted:
 
@@ -89,17 +93,32 @@ cargo build --release -p brokk-mjolnir
 ./target/release/mj --version
 ```
 
-On Linux, build a static controller for the host architecture with:
+The development wrapper builds the correct pair for the host:
+
+```sh
+scripts/run.sh --release -- --version
+```
+
+On Linux this builds the controller natively and cross-compiles only
+`brokk-mj-worker` for the matching musl target. On macOS both binaries are
+native, enabling `local-bare` without a Linux cross toolchain. Managed Linux
+targets from macOS still need a packaged worker or an explicit override.
+
+To build a portable worker manually, use:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl -p brokk-mjolnir
-./target/x86_64-unknown-linux-musl/release/mj --version
+cargo build --release --target x86_64-unknown-linux-musl \
+  -p brokk-mj-worker --bin mj-worker
 ```
 
-On ARM64 Linux, substitute `aarch64-unknown-linux-musl`. When this musl build is the running controller, it can also act as the worker for same-architecture `local-bare` and managed targets. For another target architecture, build that target with a suitable cross-compilation toolchain and place the result beside the controller as `mj-worker-<target-triple>`, for example `mj-worker-aarch64-unknown-linux-musl`. The [configuration reference](/configuration/#process-and-path-overrides) covers the worker path and verified-download overrides.
+On ARM64 Linux, substitute `aarch64-unknown-linux-musl`. Place a worker for
+another target architecture beside the controller as `mj-worker-<target-triple>`,
+for example `mj-worker-aarch64-unknown-linux-musl`. The [configuration
+reference](/configuration/#process-and-path-overrides) covers the worker path
+and verified-download overrides.
 
-For ordinary development on the current host, use:
+To work only on controller commands without launching sessions, use:
 
 ```sh
 cargo run

@@ -60,7 +60,7 @@ fn import_e2e_defaults_resolve_to_mjolnir_paths() {
         let script = fs::read_to_string(repository_root.join("scripts").join(runner)).unwrap();
         assert!(script.contains("/mjolnir/import-e2e"), "{runner}");
         assert!(script.contains("data/mjolnir"), "{runner}");
-        assert!(script.contains("debug/mj"), "{runner}");
+        assert!(script.contains("debug/mj-worker"), "{runner}");
         assert!(
             script.contains("localhost/mjolnir/agent-dev:latest"),
             "{runner}"

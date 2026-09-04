@@ -84,7 +84,7 @@ jobs:
       matrix:
         include:
         - os: ubuntu-latest
-          target: x86_64-unknown-linux-musl
+          target: x86_64-unknown-linux-gnu
         - os: macos-latest
           target: aarch64-apple-darwin
         - os: windows-latest
@@ -106,6 +106,7 @@ jobs:
     - name: Install Linux musl tools
       if: runner.os == 'Linux'
       run: |
+        rustup target add x86_64-unknown-linux-musl
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes musl-tools
 
@@ -127,12 +128,20 @@ jobs:
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
 
+    - name: Check portable worker boundary
+      if: runner.os == 'Linux'
+      run: cargo clippy --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker -- -D warnings
+
     - name: Run desktop Clippy lints
       if: runner.os != 'Linux'
       run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
 
     - name: Build Mjolnir
       run: cargo build --release
+
+    - name: Build portable worker
+      if: runner.os == 'Linux'
+      run: cargo build --release --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
 
     - name: Build desktop application
       if: runner.os != 'Linux'
@@ -161,8 +170,6 @@ jobs:
     name: Three-client reliability smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     steps:
     - uses: actions/checkout@v6
 
@@ -176,11 +183,13 @@ jobs:
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes musl-tools
 
-    - name: Build the isolated-test controller
-      run: cargo build --locked -p brokk-mjolnir
+    - name: Build the isolated-test controller and portable worker
+      run: |
+        cargo build --locked -p brokk-mjolnir
+        cargo build --locked --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
 
     - name: Run deterministic daemon, two-TUI, and web scenario
-      run: tests/e2e/run-reliability.sh --scenario multi-client-happy-path --seed 1 ./target/x86_64-unknown-linux-musl/debug/mj
+      run: tests/e2e/run-reliability.sh --scenario multi-client-happy-path --seed 1 ./target/debug/mj
 
     - name: Upload reliability evidence
       if: always()
@@ -192,7 +201,7 @@ jobs:
         retention-days: 14
 
   desktop-linux:
-    # The primary Linux jobs build the headless `mj` for musl. This is the
+    # The primary Linux job builds the headless `mj` natively. This is the
     # pull-request compile-and-test gate for the separate GNU/Linux desktop
     # executable that releases ship beside it.
     name: Desktop shell (x86_64-unknown-linux-gnu)

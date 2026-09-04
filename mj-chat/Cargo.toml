@@ -19,7 +19,7 @@ test-hooks = ["hel/test-hooks", "mj-controller/test-hooks"]
 workspace = true
 
 [dependencies]
-hel.workspace = true
+hel = { workspace = true, features = ["controller"] }
 mj-controller.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"

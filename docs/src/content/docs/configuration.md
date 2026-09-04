@@ -481,7 +481,8 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for checkpoint/archive Git operations. |
 
 Worker lookup checks `MJ_WORKER_BINARY`, `MJ_WORKER_DIR`, packaged or sibling
-workers, compatible native executables, and finally the verified URL fallback.
+workers, the native `mj-worker` companion for `local-bare`, and finally the
+verified URL fallback.
 The normal release installer already supplies both supported portable Linux
 worker architectures.
 

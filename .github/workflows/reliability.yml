@@ -21,7 +21,6 @@ permissions:
   contents: read
 
 env:
-  CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
   RELIABILITY_SEED: ${{ inputs.seed || '700001' }}
 
 jobs:
@@ -39,13 +38,15 @@ jobs:
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes musl-tools
     - name: Build feature-gated crash hooks
-      run: cargo build --locked -p brokk-mjolnir --features test-hooks
+      run: |
+        cargo build --locked -p brokk-mjolnir --features test-hooks
+        cargo build --locked --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker --features test-hooks
     - name: Run named durability boundaries
-      run: MJ_CHAOS_ISOLATED=1 tests/e2e/run-test-hook-chaos.sh ./target/x86_64-unknown-linux-musl/debug/mj --seed "$RELIABILITY_SEED"
+      run: MJ_CHAOS_ISOLATED=1 tests/e2e/run-test-hook-chaos.sh ./target/debug/mj --seed "$RELIABILITY_SEED"
     - name: Run worker topology deaths
-      run: MJ_CHAOS_ISOLATED=1 MJ_CHAOS_ARTIFACT_DIR=target/reliability-artifacts/worker-topology tests/e2e/session_restart_chaos.sh ./target/x86_64-unknown-linux-musl/debug/mj
+      run: MJ_CHAOS_ISOLATED=1 MJ_CHAOS_ARTIFACT_DIR=target/reliability-artifacts/worker-topology tests/e2e/session_restart_chaos.sh ./target/worker/x86_64-unknown-linux-musl/debug/mj-worker
     - name: Stop and recover an active turn without a barrier wait
-      run: tests/e2e/run-reliability.sh --scenario active-stop --seed "$RELIABILITY_SEED" ./target/x86_64-unknown-linux-musl/debug/mj
+      run: tests/e2e/run-reliability.sh --scenario active-stop --seed "$RELIABILITY_SEED" ./target/debug/mj
     - name: Upload crash evidence
       if: always()
       uses: actions/upload-artifact@v7
@@ -75,10 +76,12 @@ jobs:
         sudo apt-get install --no-install-recommends --assume-yes musl-tools
         npm ci --prefix tests/e2e/web
         npx --prefix tests/e2e/web playwright install --with-deps chromium
-    - name: Build Mjolnir
-      run: cargo build --locked -p brokk-mjolnir
+    - name: Build Mjolnir and portable worker
+      run: |
+        cargo build --locked -p brokk-mjolnir
+        cargo build --locked --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
     - name: Run real viewer against a concurrent TUI
-      run: tests/e2e/run-browser-reliability.sh --seed "$RELIABILITY_SEED" ./target/x86_64-unknown-linux-musl/debug/mj
+      run: tests/e2e/run-browser-reliability.sh --seed "$RELIABILITY_SEED" ./target/debug/mj
     - name: Upload browser evidence
       if: always()
       uses: actions/upload-artifact@v7
@@ -140,12 +143,14 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes musl-tools
-    - name: Build Mjolnir
-      run: cargo build --locked -p brokk-mjolnir
+    - name: Build Mjolnir and portable worker
+      run: |
+        cargo build --locked -p brokk-mjolnir
+        cargo build --locked --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
     - name: Run bounded replayable soak
       env:
         SOAK_MINUTES: ${{ inputs.soak_minutes || '30' }}
-      run: tests/e2e/run-reliability-soak.sh --minutes "$SOAK_MINUTES" --seed "$RELIABILITY_SEED" ./target/x86_64-unknown-linux-musl/debug/mj
+      run: tests/e2e/run-reliability-soak.sh --minutes "$SOAK_MINUTES" --seed "$RELIABILITY_SEED" ./target/debug/mj
     - name: Upload every soak iteration
       if: always()
       uses: actions/upload-artifact@v7

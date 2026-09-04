@@ -19,6 +19,7 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
+    nativeWorker: true,
     description: "Native universal macOS bundle for @brokkai/mjolnir",
     os: ["darwin"],
     cpu: ["x64", "arm64"],
@@ -166,6 +167,11 @@ async function stagePlatform(platform, version, source, stagingRoot) {
     const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
     await cp(path.join(source, worker), path.join(destination, "bin", worker));
     await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");
+    if (platform.nativeWorker) {
+      const nativeWorker = "mj-worker";
+      await cp(path.join(source, nativeWorker), path.join(destination, "bin", nativeWorker));
+      await ensureBinary(path.join(destination, "bin", nativeWorker), true);
+    }
     // Session workers are static Linux binaries uploaded into disposable
     // targets; the controller looks for them beside its own executable.
     for (const sessionWorker of [

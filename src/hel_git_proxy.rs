@@ -1,10 +1,16 @@
 //! Authenticated, path-confined Git smart-protocol bridge for local bundles.
 
+#[cfg(feature = "controller")]
 use std::collections::BTreeMap;
+#[cfg(feature = "controller")]
 use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
+#[cfg(feature = "controller")]
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "controller")]
+use std::path::PathBuf;
+#[cfg(feature = "controller")]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -12,17 +18,21 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(feature = "controller")]
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use hel::hel_local_git::canonical_repository;
-use hel::hel_targets::CommandSpec;
+#[cfg(feature = "controller")]
+use crate::hel_local_git::canonical_repository;
+#[cfg(feature = "controller")]
+use crate::hel_targets::CommandSpec;
 
 const BRIDGE_MAGIC: &[u8] = b"HEL-GIT-BRIDGE-2\n";
 const MAX_FRAME: usize = 1024 * 1024;
 const MAX_OPEN: usize = 16 * 1024;
 /// How long a broker waits for its target bridge to exit once the frame
 /// stream between them has closed.
+#[cfg(feature = "controller")]
 const BRIDGE_EXIT_GRACE: Duration = Duration::from_secs(5);
 /// How long a client may take to name its repository and service.
 ///
@@ -46,6 +56,7 @@ const EXCHANGE_IDLE_DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "controller")]
 pub struct GitBrokerSpec {
     pub session_id: String,
     pub bridge: CommandSpec,
@@ -61,11 +72,12 @@ struct GitOpen {
     service: String,
 }
 
+#[cfg(feature = "controller")]
 impl GitBrokerSpec {
     pub fn write(&self, path: &Path) -> Result<()> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent)?;
-        hel::hel_config::atomic_write(path, &serde_json::to_vec_pretty(self)?)
+        crate::hel_config::atomic_write(path, &serde_json::to_vec_pretty(self)?)
     }
 
     pub fn read(path: &Path) -> Result<Self> {
@@ -77,6 +89,7 @@ impl GitBrokerSpec {
 }
 
 /// What a PID file says about the broker that wrote it.
+#[cfg(feature = "controller")]
 enum BrokerLock {
     /// A broker holds the lock; the file names its process when it is
     /// readable, which it is for every broker past its own startup.
@@ -93,6 +106,7 @@ enum BrokerLock {
 /// system has since handed to an unrelated process, reads as dead and is
 /// restarted instead of being trusted, blocking the session forever, or —
 /// worse — being signalled.
+#[cfg(feature = "controller")]
 fn broker_lock(pid_path: &Path) -> BrokerLock {
     let Ok(file) = OpenOptions::new().read(true).write(true).open(pid_path) else {
         return BrokerLock::Free;
@@ -120,6 +134,7 @@ fn broker_lock(pid_path: &Path) -> BrokerLock {
 }
 
 /// Whether a broker process still owns this session's bridge.
+#[cfg(feature = "controller")]
 pub fn broker_is_alive(pid_path: &Path) -> bool {
     matches!(broker_lock(pid_path), BrokerLock::Held(_))
 }
@@ -128,6 +143,7 @@ pub fn broker_is_alive(pid_path: &Path) -> bool {
 ///
 /// Only a broker that still holds its lock is named, so a caller that stops a
 /// broker can never signal a PID the system has reassigned.
+#[cfg(feature = "controller")]
 pub fn running_broker_pid(pid_path: &Path) -> Option<i32> {
     match broker_lock(pid_path) {
         BrokerLock::Held(pid) => pid,
@@ -139,7 +155,9 @@ pub fn running_broker_pid(pid_path: &Path) -> Option<i32> {
 ///
 /// Visible to the crate so tests can stand in for a broker exactly as one
 /// behaves: holding this lock is what makes a process the session's broker.
-pub(crate) fn claim_broker_pid_file(pid_path: &Path) -> Result<File> {
+#[doc(hidden)]
+#[cfg(feature = "controller")]
+pub fn claim_broker_pid_file(pid_path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
     #[cfg(unix)]
@@ -167,6 +185,7 @@ pub(crate) fn claim_broker_pid_file(pid_path: &Path) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(feature = "controller")]
 pub async fn run_broker(spec_path: &Path) -> Result<()> {
     let spec = GitBrokerSpec::read(spec_path)?;
     let repositories = spec
@@ -195,6 +214,7 @@ pub async fn run_broker(spec_path: &Path) -> Result<()> {
     result
 }
 
+#[cfg(feature = "controller")]
 async fn run_bridge_process(
     spec: &GitBrokerSpec,
     repositories: BTreeMap<String, PathBuf>,
@@ -218,7 +238,7 @@ async fn run_bridge_process(
         .await
         .context("read Git bridge greeting")?;
     ensure!(magic == BRIDGE_MAGIC, "target Git bridge version mismatch");
-    hel::hel_config::atomic_write(&spec.ready_path, b"ready\n")?;
+    crate::hel_config::atomic_write(&spec.ready_path, b"ready\n")?;
 
     let outcome = serve_bridge(
         &mut input,
@@ -364,6 +384,7 @@ async fn watch_exchange<T>(
 }
 
 /// Serve bridged Git exchanges until the target bridge closes its stream.
+#[cfg(feature = "controller")]
 async fn serve_bridge(
     input: &mut (impl AsyncWrite + Unpin),
     output: &mut (impl AsyncRead + Unpin),
@@ -395,6 +416,7 @@ async fn serve_bridge(
     }
 }
 
+#[cfg(feature = "controller")]
 async fn serve_exchange(
     input: &mut (impl AsyncWrite + Unpin),
     output: &mut (impl AsyncRead + Unpin),
@@ -423,6 +445,7 @@ async fn serve_exchange(
     serve_git(input, output, repository, command, idle).await
 }
 
+#[cfg(feature = "controller")]
 fn git_service(service: &str) -> Result<&'static str> {
     match service {
         "git-upload-pack" => Ok("upload-pack"),
@@ -433,6 +456,7 @@ fn git_service(service: &str) -> Result<&'static str> {
 
 /// Refuse one exchange without losing the frame stream: end this side of it,
 /// then read the target's side through to its end frame.
+#[cfg(feature = "controller")]
 async fn refuse_exchange(
     input: &mut (impl AsyncWrite + Unpin),
     output: &mut (impl AsyncRead + Unpin),
@@ -444,6 +468,7 @@ async fn refuse_exchange(
 }
 
 /// Read the peer's remaining frames for the exchange in progress.
+#[cfg(feature = "controller")]
 async fn drain_exchange(output: &mut (impl AsyncRead + Unpin)) -> Result<()> {
     loop {
         match read_frame(output, MAX_FRAME).await? {
@@ -454,6 +479,7 @@ async fn drain_exchange(output: &mut (impl AsyncRead + Unpin)) -> Result<()> {
     }
 }
 
+#[cfg(feature = "controller")]
 async fn serve_git<W, R>(
     bridge_input: &mut W,
     bridge_output: &mut R,
@@ -791,7 +817,7 @@ async fn serve_client(
 pub async fn run_worker_proxy(root: &Path, repository: &str, service: &str) -> Result<()> {
     use tokio::net::UnixStream;
 
-    hel::hel_config::validate_id("repository", repository)?;
+    crate::hel_config::validate_id("repository", repository)?;
     ensure!(
         matches!(service, "git-upload-pack" | "git-receive-pack"),
         "unsupported Git service"

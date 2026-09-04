@@ -38,7 +38,7 @@ function expectedManifest(manifest) {
   let updated = manifest;
   for (const packageName of internalPackages) {
     const dependency = new RegExp(
-      `^(${packageName} = \\{ path = "[^"]+", (?:package = "[^"]+", )?version = ")[^"]+(" \\})$`,
+      `^(${packageName} = \\{ path = "[^"]+", (?:package = "[^"]+", )?version = ")[^"]+("[^\\n]* \\})$`,
       "m",
     );
     if (!dependency.test(updated)) {

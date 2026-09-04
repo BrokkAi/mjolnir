@@ -529,9 +529,12 @@ install_mjolnir() {
   patterns+=("^brokk-mjolnir-.*-${RUST_TARGET}[.]tar[.]gz$")
 
   # Helpers install beside mj so the controller finds them without PATH
-  # probing. The session workers are the static Linux binaries uploaded into
-  # disposable targets; mj-desktop alone owns the native GUI libraries.
+  # probing. Every bundle carries static Linux workers for disposable targets;
+  # macOS additionally carries a native worker for local-bare sessions.
   local companion="mj-desktop mj-voice-worker mj-worker-x86_64-unknown-linux-musl mj-worker-aarch64-unknown-linux-musl"
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    companion="$companion mj-worker"
+  fi
   if [[ "$OS_FAMILY" == "android" ]]; then
     companion=""
   fi

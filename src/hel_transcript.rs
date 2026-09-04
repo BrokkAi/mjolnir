@@ -16,6 +16,7 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, SessionUpdate, ToolCall,
     ToolCallContent, ToolCallLocation, ToolCallStatus,
 };
+#[cfg(feature = "controller")]
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -201,6 +202,7 @@ impl TranscriptItem {
         })
     }
 
+    #[cfg(feature = "controller")]
     pub(crate) fn validate(&self, through: u64) -> Result<()> {
         if self.stable_id.trim().is_empty() {
             bail!("materialized transcript item has an empty stable id");
