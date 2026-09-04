@@ -108,8 +108,9 @@ This downloads a verified release into `~/.local/bin` — no Rust toolchain
 needed. Each desktop release ships the headless `mj` controller, its separate
 `mj-desktop` application, the voice worker, and the static musl session workers
 that Mjolnir uploads into disposable targets. `mj` itself does not load native
-desktop libraries. Run `mj doctor` next. The installer also supports `--prefix`
-and `--version`; see `--help`.
+desktop libraries. Run `mj doctor` next. The installer also honors
+`MJOLNIR_VERSION` to install a specific tag and `MJOLNIR_INSTALL_DIR` (or
+`INSTALL_DIR`) to choose the install directory; see `--help`.
 
 npm works too:
 
@@ -275,7 +276,7 @@ directory elsewhere). The first-run dialog writes a working single-target
 setup; everything beyond that is edited in TOML. A minimal example:
 
 ```toml
-version = 1
+version = 2
 
 [profiles.codex-1]
 kind = "codex"
@@ -377,7 +378,7 @@ tailscale_detect = true
 - Harness homes are copied by allowlist, not wholesale. For Claude Code, for
   example: credentials, settings, `CLAUDE.md`, `skills/`, and `plugins/` — no
   transcripts, history, or caches. Mjolnir sets `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
-  `KIMI_CODE_HOME`, or `GROK_HOME` in the target. Skill edits on your machine
+  `KIMI_CODE_HOME`, `GROK_HOME`, or `DSH_HOME` in the target. Skill edits on your machine
   propagate to live sessions within about a minute.
 - Credentials travel only between the controller and a session's worker. They
   are never written to the event journal or recovery archives. When the

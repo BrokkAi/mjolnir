@@ -62,18 +62,18 @@ session with additional mounted directories.
 
 Sessions work under `/workspace`. Separately, Mjolnir writes its own session
 relay binary and a staged, allowlisted copy of the harness profile
-(credentials, config, skills, and similar) under `/var/lib/Mjolnir/` inside the
-container — for example `/var/lib/Mjolnir/workers/<session-id>` and
-`/var/lib/Mjolnir/profiles/<session-id>`.
+(credentials, config, skills, and similar) under `/var/lib/hel/` inside the
+container — for example `/var/lib/hel/workers/<session-id>` and
+`/var/lib/hel/profiles/<session-id>`.
 
 mj creates these directories itself with `mkdir -p` and writes into them
 with plain file copies; it does not pass any specific user to the runtime's `exec`,
 so those commands run as whatever user the image's `USER` (or its absence)
 puts them in. A rootless Podman container defaults to root inside when no
 `USER` is set, which can write anywhere. If your image sets a non-root
-`USER`, as the reference image does with its `mj` user, that user needs
-write access to `/workspace` and `/var/lib/Mjolnir` — the reference image grants
-it by creating both directories and `chown`-ing them to `mj:Mjolnir` before
+`USER`, as the reference image does with its `hel` user, that user needs
+write access to `/workspace` and `/var/lib/hel` — the reference image grants
+it by creating both directories and `chown`-ing them to `hel:hel` before
 switching to that user.
 
 ## Browser tests and profiling tools
@@ -114,8 +114,11 @@ itself depends on cgroup v2 being present.
 
 ## What you can't override
 
-The container-template configuration exposes exactly five keys: `image`,
-`platform`, `cpus`, `memory`, and `environment`. There's no configuration key
+The container-template configuration exposes exactly seven keys: `image`,
+`platform`, `cpus`, `memory`, `environment`, `pull_policy`, and
+`workspace_storage` (the last two only do something useful on the Podman
+target kinds; Docker and Apple targets reject non-default `workspace_storage`).
+There's no configuration key
 for arbitrary extra container-runtime arguments. Mjolnir derives the
 rest of the run command itself — the generated container name and the
 `dev.mj.session` / `dev.mj.managed` ownership labels it uses to find and

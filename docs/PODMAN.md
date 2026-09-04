@@ -62,7 +62,7 @@ builds.
 
 Hosts with native fast dataset deletion can opt into a small helper protocol.
 For example, the repository's
-[`mj-zfs-workspace-helper.sh`](../examples/mj-zfs-workspace-helper.sh) creates
+[`mj-zfs-workspace-helper.sh`](https://github.com/BrokkAi/mjolnir/blob/master/examples/mj-zfs-workspace-helper.sh) creates
 one ZFS child dataset per session. Copy it to a root-owned host path, edit its
 fixed dataset and mount roots, and grant the Podman user passwordless sudo for
 that helper command only. Then configure the target with the helper's mount

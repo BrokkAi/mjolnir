@@ -29,7 +29,7 @@ connection multiplexing of its own.
 ## Target configuration
 
 Verified against `SshConnection` and the `SshBare`/`SshPodman` variants of
-`TargetTemplate` in `src/hel_config.rs` (around lines 415–460).
+`TargetTemplate` in `src/hel_config.rs`.
 
 Shared SSH connection keys (flattened into both target kinds):
 
@@ -45,19 +45,20 @@ Shared SSH connection keys (flattened into both target kinds):
 | Key | Required | Notes |
 | --- | --- | --- |
 | `permissions` | yes | `guardian` preserves configured harness approvals; `yolo` runs unconstrained. |
-| `workspace_prefix` | no | Remote directory session workspaces are created under. Defaults to `.local/share/mjolnir/workspaces` (relative to the login home). |
+| `workspace_prefix` | no | Remote directory session workspaces are created under. Defaults to `.local/share/hel/workspaces` (relative to the login home). |
 
 ```toml
 [targets.builder]
 kind = "ssh-bare"
 host = "builder"
 permissions = "guardian"
-workspace_prefix = ".local/share/mjolnir/workspaces"
+workspace_prefix = ".local/share/hel/workspaces"
 ```
 
 `ssh-podman` always runs unconstrained and does not accept `permissions`. It
 also takes the same container keys as `local-podman` (`image`, and optionally
-`platform`, `cpus`, `memory`, `environment`):
+`platform`, `cpus`, `memory`, `environment`, `pull_policy`,
+`workspace_storage`):
 
 ```toml
 [targets.builder-podman]

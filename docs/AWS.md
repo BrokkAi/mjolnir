@@ -68,8 +68,7 @@ address_source = "public-dns"
 # ssh_args = ["-o", "StrictHostKeyChecking=accept-new"]
 ```
 
-Keys, verified against `TargetTemplate::AwsEc2` in `src/hel_config.rs`
-(around lines 466–486):
+Keys, verified against `TargetTemplate::AwsEc2` in `src/hel_config.rs`:
 
 | Key | Required | Notes |
 | --- | --- | --- |
