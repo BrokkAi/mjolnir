@@ -417,8 +417,8 @@ impl Controller {
             .checkpoint
             .as_ref()
             .context("force stop requires an existing recovery archive")?;
-        // Force stop skips a new checkpoint, never verification of the archive
-        // that makes the logical session resumable afterwards.
+        // Force stop skips a new checkpoint, never the checksum gate on the
+        // archive that makes the logical session resumable afterwards.
         verify_installed_checkpoint_gate(session_id, checkpoint)
             .context("verify the recovery archive before force stopping")?;
         retire_git_broker(session_id).context("stop the session's local Git broker")?;
@@ -492,6 +492,63 @@ impl Controller {
         hel::hel_database::delete_session(session_id)
             .context("destroy stopped session in database")?;
         self.state.destroy_stopped_session(session_id)?;
+        Ok(())
+    }
+
+    /// Permanently destroy a session from any state, without checkpointing
+    /// and without requiring a recovery archive.
+    ///
+    /// Unlike [`Controller::destroy_session_controlled`], this accepts active
+    /// states: it tears the live target down with the same close plan a
+    /// verified close uses, so the owning process group dies before any files
+    /// go. External cleanup happens before the durable record is dropped so
+    /// failures stay visible and retryable; the recovery archive is removed,
+    /// which is what makes the destruction irreversible.
+    pub fn force_destroy_session(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        self.force_destroy_session_with(session_id, executor, hel::hel_database::delete_session)
+    }
+
+    fn force_destroy_session_with(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        delete: impl Fn(&str) -> Result<()>,
+    ) -> Result<()> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .clone();
+        // A session destroyed for good keeps nothing, including a broker an
+        // earlier failure left running; retiring it first also stops a live
+        // writer from recreating files under the teardown below.
+        retire_git_broker(session_id).context("stop the session's local Git broker")?;
+        if let Some(locator) = &session.target {
+            let backend = backend_locator(locator, &session, &self.config)?;
+            execute_target_cleanup(&backend, session_id, executor)?;
+        }
+        if let Some(worktree) = &session.managed_worktree {
+            cleanup_managed_worktree(executor, worktree)
+                .context("remove managed raw-session worktree")?;
+        }
+        if let Some(checkpoint) = &session.checkpoint
+            && let Err(error) = std::fs::remove_file(&checkpoint.archive_path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error).with_context(|| {
+                format!(
+                    "remove session recovery archive {}",
+                    checkpoint.archive_path.display()
+                )
+            });
+        }
+        delete(session_id).context("force destroy session in database")?;
+        self.state.destroy_session_force(session_id)?;
         Ok(())
     }
 }
@@ -928,8 +985,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let repository = committed_repository();
         let session_id = "0123456789abcdef0123456789abcdef";
-        let mut checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
-        checkpoint.event_frontier = 8;
+        let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
         let mut session = managed_worktree_session(repository.path(), session_id);
         let worktree = session.managed_worktree.clone().unwrap();
         session.target_template_id = "local".into();
@@ -953,6 +1009,7 @@ mod tests {
             calls: RefCell::new(0),
         };
         let persisted = RefCell::new(Vec::new());
+        std::fs::write(&checkpoint.archive_path, b"changed after checkpoint").unwrap();
 
         let error = controller
             .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &executor, |record| {
@@ -961,7 +1018,7 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(error.to_string().contains("checkpoint frontier changed"));
+        assert!(error.to_string().contains("checkpoint SHA changed"));
         assert_eq!(*executor.calls.borrow(), 0);
         assert!(persisted.into_inner().is_empty());
         assert!(worktree.worktree_root.is_dir());
@@ -1221,5 +1278,174 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("cleanup is safely retryable"))
         );
+    }
+
+    struct FailingExecutor;
+
+    impl CommandExecutor for FailingExecutor {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"teardown unavailable".to_vec(),
+            })
+        }
+    }
+
+    fn branch_exists(repository: &std::path::Path, branch: &str) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["show-ref", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{branch}"))
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    #[test]
+    fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = committed_repository();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+        let worker_root = directory.path().join(session_id);
+        std::fs::create_dir_all(&worker_root).unwrap();
+        let mut session = managed_worktree_session(repository.path(), session_id);
+        session.state = SessionState::Running;
+        session.target_template_id = "local".into();
+        session.target = Some(TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+        session.checkpoint = Some(checkpoint.clone());
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("local".into(), TargetTemplate::LocalBare);
+        let mut controller = Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        };
+        let deleted = RefCell::new(Vec::new());
+
+        controller
+            .force_destroy_session_with(session_id, &ProcessExecutor, |id| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(!worker_root.exists(), "local target must be removed");
+        let worktree_root = repository.path().join(".mj/worktrees").join(session_id);
+        assert!(!worktree_root.exists(), "managed worktree must be removed");
+        assert!(
+            !branch_exists(repository.path(), &format!("mj/{session_id}")),
+            "generated branch must be removed"
+        );
+        assert!(!checkpoint.archive_path.exists(), "archive must be removed");
+        assert!(!controller.state.sessions.contains_key(session_id));
+        assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
+    }
+
+    #[test]
+    fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut session = checkpoint_test_session(session_id);
+        session.state = SessionState::Provisioning;
+        session.target = None;
+        session.checkpoint = None;
+        let mut controller = Controller {
+            config: HelConfig::default(),
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        };
+        let deleted = RefCell::new(Vec::new());
+
+        controller
+            .force_destroy_session_with(session_id, &ProcessExecutor, |id| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(!controller.state.sessions.contains_key(session_id));
+        assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
+    }
+
+    #[test]
+    fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+        let mut session = checkpoint_test_session(session_id);
+        session.target_template_id = "local".into();
+        session.state = SessionState::Running;
+        session.target = Some(TargetLocator::LocalBare {
+            worker_root: directory.path().join(session_id),
+        });
+        session.checkpoint = Some(checkpoint.clone());
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("local".into(), TargetTemplate::LocalBare);
+        let mut controller = Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        };
+        let deleted = RefCell::new(Vec::new());
+
+        let error = controller
+            .force_destroy_session_with(session_id, &FailingExecutor, |id| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("teardown unavailable"),
+            "{error:#}"
+        );
+        assert!(
+            controller.state.sessions.contains_key(session_id),
+            "a surviving target must keep the record for a retry"
+        );
+        assert!(
+            checkpoint.archive_path.exists(),
+            "a surviving target must keep the recovery archive"
+        );
+        assert!(deleted.into_inner().is_empty());
+    }
+
+    #[test]
+    fn force_destroy_tolerates_a_missing_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+        std::fs::remove_file(&checkpoint.archive_path).unwrap();
+        let mut session = checkpoint_test_session(session_id);
+        session.state = SessionState::Error;
+        session.checkpoint = Some(checkpoint);
+        let mut controller = Controller {
+            config: HelConfig::default(),
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        };
+
+        controller
+            .force_destroy_session_with(session_id, &ProcessExecutor, |_| Ok(()))
+            .unwrap();
+
+        assert!(!controller.state.sessions.contains_key(session_id));
     }
 }

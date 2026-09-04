@@ -1309,6 +1309,21 @@ impl HelState {
             .expect("session checked above"))
     }
 
+    /// Remove a session record from state regardless of its lifecycle state.
+    ///
+    /// Force destruction is the one caller: by the time it runs, every
+    /// external artifact has been torn down or its loss accepted, so no state
+    /// is refused here.
+    pub fn destroy_session_force(&mut self, session_id: &str) -> Result<SessionRecord> {
+        self.sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        Ok(self
+            .sessions
+            .remove(session_id)
+            .expect("session checked above"))
+    }
+
     /// Validate persisted foreign keys without preventing config entries from
     /// being renamed after a session is fully archived.
     pub fn validate_against_config(&self, config: &HelConfig) -> Result<()> {
@@ -2144,6 +2159,21 @@ mod tests {
         let removed = state.destroy_stopped_session("0123456789abcdef").unwrap();
         assert_eq!(removed.id, "0123456789abcdef");
         assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn force_removal_permits_an_active_session() {
+        let mut state = sample_state();
+        let removed = state.destroy_session_force("0123456789abcdef").unwrap();
+        assert_eq!(removed.id, "0123456789abcdef");
+        assert!(state.sessions.is_empty());
+        assert!(
+            state
+                .destroy_session_force("0123456789abcdef")
+                .unwrap_err()
+                .to_string()
+                .contains("unknown session")
+        );
     }
 
     #[test]

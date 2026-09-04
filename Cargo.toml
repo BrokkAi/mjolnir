@@ -108,7 +108,7 @@ tokio-util = { version = "0.7", features = ["compat", "rt"] }
 toml = "0.8"
 tracing = "0.1"
 url = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
 
 [dev-dependencies]
 proptest = "1"

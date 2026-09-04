@@ -1934,6 +1934,7 @@ impl DashboardContext {
                 | crate::daemon::RuntimeLifecycleKind::ForceStop => SessionOperationKind::Stopping,
                 crate::daemon::RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
                 crate::daemon::RuntimeLifecycleKind::DestroyStopped
+                | crate::daemon::RuntimeLifecycleKind::ForceDestroy
                 | crate::daemon::RuntimeLifecycleKind::Cleanup => SessionOperationKind::Destroying,
             };
             mark_active_chat_retiring_for_remote_lifecycle(

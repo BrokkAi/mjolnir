@@ -623,6 +623,54 @@ pub fn delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Force-delete a workspace whose active sessions have already been destroyed.
+///
+/// Drops the workspace's detached drafts and the workspace row in one
+/// immediate transaction that re-checks for active sessions, so a session
+/// created while the destruction ran refuses the deletion instead of losing
+/// the drafts. Inactive session records are global history and are preserved,
+/// exactly as in [`delete_workspace`].
+pub fn force_delete_workspace(workspace_id: &str) -> Result<()> {
+    let workspace_id = workspace_id.to_owned();
+    submit_database_write("force_delete_workspace", move |_| {
+        force_delete_workspace_at(&database_path(), &workspace_id)
+    })
+}
+
+pub fn force_delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let active_count = {
+        let mut statement = tx.prepare(
+            "SELECT s.state
+               FROM session_contexts c
+               JOIN sessions s USING(session_id)
+              WHERE c.workspace_id = ?1",
+        )?;
+        let states = statement.query_map([workspace_id], |row| row.get::<_, String>(0))?;
+        states
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|state| parse_session_state(state).is_active())
+            .count()
+    };
+    ensure!(
+        active_count == 0,
+        "workspace is not empty ({active_count} active sessions remain)"
+    );
+    tx.execute(
+        "DELETE FROM detached_drafts WHERE workspace_id = ?1",
+        [workspace_id],
+    )?;
+    let changed = tx.execute(
+        "DELETE FROM workspaces WHERE workspace_id = ?1",
+        [workspace_id],
+    )?;
+    ensure!(changed == 1, "unknown workspace {workspace_id:?}");
+    tx.commit()?;
+    Ok(())
+}
+
 /// Move a durable history into the workspace from which it is being resumed.
 ///
 /// This is deliberately limited to states accepted by the resume controller;

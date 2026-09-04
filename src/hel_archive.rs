@@ -47,6 +47,10 @@ const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 /// writer and the reader use every core on a large payload.
 const PAYLOAD_PART_BYTES: usize = 16 * 1024 * 1024;
 const PAYLOAD_PART_SUFFIX: &str = ".helpart.";
+/// Small ZIP metadata uses fast DEFLATE. Large archive payloads use Zstandard,
+/// whose independent shards keep both compression and decompression parallel.
+const DEFLATE_LEVEL: i64 = 1;
+const ZSTD_LEVEL: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -353,6 +357,29 @@ pub struct ArchiveInput {
     pub repositories: Vec<RepositorySnapshot>,
 }
 
+#[derive(Clone, Copy)]
+struct ArchiveInputView<'a> {
+    session: &'a SessionManifest,
+    target: &'a TargetManifest,
+    bundle: &'a BundleManifest,
+    canonical_session: &'a CanonicalSessionSnapshot,
+    native_artifacts: &'a [NativeArtifact],
+    repositories: &'a [RepositorySnapshot],
+}
+
+impl<'a> From<&'a ArchiveInput> for ArchiveInputView<'a> {
+    fn from(input: &'a ArchiveInput) -> Self {
+        Self {
+            session: &input.session,
+            target: &input.target,
+            bundle: &input.bundle,
+            canonical_session: &input.canonical_session,
+            native_artifacts: &input.native_artifacts,
+            repositories: &input.repositories,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedArchive {
     pub manifest: ArchiveManifest,
@@ -540,14 +567,50 @@ pub fn write_archive_atomic(path: &Path, input: &ArchiveInput) -> Result<Verifie
 /// hashes it in one sequential pass instead of structurally re-reading it.
 ///
 /// The checkpoint export path uses this: the target just wrote the ZIP from
-/// validated input, and the controller structurally verifies the same bytes
-/// after downloading them. Callers that install an archive nothing else will
-/// verify must keep using [`write_archive_atomic`].
+/// validated input, and the controller checks the downloaded bytes against the
+/// returned digest. Resume/import structurally verifies the archive when it is
+/// read. Callers without either check must keep using [`write_archive_atomic`].
 pub fn write_archive_hashed(path: &Path, input: &ArchiveInput) -> Result<String> {
-    write_archive_installed(path, input)?;
+    write_archive_hashed_view(path, input.into())
+}
+
+pub fn write_archive_hashed_borrowed(
+    path: &Path,
+    session: &SessionManifest,
+    target: &TargetManifest,
+    bundle: &BundleManifest,
+    canonical_session: &CanonicalSessionSnapshot,
+    native_artifacts: &[NativeArtifact],
+    repositories: &[RepositorySnapshot],
+) -> Result<String> {
+    write_archive_hashed_view(
+        path,
+        ArchiveInputView {
+            session,
+            target,
+            bundle,
+            canonical_session,
+            native_artifacts,
+            repositories,
+        },
+    )
+}
+
+fn write_archive_hashed_view(path: &Path, input: ArchiveInputView<'_>) -> Result<String> {
+    let installed_started = std::time::Instant::now();
+    write_archive_installed_view(path, input, PAYLOAD_PART_BYTES)?;
+    let installed_ms = installed_started.elapsed().as_millis();
+    let hash_started = std::time::Instant::now();
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    digest_reader(&mut file)
-        .with_context(|| format!("hash newly written archive {}", path.display()))
+    let digest = digest_reader(&mut file)
+        .with_context(|| format!("hash newly written archive {}", path.display()))?;
+    if std::env::var_os("MJ_CHECKPOINT_BENCH_PHASES").is_some() {
+        eprintln!(
+            "archive writer phases: installed_ms={installed_ms} final_hash_ms={}",
+            hash_started.elapsed().as_millis()
+        );
+    }
+    Ok(digest)
 }
 
 fn write_archive_installed(path: &Path, input: &ArchiveInput) -> Result<()> {
@@ -559,7 +622,17 @@ fn write_archive_installed_with_part_size(
     input: &ArchiveInput,
     part_bytes: usize,
 ) -> Result<()> {
-    let (manifest, payloads) = prepare_archive_with_part_size(input, part_bytes)?;
+    write_archive_installed_view(path, input.into(), part_bytes)
+}
+
+fn write_archive_installed_view(
+    path: &Path,
+    input: ArchiveInputView<'_>,
+    part_bytes: usize,
+) -> Result<()> {
+    let prepare_started = std::time::Instant::now();
+    let (manifest, payloads) = prepare_archive_view_with_part_size(input, part_bytes)?;
+    let prepare_ms = prepare_started.elapsed().as_millis();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
         .with_context(|| format!("create archive directory {}", parent.display()))?;
@@ -567,17 +640,30 @@ fn write_archive_installed_with_part_size(
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary archive in {}", parent.display()))?;
     restrict_archive_permissions(temporary.path())?;
+    let zip_started = std::time::Instant::now();
     write_zip(temporary.as_file_mut(), &manifest, &payloads)?;
+    let zip_ms = zip_started.elapsed().as_millis();
+    let file_sync_started = std::time::Instant::now();
     temporary
         .as_file_mut()
         .sync_all()
         .with_context(|| format!("fsync temporary archive in {}", parent.display()))?;
+    let file_sync_ms = file_sync_started.elapsed().as_millis();
+    let persist_started = std::time::Instant::now();
     temporary
         .persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("atomically replace {}", path.display()))?;
     restrict_archive_permissions(path)?;
+    let persist_ms = persist_started.elapsed().as_millis();
+    let directory_sync_started = std::time::Instant::now();
     sync_directory(parent)?;
+    if std::env::var_os("MJ_CHECKPOINT_BENCH_PHASES").is_some() {
+        eprintln!(
+            "archive install phases: prepare_ms={prepare_ms} zip_ms={zip_ms} file_sync_ms={file_sync_ms} persist_ms={persist_ms} directory_sync_ms={}",
+            directory_sync_started.elapsed().as_millis()
+        );
+    }
     drop(payloads);
     drop(manifest);
     Ok(())
@@ -792,8 +878,16 @@ fn prepare_archive(input: &ArchiveInput) -> Result<(ArchiveManifest, Vec<Pending
     prepare_archive_with_part_size(input, PAYLOAD_PART_BYTES)
 }
 
+#[cfg(test)]
 fn prepare_archive_with_part_size(
     input: &ArchiveInput,
+    part_bytes: usize,
+) -> Result<(ArchiveManifest, Vec<PendingPayload<'_>>)> {
+    prepare_archive_view_with_part_size(input.into(), part_bytes)
+}
+
+fn prepare_archive_view_with_part_size(
+    input: ArchiveInputView<'_>,
     part_bytes: usize,
 ) -> Result<(ArchiveManifest, Vec<PendingPayload<'_>>)> {
     ensure!(part_bytes > 0, "archive payload part size is zero");
@@ -807,14 +901,14 @@ fn prepare_archive_with_part_size(
         &mut payloads,
         CANONICAL_SESSION_PATH.to_string(),
         Cow::Owned(
-            serde_json::to_vec_pretty(&input.canonical_session)
+            serde_json::to_vec(input.canonical_session)
                 .context("serialize canonical session snapshot")?,
         ),
         0o600,
         PayloadRole::CanonicalSession,
     )?;
 
-    for artifact in &input.native_artifacts {
+    for artifact in input.native_artifacts {
         validate_archive_relative_path(&artifact.relative_path)?;
         ensure_not_secret_path(&artifact.relative_path)?;
         let archive_path = format!("native/{}", slash_path(&artifact.relative_path)?);
@@ -831,7 +925,7 @@ fn prepare_archive_with_part_size(
 
     let mut repository_ids = BTreeSet::new();
     let mut repositories = Vec::with_capacity(input.repositories.len());
-    for repository in &input.repositories {
+    for repository in input.repositories {
         validate_component(&repository.metadata.id, "repository id")?;
         ensure!(
             repository_ids.insert(repository.metadata.id.clone()),
@@ -926,9 +1020,9 @@ fn prepare_archive_with_part_size(
             ARCHIVE_SCHEMA_VERSION
         },
         format: ARCHIVE_FORMAT.to_string(),
-        session: input.session.clone(),
-        target: input.target.clone(),
-        bundle: input.bundle.clone(),
+        session: (*input.session).clone(),
+        target: (*input.target).clone(),
+        bundle: (*input.bundle).clone(),
         repositories,
         payloads: payloads
             .iter()
@@ -963,10 +1057,9 @@ fn push_payload<'a>(
     Ok(())
 }
 
-/// Git bundles carry packfiles whose objects are already zlib-compressed;
-/// re-deflating one saves well under 1% while costing the whole export window,
-/// so bundles are stored verbatim. Everything else compresses enough to be
-/// worth DEFLATE at the default level.
+/// Git bundles carry packfiles whose objects are already compressed, so they
+/// are stored verbatim. Text and tar payloads compress well with Zstandard,
+/// which is substantially faster than DEFLATE for checkpoint-sized history.
 fn payload_compression(role: &PayloadRole) -> CompressionMethod {
     match role {
         PayloadRole::GitBundle { .. } => CompressionMethod::Stored,
@@ -974,7 +1067,7 @@ fn payload_compression(role: &PayloadRole) -> CompressionMethod {
         | PayloadRole::NativeArtifact { .. }
         | PayloadRole::GitStagedPatch { .. }
         | PayloadRole::GitUnstagedPatch { .. }
-        | PayloadRole::GitUntrackedTar { .. } => CompressionMethod::Deflated,
+        | PayloadRole::GitUntrackedTar { .. } => CompressionMethod::Zstd,
     }
 }
 
@@ -1099,6 +1192,11 @@ fn compress_entry(entry: &PlannedEntry<'_>) -> Result<Vec<u8>> {
             entry.name,
             SimpleFileOptions::default()
                 .compression_method(entry.method)
+                .compression_level(match entry.method {
+                    CompressionMethod::Deflated => Some(DEFLATE_LEVEL),
+                    CompressionMethod::Zstd => Some(ZSTD_LEVEL),
+                    _ => None,
+                })
                 .unix_permissions(entry.mode)
                 .large_file(entry.data.len() as u64 > zip::ZIP64_BYTES_THR),
         )

@@ -1548,6 +1548,10 @@ impl DashboardContext {
                 "Permanently destroyed stopped session {}",
                 short_id(&session_id)
             )),
+            Ok(LifecycleSuccess::ForceDestroyed) => self.dashboard.set_notice(format!(
+                "Permanently destroyed session {}",
+                short_id(&session_id)
+            )),
             Err(error) => {
                 if operation
                     .as_ref()
