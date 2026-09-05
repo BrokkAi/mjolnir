@@ -410,10 +410,10 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
     )
     .await
     .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
-    if config.harness_runtime == hel::hel_worker_launch::HarnessRuntimePolicy::ManagedRemote
+    if config.harness_runtime == hel::hel_worker_launch::HarnessRuntimePolicy::Managed
         && prepared.is_none()
     {
-        bail!("managed remote harness preparation produced no installation");
+        bail!("managed harness preparation produced no installation");
     }
     Ok(())
 }

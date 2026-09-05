@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "dependencies": {
     "@agentclientprotocol/codex-acp": "1.8.0",
-    "@openai/codex": "0.151.0"
+    "@openai/codex": "0.153.4"
   }
 }

@@ -21,15 +21,17 @@ pub const REVIEWER_PROFILE_DIR: &str = "profile";
 
 /// Who owns the ACP adapter and harness executable selected by a worker.
 ///
-/// Ambient launch preserves the historical local/container behavior. Managed
-/// remote launch resolves the exact pin compiled into the worker and never
-/// falls back to an executable from `PATH`.
+/// Ambient launch preserves container behavior. Managed launch resolves the
+/// exact pin compiled into the worker and never falls back to an executable
+/// from `PATH`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessRuntimePolicy {
     #[default]
     Ambient,
-    ManagedRemote,
+    /// The worker owns the exact ACP bridge installation.
+    #[serde(rename = "managed_remote", alias = "managed")]
+    Managed,
 }
 
 impl HarnessRuntimePolicy {
@@ -325,14 +327,19 @@ mod tests {
     }
 
     #[test]
-    fn managed_remote_policy_round_trips_explicitly() {
+    fn managed_policy_accepts_new_and_legacy_wire_names() {
         let mut value = launch_json();
         value["harness_runtime"] = serde_json::json!("managed_remote");
         let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
-        assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::ManagedRemote);
+        assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Managed);
         assert_eq!(
             serde_json::to_value(&launch).unwrap()["harness_runtime"],
             "managed_remote"
         );
+
+        let mut value = launch_json();
+        value["harness_runtime"] = serde_json::json!("managed");
+        let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Managed);
     }
 }
