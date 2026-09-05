@@ -307,6 +307,16 @@ pub struct ViewerSnapshot {
     /// server's capacity poller has published a reading.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capacity: Vec<ViewerTargetCapacity>,
+    /// Recent failed launches, independent of provisional session rollback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_failures: Vec<ViewerLaunchFailure>,
+}
+
+/// Deliberately excludes raw diagnostics, which can contain credentials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ViewerLaunchFailure {
+    pub id: String,
+    pub workspace_id: String,
 }
 
 impl ViewerSnapshot {
@@ -434,6 +444,7 @@ impl ViewerSnapshot {
                 profile: config.review.profile.clone(),
             },
             capacity: Vec::new(),
+            launch_failures: Vec::new(),
         }
     }
 }

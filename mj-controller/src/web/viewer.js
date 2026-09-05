@@ -234,6 +234,7 @@ function applyRoute() {
 function renderRoute() {
   if (!snapshot) return;
   renderWorkspaces();
+  renderLaunchFailures();
   switch (route.name) {
     case 'new':
       renderNewForm();
@@ -257,6 +258,25 @@ function renderRoute() {
 // ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
+
+const dismissedLaunchFailures = new Set();
+
+function renderLaunchFailures() {
+  const notices = (snapshot.launch_failures || []).filter(
+    failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
+  );
+  document.querySelector('#launch-failures').replaceChildren(...notices.map(failure => {
+    const card = el('div', 'card');
+    card.append(el('p', '', 'A session could not be started. Check the project and target, then retry. Details are in the daemon logs.'));
+    const dismiss = el('button', 'secondary', 'Dismiss launch error');
+    dismiss.onclick = () => {
+      dismissedLaunchFailures.add(failure.id);
+      renderLaunchFailures();
+    };
+    card.append(dismiss);
+    return card;
+  }));
+}
 
 function renderWorkspaces() {
   const selected = selectedWorkspaceId();

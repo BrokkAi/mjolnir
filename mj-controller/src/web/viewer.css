@@ -901,6 +901,19 @@ article > h3 {
   justify-content: space-between;
 }
 
+/* Session titles are currently text nodes, so making their heading a flex
+ * container creates an anonymous flex item whose min-content width is the
+ * entire (possibly unbroken) title. Keep the full text in the DOM for
+ * assistive technology, while bounding its visual representation to three
+ * lines. Other article headings use flex for their status pills. */
+.session > h3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 /* ---- the conversation screen ----
  *
  * A full-height column: header, a transcript that scrolls inside itself, and a
