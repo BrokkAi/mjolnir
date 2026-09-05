@@ -371,6 +371,7 @@ class Lab:
         fixture_bin = self.runtime_root / "bin"
         fixture_bin.mkdir()
         (fixture_bin / "python3").symlink_to(sys.executable)
+        (fixture_bin / "sh").symlink_to("/bin/sh")
         bridge.write_text(
             """#!/usr/bin/env python3
 import json
@@ -380,6 +381,11 @@ import sys
 import time
 
 session_id = "reliability-native"
+
+if sys.argv[1:] == ["--version"]:
+    print("@agentclientprotocol/codex-acp 1.8.0")
+    raise SystemExit(0)
+
 log_path = os.environ["MJ_FAKE_ACP_LOG"]
 
 def send(payload):
@@ -425,7 +431,19 @@ for line in sys.stdin:
                 "type": "session_meta",
                 "payload": {"session_id": session_id},
             }, separators=(",", ":")) + "\\n")
-        result = {"sessionId": session_id}
+        result = {
+            "sessionId": session_id,
+            "modes": {
+                "currentModeId": "agent",
+                "availableModes": [
+                    {"id": "default", "name": "Default"},
+                    {"id": "agent", "name": "Agent"},
+                    {"id": "agent-full-access", "name": "Full access"},
+                ],
+            },
+        }
+    elif method == "session/set_mode":
+        result = {}
     elif method == "session/prompt":
         blocks = message.get("params", {}).get("prompt", [])
         text = " ".join(block.get("text", "") for block in blocks if block.get("type") == "text")
@@ -466,6 +484,10 @@ for line in sys.stdin:
 """
         )
         bridge.chmod(0o700)
+        # The controller discovers the ambient Codex bridge through PATH. Keep
+        # the fixture on that same path instead of relying on the removed
+        # profile-level executable override.
+        (fixture_bin / "codex-acp").symlink_to(bridge)
         port = self.free_port()
         tls_config = ""
         if phone_tls:
@@ -520,7 +542,6 @@ tailscale_detect = false
 [profiles.fake]
 kind = "codex"
 home = {json.dumps(str(self.profile))}
-executable = {json.dumps(str(bridge))}
 environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, PATH = {json.dumps(str(fixture_bin))} }}
 
 [bundles.fixture]

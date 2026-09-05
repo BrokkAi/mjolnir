@@ -781,10 +781,7 @@ impl DashboardState {
             return DashboardAction::PasteFromClipboard;
         }
         let text_focused = self.text_input_focused();
-        if text_focused
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('c')
-        {
+        if text_focused && dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
             self.cancel_modal();
             return DashboardAction::None;
         }

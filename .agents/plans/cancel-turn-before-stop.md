@@ -12,7 +12,8 @@ Stopping an active session currently restarts its worker to interrupt the agent 
 - [x] (2026-09-05) Add worker CancelTurn operation and behavior tests.
 - [x] (2026-09-05) Use bounded cancellation in the controller close checkpoint path.
 - [x] (2026-09-05) Review integrated behavior; full cargo test, focused race tests, and Clippy pass.
-- [ ] Commit cancellation, finish the additionally requested CI fixes, and push.
+- [x] (2026-09-05) Commit cancellation as `73ac5ff0`.
+- [x] (2026-09-05) Fix the additionally requested CI failures; the three-client smoke and TUI tests pass. Publish both changes together after final checks.
 
 ## Surprises & Discoveries
 
@@ -60,8 +61,12 @@ Add `RelayCommand::CancelTurn` and its kind with minimum protocol 7. Reuse `Comm
 
 ## Outcomes & Retrospective
 
-Responsive cancellation now reaches a checkpoint without replacing the worker. The controller regression exercises this through a live relay fixture; worker runtime tests prove cancellation acknowledgment does not release the barrier early or steer queued prompts. Full `cargo test`, focused late-cancellation tests (5 passed), and `cargo clippy --all-targets -- -D warnings` passed. The user also requested repairing the current macOS keyboard and reliability-smoke CI failures before pushing; those fixes are being handled separately.
+Responsive cancellation now reaches a checkpoint without replacing the worker. The controller regression exercises this through a live relay fixture; worker runtime tests prove cancellation acknowledgment does not release the barrier early or steer queued prompts. Full `cargo test`, focused late-cancellation tests (5 passed), and `cargo clippy --all-targets -- -D warnings` passed.
+
+The additional CI fixes align text-modal cancellation with the existing platform accelerator and update the reliability fixture to discover Codex ACP through PATH and advertise its required access mode. The full TUI tests pass locally. The exact CI smoke command passed with zero leaked processes and successful database integrity checks (artifact directory `target/reliability-artifacts/multi-client-happy-path-seed-1-1240971`). This Linux host cannot execute the macOS test binary; remote CI will validate that platform after publication.
 
 Initial plan records the controller/worker boundary and why existing interactive cancellation is insufficient.
 
 Updated after integration to record the admitted-barrier race, completed validation, and the user's additional CI request.
+
+Updated after CI repair to record fixture compatibility changes and the passing smoke scenario.
