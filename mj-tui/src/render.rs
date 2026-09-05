@@ -19,6 +19,7 @@ use mj_chat::hel_chat::render_agent_message_head;
 use mj_chat::hel_chat::render_agent_message_tail;
 use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
 
+use crate::combined::MINIMIZED_GRID_COLUMNS;
 use crate::dialogs::{
     render_config_id_editor, render_confirmation, render_container_editor,
     render_import_bundle_confirmation, render_import_progress, render_rename_editor,
@@ -830,7 +831,6 @@ fn render_sessions_grid(
     dashboard: &DashboardState,
     maximize_enabled: bool,
 ) -> SessionRowsRendered {
-    const COLUMNS: usize = 3;
     const GAP: u16 = 2;
 
     let now_epoch_seconds = SystemTime::now()
@@ -881,20 +881,20 @@ fn render_sessions_grid(
 
     // Column widths: equal share of what is left after the gaps, remainder
     // handed to the leftmost columns so the row still spans the full width.
-    let gaps = GAP * (COLUMNS as u16 - 1);
+    let gaps = GAP * (MINIMIZED_GRID_COLUMNS as u16 - 1);
     let available = inner.width.saturating_sub(gaps);
-    let base = available / COLUMNS as u16;
-    let extra = available % COLUMNS as u16;
-    let column_widths: Vec<u16> = (0..COLUMNS)
+    let base = available / MINIMIZED_GRID_COLUMNS as u16;
+    let extra = available % MINIMIZED_GRID_COLUMNS as u16;
+    let column_widths: Vec<u16> = (0..MINIMIZED_GRID_COLUMNS)
         .map(|column| base + u16::from((column as u16) < extra))
         .collect();
 
     // Viewport: scroll so the selected session's column stays visible. The
     // offset is derived from the selection alone, so it needs no stored state.
     let total_columns = cells.len().div_ceil(grid_rows).max(1);
-    let max_offset = total_columns.saturating_sub(COLUMNS);
+    let max_offset = total_columns.saturating_sub(MINIMIZED_GRID_COLUMNS);
     let column_offset = selected_flow_pos
-        .map(|position| (position / grid_rows).saturating_sub(COLUMNS - 1))
+        .map(|position| (position / grid_rows).saturating_sub(MINIMIZED_GRID_COLUMNS - 1))
         .unwrap_or(0)
         .min(max_offset);
 
@@ -907,7 +907,7 @@ fn render_sessions_grid(
         .filter(|cell| matches!(cell, GridCell::Session { .. }))
         .count();
     let viewport_start = column_offset * grid_rows;
-    let viewport_end = ((column_offset + COLUMNS) * grid_rows).min(cells.len());
+    let viewport_end = ((column_offset + MINIMIZED_GRID_COLUMNS) * grid_rows).min(cells.len());
     let sessions_shown = cells
         .get(viewport_start..viewport_end)
         .map(|slots| {
@@ -3909,7 +3909,8 @@ mod tests {
     /// The content rows of the Sessions pane (inside its border) for a
     /// minimized grid of the given terminal size.
     fn grid_content_rows(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
-        let rows = crate::combined::minimized_grid_rows(height) as usize;
+        let rows =
+            crate::combined::minimized_grid_rows(height, dashboard.sessions_rows().len()) as usize;
         let lines = drawn(dashboard, width, height);
         lines[1..=rows].to_vec()
     }
@@ -3975,15 +3976,17 @@ mod tests {
         );
     }
 
-    /// A grid that shows every session has nothing to mark.
+    /// A sparse grid uses one content row when its heading and sessions fit
+    /// across the three columns, and has nothing to mark.
     #[test]
-    fn the_minimized_grid_omits_the_marker_when_everything_fits() {
-        let mut dashboard = minimized_grid_dashboard(1, 1);
+    fn the_minimized_grid_uses_one_row_when_three_cells_fit() {
+        let mut dashboard = minimized_grid_dashboard(1, 2);
         let lines = drawn(&mut dashboard, 120, 44);
         assert!(
             !lines.iter().any(|line| line.contains("more")),
             "no marker expected when all sessions fit: {lines:?}"
         );
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 3);
     }
 
     /// The clock is right-justified at each column's edge, so the clocks line
@@ -3997,11 +4000,12 @@ mod tests {
             .find(|line| line.contains("[idle]"))
             .expect("the session row");
 
-        // Column 0 spans the inner width less two 2-space gaps, split three
-        // ways; the clock ends flush against that column's right edge.
+        // Each column spans the inner width less two 2-space gaps, split
+        // three ways; the clock ends flush against its column's right edge.
         let inner = 120u16 - 2;
         let column0 = (inner - 4) / 3 + u16::from(!(inner - 4).is_multiple_of(3));
-        let expected = 1 + column0 - "[idle]".len() as u16;
+        let session_column_start = 1 + column0 + 2;
+        let expected = session_column_start + column0 - "[idle]".len() as u16;
         assert_eq!(cell_column(session, "[idle]"), expected, "{session:?}");
     }
 
@@ -4150,11 +4154,11 @@ mod tests {
 
     #[test]
     fn the_minimized_grid_reevaluates_the_height_threshold_each_frame() {
-        let mut dashboard = minimized_grid_dashboard(2, 2);
+        let mut dashboard = minimized_grid_dashboard(3, 2);
 
         let tall = drawn(&mut dashboard, 120, 44);
         assert!((tall[0].contains('┌') || tall[0].contains('╔')) && tall[0].contains("Sessions"));
-        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 7);
+        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 5);
 
         let short = drawn(&mut dashboard, 120, 20);
         assert!(
@@ -4163,11 +4167,11 @@ mod tests {
         assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 4);
 
         drawn(&mut dashboard, 120, 44);
-        assert_eq!(dashboard.pane_areas.expect("tall panes again")[0].height, 7);
+        assert_eq!(dashboard.pane_areas.expect("tall panes again")[0].height, 5);
     }
 
-    /// Minimized Sessions draws the fixed grid on a landscape terminal: the
-    /// Sessions pane is exactly the grid's five bordered rows.
+    /// Minimized Sessions draws a sparse grid on a landscape terminal: one
+    /// heading and one session fit in a single bordered content row.
     #[test]
     fn minimized_on_a_landscape_terminal_draws_the_grid() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -4180,11 +4184,7 @@ mod tests {
             .iter()
             .position(|line| line.contains("Conversation"))
             .expect("the conversation band");
-        assert_eq!(
-            sessions_height,
-            usize::from(crate::combined::minimized_grid_rows(40)) + 2,
-            "{lines:#?}"
-        );
+        assert_eq!(sessions_height, 3, "{lines:#?}");
     }
 
     /// A brand-new workspace has no sessions at all, and minimizing Sessions
@@ -4214,7 +4214,7 @@ mod tests {
             .iter()
             .position(|line| line.contains("Conversation"))
             .expect("the conversation band");
-        assert_eq!(sessions_height, 7, "{lines:#?}");
+        assert_eq!(sessions_height, 3, "{lines:#?}");
     }
 
     #[test]
@@ -4230,7 +4230,7 @@ mod tests {
             (lines[0].contains('┌') || lines[0].contains('╔')) && lines[0].contains("Sessions"),
             "the portrait grid keeps its bordered Sessions title: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 4);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 3);
         for visible in ["Targets", "Quota"] {
             assert!(
                 lines.iter().any(|line| line.contains(visible)),

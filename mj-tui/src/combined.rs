@@ -38,17 +38,27 @@ const PANE_MINIMUM: u16 = 3;
 const SUMMARY_ROW: u16 = 1;
 
 /// The terminal height at or above which the minimized Sessions grid gets its
-/// taller five-row form; below it the grid falls back to two rows.
+/// taller five-row cap; below it the grid is capped at two rows.
 const TALL_TERMINAL_HEIGHT: u16 = 40;
 
-/// How many content rows the minimized Sessions grid draws: five when the
-/// terminal is tall enough to spare them and two on a short terminal.
-pub(crate) fn minimized_grid_rows(frame_height: u16) -> u16 {
-    if frame_height >= TALL_TERMINAL_HEIGHT {
+/// The number of columns in the minimized Sessions grid.
+pub(crate) const MINIMIZED_GRID_COLUMNS: usize = 3;
+
+/// How many content rows the minimized Sessions grid needs for its cells.
+/// Sparse grids use only the rows they need; short and tall terminals cap
+/// that count at the existing two- and five-row limits respectively.
+pub(crate) fn minimized_grid_rows(frame_height: u16, cell_count: usize) -> u16 {
+    let required = cell_count
+        .div_ceil(MINIMIZED_GRID_COLUMNS)
+        .max(1)
+        .try_into()
+        .unwrap_or(u16::MAX);
+    let cap = if frame_height >= TALL_TERMINAL_HEIGHT {
         5
     } else {
         2
-    }
+    };
+    required.min(cap)
 }
 
 /// The height the composer settles at: its desired height, but never below
@@ -324,7 +334,8 @@ pub fn render_combined(
         (
             SupportPane::Sessions,
             PaneDimensions {
-                minimized: minimized_grid_rows(area.height).saturating_add(2),
+                minimized: minimized_grid_rows(area.height, dashboard.sessions_rows().len())
+                    .saturating_add(2),
                 full: sessions_content_height(dashboard, area.width).saturating_add(2),
                 standard_cap: area.height / 3,
             },
@@ -612,11 +623,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minimized_grid_uses_five_content_rows_when_tall_and_two_when_short() {
-        assert_eq!(minimized_grid_rows(40), 5);
-        assert_eq!(minimized_grid_rows(100), 5);
-        assert_eq!(minimized_grid_rows(39), 2);
-        assert_eq!(minimized_grid_rows(10), 2);
+    fn minimized_grid_uses_fewest_rows_for_sparse_cell_counts() {
+        assert_eq!(minimized_grid_rows(40, 0), 1);
+        assert_eq!(minimized_grid_rows(40, 1), 1);
+        assert_eq!(minimized_grid_rows(40, 3), 1);
+        assert_eq!(minimized_grid_rows(40, 4), 2);
+    }
+
+    #[test]
+    fn minimized_grid_caps_rows_at_two_short_and_five_tall() {
+        assert_eq!(minimized_grid_rows(39, 6), 2);
+        assert_eq!(minimized_grid_rows(39, 100), 2);
+        assert_eq!(minimized_grid_rows(40, 15), 5);
+        assert_eq!(minimized_grid_rows(100, 100), 5);
     }
 
     #[test]
