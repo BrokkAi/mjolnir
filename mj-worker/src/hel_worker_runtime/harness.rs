@@ -1,4 +1,4 @@
-//! Exact, target-local harness installations for remote bare workers.
+//! Exact, target-local harness installations for bare workers.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};

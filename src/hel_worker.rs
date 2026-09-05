@@ -297,6 +297,9 @@ pub struct DurableRelay {
     /// their current status. This is stronger foreground evidence than a
     /// harness-neutral step clock, whose prose steps have no portable ending.
     foreground_tools: BTreeMap<String, (agent_client_protocol::schema::v1::ToolCallStatus, i64)>,
+    /// Codex tool calls explicitly introduced as execute cards, with the
+    /// command needed if a later partial update says the process is detached.
+    codex_execute_tools: BTreeMap<String, String>,
     /// Commands a Codex exec card reported without an exit code, keyed by the
     /// tool call id so a later card for the same call clears it. In memory,
     /// like the terminals: it describes processes that are alive now.
@@ -458,6 +461,7 @@ impl DurableRelay {
             harness_turns: HarnessTurnPolicy::default(),
             background_work: BackgroundWorkPolicy::default(),
             foreground_tools: BTreeMap::new(),
+            codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
@@ -617,6 +621,7 @@ impl DurableRelay {
         self.closed_agent_terminals.clear();
         // The harness that owned those processes is gone, and so is whatever
         // it left running: a restart cannot poll a process it no longer has.
+        self.codex_execute_tools.clear();
         self.background_exec_cards.clear();
         self.foreground_tools.clear();
     }
@@ -1669,6 +1674,7 @@ impl DurableRelay {
                 | RelayObservation::Closing
                 | RelayObservation::Closed
         ) {
+            self.codex_execute_tools.clear();
             self.background_exec_cards.clear();
             self.foreground_tools.clear();
         }
@@ -1722,8 +1728,18 @@ impl DurableRelay {
                     prompt_in_flight: self.snapshot.active_prompt.is_some(),
                 },
             )?;
+            self.finish_turn_activity();
         }
         Ok(ordinal)
+    }
+
+    /// Forget provisional tool statuses at a boundary the harness itself has
+    /// confirmed. Only a Codex execute card already known to have detached may
+    /// survive into idle as background work.
+    fn finish_turn_activity(&mut self) {
+        self.foreground_tools.clear();
+        self.codex_execute_tools
+            .retain(|tool_call_id, _| self.background_exec_cards.contains_key(tool_call_id));
     }
 
     /// Track tool statuses that prove the agent is still doing foreground
@@ -1787,28 +1803,46 @@ impl DurableRelay {
             ),
             _ => return,
         };
+        match kind {
+            Some(agent_client_protocol::schema::v1::ToolKind::Execute) => {
+                let command =
+                    exec_card_command(raw_input).unwrap_or_else(|| tool_call_id.to_owned());
+                self.codex_execute_tools
+                    .insert(tool_call_id.to_owned(), command);
+            }
+            Some(_) => {
+                self.codex_execute_tools.remove(tool_call_id);
+                self.background_exec_cards.remove(tool_call_id);
+                return;
+            }
+            None => {}
+        }
+        let Some(command) = self.codex_execute_tools.get(tool_call_id).cloned() else {
+            // Tool-call updates are partial. A result with no kind belongs to
+            // the card that introduced it; it is not evidence of execution by
+            // itself (guardian reviews and searches also carry raw output).
+            return;
+        };
+        if status.is_some_and(|status| {
+            status == agent_client_protocol::schema::v1::ToolCallStatus::Failed
+        }) {
+            self.codex_execute_tools.remove(tool_call_id);
+            self.background_exec_cards.remove(tool_call_id);
+            return;
+        }
         // A card with no result says nothing about a process: an execute card
         // is in flight until Codex reports its output.
         let Some(raw_output) = raw_output else {
             return;
         };
-        if kind.is_some_and(|kind| kind != agent_client_protocol::schema::v1::ToolKind::Execute) {
-            return;
-        }
-        if status.is_some_and(|status| {
-            status == agent_client_protocol::schema::v1::ToolCallStatus::Failed
-        }) {
-            self.background_exec_cards.remove(tool_call_id);
-            return;
-        }
         if raw_output
             .get("exit_code")
             .is_some_and(|code| !code.is_null())
         {
+            self.codex_execute_tools.remove(tool_call_id);
             self.background_exec_cards.remove(tool_call_id);
             return;
         }
-        let command = exec_card_command(raw_input).unwrap_or_else(|| tool_call_id.to_owned());
         self.background_exec_cards
             .entry(tool_call_id.to_owned())
             .or_insert(BackgroundCommand {
@@ -1841,6 +1875,7 @@ impl DurableRelay {
         ) {
             bail!("checkpoint barriers complete through record_checkpoint_ready");
         }
+        let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandCompleted {
@@ -1848,6 +1883,9 @@ impl DurableRelay {
                 outcome,
             },
         )?;
+        if finishes_turn {
+            self.finish_turn_activity();
+        }
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -1867,6 +1905,9 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        if command == RelayCommandKind::Prompt {
+            self.finish_turn_activity();
+        }
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -1886,6 +1927,9 @@ impl DurableRelay {
                 message: message.into(),
             },
         )?;
+        if command == RelayCommandKind::Prompt {
+            self.finish_turn_activity();
+        }
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -3748,6 +3792,10 @@ mod tests {
         assert_eq!(settled.execution, RelayExecutionState::Idle);
         assert!(settled.harness_turn.is_none());
         assert_eq!(
+            settled.foreground_tool_started_at_ms, None,
+            "the confirmed turn boundary clears any tool status the adapter left open"
+        );
+        assert_eq!(
             settled.last_harness_turn_started_ordinal,
             Some(1),
             "the started ordinal only moves forward, so a checkpoint can compare against it"
@@ -3848,6 +3896,10 @@ mod tests {
             "a prompt result means the SDK reached a turn boundary"
         );
         assert_eq!(state.execution, RelayExecutionState::Idle);
+        assert_eq!(
+            state.foreground_tool_started_at_ms, None,
+            "the prompt result outranks a stale pending tool status"
+        );
     }
 
     #[test]
@@ -3881,6 +3933,20 @@ mod tests {
             "exit_code": exit_code,
         }));
         SessionUpdate::ToolCall(call)
+    }
+
+    fn exec_card_update(tool_call_id: &'static str, exit_code: Option<i64>) -> SessionUpdate {
+        use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
+
+        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            tool_call_id,
+            ToolCallUpdateFields::new()
+                .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                .raw_output(serde_json::json!({
+                    "output": "",
+                    "exit_code": exit_code,
+                })),
+        ))
     }
 
     #[test]
@@ -3925,8 +3991,22 @@ mod tests {
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
 
+        let mut started = agent_client_protocol::schema::v1::ToolCall::new("call-1", "shell");
+        started.kind = agent_client_protocol::schema::v1::ToolKind::Execute;
+        started.status = agent_client_protocol::schema::v1::ToolCallStatus::InProgress;
+        started.raw_input = Some(serde_json::json!({
+            "command": ["bash", "-lc", "sleep 600"],
+        }));
         relay
-            .record_session_update(exec_card("call-1", &["bash", "-lc", "sleep 600"], None))
+            .record_session_update(SessionUpdate::ToolCall(started))
+            .unwrap();
+        assert!(
+            relay.operational_state().background_commands.is_empty(),
+            "an execute card is not background work before it reports a detached result"
+        );
+
+        relay
+            .record_session_update(exec_card_update("call-1", None))
             .unwrap();
 
         let commands = relay.operational_state().background_commands;
@@ -3947,9 +4027,85 @@ mod tests {
 
         // Codex polls the process it left running; the poll carries the exit.
         relay
-            .record_session_update(exec_card("call-1", &["bash", "-lc", "sleep 600"], Some(0)))
+            .record_session_update(exec_card_update("call-1", Some(0)))
             .unwrap();
         assert!(relay.operational_state().background_commands.is_empty());
+    }
+
+    #[test]
+    fn a_codex_non_execute_partial_result_is_not_background_work() {
+        use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+
+        let mut guardian = agent_client_protocol::schema::v1::ToolCall::new(
+            "guardian-assessment",
+            "Guardian Review",
+        );
+        guardian.kind = agent_client_protocol::schema::v1::ToolKind::Think;
+        guardian.status = agent_client_protocol::schema::v1::ToolCallStatus::InProgress;
+        relay
+            .record_session_update(SessionUpdate::ToolCall(guardian))
+            .unwrap();
+        relay
+            .record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "guardian-assessment",
+                ToolCallUpdateFields::new()
+                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                    .raw_output(serde_json::json!({"review": {"status": "approved"}})),
+            )))
+            .unwrap();
+
+        assert!(
+            relay.operational_state().background_commands.is_empty(),
+            "a partial result inherits the original non-execute kind"
+        );
+    }
+
+    #[test]
+    fn prompt_boundaries_clear_stale_tools_but_preserve_detached_commands() {
+        for outcome in ["completed", "rejected", "interrupted"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+            relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+            submit_relay(&mut relay, "boundary-prompt", prompt("run work"));
+            assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+            relay.record_session_update(tool_call_update()).unwrap();
+            relay
+                .record_session_update(exec_card("detached", &["sleep", "600"], None))
+                .unwrap();
+            assert!(
+                relay
+                    .operational_state()
+                    .foreground_tool_started_at_ms
+                    .is_some()
+            );
+
+            match outcome {
+                "completed" => relay.record_command_completed(
+                    "boundary-prompt",
+                    RelayCommandOutcome::Prompt {
+                        stop_reason: "end_turn".into(),
+                    },
+                ),
+                "rejected" => relay.record_command_rejected("boundary-prompt", "adapter failed"),
+                _ => relay.record_command_interrupted("boundary-prompt", "cancelled"),
+            }
+            .unwrap();
+
+            let state = relay.operational_state();
+            assert_eq!(state.foreground_tool_started_at_ms, None, "{outcome}");
+            assert_eq!(state.background_commands.len(), 1, "{outcome}");
+            relay
+                .record_session_update(exec_card_update("detached", Some(0)))
+                .unwrap();
+            assert!(
+                relay.operational_state().background_commands.is_empty(),
+                "{outcome}"
+            );
+        }
     }
 
     #[test]

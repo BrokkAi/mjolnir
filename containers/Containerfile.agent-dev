@@ -76,20 +76,14 @@ RUN npm install --global --no-audit --no-fund \
         @agentclientprotocol/claude-agent-acp@0.73.0 \
         @deepseek-ai/dsh@0.1.1-rc.2 \
         dsh-acp-server@0.10.0 \
-        @openai/codex@0.151.0 \
+        @openai/codex@0.153.4 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version
 
-# codex-acp 1.8.0 depends on @openai/codex ^0.152.0 and bundles that build, but
-# 0.152 is suspected buggy, and no codex-acp release resolves to 0.151. The
-# bridge's startAcpServer() prefers $CODEX_PATH over its bundled binary, so the
-# separate global @openai/codex@0.151.0 above plus this variable pin the CLI
-# without pinning the bridge backwards. The path is the literal target of the
-# `codex` bin symlink npm creates; re-check it with `readlink -f $(which codex)`
-# whenever the codex version moves. Hel layers the bridge spec's environment on
-# top of the inherited process environment rather than starting from an
-# allowlist, so a container ENV reaches the bridge.
+# The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
+# separately pinned global CLI so containers and managed bare workers use
+# the same version regardless of the bridge's transitive dependency.
 ENV CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js
 
 # Buildx sets TARGETARCH per platform; the dpkg fallback keeps a plain

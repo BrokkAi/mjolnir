@@ -8,16 +8,17 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::{HarnessProfile, PhoneConfig};
-use hel::hel_state::{HelState, SessionRecord};
-use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor};
+use hel::hel_config::{HarnessProfile, HelConfig, PhoneConfig, is_bare_project_target};
+use hel::hel_state::{HelState, MaterializedSession, SessionRecord};
+use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, ProcessExecutor};
 use hel::hel_worker::RelayCommand;
 use hel::hel_workspace::WorkspaceRecord;
 use mj_controller::hel_controller::{Controller, SessionLaunchOptions};
 use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_server::{
-    ActionOutcome, ControllerAction, ControllerRequest, ReadReceiptRequest, ResumeQueueDisposition,
-    ServerOptions, ViewerQueuedPrompt, ViewerQuota, ViewerSnapshot, ViewerUserShell,
+    ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, PreflightFailure,
+    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerQueuedPrompt, ViewerQuota,
+    ViewerSnapshot, ViewerUserShell,
 };
 use mj_controller::hel_session_manager::{
     SessionManagerChannels, SessionManagerControl, new_command_id,
@@ -26,6 +27,7 @@ use mj_controller::hel_tailscale::TailscaleTls;
 use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 
 use crate::daemon::{ResumeSessionRequest, RuntimeState, WebViewerStatus};
+use crate::dashboard::io::config_only_controller;
 use crate::pollers::{
     CredentialSyncNotices, CredentialSyncSignalTracker, QUOTA_STALE_AFTER, QuotaRefreshBatch,
     QuotaUpdate, apply_worker_record_update, credential_sync_targets, dashboard_worker_targets,
@@ -54,6 +56,249 @@ impl From<&PhoneConfig> for ServerArgs {
 
 const TAILSCALE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const TAILSCALE_RENEW_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Transcript projection parses every stored ACP content chunk. Keep that work
+/// off the control task, and allow only a small number of projections to use
+/// the blocking pool at once so a burst of active sessions cannot turn the
+/// pool into an unbounded queue.
+const MAX_CONCURRENT_CONVERSATION_PROJECTIONS: usize = 2;
+const CONVERSATION_PROJECTION_CHANNEL_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConversationProjectionKey {
+    ordinal: u64,
+    digest: String,
+}
+
+impl ConversationProjectionKey {
+    fn of(materialized: &MaterializedSession) -> Self {
+        Self {
+            ordinal: materialized.applied_event_ordinal,
+            digest: materialized.applied_event_digest.clone(),
+        }
+    }
+
+    /// Event ordinals are monotonic. A changed digest at one ordinal is also a
+    /// new projection, which preserves the integrity-repair path without
+    /// relying on string ordering for digests.
+    fn is_newer_than(&self, other: &Self) -> bool {
+        self.ordinal > other.ordinal
+            || (self.ordinal == other.ordinal && self.digest != other.digest)
+    }
+}
+
+struct ConversationProjectionRequest {
+    materialized: MaterializedSession,
+    key: ConversationProjectionKey,
+    generation: u64,
+}
+
+struct ConversationProjectionResult {
+    session_id: String,
+    key: ConversationProjectionKey,
+    generation: u64,
+    result: std::result::Result<BrowserTranscript, String>,
+}
+
+/// Owns the one-at-a-time/latest-state scheduling for each session. The
+/// control loop remains the sole owner of these maps; background tasks only
+/// return completed browser projections through `results`.
+struct ConversationProjectionDispatcher {
+    in_flight: std::collections::BTreeMap<String, (ConversationProjectionKey, u64)>,
+    pending: std::collections::BTreeMap<String, ConversationProjectionRequest>,
+    completed: std::collections::BTreeMap<String, ConversationProjectionKey>,
+    generations: std::collections::BTreeMap<String, u64>,
+    permits: Arc<tokio::sync::Semaphore>,
+    results: tokio::sync::mpsc::Sender<ConversationProjectionResult>,
+    shutdown: tokio_util::sync::CancellationToken,
+}
+
+impl ConversationProjectionDispatcher {
+    fn new(
+        results: tokio::sync::mpsc::Sender<ConversationProjectionResult>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            in_flight: std::collections::BTreeMap::new(),
+            pending: std::collections::BTreeMap::new(),
+            completed: std::collections::BTreeMap::new(),
+            generations: std::collections::BTreeMap::new(),
+            permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_CONVERSATION_PROJECTIONS,
+            )),
+            results,
+            shutdown,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_permits(
+        results: tokio::sync::mpsc::Sender<ConversationProjectionResult>,
+        shutdown: tokio_util::sync::CancellationToken,
+        permits: usize,
+    ) -> Self {
+        let mut dispatcher = Self::new(results, shutdown);
+        dispatcher.permits = Arc::new(tokio::sync::Semaphore::new(permits));
+        dispatcher
+    }
+
+    /// Queue a session's newest durable view. At most one request is running
+    /// and one newer request is retained for any given session.
+    fn enqueue(&mut self, materialized: MaterializedSession) {
+        let session_id = materialized.session_id.clone();
+        let key = ConversationProjectionKey::of(&materialized);
+        if self
+            .completed
+            .get(&session_id)
+            .is_some_and(|completed| !key.is_newer_than(completed))
+        {
+            return;
+        }
+        let generation = *self.generations.entry(session_id.clone()).or_default();
+        if let Some((in_flight, in_flight_generation)) = self.in_flight.get(&session_id) {
+            if generation != *in_flight_generation || key.is_newer_than(in_flight) {
+                let replace = self.pending.get(&session_id).is_none_or(|pending| {
+                    pending.generation != generation || key.is_newer_than(&pending.key)
+                });
+                if replace {
+                    self.pending.insert(
+                        session_id,
+                        ConversationProjectionRequest {
+                            materialized,
+                            key,
+                            generation,
+                        },
+                    );
+                }
+            }
+            return;
+        }
+        self.in_flight
+            .insert(session_id.clone(), (key.clone(), generation));
+        self.start(ConversationProjectionRequest {
+            materialized,
+            key,
+            generation,
+        });
+    }
+
+    /// Finish one task and, when the session is still active, immediately
+    /// launch the newest coalesced request. Returning `None` means the task
+    /// failed or no longer belongs to the current in-flight request.
+    fn finish(
+        &mut self,
+        result: ConversationProjectionResult,
+        session_active: bool,
+    ) -> Option<(String, ConversationProjectionKey, BrowserTranscript)> {
+        let expected = self.in_flight.remove(&result.session_id);
+        if expected.as_ref() != Some(&(result.key.clone(), result.generation)) {
+            tracing::warn!(
+                session_id = %result.session_id,
+                "discarding an out-of-date browser transcript projection"
+            );
+            return None;
+        }
+        let session_id = result.session_id;
+        let key = result.key;
+        let current_generation = self
+            .generations
+            .get(&session_id)
+            .copied()
+            .unwrap_or_default();
+        let current = result.generation == current_generation;
+        let projected = match result.result {
+            Ok(transcript) if session_active && current => {
+                self.completed.insert(session_id.clone(), key.clone());
+                Some((session_id.clone(), key, transcript))
+            }
+            Ok(_) => {
+                // An inactive session, or a result from an earlier lifecycle
+                // generation, must not resurrect a conversation. Its next
+                // active update gets a fresh generation.
+                self.completed.remove(&session_id);
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "browser transcript projection failed: {error}"
+                );
+                None
+            }
+        };
+        if session_active {
+            if let Some(pending) = self.pending.remove(&session_id) {
+                self.enqueue(pending.materialized);
+            }
+        } else {
+            self.pending.remove(&session_id);
+            self.completed.remove(&session_id);
+        }
+        projected
+    }
+
+    /// Drop queued/completed state after a controller reload removes a
+    /// session. An in-flight task is allowed to finish; `finish` receives the
+    /// current active-state guard and discards its result.
+    fn forget(&mut self, session_id: &str) {
+        self.pending.remove(session_id);
+        self.completed.remove(session_id);
+        let generation = self.generations.entry(session_id.to_owned()).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn session_ids(&self) -> std::collections::BTreeSet<String> {
+        self.in_flight
+            .keys()
+            .chain(self.pending.keys())
+            .chain(self.completed.keys())
+            .cloned()
+            .collect()
+    }
+
+    fn start(&self, request: ConversationProjectionRequest) {
+        let session_id = request.materialized.session_id.clone();
+        let key = request.key;
+        let generation = request.generation;
+        let permits = Arc::clone(&self.permits);
+        let results = self.results.clone();
+        let shutdown = self.shutdown.clone();
+        tokio::spawn(async move {
+            let result = match tokio::select! {
+                _ = shutdown.cancelled() => return,
+                result = permits.acquire_owned() => result,
+            } {
+                Ok(permit) => {
+                    let projection = tokio::task::spawn_blocking(move || {
+                        mj_chat::hel_chat::TranscriptSnapshot::from_materialized(
+                            &request.materialized,
+                        )
+                        .browser_transcript(None)
+                    })
+                    .await;
+                    drop(permit);
+                    projection
+                        .map_err(|error| format!("transcript projection task failed: {error}"))
+                }
+                Err(error) => Err(format!("transcript projection worker stopped: {error}")),
+            };
+            let message = ConversationProjectionResult {
+                session_id,
+                key,
+                generation,
+                result,
+            };
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                result = results.send(message) => {
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "browser transcript projection result dropped after server shutdown");
+                    }
+                }
+            }
+        });
+    }
+}
 
 struct ResolvedServerArgs {
     bind: SocketAddr,
@@ -476,6 +721,7 @@ pub(crate) async fn run_server(
     let mut prompt_images = std::collections::BTreeSet::new();
     let mut operational = std::collections::BTreeMap::new();
     let mut operations = std::collections::BTreeMap::new();
+    let mut launch_failures = Vec::new();
     // What the capacity poller last said, per probe target. The projection is
     // built from this on every publish rather than being accumulated, so a
     // target that disappears from the configuration disappears from the page.
@@ -496,6 +742,7 @@ pub(crate) async fn run_server(
             operational: &operational,
             operations: &operations,
             capacity: &viewer_capacity(&capacity_state),
+            launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
         },
         revision,
@@ -575,6 +822,7 @@ pub(crate) async fn run_server(
     });
 
     let serve = mj_controller::hel_server::run_server(options);
+    let conversation_projection_shutdown = termination.child_token();
     let control = async {
         let mut credential_tick = tokio::time::interval(Duration::from_millis(250));
         // Stored viewer state expires with the authentication that created it.
@@ -601,6 +849,13 @@ pub(crate) async fn run_server(
         let mut action_cancellations = std::collections::BTreeMap::<u64, PhoneActionControl>::new();
         let mut action_sessions = std::collections::BTreeMap::<u64, String>::new();
         let mut action_replies = PendingActionReplies::default();
+        let mut launch_workspaces = std::collections::BTreeMap::new();
+        let (conversation_projection_tx, mut conversation_projection_rx) =
+            tokio::sync::mpsc::channel(CONVERSATION_PROJECTION_CHANNEL_CAPACITY);
+        let mut conversation_projections = ConversationProjectionDispatcher::new(
+            conversation_projection_tx,
+            conversation_projection_shutdown.clone(),
+        );
         let mut quota_updates_open = true;
         // A feed that ends is not a reason to exit quietly: the phone server
         // exists to follow sessions, so losing that feed is a named failure
@@ -621,6 +876,7 @@ pub(crate) async fn run_server(
                         operational: &operational,
                         operations: &operations,
                         capacity: &viewer_capacity(&capacity_state),
+                        launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
                     },
                     $revision,
@@ -703,6 +959,48 @@ pub(crate) async fn run_server(
                         }
                     }
                 }
+                projected = conversation_projection_rx.recv() => {
+                    let Some(projected) = projected else {
+                        failure = feed_stopped(
+                            termination.is_cancelled(),
+                            "the browser transcript projection feed stopped",
+                        );
+                        break;
+                    };
+                    let session_id = projected.session_id.clone();
+                    let session_active = controller
+                        .state
+                        .sessions
+                        .get(&session_id)
+                        .is_some_and(|session| session.state.is_active());
+                    if !session_active {
+                        // Invalidate a late result before it can be applied or
+                        // launch another queued projection. A session that is
+                        // resumed later gets a new generation from its next
+                        // worker snapshot.
+                        conversation_projections.forget(&session_id);
+                    }
+                    if let Some((session_id, _key, transcript)) =
+                        conversation_projections.finish(projected, session_active)
+                    {
+                        conversations.insert(session_id, transcript);
+                        revision = daemon_runtime.allocate_revision();
+                        conversation_tx.send_replace(conversations.clone());
+                        publish_snapshot!(revision);
+                    } else if !session_active && conversations.remove(&session_id).is_some() {
+                        // Controller reload normally removes inactive rows
+                        // first, but this also covers a worker result racing
+                        // that reload and keeps the viewer from seeing a
+                        // conversation for a dead session.
+                        revision = daemon_runtime.allocate_revision();
+                        conversation_tx.send_replace(conversations.clone());
+                        publish_snapshot!(revision);
+                    }
+                    // SessionManagerUpdates has a synchronous pending fast
+                    // path. Yield after each completion so a hot stream of
+                    // updates cannot monopolize this runtime worker.
+                    tokio::task::yield_now().await;
+                }
                 update = worker_updates_rx.recv() => {
                     let Some(update) = update else {
                         failure = feed_stopped(termination.is_cancelled(), "the session manager stopped; the phone server can no longer follow sessions");
@@ -729,33 +1027,34 @@ pub(crate) async fn run_server(
                         tracing::warn!(session_id = %update.session_id, "could not persist relay session metadata: {error:#}");
                     }
                     if let Some(snapshot) = update.view.snapshot {
+                        let materialized = snapshot.materialized;
+                        let operational_state = snapshot.operational;
+                        let queued = queued_prompt_projection(&materialized);
+                        let pending = materialized.pending_elicitations.clone();
+                        let active_shells = operational_state.active_user_shells.clone();
+                        let prompt_images_supported =
+                            agent_accepts_prompt_images(&operational_state);
                         active_user_shells.insert(
                             update.session_id.clone(),
-                            snapshot.operational.active_user_shells.clone(),
+                            active_shells,
                         );
-                        conversations.insert(
-                            update.session_id.clone(),
-                            mj_chat::hel_chat::TranscriptSnapshot::from_materialized(
-                                &snapshot.materialized,
-                            )
-                            .browser_transcript(None),
-                        );
+                        conversation_projections.enqueue(materialized);
                         queued_prompts.insert(
                             update.session_id.clone(),
-                            queued_prompt_projection(&snapshot.materialized),
+                            queued,
                         );
                         pending_elicitations.insert(
                             update.session_id.clone(),
-                            snapshot.materialized.pending_elicitations.clone(),
+                            pending,
                         );
-                        if agent_accepts_prompt_images(&snapshot.operational) {
+                        if prompt_images_supported {
                             prompt_images.insert(update.session_id.clone());
                         } else {
                             prompt_images.remove(&update.session_id);
                         }
                         operational.insert(
                             update.session_id.clone(),
-                            snapshot.operational.clone(),
+                            operational_state,
                         );
                         operations = daemon_runtime
                             .active_lifecycles()
@@ -766,6 +1065,11 @@ pub(crate) async fn run_server(
                         conversation_tx.send_replace(conversations.clone());
                         publish_snapshot!(revision);
                     }
+                    // The session update receiver can return pending entries
+                    // without touching Tokio's budgeted receive operation.
+                    // Give HTTP/TLS tasks a scheduling opportunity after each
+                    // update even when the worker is publishing continuously.
+                    tokio::task::yield_now().await;
                 }
                 _ = prune_tick.tick() => {
                     // Only rows whose client id names a phone are considered:
@@ -913,30 +1217,46 @@ pub(crate) async fn run_server(
                     }
                 }
                 preflight = preflight_rx.recv() => {
-                    let Some(mj_controller::hel_server::PreflightRequest { bundle_id, reply }) = preflight else {
+                    let Some(mj_controller::hel_server::PreflightRequest {
+                        bundle_id,
+                        target_id,
+                        project_directory,
+                        reply,
+                    }) = preflight else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
                         break;
                     };
-                    // Reading a working tree's status touches the disk, so it
-                    // runs on its own task rather than on the loop that has to
-                    // stay responsive to every other feed.
-                    let bundle = controller.config.bundles.get(&bundle_id).cloned();
+                    // Reading a working tree's status or validating a project
+                    // directory touches the disk, so it runs on its own task
+                    // rather than on the loop that has to stay responsive to
+                    // every other feed.
+                    let config = controller.config.clone();
+                    let project_validation = project_directory.is_some();
                     tokio::spawn(async move {
                         let answer = tokio::task::spawn_blocking(move || {
-                            let bundle = bundle.context("unknown bundle")?;
-                            let dirty = hel::hel_local_git::dirty_local_repositories(&bundle)?
-                                .into_iter()
-                                .map(|repository| dirty_repository_label(&repository.path))
-                                .collect();
-                            anyhow::Ok(mj_controller::hel_server::PreflightNew {
-                                dirty_repositories: dirty,
-                            })
+                            run_new_preflight(config, bundle_id, target_id, project_directory)
                         })
                         .await;
                         let answer = match answer {
                             Ok(Ok(answer)) => Ok(answer),
-                            Ok(Err(error)) => Err(format!("{error:#}")),
-                            Err(error) => Err(format!("preflight task failed: {error}")),
+                            Ok(Err(error)) => {
+                                tracing::debug!(
+                                    error = %error,
+                                    project_validation,
+                                    "phone preflight check failed"
+                                );
+                                Err(if project_validation {
+                                    PreflightFailure::Validation
+                                } else {
+                                    PreflightFailure::Controller(format!("{error:#}"))
+                                })
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "phone preflight task failed");
+                                Err(PreflightFailure::Controller(format!(
+                                    "preflight task failed: {error}"
+                                )))
+                            }
                         };
                         if reply.send(answer).is_err() {
                             tracing::debug!("phone preflight reply dropped after client disconnect");
@@ -1027,6 +1347,7 @@ pub(crate) async fn run_server(
                             if request.reply.send(outcome).is_err() {
                                 tracing::debug!(%target_id, "phone capacity refresh reply dropped after client disconnect");
                             }
+                            tokio::task::yield_now().await;
                             continue;
                         }
                         ControllerAction::RefreshQuota { profile_id } => {
@@ -1047,6 +1368,7 @@ pub(crate) async fn run_server(
                             if request.reply.send(outcome).is_err() {
                                 tracing::debug!(%profile_id, "phone quota refresh reply dropped after client disconnect");
                             }
+                            tokio::task::yield_now().await;
                             continue;
                         }
                         _ => {}
@@ -1065,6 +1387,7 @@ pub(crate) async fn run_server(
                         if request.reply.send(outcome).is_err() {
                             tracing::debug!(%session_id, "phone cancellation reply dropped after client disconnect");
                         }
+                        tokio::task::yield_now().await;
                         continue;
                     }
                     let session_id = match admit_phone_action(
@@ -1077,6 +1400,7 @@ pub(crate) async fn run_server(
                             if request.reply.send(refusal).is_err() {
                                 tracing::debug!("phone action refusal reply dropped after client disconnect");
                             }
+                            tokio::task::yield_now().await;
                             continue;
                         }
                     };
@@ -1087,6 +1411,14 @@ pub(crate) async fn run_server(
                     let started = action_started_tx.clone();
                     next_action_id = next_action_id.wrapping_add(1).max(1);
                     let action_id = next_action_id;
+                    if let ControllerAction::New { workspace_id, .. } = &action {
+                        let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
+                            phone_workspaces[0].id.clone()
+                        } else {
+                            workspace_id.clone()
+                        };
+                        launch_workspaces.insert(action_id, workspace_id);
+                    }
                     let control = PhoneActionControl::for_action(&action);
                     action_cancellations.insert(action_id, control.clone());
                     if let Some(session_id) = &session_id {
@@ -1129,7 +1461,10 @@ pub(crate) async fn run_server(
                     });
                 }
                 started = action_started_rx.recv() => {
-                    let Some(started) = started else { continue; };
+                    let Some(started) = started else {
+                        tokio::task::yield_now().await;
+                        continue;
+                    };
                     let publication = if !action_cancellations.contains_key(&started.action_id) {
                         Err("phone action completed before its provisional session was published".into())
                     } else {
@@ -1156,6 +1491,7 @@ pub(crate) async fn run_server(
                                 operational: &operational,
                                 operations: &operations,
                                 capacity: &viewer_capacity(&capacity_state),
+                                launch_failures: &launch_failures,
                                 reviews: &review_views(&daemon_runtime),
                             },
                             revision,
@@ -1200,6 +1536,13 @@ pub(crate) async fn run_server(
                     // reached the arm that answers it, so its phone is still
                     // waiting for a reply it can act on.
                     action_replies.resolve(action_id, ActionOutcome::Failed);
+                    if let Some(workspace_id) = launch_workspaces.remove(&action_id)
+                        && result.is_err()
+                    {
+                        record_launch_failure(&mut launch_failures, action_id, workspace_id);
+                        revision = daemon_runtime.allocate_revision();
+                        publish_snapshot!(revision);
+                    }
                     if let Err(error) = &result {
                         tracing::warn!(action_id, %error, "phone action failed");
                     }
@@ -1277,6 +1620,16 @@ pub(crate) async fn run_server(
                             conversations.retain(|id, _| {
                                 controller.state.sessions.get(id).is_some_and(|session| session.state.is_active())
                             });
+                            for session_id in conversation_projections.session_ids() {
+                                if !controller
+                                    .state
+                                    .sessions
+                                    .get(&session_id)
+                                    .is_some_and(|session| session.state.is_active())
+                                {
+                                    conversation_projections.forget(&session_id);
+                                }
+                            }
                             revision = daemon_runtime.allocate_revision();
                             conversation_tx.send_replace(conversations.clone());
                             publish_snapshot!(revision);
@@ -1306,6 +1659,7 @@ pub(crate) async fn run_server(
         result = serve => result,
         result = control => result,
     };
+    conversation_projection_shutdown.cancel();
     renewal_cancellation.cancel();
     if let Some(task) = renewal_task
         && let Err(error) = task.await
@@ -1385,6 +1739,48 @@ fn dirty_repository_label(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+/// Perform the filesystem half of a new-session preflight.
+///
+/// This runs on the blocking task owned by the phone server. Bare targets
+/// need the same directory-and-Git-HEAD validation as the dashboard; isolated
+/// targets instead inspect the configured bundle for dirty local repositories.
+fn run_new_preflight(
+    config: HelConfig,
+    bundle_id: String,
+    target_id: String,
+    project_directory: Option<PathBuf>,
+) -> Result<mj_controller::hel_server::PreflightNew> {
+    let target_is_bare = config
+        .targets
+        .get(&target_id)
+        .with_context(|| format!("unknown target template {target_id:?}"))
+        .map(is_bare_project_target)?;
+    if target_is_bare {
+        let directory =
+            project_directory.context("project directory is required for a bare target")?;
+        config_only_controller(config).validate_project_directory(
+            &target_id,
+            &directory,
+            &ProcessExecutor,
+        )?;
+        return Ok(mj_controller::hel_server::PreflightNew {
+            dirty_repositories: Vec::new(),
+        });
+    }
+    if project_directory.is_some() {
+        bail!("project directory is unsupported for this target");
+    }
+
+    let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
+    let dirty = hel::hel_local_git::dirty_local_repositories(bundle)?
+        .into_iter()
+        .map(|repository| dirty_repository_label(&repository.path))
+        .collect();
+    Ok(mj_controller::hel_server::PreflightNew {
+        dirty_repositories: dirty,
+    })
+}
+
 fn phone_action_capacity_available(active_actions: usize) -> bool {
     active_actions < MAX_CONCURRENT_PHONE_ACTIONS
 }
@@ -1446,6 +1842,22 @@ fn track_started_phone_session(
     action_sessions.insert(action_id, session_id.clone());
     state.sessions.insert(session_id, session);
     Ok(())
+}
+
+/// Retain safe notices even if provisioning removed its provisional session.
+/// This bounded, daemon-lifetime history survives durable controller reloads.
+fn record_launch_failure(
+    failures: &mut Vec<mj_controller::hel_server::ViewerLaunchFailure>,
+    action_id: u64,
+    workspace_id: String,
+) {
+    failures.push(mj_controller::hel_server::ViewerLaunchFailure {
+        id: format!("{}-{action_id}", std::process::id()),
+        workspace_id,
+    });
+    if failures.len() > 16 {
+        failures.remove(0);
+    }
 }
 
 struct PhoneActionServices<'a> {
@@ -1798,6 +2210,7 @@ struct PhoneSessionViews<'a> {
     operations: &'a std::collections::BTreeMap<String, mj_controller::hel_server::ViewerOperation>,
     /// The most recent capacity reading per probe target.
     capacity: &'a [mj_controller::hel_server::ViewerTargetCapacity],
+    launch_failures: &'a [mj_controller::hel_server::ViewerLaunchFailure],
     /// Reviews the daemon is running, keyed by session. The phone renders the
     /// same review the terminal does, from the same host.
     reviews:
@@ -2147,9 +2560,11 @@ fn viewer_snapshot(
         operational,
         operations,
         capacity,
+        launch_failures,
     } = views;
     let mut snapshot =
         ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision);
+    snapshot.launch_failures = launch_failures.to_vec();
     snapshot.workspaces = workspaces
         .iter()
         .map(|workspace| mj_controller::hel_server::ViewerWorkspace {
@@ -2261,13 +2676,21 @@ fn viewer_snapshot(
                 .map(|prompt| prompt.started_at_ms)
                 .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms))
                 .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok());
+            let activity = mj_chat::usage_format::SessionActivity::of(state);
+            session.is_idle = controller
+                .state
+                .sessions
+                .get(&session.id)
+                .is_some_and(|record| record.state == hel::hel_state::SessionState::Running)
+                && session.operation.is_none()
+                && activity.is_idle(turn_started_at);
             session.activity = mj_chat::usage_format::format_activity_columns(
                 now,
                 turn_started_at,
                 state
                     .current_step_started_at_ms
                     .and_then(|value| u64::try_from(value).ok()),
-                &mj_chat::usage_format::SessionActivity::of(state),
+                &activity,
             )
             .join("  ")
             .trim()
@@ -2319,7 +2742,9 @@ fn viewer_snapshot(
 mod tests {
     use super::*;
     use crate::pollers::QUOTA_REFRESH_INTERVAL;
-    use hel::hel_config::{CONFIG_VERSION, HarnessKind, HelConfig};
+    use hel::hel_config::{
+        CONFIG_VERSION, HarnessKind, HelConfig, ProjectBundle, ProjectRepository, TargetTemplate,
+    };
     use hel::hel_state::SessionState;
 
     #[tokio::test]
@@ -2371,6 +2796,81 @@ mod tests {
                 .unwrap()
                 .contains("detection is disabled")
         );
+    }
+
+    fn bare_preflight_config() -> HelConfig {
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("raw".into(), TargetTemplate::LocalBare);
+        config
+    }
+
+    #[test]
+    fn new_preflight_rejects_a_bare_project_without_a_git_head() {
+        let error = run_new_preflight(
+            bare_preflight_config(),
+            "hel".into(),
+            "raw".into(),
+            Some(PathBuf::from("/definitely/not/a/project")),
+        )
+        .expect_err("a missing project directory must fail preflight");
+
+        assert!(
+            error
+                .to_string()
+                .contains("project directory does not exist or is not a directory")
+        );
+    }
+
+    #[test]
+    fn new_preflight_accepts_a_git_project_for_a_bare_target() {
+        let directory = std::env::current_dir().expect("the test has a working directory");
+        let answer = run_new_preflight(
+            bare_preflight_config(),
+            "hel".into(),
+            "raw".into(),
+            Some(directory),
+        )
+        .expect("the repository running the test has a valid Git HEAD");
+
+        assert!(answer.dirty_repositories.is_empty());
+    }
+
+    #[test]
+    fn new_preflight_keeps_bundle_dirty_check_for_isolated_targets() {
+        let mut config = HelConfig::default();
+        config.targets.insert(
+            "podman".into(),
+            TargetTemplate::LocalPodman {
+                container: hel::hel_config::ContainerTemplate {
+                    image: "test-image".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: Default::default(),
+                    workspace_storage: Default::default(),
+                },
+            },
+        );
+        config.bundles.insert(
+            "hel".into(),
+            ProjectBundle {
+                primary_repo: "hel".into(),
+                repositories: vec![ProjectRepository {
+                    id: "hel".into(),
+                    github: Some("owner/hel".into()),
+                    local: None,
+                    destination: "hel".into(),
+                    git_ref: None,
+                }],
+            },
+        );
+        let answer = run_new_preflight(config, "hel".into(), "podman".into(), None)
+            .expect("a GitHub-only bundle has no local dirty repositories");
+
+        assert!(answer.dirty_repositories.is_empty());
     }
 
     #[test]
@@ -2510,24 +3010,28 @@ mod tests {
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
         };
-        let operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
-        let snapshot = viewer_snapshot(
-            &controller,
-            &[],
-            &std::collections::BTreeMap::new(),
-            &PhoneSessionViews {
-                conversations: &std::collections::BTreeMap::new(),
-                queued_prompts: &std::collections::BTreeMap::new(),
-                active_user_shells: &std::collections::BTreeMap::new(),
-                pending_elicitations: &std::collections::BTreeMap::new(),
-                prompt_images: &std::collections::BTreeSet::new(),
-                operational: &operational,
-                operations: &std::collections::BTreeMap::new(),
-                capacity: &[],
-                reviews: &std::collections::BTreeMap::new(),
-            },
-            1,
-        );
+        let mut operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
+        let project = |operational: &std::collections::BTreeMap<String, RelayOperationalState>| {
+            viewer_snapshot(
+                &controller,
+                &[],
+                &std::collections::BTreeMap::new(),
+                &PhoneSessionViews {
+                    conversations: &std::collections::BTreeMap::new(),
+                    queued_prompts: &std::collections::BTreeMap::new(),
+                    active_user_shells: &std::collections::BTreeMap::new(),
+                    pending_elicitations: &std::collections::BTreeMap::new(),
+                    prompt_images: &std::collections::BTreeSet::new(),
+                    operational,
+                    operations: &std::collections::BTreeMap::new(),
+                    capacity: &[],
+                    launch_failures: &[],
+                    reviews: &std::collections::BTreeMap::new(),
+                },
+                1,
+            )
+        };
+        let snapshot = project(&operational);
         let session = &snapshot.sessions[0];
 
         assert!(session.capabilities.prompt);
@@ -2550,6 +3054,33 @@ mod tests {
         let inspect = session.available_commands.last().unwrap();
         assert_eq!(inspect.description, "Inspect the workspace");
         assert_eq!(inspect.argument.as_deref(), Some("query"));
+
+        assert!(session.is_idle);
+        assert_eq!(session.activity, "[idle]");
+        let state = operational.get_mut("session-1").unwrap();
+        state
+            .background_commands
+            .push(hel::hel_worker::BackgroundCommand {
+                started_at_ms: 1_000,
+                command: "background check".into(),
+            });
+        let background = project(&operational);
+        assert!(!background.sessions[0].is_idle);
+        assert!(background.sessions[0].activity.starts_with("BG "));
+        let state = operational.get_mut("session-1").unwrap();
+        state.background_commands.clear();
+        // Execution is authoritative even before its timestamp arrives.
+        state.execution = RelayExecutionState::Running;
+        let running = project(&operational);
+        assert!(!running.sessions[0].is_idle);
+        assert_ne!(running.sessions[0].activity, "[idle]");
+        operational.get_mut("session-1").unwrap().execution = RelayExecutionState::Idle;
+        let idle_again = project(&operational);
+        assert!(idle_again.sessions[0].is_idle);
+        assert_eq!(idle_again.sessions[0].activity, "[idle]");
+        let unknown = project(&std::collections::BTreeMap::new());
+        assert!(!unknown.sessions[0].is_idle);
+        assert!(unknown.sessions[0].activity.is_empty());
     }
 
     #[test]
@@ -2869,6 +3400,7 @@ mod tests {
                     operational: &std::collections::BTreeMap::new(),
                     operations: &std::collections::BTreeMap::new(),
                     capacity: &[],
+                    launch_failures: &[],
                     reviews: &std::collections::BTreeMap::new(),
                 },
                 1,
@@ -2924,6 +3456,41 @@ mod tests {
     }
 
     #[test]
+    fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
+        let controller = controller_with_profiles(&["codex"]);
+        let mut failures = Vec::new();
+        for index in 0..20 {
+            record_launch_failure(&mut failures, index, format!("workspace-{index}"));
+        }
+        let snapshot = viewer_snapshot(
+            &controller,
+            &[],
+            &std::collections::BTreeMap::new(),
+            &PhoneSessionViews {
+                conversations: &std::collections::BTreeMap::new(),
+                queued_prompts: &std::collections::BTreeMap::new(),
+                active_user_shells: &std::collections::BTreeMap::new(),
+                pending_elicitations: &std::collections::BTreeMap::new(),
+                prompt_images: &std::collections::BTreeSet::new(),
+                operational: &std::collections::BTreeMap::new(),
+                operations: &std::collections::BTreeMap::new(),
+                capacity: &[],
+                launch_failures: &failures,
+                reviews: &std::collections::BTreeMap::new(),
+            },
+            1,
+        );
+        assert!(snapshot.sessions.is_empty());
+        assert_eq!(failures.len(), 16);
+        assert_eq!(failures[0].workspace_id, "workspace-4");
+        assert_eq!(failures[15].workspace_id, "workspace-19");
+        assert_ne!(failures[0].id, failures[1].id);
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["launch_failures"][15]["workspace_id"], "workspace-19");
+        assert_eq!(json["launch_failures"][15].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
     fn phone_cancel_targets_the_matching_background_action() {
         let first = PhoneActionControl {
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -2972,5 +3539,86 @@ mod tests {
             assert!(!control.request_cancel());
             assert!(!control.grant_new_commit());
         }
+    }
+
+    fn materialized_at(ordinal: u64) -> MaterializedSession {
+        let mut materialized = MaterializedSession::empty("session-1");
+        materialized.applied_event_ordinal = ordinal;
+        materialized.applied_event_digest = format!("digest-{ordinal}");
+        materialized
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn browser_projection_enqueue_does_not_wait_for_a_blocking_permit() {
+        let (results, mut completed) = tokio::sync::mpsc::channel(1);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut dispatcher = ConversationProjectionDispatcher::with_permits(results, shutdown, 0);
+
+        dispatcher.enqueue(materialized_at(1));
+        let (progress, progress_done) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            progress.send(()).expect("control task is still alive");
+        });
+
+        tokio::time::timeout(Duration::from_millis(100), progress_done)
+            .await
+            .expect("control progress was starved by transcript projection")
+            .expect("progress task did not report");
+        assert!(completed.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn browser_projection_keeps_only_the_newest_pending_snapshot() {
+        let (results, mut completed) = tokio::sync::mpsc::channel(4);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut dispatcher = ConversationProjectionDispatcher::with_permits(results, shutdown, 0);
+
+        dispatcher.enqueue(materialized_at(1));
+        dispatcher.enqueue(materialized_at(3));
+        dispatcher.enqueue(materialized_at(2));
+        assert_eq!(dispatcher.pending["session-1"].key.ordinal, 3);
+
+        dispatcher.permits.add_permits(1);
+        let first = tokio::time::timeout(Duration::from_secs(1), completed.recv())
+            .await
+            .expect("first projection did not complete")
+            .expect("projection result channel closed");
+        assert_eq!(first.key.ordinal, 1);
+        assert!(dispatcher.finish(first, true).is_some());
+
+        let second = tokio::time::timeout(Duration::from_secs(1), completed.recv())
+            .await
+            .expect("coalesced projection did not complete")
+            .expect("projection result channel closed");
+        assert_eq!(second.key.ordinal, 3);
+        assert!(dispatcher.finish(second, true).is_some());
+        assert!(dispatcher.pending.is_empty());
+        assert!(dispatcher.in_flight.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn forgotten_projection_cannot_repopulate_after_a_same_cursor_resume() {
+        let (results, mut completed) = tokio::sync::mpsc::channel(4);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut dispatcher = ConversationProjectionDispatcher::with_permits(results, shutdown, 0);
+        let snapshot = materialized_at(7);
+
+        dispatcher.enqueue(snapshot.clone());
+        dispatcher.forget("session-1");
+        dispatcher.enqueue(snapshot);
+        dispatcher.permits.add_permits(1);
+
+        let old = tokio::time::timeout(Duration::from_secs(1), completed.recv())
+            .await
+            .expect("old projection did not complete")
+            .expect("projection result channel closed");
+        assert!(dispatcher.finish(old, true).is_none());
+
+        let current = tokio::time::timeout(Duration::from_secs(1), completed.recv())
+            .await
+            .expect("resumed projection did not complete")
+            .expect("projection result channel closed");
+        assert!(dispatcher.finish(current, true).is_some());
+        assert!(dispatcher.in_flight.is_empty());
     }
 }

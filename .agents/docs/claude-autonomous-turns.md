@@ -113,16 +113,39 @@ evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
   Codex's structured result. A card whose `rawOutput` has no exit code (null or
   absent) is a process Codex's unified exec left running; the relay tracks it by
   tool call id and clears it when a later card for the same call reports an exit
-  code, when the harness restarts, and when the session closes.
+  code, when the harness restarts, and when the session closes. ACP tool-call
+  updates are partial, so the relay first remembers that the card was explicitly
+  introduced with `kind: execute`. A later `rawOutput` without `kind` inherits
+  that remembered identity. Raw output by itself is not execution evidence:
+  Codex Guardian reviews and searches also return it.
 
-**The Codex card shape is unvalidated.** It is implemented from the description
-above, not from a recorded session. Before trusting it, run one live Codex
-session: ask it to start a long command and yield, confirm the `exec_command`
-card's `rawOutput.exit_code` is null, check that the row reads `BG`, then ask it
-to poll the process and confirm the row clears on the card that reports the
-exit. Adjust `DurableRelay::track_codex_exec_card` if the shape differs. If
-Codex's five-minute reap of unpolled processes is confirmed, entries should also
-age out at that bound.
+The completed-command shape and partial-update behavior were validated against
+codex-acp 1.8.0 on 2026-09-04. Ordinary commands ended with
+`rawOutput.exit_code: 0`. Guardian cards began as `kind: think`, then ended in a
+partial update with raw output and no repeated kind; treating that final update
+as an execute result produced dozens of false `BG` entries. The relay regression
+tests cover both the correlated execute update and the non-execute negative
+control. A live detached-process check is still needed to confirm Codex's null
+exit-code and five-minute reap behavior; if the reap is confirmed, entries
+should also age out at that bound.
+
+On 2026-09-05, source review of the installed codex-acp 1.8.0
+`dist/index.js` (`createCommandExecutionUpdate` and
+`createCommandExecutionCompleteUpdate`) confirmed that command starts carry
+their kind and command, while completion updates reuse `item.id`, omit kind,
+and carry `exit_code: item.exitCode`. In-progress items produce no completion
+update. This confirms partial-update correlation, but does not establish that
+a null exit code proves detachment or that polling reuses the original item ID.
+Those remain assumptions of the existing background-process tracking; no
+timeout-based cleanup is justified by this source review.
+
+Turn-boundary regression coverage also checks successful, rejected, and
+interrupted prompts: stale foreground tool statuses clear, while a previously
+tracked detached command survives and can still be cleared by its correlated
+exit update.
+
+Validation on 2026-09-05 passed: `cargo fmt --all -- --check`, the full
+`cargo test --quiet` suite, and `cargo clippy --all-targets -- -D warnings`.
 
 Every surface renders the same three states from one pair of helpers in
 `src/usage_format.rs`: `format_activity_columns` for wide rows, the chat pane

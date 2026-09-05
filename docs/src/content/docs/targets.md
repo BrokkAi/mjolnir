@@ -33,6 +33,18 @@ tests.
 SHA-256 on the controller before tearing the resource down. See
 [Durability and recovery](/durability/).
 
+## Harness versions
+
+Mjolnir installs and caches its pinned harness runtimes for `local-bare`,
+`ssh-bare`, and `aws-ec2` sessions. Local sessions use the selected profile's
+existing home and credentials, while their runtime is managed independently
+of commands such as `codex` installed for native terminal use. Containers use
+the runtimes supplied by their image.
+
+New workers use the versions shipped with your Mjolnir build. Upgrade an
+existing session's worker to adopt those versions; running workers retain their
+current runtime until upgraded.
+
 ## Execution policy
 
 Mjolnir selects approval behavior from the target, then translates it into the

@@ -3,12 +3,13 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const viewerPath = new URL('../../../src/web/viewer.js', import.meta.url);
-const htmlPath = new URL('../../../src/web/viewer.html', import.meta.url);
-const manifestPath = new URL('../../../src/web/manifest.webmanifest', import.meta.url);
-const serviceWorkerPath = new URL('../../../src/web/service-worker.js', import.meta.url);
-const viewerCssPath = new URL('../../../src/web/viewer.css', import.meta.url);
-const toolOutputPath = new URL('../../../src/web/tool-output.js', import.meta.url);
+const webRoot = new URL('../../../mj-controller/src/web/', import.meta.url);
+const viewerPath = new URL('viewer.js', webRoot);
+const htmlPath = new URL('viewer.html', webRoot);
+const manifestPath = new URL('manifest.webmanifest', webRoot);
+const serviceWorkerPath = new URL('service-worker.js', webRoot);
+const viewerCssPath = new URL('viewer.css', webRoot);
+const toolOutputPath = new URL('tool-output.js', webRoot);
 const viewerSource = readFileSync(viewerPath, 'utf8');
 const serviceWorkerSource = readFileSync(serviceWorkerPath, 'utf8');
 
@@ -46,6 +47,86 @@ function makeNode(tag = 'div') {
     },
   };
 }
+
+test('session titles stay blue while truly idle and clear blue when activity resumes', () => {
+  const classes = new Set();
+  const node = {
+    textContent: '',
+    classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) },
+  };
+  const context = vm.createContext({ node, session: { title: 'Test session', is_idle: true } });
+  vm.runInContext(sourceBetween('function renderSessionTitle(', '\nfunction renderConversationHeader('), context);
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.equal(node.textContent, 'Test session');
+  assert.ok(classes.has('idle-title'));
+  // A read-cursor update does not change the operational idle classification.
+  context.session.latest_event_ordinal = 20;
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.ok(classes.has('idle-title'));
+  context.session.is_idle = false;
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.ok(!classes.has('idle-title'));
+  delete context.session.is_idle;
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
+});
+
+test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
+  let complete;
+  let requests = 0;
+  const draft = { profileId: 'test', targetId: 'raw', projectDirectory: '/project' };
+  const context = vm.createContext({
+    newDraft: draft,
+    pendingNewPreflight: null,
+    targetIsBare: () => true,
+    selectedWorkspaceId: () => 'test',
+    renderNewForm: () => {},
+    request: () => {
+      requests++;
+      return new Promise(resolve => { complete = resolve; });
+    },
+  });
+  vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
+  const pending = vm.runInContext('preflightNew()', context);
+  assert.equal(context.pendingNewPreflight, draft);
+  assert.equal(await vm.runInContext('preflightNew()', context), false);
+  assert.equal(requests, 1);
+  context.newDraft = { profileId: 'another wizard' };
+  complete({ dirty_repositories: ['old-project'] });
+  assert.equal(await pending, false);
+  assert.equal(context.newDraft.dirty, undefined);
+  assert.equal(context.pendingNewPreflight, null);
+  context.request = async () => { throw new Error('invalid project'); };
+  await assert.rejects(vm.runInContext('preflightNew()', context), /invalid project/);
+  assert.equal(context.pendingNewPreflight, null, 'failure releases the checking state');
+  assert.equal(context.newDraft.preflighted, undefined);
+});
+
+test('rolled-back launch errors remain visible only in their workspace and can be dismissed', () => {
+  const notices = makeNode();
+  const context = vm.createContext({
+    snapshot: { sessions: [], launch_failures: [
+      { id: 'first', workspace_id: 'test' },
+      { id: 'second', workspace_id: 'primary' },
+    ] },
+    route: { name: 'dashboard' },
+    selectedWorkspaceId: () => 'test',
+    document: { querySelector: () => notices },
+    el: (tag, className, textContent) => Object.assign(makeNode(tag), { className, textContent }),
+  });
+  vm.runInContext(sourceBetween('const dismissedLaunchFailures =', '\nfunction renderWorkspaces()'), context);
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1);
+  assert.match(notices.children[0].children[0].textContent, /could not be started/);
+  notices.children[0].children[1].onclick();
+  assert.equal(notices.children.length, 0);
+  context.selectedWorkspaceId = () => 'primary';
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1);
+  context.route.name = 'conversation';
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 0);
+});
 
 function descendants(root, tag) {
   const wanted = tag.toUpperCase();
@@ -283,6 +364,7 @@ test('viewer chrome and install metadata use Mjolnir branding', () => {
 test('offline shell uses a Mjolnir cache without caching live requests', async () => {
   const listeners = new Map();
   const operations = [];
+  let installedCache;
   let fetchImplementation = async request => ({
     ok: true,
     request,
@@ -304,7 +386,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
       };
     },
     async keys() {
-      return ['mjolnir-shell-v1', 'hel-v2', 'mjolnir-shell-v0'];
+      return [installedCache, 'hel-v2', 'mjolnir-shell-v0'];
     },
     async delete(name) {
       operations.push(['delete', name]);
@@ -343,11 +425,13 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
   let lifetime;
   listeners.get('install')({ waitUntil(promise) { lifetime = promise; } });
   await lifetime;
+  installedCache = operations[0][1];
+  assert.match(installedCache, /^mjolnir-shell-v[1-9]\d*$/);
   assert.deepEqual(operations.slice(0, 3), [
-    ['open', 'mjolnir-shell-v1'],
+    ['open', installedCache],
     [
       'addAll',
-      'mjolnir-shell-v1',
+      installedCache,
       ['/', '/viewer.css', '/viewer.js', '/manifest.webmanifest', '/icon.svg'],
     ],
     ['skipWaiting'],
@@ -384,7 +468,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
   assert.ok(navigation, 'navigation was not intercepted');
   assert.strictEqual(await navigation, networkResponse);
   assert.deepEqual(operations.map(operation => operation[0]), ['fetch', 'open', 'put']);
-  assert.equal(operations[1][1], 'mjolnir-shell-v1');
+  assert.equal(operations[1][1], installedCache);
 
   operations.length = 0;
   cachedFallback = { offline: true };

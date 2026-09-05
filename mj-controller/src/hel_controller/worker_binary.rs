@@ -355,9 +355,9 @@ fn worker_launch_config(
 
 fn harness_runtime_policy(backend: &hel_targets::TargetLocator) -> HarnessRuntimePolicy {
     match backend {
-        hel_targets::TargetLocator::AwsEc2 { .. } | hel_targets::TargetLocator::SshBare { .. } => {
-            HarnessRuntimePolicy::ManagedRemote
-        }
+        hel_targets::TargetLocator::LocalBare { .. }
+        | hel_targets::TargetLocator::AwsEc2 { .. }
+        | hel_targets::TargetLocator::SshBare { .. } => HarnessRuntimePolicy::Managed,
         _ => HarnessRuntimePolicy::Ambient,
     }
 }
@@ -1679,9 +1679,11 @@ pub(super) fn replace_installed_worker_launch_config(
     Ok(())
 }
 
-/// Prepare the exact managed harness with a separately staged current worker
-/// binary. The running worker is not stopped or replaced, so any failure here
-/// leaves the quiet session attachable on its previous build.
+/// Prepare the exact managed harness using the current worker binary. Remote
+/// targets receive a separately staged copy; local bare targets run the binary
+/// directly with a private launch config. The running worker is not stopped or
+/// replaced, so any failure here leaves the quiet session attachable on its
+/// previous build.
 pub(super) fn prepare_managed_harness_for_upgrade(
     executor: &impl CommandExecutor,
     locator: &hel_targets::TargetLocator,
@@ -1689,46 +1691,66 @@ pub(super) fn prepare_managed_harness_for_upgrade(
     worker_binary: &Path,
     launch: &WorkerLaunchConfig,
 ) -> Result<()> {
-    if launch.harness_runtime != HarnessRuntimePolicy::ManagedRemote {
+    if launch.harness_runtime != HarnessRuntimePolicy::Managed {
         return Ok(());
     }
-    let ssh = match locator {
-        hel_targets::TargetLocator::AwsEc2 { ssh, .. }
-        | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh,
-        _ => bail!("managed remote harness policy requires an SSH-bare or EC2 target"),
-    };
     let worker_root = hel_targets::worker_root(locator, session_id)?;
-    let remote = format!("{worker_root}/harness-prepare");
-    let remote_binary = format!("{remote}/hel");
-    let remote_config = format!("{remote}/launch.json");
+    let staging_root = format!("{worker_root}/harness-prepare");
+    let staging_binary = format!("{staging_root}/hel");
+    let staging_config = format!("{staging_root}/launch.json");
     let staging = tempfile::tempdir().context("create managed harness upgrade staging")?;
     let local_config = staging.path().join("launch.json");
     launch.write(&local_config)?;
 
+    // Local bare workers already share the controller's filesystem. Running
+    // the current binary against a private launch config is enough to prepare
+    // the cache, and leaves the live worker root completely untouched.
+    if matches!(locator, hel_targets::TargetLocator::LocalBare { .. }) {
+        execute_checked(
+            executor,
+            CommandSpec::new(
+                worker_binary.to_string_lossy().into_owned(),
+                [
+                    "worker".to_owned(),
+                    "prepare-harness".to_owned(),
+                    "--config".to_owned(),
+                    local_config.to_string_lossy().into_owned(),
+                ],
+            )
+            .purpose("prepare exact managed harness"),
+        )?;
+        return Ok(());
+    }
+
+    let ssh = match locator {
+        hel_targets::TargetLocator::AwsEc2 { ssh, .. }
+        | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh,
+        _ => bail!("managed harness policy requires a local bare, SSH-bare, or EC2 target"),
+    };
     let result = (|| {
         execute_checked(
             executor,
-            ssh_command_spec(ssh, ["rm", "-rf", "--", &remote])
+            ssh_command_spec(ssh, ["rm", "-rf", "--", &staging_root])
                 .purpose("clear managed harness preparation staging"),
         )?;
         execute_checked(
             executor,
-            ssh_command_spec(ssh, ["mkdir", "-p", &remote])
+            ssh_command_spec(ssh, ["mkdir", "-p", &staging_root])
                 .purpose("create managed harness preparation staging"),
         )?;
         execute_checked(
             executor,
-            scp_command_spec(ssh, worker_binary, &remote_binary, false)
+            scp_command_spec(ssh, worker_binary, &staging_binary, false)
                 .purpose("stage current worker for managed harness preparation"),
         )?;
         execute_checked(
             executor,
-            scp_command_spec(ssh, &local_config, &remote_config, false)
+            scp_command_spec(ssh, &local_config, &staging_config, false)
                 .purpose("stage managed harness launch configuration"),
         )?;
         execute_checked(
             executor,
-            ssh_command_spec(ssh, ["chmod", "700", &remote_binary])
+            ssh_command_spec(ssh, ["chmod", "700", &staging_binary])
                 .purpose("make managed harness preparation worker executable"),
         )?;
         execute_checked(
@@ -1736,11 +1758,11 @@ pub(super) fn prepare_managed_harness_for_upgrade(
             ssh_command_spec(
                 ssh,
                 [
-                    remote_binary.as_str(),
+                    staging_binary.as_str(),
                     "worker",
                     "prepare-harness",
                     "--config",
-                    remote_config.as_str(),
+                    staging_config.as_str(),
                 ],
             )
             .purpose("prepare exact managed harness"),
@@ -1749,7 +1771,7 @@ pub(super) fn prepare_managed_harness_for_upgrade(
     })();
     let cleanup = execute_checked(
         executor,
-        ssh_command_spec(ssh, ["rm", "-rf", "--", &remote])
+        ssh_command_spec(ssh, ["rm", "-rf", "--", &staging_root])
             .purpose("remove managed harness preparation staging"),
     );
     match (result, cleanup) {
@@ -1757,7 +1779,7 @@ pub(super) fn prepare_managed_harness_for_upgrade(
         (Ok(()), Err(error)) => Err(error).context("clean managed harness preparation staging"),
         (Err(error), Ok(_)) => Err(error),
         (Err(error), Err(cleanup)) => {
-            tracing::warn!(%cleanup, path = %remote, "managed harness preparation staging cleanup failed");
+            tracing::warn!(%cleanup, path = %staging_root, "managed harness preparation staging cleanup failed");
             Err(error)
         }
     }
@@ -1769,19 +1791,23 @@ fn prepare_installed_managed_harness(
     worker_root: &str,
     launch: &WorkerLaunchConfig,
 ) -> Result<()> {
-    if launch.harness_runtime != HarnessRuntimePolicy::ManagedRemote {
+    if launch.harness_runtime != HarnessRuntimePolicy::Managed {
         return Ok(());
     }
-    let ssh = match locator {
-        hel_targets::TargetLocator::AwsEc2 { ssh, .. }
-        | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh,
-        _ => bail!("managed remote harness policy requires an SSH-bare or EC2 target"),
-    };
     let worker_binary = format!("{worker_root}/hel");
     let launch_config = format!("{worker_root}/launch.json");
-    execute_checked(
-        executor,
-        ssh_command_spec(
+    let command = match locator {
+        hel_targets::TargetLocator::LocalBare { .. } => CommandSpec::new(
+            worker_binary.clone(),
+            [
+                "worker",
+                "prepare-harness",
+                "--config",
+                launch_config.as_str(),
+            ],
+        ),
+        hel_targets::TargetLocator::AwsEc2 { ssh, .. }
+        | hel_targets::TargetLocator::SshBare { ssh, .. } => ssh_command_spec(
             ssh,
             [
                 worker_binary.as_str(),
@@ -1790,8 +1816,12 @@ fn prepare_installed_managed_harness(
                 "--config",
                 launch_config.as_str(),
             ],
-        )
-        .purpose("prepare exact managed harness before worker startup"),
+        ),
+        _ => bail!("managed harness policy requires a local bare, SSH-bare, or EC2 target"),
+    };
+    execute_checked(
+        executor,
+        command.purpose("prepare exact managed harness before worker startup"),
     )?;
     Ok(())
 }
@@ -3383,7 +3413,7 @@ mod tests {
         assert!(!managed_environment.contains_key(DISCOVER_LOGIN_PATH_ENV));
     }
     #[test]
-    fn only_remote_bare_targets_use_managed_harnesses() {
+    fn bare_targets_use_managed_harnesses_but_containers_stay_ambient() {
         let ssh = SshTarget {
             destination: "user@example.test".into(),
             ssh_args: Vec::new(),
@@ -3393,7 +3423,7 @@ mod tests {
                 hel_targets::TargetLocator::LocalBare {
                     worker_root: "/worker".into(),
                 },
-                HarnessRuntimePolicy::Ambient,
+                HarnessRuntimePolicy::Managed,
             ),
             (
                 hel_targets::TargetLocator::LocalPodman {
@@ -3407,7 +3437,7 @@ mod tests {
                     ssh: ssh.clone(),
                     workspace: "/workspace/session".into(),
                 },
-                HarnessRuntimePolicy::ManagedRemote,
+                HarnessRuntimePolicy::Managed,
             ),
             (
                 hel_targets::TargetLocator::AwsEc2 {
@@ -3417,7 +3447,7 @@ mod tests {
                     ssh,
                     workspace: "/workspace/session".into(),
                 },
-                HarnessRuntimePolicy::ManagedRemote,
+                HarnessRuntimePolicy::Managed,
             ),
         ];
 
@@ -3934,7 +3964,7 @@ mod tests {
             harness: HarnessKind::Codex,
             bridge_command: "ignored".into(),
             bridge_args: Vec::new(),
-            harness_runtime: HarnessRuntimePolicy::ManagedRemote,
+            harness_runtime: HarnessRuntimePolicy::Managed,
             environment: BTreeMap::new(),
             cwd: "/srv/mj/session-remote/project".into(),
             additional_directories: Vec::new(),
@@ -3985,7 +4015,116 @@ mod tests {
     }
 
     #[test]
-    fn initial_remote_provision_prepares_the_harness_from_installed_files() {
+    fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
+        struct ConfigRecordingExecutor {
+            command: RefCell<Option<CommandSpec>>,
+            launch: RefCell<Option<WorkerLaunchConfig>>,
+        }
+
+        impl CommandExecutor for ConfigRecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                let config_path = command
+                    .args
+                    .get(3)
+                    .context("local prepare command did not include its config path")?;
+                *self.command.borrow_mut() = Some(command.clone());
+                *self.launch.borrow_mut() = Some(WorkerLaunchConfig::read(Path::new(config_path))?);
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        struct FailingExecutor {
+            purposes: RefCell<Vec<String>>,
+        }
+
+        impl CommandExecutor for FailingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.purposes.borrow_mut().push(command.purpose.clone());
+                Err(anyhow::anyhow!("managed harness installation failed"))
+            }
+        }
+
+        let executor = ConfigRecordingExecutor {
+            command: RefCell::new(None),
+            launch: RefCell::new(None),
+        };
+        let launch = WorkerLaunchConfig {
+            session_id: "session-local".into(),
+            harness: HarnessKind::Codex,
+            bridge_command: "ignored".into(),
+            bridge_args: Vec::new(),
+            harness_runtime: HarnessRuntimePolicy::Managed,
+            environment: BTreeMap::from([("CODEX_HOME".into(), "/configured/profile/home".into())]),
+            cwd: "/workspace/project".into(),
+            additional_directories: Vec::new(),
+            native_session_id: None,
+            project_memory: None,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        };
+        let locator = hel_targets::TargetLocator::LocalBare {
+            worker_root: "/worker/session-local".into(),
+        };
+
+        prepare_managed_harness_for_upgrade(
+            &executor,
+            &locator,
+            "session-local",
+            Path::new("/controller/hel"),
+            &launch,
+        )
+        .unwrap();
+
+        {
+            let command = executor.command.borrow();
+            let command = command.as_ref().unwrap();
+            assert_eq!(command.purpose, "prepare exact managed harness");
+            assert_eq!(command.program, "/controller/hel");
+            assert_eq!(
+                &command.args[..3],
+                ["worker", "prepare-harness", "--config"]
+            );
+            assert!(!command.args[3].contains("/worker/session-local"));
+        }
+
+        let prepared = executor.launch.borrow();
+        let prepared = prepared.as_ref().unwrap();
+        assert_eq!(
+            prepared.environment.get("CODEX_HOME").map(String::as_str),
+            Some("/configured/profile/home")
+        );
+        assert_eq!(
+            prepared.execution_policy,
+            ExecutionPolicy::ConfiguredApprovals
+        );
+
+        let failing = FailingExecutor {
+            purposes: RefCell::new(Vec::new()),
+        };
+        let error = prepare_managed_harness_for_upgrade(
+            &failing,
+            &locator,
+            "session-local",
+            Path::new("/controller/hel"),
+            &launch,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("managed harness installation failed")
+        );
+        assert_eq!(
+            failing.purposes.borrow().as_slice(),
+            ["prepare exact managed harness"]
+        );
+    }
+
+    #[test]
+    fn initial_bare_provision_prepares_the_harness_from_installed_files() {
         let session = "session-remote";
         let executor = DigestExecutor {
             installed_line: String::new(),
@@ -3996,7 +4135,7 @@ mod tests {
             harness: HarnessKind::Kimi,
             bridge_command: "ignored".into(),
             bridge_args: Vec::new(),
-            harness_runtime: HarnessRuntimePolicy::ManagedRemote,
+            harness_runtime: HarnessRuntimePolicy::Managed,
             environment: BTreeMap::new(),
             cwd: "/srv/mj/session-remote/project".into(),
             additional_directories: Vec::new(),
@@ -4017,9 +4156,28 @@ mod tests {
         assert!(rendered.contains("'/worker/root/hel' 'worker' 'prepare-harness'"));
         drop(commands);
 
+        let local = hel_targets::TargetLocator::LocalBare {
+            worker_root: "/worker/session-remote".into(),
+        };
+        prepare_installed_managed_harness(&executor, &local, "/worker/session-remote", &launch)
+            .unwrap();
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[1].program, "/worker/session-remote/hel");
+        assert_eq!(
+            commands[1].args,
+            vec![
+                "worker".to_owned(),
+                "prepare-harness".to_owned(),
+                "--config".to_owned(),
+                "/worker/session-remote/launch.json".to_owned(),
+            ]
+        );
+        drop(commands);
+
         launch.harness_runtime = HarnessRuntimePolicy::Ambient;
         prepare_installed_managed_harness(&executor, &locator, "/worker/root", &launch).unwrap();
-        assert_eq!(executor.commands.borrow().len(), 1);
+        assert_eq!(executor.commands.borrow().len(), 2);
     }
 
     #[test]

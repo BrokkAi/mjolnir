@@ -3802,12 +3802,14 @@ mod tests {
         assert!(prompt_title(&chat, 0).contains("Prompt"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 started_at_ms,
                 command: "cargo   test".into(),
             }],
+            active_user_shells: Vec::new(),
         });
         assert!(
             prompt_title(&chat, 0).contains("Background: cargo test (43m36s)"),
@@ -3816,6 +3818,7 @@ mod tests {
         );
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![
@@ -3828,6 +3831,7 @@ mod tests {
                     command: "npm run build".into(),
                 },
             ],
+            active_user_shells: Vec::new(),
         });
         assert!(
             prompt_title(&chat, 0).contains("Background: 2 commands, oldest 43m36s"),

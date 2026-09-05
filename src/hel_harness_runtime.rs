@@ -1,4 +1,4 @@
-//! Exact harness versions used by Mjolnir-managed remote workers.
+//! Exact harness versions used by Mjolnir-managed bare workers.
 //!
 //! Installation and process ownership live in `brokk-mj-worker`; this module
 //! contains only shared, inert metadata so the controller, worker, container
@@ -7,7 +7,7 @@
 use crate::hel_config::HarnessKind;
 
 pub const CODEX_ACP_VERSION: &str = "1.8.0";
-pub const CODEX_CLI_VERSION: &str = "0.151.0";
+pub const CODEX_CLI_VERSION: &str = "0.153.4";
 pub const CLAUDE_ACP_VERSION: &str = "0.73.0";
 pub const KIMI_VERSION: &str = "0.41.0";
 pub const GROK_VERSION: &str = "1.0.13";
@@ -24,8 +24,8 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Codex => HarnessPin {
-            install_id: "codex-acp-1.8.0_codex-0.151.0",
-            display_version: "codex-acp 1.8.0 + codex 0.151.0",
+            install_id: "codex-acp-1.8.0_codex-0.153.4",
+            display_version: "codex-acp 1.8.0 + codex 0.153.4",
             entrypoint: "node_modules/.bin/codex-acp",
         },
         HarnessKind::Claude => HarnessPin {
