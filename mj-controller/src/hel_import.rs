@@ -1550,11 +1550,12 @@ pub fn read_claude_transcript(path: &Path) -> Result<ClaudeTranscript> {
                 // its text/tool blocks. Preserve that lifecycle boundary so
                 // the restored durable worker is idle and accepts the next
                 // user prompt instead of treating the imported turn as live.
-                if record
-                    .pointer("/message/stop_reason")
-                    .and_then(Value::as_str)
-                    == Some("end_turn")
-                {
+                if matches!(
+                    record
+                        .pointer("/message/stop_reason")
+                        .and_then(Value::as_str),
+                    Some("end_turn" | "stop_sequence")
+                ) {
                     push_event(&mut events, recorded_at_ms, WorkerEvent::TurnCompleted);
                 }
             }

@@ -554,7 +554,7 @@ fn projects_jsonl_projects_user_and_assistant_text_in_source_order() {
             concat!(
                 r#"{"type":"user","cwd":"/work/app","message":{"content":"<mj-project-memory>private</mj-project-memory>\nfirst prompt"}}"#,
                 "\n",
-                r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"first reply"}]}}"#,
+                r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"first reply"}]}}"#,
                 "\n",
                 r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ignored"}]}}"#,
                 "\n",
@@ -1124,7 +1124,7 @@ fn import_of_a_session_with_a_second_repository_stays_a_bundle_session() {
 }
 
 #[test]
-fn single_repository_claude_import_becomes_a_raw_project_session() {
+fn stop_sequence_claude_import_produces_idle_raw_project_session() {
     let directory = tempfile::tempdir().unwrap();
     let app = directory.path().join("app");
     initialize_repository(&app, "app");
@@ -1147,7 +1147,7 @@ fn single_repository_claude_import_becomes_a_raw_project_session() {
                 "type": "assistant",
                 "message": {
                     "content": [{"type": "text", "text": "imported"}],
-                    "stop_reason": "end_turn"
+                    "stop_reason": "stop_sequence"
                 }
             }),
         ]
@@ -1191,6 +1191,11 @@ fn single_repository_claude_import_becomes_a_raw_project_session() {
     .unwrap();
 
     let record = &state.sessions[&imported.session_id];
+    let verified = hel::hel_archive::verify_archive_streaming(&imported.archive_path).unwrap();
+    assert_eq!(
+        verified.canonical_session.session.execution,
+        hel::hel_archive::CanonicalExecutionState::Idle
+    );
     assert_eq!(
         record.project_directory,
         Some(fs::canonicalize(&app).unwrap())
