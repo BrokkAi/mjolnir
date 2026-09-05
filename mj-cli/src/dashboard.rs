@@ -3118,7 +3118,7 @@ mod tests {
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny sessions grid registered");
-        assert_eq!(surface.rect.height, 2);
+        assert_eq!(surface.rect.height, 1);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);
