@@ -277,7 +277,7 @@ pub(crate) fn pane_title_content_width(width: u16) -> u16 {
 
 /// The three title-bar controls. Their padded backgrounds are the buttons;
 /// the unstyled cells between them keep inactive controls visually distinct.
-pub(crate) fn pane_size_controls(active: PaneSize) -> Line<'static> {
+pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (size, glyph)) in [
         (PaneSize::Minimized, "▁"),
@@ -290,7 +290,9 @@ pub(crate) fn pane_size_controls(active: PaneSize) -> Line<'static> {
         if index > 0 {
             spans.push(Span::raw(" "));
         }
-        let style = if size == active {
+        let style = if size == PaneSize::Maximized && !maximize_enabled {
+            Style::default().fg(Color::DarkGray)
+        } else if size == active {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -305,8 +307,8 @@ pub(crate) fn pane_size_controls(active: PaneSize) -> Line<'static> {
 
 /// Minimized panes have no right border, but keep its column as horizontal
 /// rule so their controls line up with those in a fully bordered pane.
-pub(crate) fn minimized_pane_size_controls(focused: bool) -> Line<'static> {
-    let mut controls = pane_size_controls(PaneSize::Minimized);
+pub(crate) fn minimized_pane_size_controls(focused: bool, maximize_enabled: bool) -> Line<'static> {
+    let mut controls = pane_size_controls(PaneSize::Minimized, maximize_enabled);
     controls
         .spans
         .push(Span::raw(if focused { "═" } else { "─" }));
@@ -689,6 +691,7 @@ fn sessions_block(
     width: u16,
     size: PaneSize,
     pending_count: usize,
+    maximize_enabled: bool,
 ) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -702,7 +705,7 @@ fn sessions_block(
                 0
             },
         ))
-        .title(pane_size_controls(size))
+        .title(pane_size_controls(size, maximize_enabled))
 }
 
 /// Draws the Sessions pane and reports the per-row mouse hitboxes.
@@ -713,7 +716,12 @@ pub(crate) fn render_sessions(
 ) -> SessionRowsRendered {
     if dashboard.sessions_minimized() {
         let _ = take_scroll_lookahead(dashboard, Focus::Sessions);
-        return render_sessions_grid(frame, area, dashboard);
+        return render_sessions_grid(
+            frame,
+            area,
+            dashboard,
+            dashboard.pane_maximize_enabled(SupportPane::Sessions),
+        );
     }
     let drawn = drawn_session_rows(dashboard, area.width);
     let focused = dashboard.focus() == Focus::Sessions;
@@ -723,6 +731,7 @@ pub(crate) fn render_sessions(
         area.width,
         dashboard.pane_size(SupportPane::Sessions),
         dashboard.pending_input_count(),
+        dashboard.pane_maximize_enabled(SupportPane::Sessions),
     );
     let table = Table::new(
         drawn.iter().map(|row| {
@@ -819,6 +828,7 @@ fn render_sessions_grid(
     frame: &mut Frame,
     area: Rect,
     dashboard: &DashboardState,
+    maximize_enabled: bool,
 ) -> SessionRowsRendered {
     const COLUMNS: usize = 3;
     const GAP: u16 = 2;
@@ -855,6 +865,7 @@ fn render_sessions_grid(
         area.width,
         PaneSize::Minimized,
         dashboard.pending_input_count(),
+        maximize_enabled,
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1537,7 +1548,12 @@ pub(crate) fn render_capacity(
         .borders(Borders::ALL)
         .border_type(focus_border(focused))
         .title(" Targets ");
-    let block = size.map_or(block.clone(), |size| block.title(pane_size_controls(size)));
+    let block = size.map_or(block.clone(), |size| {
+        block.title(pane_size_controls(
+            size,
+            dashboard.pane_maximize_enabled(SupportPane::Targets),
+        ))
+    });
     let table = Table::new(
         rows,
         [
@@ -2200,7 +2216,12 @@ pub(crate) fn render_quotas(
         .borders(Borders::ALL)
         .border_type(border_type)
         .title(title);
-    let block = size.map_or(block.clone(), |size| block.title(pane_size_controls(size)));
+    let block = size.map_or(block.clone(), |size| {
+        block.title(pane_size_controls(
+            size,
+            dashboard.pane_maximize_enabled(SupportPane::Quota),
+        ))
+    });
     let table = Table::new(
         rows.into_iter().map(|row| row.into_row(content_widths)),
         widths,
@@ -2670,7 +2691,11 @@ mod tests {
             for ((_, size, area), glyph) in controls.into_iter().zip(expected_glyphs) {
                 let cell = &buffer[(area.x + 1, area.y)];
                 assert_eq!(cell.symbol(), glyph.to_string());
-                if *size == PaneSize::Standard {
+                if *size == PaneSize::Maximized && !dashboard.pane_maximize_enabled(pane) {
+                    assert_eq!(cell.bg, Color::Reset);
+                    assert_eq!(cell.fg, Color::DarkGray);
+                    assert!(!cell.modifier.contains(Modifier::BOLD));
+                } else if *size == PaneSize::Standard {
                     assert_eq!(cell.bg, Color::Cyan);
                     assert_eq!(cell.fg, Color::Black);
                     assert!(cell.modifier.contains(Modifier::BOLD));
@@ -2727,9 +2752,49 @@ mod tests {
         ));
         assert_eq!(
             dashboard.pane_size(SupportPane::Targets),
-            PaneSize::Maximized
+            PaneSize::Minimized
         );
         assert_eq!(dashboard.focus(), Focus::Sessions);
+    }
+
+    #[test]
+    fn maximize_availability_tracks_content_and_works_from_minimized() {
+        let mut dashboard = dashboard_with_session(running_session());
+        drawn(&mut dashboard, 120, 40);
+        assert!(!dashboard.pane_maximize_enabled(SupportPane::Quota));
+
+        let profile = dashboard.config.profiles.values().next().unwrap().clone();
+        for index in 0..20 {
+            dashboard
+                .config
+                .profiles
+                .insert(format!("extra-{index}"), profile.clone());
+        }
+        drawn(&mut dashboard, 120, 40);
+        assert!(dashboard.pane_maximize_enabled(SupportPane::Quota));
+        let standard_height = dashboard.pane_areas.unwrap()[2].height;
+        dashboard.set_pane_size(SupportPane::Quota, PaneSize::Minimized);
+        drawn(&mut dashboard, 120, 40);
+        assert!(dashboard.pane_maximize_enabled(SupportPane::Quota));
+        let maximum = dashboard
+            .pane_size_control_areas
+            .iter()
+            .find(|(pane, size, _)| *pane == SupportPane::Quota && *size == PaneSize::Maximized)
+            .unwrap()
+            .2;
+        let focus = dashboard.focus();
+        dashboard.handle_mouse(mouse_at_row(
+            MouseEventKind::Down(MouseButton::Left),
+            maximum,
+            0,
+        ));
+        assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Maximized);
+        assert_eq!(dashboard.focus(), focus);
+        drawn(&mut dashboard, 120, 40);
+        assert!(dashboard.pane_areas.unwrap()[2].height > standard_height);
+
+        drawn(&mut dashboard, 120, 120);
+        assert!(!dashboard.pane_maximize_enabled(SupportPane::Quota));
     }
 
     #[test]
