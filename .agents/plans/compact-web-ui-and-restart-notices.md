@@ -15,8 +15,9 @@ Make the phone viewer useful at a glance: tap session cards to open conversation
 - [x] (2026-09-05) Reviewed integrated changes and passed focused restart tests, full Clippy, rustfmt check, and two card/paperclip Chromium checks. Corrected CSS to respect image-support visibility. Updated the browser lab to include quota fixtures and use the new card/disclosure interactions.
 - [x] (2026-09-05) Full `cargo test` completed successfully, including the long journal-chaos test; full Clippy and formatting passed.
 - [x] (2026-09-05) Built the final binary, restarted the authorized shared daemon, and passed all nine layout/quota browser tests against the installed viewer. Read-only live checks confirmed lifecycle wording, card navigation, empty-control hiding, and no adjacent restart entries.
-- [ ] Correct the isolated browser lab's stale fake-adapter provisioning if a small supported correction is available, and rerun it.
-- [ ] Commit validated changes on the current master branch.
+- [x] (2026-09-05) Corrected isolated test provisioning by seeding its own XDG managed-harness cache with the existing Python fake and expected manifest. No Node, real provider, or live credentials are introduced.
+- [x] (2026-09-05) Corrected the browser-cache path and stale TUI footer focus probe. The complete isolated browser/TUI lab passes with two clients, one SSE reconnection, zero leaks, and all nine layout/quota tests. Fixture-only corrections are validated for their separate commit.
+- [x] (2026-09-05) Committed requested UI/transcript changes on master as `8fbc9d0d`; no push performed.
 
 ## Surprises & Discoveries
 
@@ -38,7 +39,7 @@ Decision: Render durable state `running` as `live` in web lifecycle badges. Rati
 
 ## Outcomes & Retrospective
 
-The requested product changes are implemented and installed in the live viewer. Full Rust tests, Clippy, formatting, 14 Node tests, and nine browser layout/quota tests pass. Live quota height is 370px versus 2230px before, with all seven profiles visible at 320x568. Primary-workspace reads were protected by aborting all API writes, including automatic read receipts. An isolated fake-provider integration fixture issue is being corrected separately; do not describe that lab as passing until it does. No new push has been requested for this round; the preceding merge and push was completed before this task.
+The requested product changes are implemented and installed in the live viewer. Full Rust tests, Clippy, formatting, 14 Node tests, and nine browser layout/quota tests pass. Live quota height is 370px versus 2230px before, with all seven profiles visible at 320x568. Primary-workspace reads were protected by aborting all API writes, including automatic read receipts. The complete isolated fake-provider browser/TUI workflow also passes after correcting its managed cache setup and stale footer probe. It reports two clients, one SSE reconnection, and zero leaked processes. Refresh an existing web tab for new assets; relaunch an already-running TUI to load its new rendering code. No new push has been requested for this round; the preceding merge and push was completed before this task.
 
 ## Context and Orientation
 
@@ -89,3 +90,7 @@ Updated 2026-09-05 after integration review and focused checks; full Rust suite 
 Updated 2026-09-05 with full Rust validation success and the user's Quicksilver lifecycle-label finding. The display-only lifecycle wording change passed Node tests and will be checked in the final browser run.
 
 Updated 2026-09-05 with installed-live success and the diagnosed fake-adapter fixture failure, separating product evidence from unfinished integration validation.
+
+Updated 2026-09-05 after committing the product changes and correcting only the isolated fake managed-harness cache setup in `tests/e2e/reliability_lab.py`; integration rerun remains in progress.
+
+Updated 2026-09-05 after final integration success. `tests/e2e/browser_lab.py` now preserves the caller's installed Chromium cache and sizes the terminal to retain its current pane-specific footer, rather than assuming an obsolete footer string at a width that hides it. Final artifact directory: `target/reliability-artifacts/browser-tui-convergence-seed-20260905-1128611`. All requested work and validation are complete.
