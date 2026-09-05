@@ -1,3 +1,25 @@
+# Collaboration
+
+Treat requests to build or fix something as instructions to complete the work.
+Use the conversation to infer scope, resolve routine choices, and continue
+through implementation, validation, and the required commit. State material
+assumptions. Ask for clarification when the answer changes the intended result
+and cannot be inferred; continue independent authorized work while waiting.
+
+Authorization persists across turns. Before requesting new approval, complete
+the authorized preparation so the user can review a concrete result. Follow
+the explicit Git and release rules below when deciding what is authorized.
+
+User instructions take precedence over skill guidelines. If a skill causes a
+pause, permission request, or unfinished work, link the exact `SKILL.md`, quote
+the relevant instruction, and explain how it applies. Distinguish an explicit
+requirement from your interpretation; do not invent approval requirements.
+
+Lead updates and final responses with the result or finding. Use concise,
+connected prose and plain language; use lists when they improve clarity.
+Explain what changed, why, how it was validated, and any remaining limitation.
+Keep messages between agents equally clear and readable.
+
 # ExecPlans
 
 Use an ExecPlan for a complex feature or a significant refactor. Follow `.agents/PLANS.md` from design through implementation.
@@ -33,7 +55,7 @@ unless the user explicitly says not to commit. Do not push unless the user
 explicitly asks.
 
 Commit directly to the current branch. This rule also applies when the current branch is `master`.
-Similarly, push to upstream, even when upstream is `master`.
+When explicitly asked to push, push to upstream, even when upstream is `master`.
 
 Do not create a branch, change branches, rebase, or open a pull request unless the user gives an explicit instruction.
 
@@ -115,7 +137,13 @@ worker explicitly with `--target x86_64-unknown-linux-musl` or
 
 Run every `cargo test` invocation outside the restricted sandbox with elevated permissions. The suite exercises loopback TCP and Unix sockets; sandboxed runs can fail with `EPERM` or hang and do not provide a valid test result.
 
-Add focused unit tests near the code under test using `#[cfg(test)] mod tests`. Follow the existing descriptive test naming style, e.g. `autocomplete_updates_matches_for_prefix`. For state-machine changes, test the event transition or input handling directly rather than relying only on manual TUI checks. Run `cargo test` and `cargo clippy --all-targets -- -D warnings` before submitting changes.
+Add focused unit tests near the code under test using `#[cfg(test)] mod tests`. Follow the existing descriptive test naming style, e.g. `autocomplete_updates_matches_for_prefix`. For state-machine changes, test the event transition or input handling directly rather than relying only on manual TUI checks.
+
+For Rust code or Cargo dependency changes, run `cargo test` and
+`cargo clippy --all-targets -- -D warnings` before submitting changes. For
+documentation or agent-configuration-only changes, review the diff and run
+applicable format or configuration checks; Cargo checks are not required.
+Release work must still pass all validations in `RELEASING.md`.
 
 Do not write tests for reversible, low-impact changes that mirror the implementation. If you do choose to verify your work with tests, make sure that the tests are meaningful and necessary to verify implementation.
 
