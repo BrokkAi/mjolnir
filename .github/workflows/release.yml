@@ -167,10 +167,7 @@ jobs:
   build-linux-arm64:
     name: Build aarch64-unknown-linux-gnu
     needs: [build-worker-x64, build-worker-arm64]
-    # Build natively on a GitHub-hosted arm64 runner instead of cross. The
-    # cross images ship a libstdc++ too old to link the GCC 11+ symbols in the
-    # prebuilt sherpa-onnx aarch64 static libs; ubuntu-24.04-arm ships GCC 13,
-    # matching the native build path that already succeeds on x86_64.
+    # Build natively so desktop and audio system dependencies match the target.
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6

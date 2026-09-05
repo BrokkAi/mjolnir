@@ -44,13 +44,3 @@ license = "MIT"
 path = "LICENSE.txt"
 license = "MIT"
 checksum = "a08554fab028af3af047e8588d32d019662c1b1bf07959a195a2f75fe340726b"
-
-# ureq is dual-licensed and cargo-about can otherwise choose a different
-# accepted license file on different platforms.
-[ureq.clarify]
-license = "Apache-2.0"
-
-[[ureq.clarify.files]]
-path = "LICENSE-APACHE"
-license = "Apache-2.0"
-checksum = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"

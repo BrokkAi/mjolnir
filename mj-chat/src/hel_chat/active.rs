@@ -33,7 +33,7 @@ use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
     queue_chat_remote_operation, restore_unsent_input,
 };
-use super::rendering::{display_width, truncate_to_width};
+use super::rendering::{display_width, truncate_to_width, voice_button_area, voice_button_line};
 use super::second_opinion::{
     CapturedProposal, SecondOpinion, SecondOpinionIntent, render_reviewer, render_setup,
     render_split_actions, review_role_session_id, reviewer_session_id,
@@ -390,8 +390,12 @@ pub struct ActiveChat {
     /// Held for the same reason, and cloned into each dictation thread.
     voice_updates_tx: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
     voice_updates_rx: tokio::sync::mpsc::UnboundedReceiver<VoiceUpdate>,
-    voice_cancel: Option<std::sync::mpsc::Sender<()>>,
-    voice_prefix: String,
+    voice_cancel: Option<std::sync::mpsc::Sender<crate::speech::VoiceCommand>>,
+    voice_auth: Option<std::path::PathBuf>,
+    voice_probe_at: Option<std::time::Instant>,
+    voice_probe_pending: bool,
+    voice_probe_paths: Vec<std::path::PathBuf>,
+    voice_finishing: bool,
     /// A closed feed reports `None` for ever, which would leave its arm
     /// permanently ready. Each flag retires its own arm instead.
     remote_open: bool,
@@ -609,7 +613,7 @@ impl ActiveChat {
                 );
             }
         }
-        let chat = Self {
+        let mut chat = Self {
             state,
             session,
             session_manager: control,
@@ -621,7 +625,11 @@ impl ActiveChat {
             voice_updates_tx,
             voice_updates_rx,
             voice_cancel: None,
-            voice_prefix: String::new(),
+            voice_auth: None,
+            voice_probe_at: None,
+            voice_probe_pending: false,
+            voice_probe_paths: Vec::new(),
+            voice_finishing: false,
             remote_open: true,
             session_open: true,
             session_reconnect_in_flight: false,
@@ -634,6 +642,7 @@ impl ActiveChat {
             persistence,
             deferred_elicitation_draft: None,
         };
+        chat.refresh_voice_availability();
         if chat.state.second_opinion_split() {
             chat.poll_reviewer_events();
         }
@@ -767,6 +776,7 @@ impl ActiveChat {
             context.session = session.clone();
         }
         self.state.set_review_config(config.review.clone());
+        self.refresh_voice_availability();
     }
 
     /// The composer's current text. The surface saves this on detach so
@@ -817,6 +827,7 @@ impl ActiveChat {
     }
 
     async fn drain(&mut self) {
+        self.refresh_voice_availability();
         while let Ok(result) = self.remote.try_recv() {
             self.apply_remote_result(result);
         }
@@ -1060,19 +1071,71 @@ impl ActiveChat {
         spawn_transcript_prefix(pending, attempt, self.chat_io_tx.clone());
     }
 
+    fn refresh_voice_availability(&mut self) {
+        let Some(context) = &self.context else {
+            return;
+        };
+        let paths = crate::dictation::auth_paths(&context.config, &context.session.last_profile);
+        if paths != self.voice_probe_paths {
+            self.voice_probe_paths.clone_from(&paths);
+            self.voice_auth = None;
+            self.state.set_voice_available(false);
+            self.voice_probe_at = None;
+        }
+        if self.voice_probe_pending
+            || self
+                .voice_probe_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+        {
+            return;
+        }
+        self.voice_probe_pending = true;
+        self.voice_probe_at = Some(std::time::Instant::now());
+        let updates = self.voice_updates_tx.clone();
+        tokio::spawn(async move {
+            let probed_paths = paths.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                if crate::speech::voice_input_supported() {
+                    crate::dictation::available_auth(paths)
+                } else {
+                    None
+                }
+            })
+            .await;
+            let result = result
+                .map_err(|error| anyhow::anyhow!("dictation availability task failed: {error}"));
+            if let Err(error) = updates.send(VoiceUpdate::Availability(probed_paths, result)) {
+                tracing::debug!(%error, "dictation availability dropped because the chat closed");
+            }
+        });
+    }
+
     fn apply_voice_update(&mut self, update: VoiceUpdate) {
         match update {
-            VoiceUpdate::Partial(text) => self
-                .state
-                .set_input(append_dictation(&self.voice_prefix, &text)),
+            VoiceUpdate::Availability(paths, result) => {
+                self.voice_probe_pending = false;
+                if paths != self.voice_probe_paths {
+                    return;
+                }
+                match result {
+                    Ok(path) => {
+                        self.state.set_voice_available(path.is_some());
+                        self.voice_auth = path;
+                    }
+                    Err(error) => self.state.set_notice(error.to_string()),
+                }
+            }
             VoiceUpdate::Status(status) => self.state.set_notice(status),
             VoiceUpdate::Finished(result) => {
                 self.state.voice_active = false;
                 self.voice_cancel = None;
+                self.voice_finishing = false;
                 match result {
                     Ok(text) => {
-                        self.state
-                            .set_input(append_dictation(&self.voice_prefix, &text));
+                        if !text.trim().is_empty() {
+                            self.state
+                                .set_input(append_dictation(&self.state.input, &text));
+                        }
                         self.state.notices.clear();
                     }
                     Err(error) => self
@@ -1361,20 +1424,30 @@ impl ActiveChat {
             }
             ChatAction::ToggleVoice => {
                 if let Some(cancel) = self.voice_cancel.as_ref() {
-                    let _ = cancel.send(());
-                    self.state.set_notice("Stopping voice dictation…");
-                } else if !crate::speech::voice_input_supported() {
-                    self.state.set_notice(
-                        "Voice helper unavailable; install mj-voice-worker beside mj or set MJ_VOICE_WORKER",
-                    );
-                } else {
+                    let (command, notice) = if self.voice_finishing {
+                        (crate::speech::VoiceCommand::Cancel, "Cancelling dictation…")
+                    } else {
+                        self.voice_finishing = true;
+                        (
+                            crate::speech::VoiceCommand::Finish,
+                            "Finishing dictation… click the microphone again to cancel",
+                        )
+                    };
+                    if let Err(error) = cancel.send(command) {
+                        self.state
+                            .set_notice(format!("Dictation worker stopped: {error}"));
+                    } else {
+                        self.state.set_notice(notice);
+                    }
+                } else if let Some(auth_path) = self.voice_auth.clone() {
                     let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
                     self.voice_cancel = Some(cancel_tx);
-                    self.voice_prefix.clone_from(&self.state.input);
+                    self.voice_finishing = false;
                     self.state.voice_active = true;
-                    self.state
-                        .set_notice("Listening… press Alt-V again to stop");
-                    spawn_dictation(self.voice_updates_tx.clone(), cancel_rx);
+                    self.state.set_notice(
+                        "Starting microphone… click again or press Alt-V to transcribe",
+                    );
+                    spawn_dictation(auth_path, self.voice_updates_tx.clone(), cancel_rx);
                 }
             }
             // Moving the keyboard to another pane is not leaving the
@@ -2029,8 +2102,10 @@ impl ActiveChat {
     /// Stops any dictation thread. The thread reports `Finished`, which clears
     /// the view's voice state, so this only asks it to stop.
     fn cancel_dictation(&mut self) {
-        if let Some(cancel) = self.voice_cancel.take() {
-            let _ = cancel.send(());
+        if let Some(cancel) = self.voice_cancel.take()
+            && let Err(error) = cancel.send(crate::speech::VoiceCommand::Cancel)
+        {
+            tracing::debug!(%error, "dictation worker already stopped");
         }
     }
 
@@ -2218,6 +2293,10 @@ pub(super) fn render_in(
     } else {
         BorderType::Plain
     };
+    // The button lives on the prompt's bottom border, so it is not part of
+    // the selectable prompt interior. Clear the hitbox first because a split
+    // view or modal may replace the composer for this frame.
+    chat.voice_button_area = None;
     let split = chat.second_opinion_split() || chat.turn_review_split();
     let (primary_area, reviewer_area) = if split {
         let halves = Layout::default()
@@ -2308,8 +2387,10 @@ pub(super) fn render_in(
         let prompt_block = Block::default()
             .borders(Borders::ALL)
             .border_type(prompt_border)
-            .title(prompt_title);
+            .title(prompt_title)
+            .title_bottom(voice_button_line(chat.voice_available, chat.voice_active));
         let prompt_inner = prompt_block.inner(prompt_area);
+        chat.voice_button_area = voice_button_area(prompt_area);
         let mut prompt_lines = chat
             .queued_prompts
             .iter()
@@ -2579,32 +2660,38 @@ fn prompt_title(chat: &ChatState, queued: usize) -> String {
 }
 
 enum VoiceUpdate {
-    Partial(String),
+    Availability(
+        Vec<std::path::PathBuf>,
+        anyhow::Result<Option<std::path::PathBuf>>,
+    ),
     Status(String),
     Finished(anyhow::Result<String>),
 }
 
 fn spawn_dictation(
+    auth_path: std::path::PathBuf,
     updates: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
-    cancel: std::sync::mpsc::Receiver<()>,
+    cancel: std::sync::mpsc::Receiver<crate::speech::VoiceCommand>,
 ) {
-    std::thread::spawn(move || {
-        let partial_updates = updates.clone();
-        let status_updates = updates.clone();
-        let result = crate::speech::run_dictation(
-            move |text| {
-                if let Err(error) = partial_updates.send(VoiceUpdate::Partial(text)) {
-                    tracing::debug!(%error, "voice partial result dropped because the chat closed");
-                }
-            },
-            |_| {},
-            move |status| {
-                if let Err(error) = status_updates.send(VoiceUpdate::Status(status)) {
-                    tracing::debug!(%error, "voice status dropped because the chat closed");
-                }
-            },
-            cancel,
-        );
+    tokio::spawn(async move {
+        let worker_updates = updates.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let updates = worker_updates;
+            let status_updates = updates.clone();
+            crate::speech::run_dictation(
+                &auth_path,
+                |_| {},
+                |_| {},
+                move |status| {
+                    if let Err(error) = status_updates.send(VoiceUpdate::Status(status)) {
+                        tracing::debug!(%error, "voice status dropped because the chat closed");
+                    }
+                },
+                cancel,
+            )
+        })
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("dictation task failed: {error}")));
         if let Err(error) = updates.send(VoiceUpdate::Finished(result)) {
             tracing::debug!(%error, "voice result dropped because the chat closed");
         }
@@ -2904,6 +2991,37 @@ mod tests {
             chat.notice().as_deref(),
             Some("connection lost: session manager stopped")
         );
+    }
+
+    #[tokio::test]
+    async fn dictation_completion_preserves_edits_and_recovers_after_errors() {
+        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "session-dictation",
+            72,
+        );
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            "original".into(),
+            Notices::default(),
+        );
+        chat.state.voice_active = true;
+        chat.state.set_input("edited while recording".into());
+        chat.apply_voice_update(VoiceUpdate::Finished(Ok("spoken words".into())));
+        assert_eq!(chat.draft(), "edited while recording spoken words");
+        assert!(!chat.state.voice_active);
+        chat.state.voice_active = true;
+        chat.apply_voice_update(VoiceUpdate::Finished(Err(anyhow::anyhow!(
+            "capture failed"
+        ))));
+        assert_eq!(chat.draft(), "edited while recording spoken words");
+        assert!(!chat.state.voice_active);
+        assert!(chat.state.notice().unwrap().contains("capture failed"));
+        chat.apply_voice_update(VoiceUpdate::Finished(Ok(String::new())));
+        assert_eq!(chat.draft(), "edited while recording spoken words");
     }
 
     #[tokio::test]

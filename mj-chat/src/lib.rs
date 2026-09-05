@@ -1,6 +1,7 @@
 //! Hel's conversation view state: the chat transcript, its input surfaces, and
 //! the usage formatting the surfaces render.
 
+mod dictation;
 pub mod speech;
 pub mod usage_format;
 

@@ -66,6 +66,8 @@ use elicitation::ElicitationDialog;
 pub use elicitation::ElicitationDraft;
 use history::{HistorySearch, HistorySearchRequest};
 pub use rendering::truncate_line_to_width;
+#[cfg(test)]
+use rendering::voice_button_area;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
@@ -438,7 +440,14 @@ pub struct ChatState {
     render_mode: TranscriptRenderMode,
     render_cache: TranscriptRenderCache,
     notices: Notices,
+    /// Whether Codex OAuth credentials and the voice helper are available. The runtime
+    /// owns discovering this asynchronously; the chat starts disabled until
+    /// the host reports a successful probe.
+    voice_available: bool,
     voice_active: bool,
+    /// The last frame's microphone button, which sits on the prompt's bottom
+    /// border rather than inside its selectable text surface.
+    voice_button_area: Option<Rect>,
     /// Session-list identity snapshotted when the chat opened.
     header_target: String,
     header_profile: String,
@@ -533,7 +542,9 @@ impl ChatState {
             render_mode: TranscriptRenderMode::Rich,
             render_cache: TranscriptRenderCache::default(),
             notices: Notices::default(),
+            voice_available: false,
             voice_active: false,
+            voice_button_area: None,
             header_target: String::new(),
             header_profile: String::new(),
             turn_started_at_epoch_seconds: None,
@@ -1178,6 +1189,13 @@ impl ChatState {
         self.notices.set(notice);
     }
 
+    /// Tells the chat whether the host can start voice dictation. Availability
+    /// is separate from [`Self::voice_active`], because an active recording
+    /// must remain stoppable if the helper later disappears.
+    pub(super) fn set_voice_available(&mut self, available: bool) {
+        self.voice_available = available;
+    }
+
     /// The current shared notice, if any.
     pub fn notice(&self) -> Option<String> {
         self.notices.current()
@@ -1606,7 +1624,14 @@ impl ChatState {
         }
 
         if modifiers.contains(KeyModifiers::ALT) && code == KeyCode::Char('v') {
-            return ChatAction::ToggleVoice;
+            // A recording remains stoppable even if the helper becomes
+            // unavailable while it is running. An unavailable idle button is
+            // inert, matching the mouse path below.
+            return if self.voice_available || self.voice_active {
+                ChatAction::ToggleVoice
+            } else {
+                ChatAction::None
+            };
         }
 
         if self.history_search.is_some() {
@@ -1737,6 +1762,11 @@ impl ChatState {
             }
             KeyCode::Enter => {
                 if self.accept_autocomplete() {
+                    ChatAction::None
+                } else if self.voice_active {
+                    // Voice updates append to the current draft. Keep Enter
+                    // from submitting that draft while the recorder still
+                    // owns the input, but leave ordinary editing available.
                     ChatAction::None
                 } else {
                     self.submit_input()
@@ -1946,6 +1976,26 @@ impl ChatState {
         if let Some(dialog) = self.elicitation.as_mut() {
             dialog.handle_mouse(mouse);
             return ChatAction::None;
+        }
+        // The value selector owns all clicks while it is open. Its modal body
+        // replaces the prompt surfaces, but the button area is retained until
+        // the next frame, so check the state before hit-testing it.
+        if self.config_picker_active() {
+            return ChatAction::None;
+        }
+        // Setup modals do not enter the split branch above, but they still
+        // own the frame and must not expose a stale prompt hitbox from the
+        // preceding draw.
+        if self.second_opinion_active() || self.turn_review_active() {
+            return ChatAction::None;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .voice_button_area
+                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+            && (self.voice_available || self.voice_active)
+        {
+            return ChatAction::ToggleVoice;
         }
         // The host routes a wheel event here only when the pointer is over
         // the conversation, so it always drives the transcript.
@@ -2325,9 +2375,10 @@ fn turn_started_at_epoch_seconds(execution: MaterializedExecutionState) -> Optio
 mod tests {
     use super::*;
     use crate::hel_chat::test_support::{
-        advertise, alt, ctrl, fast_mode_option, grok_chat, key, mode_config_option, queued,
-        select_config_option, snapshot,
+        advertise, alt, ctrl, drawn_transcript, fast_mode_option, grok_chat, key,
+        mode_config_option, queued, select_config_option, snapshot,
     };
+    use crate::hel_selection::SurfaceId;
     use hel::hel_worker::ActivePrompt;
 
     /// Mirrors what `ActiveChat::open` does for a session with no warm view:
@@ -2341,11 +2392,107 @@ mod tests {
     }
 
     #[test]
-    fn alt_v_toggles_voice_without_editing_prompt() {
+    fn alt_v_is_disabled_until_voice_is_available() {
         let mut chat = ChatState::new(&snapshot(), &[]);
-        let action = chat.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(chat.handle_key(key), ChatAction::None);
+
+        chat.set_voice_available(true);
+        let action = chat.handle_key(key);
         assert_eq!(action, ChatAction::ToggleVoice);
         assert!(chat.input.is_empty());
+    }
+
+    #[test]
+    fn active_voice_remains_stoppable_after_availability_is_lost() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.voice_active = true;
+        chat.voice_button_area = Some(Rect::new(10, 8, 4, 1));
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+
+        assert_eq!(chat.handle_key(key), ChatAction::ToggleVoice);
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 11,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            }),
+            ChatAction::ToggleVoice
+        );
+    }
+
+    #[test]
+    fn disabled_voice_button_click_is_inert() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.voice_button_area = Some(Rect::new(10, 8, 4, 1));
+
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 11,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            }),
+            ChatAction::None
+        );
+    }
+
+    #[test]
+    fn enabled_voice_button_click_toggles_voice() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_voice_available(true);
+        chat.voice_button_area = Some(Rect::new(10, 8, 4, 1));
+
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 11,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            }),
+            ChatAction::ToggleVoice
+        );
+    }
+
+    #[test]
+    fn enter_does_not_submit_while_voice_is_active() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.voice_active = true;
+        chat.set_input("dictated draft".into());
+
+        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+        assert_eq!(chat.input, "dictated draft");
+    }
+
+    #[test]
+    fn microphone_button_hitbox_uses_ratatui_display_width() {
+        let prompt = Rect::new(4, 2, 30, 5);
+        let button = voice_button_area(prompt).expect("button fits");
+        assert_eq!(button.y, prompt.bottom() - 1);
+        assert_eq!(button.right(), prompt.right() - 1);
+        assert_eq!(usize::from(button.width), rendering::display_width(" 🎙︎ "));
+    }
+
+    #[test]
+    fn regular_prompt_draws_microphone_on_its_bottom_border() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_voice_available(true);
+
+        let rows = drawn_transcript(&mut chat, 80, 24);
+        assert!(
+            rows.iter().any(|row| row.contains("🎙︎")),
+            "microphone button missing from prompt border: {rows:?}"
+        );
+        let button = chat.voice_button_area.expect("button hitbox");
+        assert_eq!(
+            button.y,
+            chat.frame_surfaces()
+                .surface(SurfaceId::PromptInput)
+                .unwrap()
+                .rect
+                .bottom()
+        );
     }
 
     #[test]

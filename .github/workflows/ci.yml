@@ -239,7 +239,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
-      SHERPA_ONNX_ARCHIVE_DIR: ${{ github.workspace }}/.ci-cache/sherpa-onnx
     steps:
     - uses: actions/checkout@v6
 
@@ -252,27 +251,6 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
-
-    - name: Cache sherpa-onnx native archive
-      uses: actions/cache@v5
-      with:
-        path: .ci-cache/sherpa-onnx
-        key: sherpa-onnx-v1.13.3-linux-x64-static
-
-    - name: Fetch sherpa-onnx native archive
-      shell: bash
-      run: |
-        archive='sherpa-onnx-v1.13.3-linux-x64-static-lib.tar.bz2'
-        mkdir -p "$SHERPA_ONNX_ARCHIVE_DIR"
-        destination="$SHERPA_ONNX_ARCHIVE_DIR/$archive"
-        if [[ ! -f "$destination" ]] || ! tar -tjf "$destination" >/dev/null; then
-          rm -f "$destination" "$destination.part"
-          curl --fail --location --retry 5 --retry-all-errors \
-            --output "$destination.part" \
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.3/$archive"
-          tar -tjf "$destination.part" >/dev/null
-          mv "$destination.part" "$destination"
-        fi
 
     - name: Check voice worker
       run: cargo clippy -p brokk-mj-voice-worker --all-targets -- -D warnings

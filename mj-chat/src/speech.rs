@@ -1,30 +1,37 @@
 //! Prompt dictation support.
 //!
-//! Non-Android platforms run a fully local `mj-voice-worker` sidecar built on
-//! sherpa-onnx. Keeping the native speech stack in its own workspace package
-//! means ordinary `mj` builds never compile or link ONNX Runtime.
-//!
-//! The native speech stack can raise foreign C++ exceptions across the FFI boundary or
-//! abort outright when system libraries are incompatible or model files are
-//! corrupt; Rust cannot catch those, so in-process use would `SIGABRT` the
-//! whole TUI. Isolating dictation in a child process turns any such crash
-//! into a status-line warning while the chat session keeps running. The
-//! worker streams progress to the parent as JSON lines on stdout, and stops
-//! when its stdin reaches EOF (cancellation or parent exit).
+//! Non-Android platforms run an `mj-voice-worker` sidecar. The worker receives
+//! the Codex authentication path as a command-line argument and streams
+//! progress to the parent as JSON lines on stdout. A newline on stdin ends
+//! capture and starts upload/transcription; EOF cancels the request without
+//! uploading it.
 
 use anyhow::Result;
 #[cfg(target_os = "android")]
 use anyhow::bail;
+use std::path::Path;
+
+/// Command sent from the chat input to the dictation transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceCommand {
+    /// End microphone capture and let the worker upload and transcribe it.
+    Finish,
+    /// Cancel capture. The worker must not upload or return a transcript.
+    Cancel,
+}
+
 #[cfg(not(target_os = "android"))]
 mod worker {
     use anyhow::{Context, Result, anyhow};
     use serde::{Deserialize, Serialize};
-    use std::io::{BufRead, BufReader, Read};
-    use std::path::PathBuf;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitStatus, Stdio};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    use super::VoiceCommand;
 
     /// One JSON line on the worker's stdout.
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -41,21 +48,28 @@ mod worker {
         serde_json::from_str(line.trim()).ok()
     }
 
-    /// How long after cancellation the worker gets to flush a final
-    /// transcript before it is killed.
-    const CANCEL_GRACE: Duration = Duration::from_secs(10);
-    /// The worker enforces the dictation timeout itself; the parent allows
-    /// some slack on top before declaring it hung.
+    /// How long after cancellation the worker gets to exit before it is
+    /// forcefully stopped.
+    const CANCEL_GRACE: Duration = Duration::from_secs(5);
+    /// Bound capture and worker startup even if the sidecar never reports a
+    /// command-ready state. The worker applies the same capture limit.
+    const CAPTURE_TIMEOUT: Duration = Duration::from_secs(600);
+    /// How long the upload/transcription phase may run. The worker's own
+    /// timeout is independent; this extra slack prevents a hung worker from
+    /// keeping the chat task alive forever.
+    const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
     const WORKER_GRACE: Duration = Duration::from_secs(30);
-    const DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+    #[cfg(unix)]
+    const SIGKILL: i32 = 9;
 
-    /// Parent-side dictation: spawn the native sidecar and relay its events, so
-    /// a native-library crash cannot take down the TUI process.
+    /// Parent-side dictation: spawn the sidecar and relay its events.
     pub(super) fn run<F, G, H>(
+        auth_path: &Path,
         on_partial: F,
         on_level: G,
         on_status: H,
-        cancel_rx: mpsc::Receiver<()>,
+        cancel_rx: mpsc::Receiver<VoiceCommand>,
     ) -> Result<String>
     where
         F: FnMut(String),
@@ -63,10 +77,19 @@ mod worker {
         H: FnMut(String),
     {
         let exe = voice_worker_executable()?;
-        let child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        command
+            .arg("--codex-auth")
+            .arg(auth_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command
             .spawn()
             .with_context(|| format!("start voice worker {}", exe.display()))?;
         drive_worker(child, on_partial, on_level, on_status, cancel_rx)
@@ -99,13 +122,13 @@ mod worker {
 
     /// Relay worker events to the UI callbacks and translate every way the
     /// worker can end — result, reported error, crash, or hang — into a
-    /// `Result`. Non-protocol stdout lines (native-library noise) are ignored.
+    /// `Result`. Non-protocol stdout lines are ignored.
     pub(super) fn drive_worker<F, G, H>(
         mut child: Child,
         mut on_partial: F,
         mut on_level: G,
         mut on_status: H,
-        cancel_rx: mpsc::Receiver<()>,
+        cancel_rx: mpsc::Receiver<VoiceCommand>,
     ) -> Result<String>
     where
         F: FnMut(String),
@@ -141,43 +164,77 @@ mod worker {
         let stderr_reader = stderr.map(|stderr| thread::spawn(move || read_tail(stderr)));
 
         let started_at = Instant::now();
+        let mut finish_started_at: Option<Instant> = None;
         let mut cancelled_at: Option<Instant> = None;
-        let mut last_partial = String::new();
         let outcome = loop {
-            if cancelled_at.is_none() && cancel_rx.try_recv().is_ok() {
-                cancelled_at = Some(Instant::now());
-                // Closing stdin is the cancellation signal; the worker then
-                // flushes and reports whatever it recognized so far.
-                stdin = None;
+            if cancelled_at.is_none() {
+                match cancel_rx.try_recv() {
+                    Ok(VoiceCommand::Finish) if finish_started_at.is_none() => {
+                        let Some(worker_stdin) = stdin.as_mut() else {
+                            break Some(Err(anyhow!(
+                                "voice worker stdin closed before transcription started"
+                            )));
+                        };
+                        if let Err(error) = worker_stdin
+                            .write_all(b"\n")
+                            .and_then(|()| worker_stdin.flush())
+                        {
+                            break Some(Err(anyhow!(
+                                "send voice capture completion to worker: {error}"
+                            )));
+                        }
+                        // Keep stdin open while the worker uploads and
+                        // transcribes. EOF is reserved for cancellation.
+                        finish_started_at = Some(Instant::now());
+                    }
+                    Ok(VoiceCommand::Finish) => {}
+                    Ok(VoiceCommand::Cancel) | Err(mpsc::TryRecvError::Disconnected) => {
+                        cancelled_at = Some(Instant::now());
+                        // EOF is the cancellation signal. Do not allow any
+                        // result the worker may have already queued to reach
+                        // the canceled chat input.
+                        stdin = None;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
             }
             if let Some(at) = cancelled_at
                 && at.elapsed() >= CANCEL_GRACE
             {
-                if let Err(error) = child.kill()
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!(%error, "could not stop the cancelled voice worker");
-                }
-                break Some(Ok(last_partial.clone()));
+                stop_worker(&mut child);
+                break Some(Err(anyhow!("voice dictation cancelled")));
             }
-            if started_at.elapsed() >= DICTATION_TIMEOUT + WORKER_GRACE {
-                if let Err(error) = child.kill()
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!(%error, "could not stop the timed-out voice worker");
+            if let Some(at) = finish_started_at {
+                if at.elapsed() >= TRANSCRIPTION_TIMEOUT + WORKER_GRACE {
+                    stop_worker(&mut child);
+                    break Some(Err(anyhow!("voice dictation transcription timed out")));
                 }
-                break Some(Err(anyhow!("voice dictation timed out")));
+            } else if started_at.elapsed() >= CAPTURE_TIMEOUT + TRANSCRIPTION_TIMEOUT + WORKER_GRACE
+            {
+                // The worker also finishes capture automatically at its limit,
+                // so reserve a complete transcription deadline without a click.
+                stop_worker(&mut child);
+                break Some(Err(anyhow!("voice dictation capture timed out")));
             }
-            match event_rx.recv_timeout(Duration::from_millis(50)) {
+            match event_rx.recv_timeout(POLL_INTERVAL) {
+                Ok(Some(event)) if cancelled_at.is_some() => {
+                    // Cancellation owns the result even if the worker raced
+                    // EOF and emitted one more event.
+                    drop(event);
+                }
                 Ok(Some(WorkerEvent::Partial { text })) => {
-                    last_partial.clone_from(&text);
                     on_partial(text);
                 }
                 Ok(Some(WorkerEvent::Level { value })) => on_level(value),
                 Ok(Some(WorkerEvent::Status { message })) => on_status(message),
                 Ok(Some(WorkerEvent::Result { text })) => break Some(Ok(text)),
                 Ok(Some(WorkerEvent::Error { message })) => break Some(Err(anyhow!(message))),
-                Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+                Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if cancelled_at.is_some() {
+                        break Some(Err(anyhow!("voice dictation cancelled")));
+                    }
+                    break None;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         };
@@ -193,30 +250,43 @@ mod worker {
                 }
             })
             .unwrap_or_default();
+        if !stderr_tail.trim().is_empty() {
+            match &outcome {
+                Some(Err(_)) | None => tracing::warn!("voice worker stderr: {stderr_tail}"),
+                Some(Ok(_)) => tracing::debug!("voice worker stderr: {stderr_tail}"),
+            }
+        }
         match outcome {
             Some(result) => result,
-            None => {
-                if !stderr_tail.trim().is_empty() {
-                    tracing::warn!("voice worker stderr: {stderr_tail}");
-                }
-                Err(worker_crash_error(status, &stderr_tail))
-            }
+            None => Err(worker_crash_error(status, &stderr_tail)),
+        }
+    }
+
+    /// Stop the worker and any subprocesses it owns.
+    fn stop_worker(child: &mut Child) {
+        #[cfg(unix)]
+        {
+            // The shared helper also handles a group that exited between the
+            // timeout check and this call.
+            hel::hel_subprocess::terminate_process_group(child.id() as i32, SIGKILL);
+        }
+        #[cfg(not(unix))]
+        if let Err(error) = child.kill()
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "could not stop the voice worker");
         }
     }
 
     /// Wait briefly for the worker to exit, killing it if it lingers.
     fn reap(mut child: Child) -> Option<ExitStatus> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + CANCEL_GRACE;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => return Some(status),
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
                 _ => {
-                    if let Err(error) = child.kill()
-                        && error.kind() != std::io::ErrorKind::NotFound
-                    {
-                        tracing::warn!(%error, "could not stop the voice worker while reaping it");
-                    }
+                    stop_worker(&mut child);
                     return match child.wait() {
                         Ok(status) => Some(status),
                         Err(error) => {
@@ -246,9 +316,8 @@ mod worker {
         String::from_utf8_lossy(&buffer).into_owned()
     }
 
-    /// The worker vanished without reporting a result or an error: a native
-    /// crash (foreign exception, abort) or an outright kill. Explain what
-    /// happened without taking the session with it.
+    /// The worker vanished without reporting a result or an error. Explain
+    /// what happened without taking the session with it.
     pub(super) fn worker_crash_error(
         status: Option<ExitStatus>,
         stderr_tail: &str,
@@ -260,14 +329,7 @@ mod worker {
         if let Some(line) = last_meaningful_line(stderr_tail) {
             message.push_str(&format!(": {line}"));
         }
-        let cache = dirs::cache_dir()
-            .map(|path| path.join("mjolnir/voice").display().to_string())
-            .unwrap_or_else(|| "the voice model cache".to_string());
-        message.push_str(&format!(
-            " — the dictation engine runs in a separate process, so your session is unaffected; \
-             this usually means an incompatible or outdated system library (try updating system \
-             packages, or delete {cache} and retry)"
-        ));
+        message.push_str(" — the voice worker runs separately, so your session is unaffected");
         anyhow!(message)
     }
 
@@ -325,33 +387,33 @@ pub fn voice_input_supported() -> bool {
 ///
 /// `on_partial` receives the cumulative transcript as it grows, `on_level`
 /// receives normalized microphone levels for the input meter, and `on_status`
-/// receives transient progress messages (model download, loading). Sending on
-/// `cancel_rx` stops capture and returns whatever was recognized so far.
-///
-/// Dictation runs in a separate worker process (see the module docs); a crash
-/// in the native speech stack surfaces here as an error instead of aborting
-/// the TUI.
+/// receives transient progress messages. `VoiceCommand::Finish` stops capture
+/// and starts transcription; `VoiceCommand::Cancel`, or a dropped command
+/// sender, closes the worker's stdin and returns a cancellation error without
+/// a transcript.
 #[cfg(not(target_os = "android"))]
 pub fn run_dictation<F, G, H>(
+    auth_path: &Path,
     on_partial: F,
     on_level: G,
     on_status: H,
-    cancel_rx: std::sync::mpsc::Receiver<()>,
+    cancel_rx: std::sync::mpsc::Receiver<VoiceCommand>,
 ) -> Result<String>
 where
     F: FnMut(String),
     G: FnMut(f32),
     H: FnMut(String),
 {
-    worker::run(on_partial, on_level, on_status, cancel_rx)
+    worker::run(auth_path, on_partial, on_level, on_status, cancel_rx)
 }
 
 #[cfg(target_os = "android")]
 pub fn run_dictation<F, G, H>(
+    _auth_path: &Path,
     _on_partial: F,
     _on_level: G,
     _on_status: H,
-    _cancel_rx: std::sync::mpsc::Receiver<()>,
+    _cancel_rx: std::sync::mpsc::Receiver<VoiceCommand>,
 ) -> Result<String>
 where
     F: FnMut(String),
@@ -398,7 +460,7 @@ mod tests {
         use super::worker::{WorkerEvent, parse_event};
         let events = [
             WorkerEvent::Status {
-                message: "loading voice model...".to_string(),
+                message: "uploading audio...".to_string(),
             },
             WorkerEvent::Partial {
                 text: "hello".to_string(),
@@ -423,20 +485,20 @@ mod tests {
     fn parse_event_ignores_non_protocol_output() {
         use super::worker::parse_event;
         assert_eq!(parse_event(""), None);
-        assert_eq!(parse_event("onnxruntime init log line"), None);
+        assert_eq!(parse_event("worker startup log line"), None);
         assert_eq!(parse_event("{\"event\":\"unknown\"}"), None);
     }
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn crash_error_includes_stderr_line_and_recovery_hint() {
+    fn crash_error_includes_stderr_line_and_isolated_worker_hint() {
         let err = super::worker::worker_crash_error(
             None,
-            "onnx init\nfatal runtime error: Rust cannot catch foreign exceptions, aborting\n",
+            "worker startup failed\ntranscription helper exited unexpectedly\n",
         );
         let message = err.to_string();
         assert!(message.contains("voice dictation stopped unexpectedly"));
-        assert!(message.contains("Rust cannot catch foreign exceptions"));
+        assert!(message.contains("transcription helper exited unexpectedly"));
         assert!(message.contains("session is unaffected"));
     }
 
@@ -444,6 +506,7 @@ mod tests {
     /// in for the real worker, covering each way the child can end.
     #[cfg(all(unix, not(target_os = "android")))]
     mod fake_worker {
+        use super::super::VoiceCommand;
         use super::super::worker::drive_worker;
         use std::process::{Command, Stdio};
         use std::sync::mpsc;
@@ -461,7 +524,7 @@ mod tests {
 
         fn drive(
             script: &str,
-            cancel_rx: mpsc::Receiver<()>,
+            cancel_rx: mpsc::Receiver<VoiceCommand>,
         ) -> (anyhow::Result<String>, Vec<String>, Vec<String>) {
             let mut partials = Vec::new();
             let mut statuses = Vec::new();
@@ -475,7 +538,7 @@ mod tests {
             (result, partials, statuses)
         }
 
-        fn never_cancelled() -> mpsc::Receiver<()> {
+        fn never_cancelled() -> mpsc::Receiver<VoiceCommand> {
             let (tx, rx) = mpsc::channel();
             std::mem::forget(tx);
             rx
@@ -487,7 +550,7 @@ mod tests {
                 printf '%s\n' '{"event":"status","message":"listening..."}'
                 printf '%s\n' '{"event":"level","value":0.5}'
                 printf '%s\n' '{"event":"partial","text":"hello"}'
-                printf 'native library noise\n'
+                printf 'worker log noise\n'
                 printf '%s\n' '{"event":"result","text":"hello world"}'
             "#;
             let (result, partials, statuses) = drive(script, never_cancelled());
@@ -508,9 +571,9 @@ mod tests {
         }
 
         #[test]
-        fn abort_is_contained_and_described() {
+        fn worker_abort_is_contained_and_described() {
             let script = r#"
-                echo 'fatal runtime error: Rust cannot catch foreign exceptions, aborting' >&2
+                echo 'voice worker crashed during transcription' >&2
                 kill -ABRT $$
             "#;
             let (result, _, _) = drive(script, never_cancelled());
@@ -518,7 +581,7 @@ mod tests {
             assert!(message.contains("signal 6"), "got: {message}");
             assert!(message.contains("SIGABRT"), "got: {message}");
             assert!(
-                message.contains("Rust cannot catch foreign exceptions"),
+                message.contains("voice worker crashed during transcription"),
                 "got: {message}"
             );
             assert!(message.contains("session is unaffected"), "got: {message}");
@@ -535,17 +598,51 @@ mod tests {
         }
 
         #[test]
-        fn cancel_closes_stdin_and_returns_flushed_result() {
-            // The fake worker mirrors the real cancellation handshake: wait
-            // for stdin EOF, then flush a final transcript.
+        fn cancel_closes_stdin_and_discards_worker_result() {
+            // EOF is cancellation. Even if a buggy worker emits a result
+            // after that signal, it must never reach the canceled chat.
             let script = r#"
-                while read -r _; do :; done
-                printf '%s\n' '{"event":"result","text":"flushed"}'
+                if read -r _; then
+                    exit 9
+                fi
+                i=0
+                while [ "$i" -lt 70000 ]; do
+                    printf 'worker noise\n'
+                    i=$((i + 1))
+                done
+                printf '%s\n' '{"event":"result","text":"must-not-reach-ui"}'
             "#;
             let (cancel_tx, cancel_rx) = mpsc::channel();
-            cancel_tx.send(()).expect("queue cancel");
+            cancel_tx.send(VoiceCommand::Cancel).expect("queue cancel");
             let (result, _, _) = drive(script, cancel_rx);
-            assert_eq!(result.expect("flushed transcript"), "flushed");
+            let error = result.expect_err("cancel must not return a transcript");
+            assert!(error.to_string().contains("cancelled"));
+        }
+
+        #[test]
+        fn finish_sends_newline_and_drains_large_upload_output() {
+            // The worker sees a blank line as Finish and then performs the
+            // upload/transcription phase while stdin remains open. The large
+            // noise stream proves stdout is drained concurrently with that
+            // phase instead of deadlocking at the pipe buffer boundary.
+            let script = r#"
+                if ! read -r command; then
+                    exit 9
+                fi
+                if [ -n "$command" ]; then
+                    exit 10
+                fi
+                i=0
+                while [ "$i" -lt 70000 ]; do
+                    printf 'worker noise\n'
+                    i=$((i + 1))
+                done
+                printf '%s\n' '{"event":"result","text":"uploaded transcript"}'
+            "#;
+            let (finish_tx, finish_rx) = mpsc::channel();
+            finish_tx.send(VoiceCommand::Finish).expect("queue finish");
+            let (result, _, _) = drive(script, finish_rx);
+            assert_eq!(result.expect("uploaded transcript"), "uploaded transcript");
         }
     }
 }

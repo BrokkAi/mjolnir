@@ -51,7 +51,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 tracing = "0.1"
 url = "2"
-anvil-llm = { package = "brokk-anvil-llm", version = "0.27.1" }
+anvil-llm.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"

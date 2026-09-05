@@ -3,7 +3,7 @@ name = "brokk-mj-voice-worker"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "Native local speech-recognition sidecar for Mjolnir"
+description = "Codex OAuth dictation sidecar for Mjolnir"
 license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
@@ -17,14 +17,16 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-bzip2 = "0.6"
+anvil-llm.workspace = true
+bytes = "1"
 cpal = "0.16"
-dirs = "6"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sherpa-onnx = { version = "1.13.2", default-features = false, features = ["static"] }
-tar = "0.4"
+tokio = { version = "1", features = ["rt", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

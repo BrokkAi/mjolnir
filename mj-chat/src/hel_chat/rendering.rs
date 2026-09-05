@@ -1,10 +1,57 @@
 //! Markdown and width-aware transcript rendering.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use textwrap::WordSplitter;
 use unicode_segmentation::UnicodeSegmentation;
+
+/// Text presentation of the microphone glyph. The text variation selector is
+/// intentional: terminals should keep this as a compact text button rather
+/// than selecting an emoji presentation with a potentially different width.
+pub(super) const VOICE_BUTTON_GLYPH: &str = "🎙︎";
+
+/// The microphone button is a right-aligned chip on the prompt's bottom
+/// border. Keep its geometry derived from the same Unicode width ratatui uses
+/// to lay out `Line`s, rather than assuming the glyph occupies one cell.
+pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
+    if prompt_area.width == 0 || prompt_area.height == 0 {
+        return None;
+    }
+    let button_width = display_width(&format!(" {VOICE_BUTTON_GLYPH} "));
+    let button_width = u16::try_from(button_width).ok()?;
+    let title_width = prompt_area.width.saturating_sub(2);
+    (button_width <= title_width).then(|| {
+        Rect::new(
+            prompt_area
+                .right()
+                .saturating_sub(1)
+                .saturating_sub(button_width),
+            prompt_area.bottom().saturating_sub(1),
+            button_width,
+            1,
+        )
+    })
+}
+
+/// Renders the microphone chip that belongs to the prompt's bottom border.
+pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Line<'static> {
+    let style = if voice_active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightRed)
+            .add_modifier(Modifier::BOLD)
+    } else if voice_available {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray).bg(Color::Black)
+    };
+    Line::from(Span::styled(format!(" {VOICE_BUTTON_GLYPH} "), style)).right_aligned()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TranscriptRenderMode {
@@ -904,5 +951,19 @@ mod tests {
             truncated.spans.last().and_then(|span| span.style.fg),
             Some(Color::Blue)
         );
+    }
+
+    #[test]
+    fn microphone_button_uses_text_presentation_and_matches_line_width() {
+        let line = voice_button_line(true, false);
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            format!(" {VOICE_BUTTON_GLYPH} ")
+        );
+        assert_eq!(line.width(), display_width(" 🎙︎ "));
+        assert_eq!(display_width(VOICE_BUTTON_GLYPH), display_width("🎙︎"));
     }
 }

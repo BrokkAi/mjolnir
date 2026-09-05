@@ -43,56 +43,6 @@ The `cfg_aliases!` macro uses a lot of the code from [`tectonic_cfg_support::tar
 ---
 
 ================================================================================
-bzip2/libbzip2 1.0.8
-================================================================================
-
-Source: https://crates.io/crates/bzip2-sys/0.1.13%2B1.0.8 (bzip2-1.0.8/LICENSE)
-Inclusion: used while unpacking sherpa-onnx native libraries during the voice-worker build
-
-
---------------------------------------------------------------------------
-
-This program, "bzip2", the associated library "libbzip2", and all
-documentation, are copyright (C) 1996-2019 Julian R Seward.  All
-rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions
-are met:
-
-1. Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-2. The origin of this software must not be misrepresented; you must 
-   not claim that you wrote the original software.  If you use this 
-   software in a product, an acknowledgment in the product 
-   documentation would be appreciated but is not required.
-
-3. Altered source versions must be plainly marked as such, and must
-   not be misrepresented as being the original software.
-
-4. The name of the author may not be used to endorse or promote 
-   products derived from this software without specific prior written 
-   permission.
-
-THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
-OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
-GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-Julian Seward, jseward@acm.org
-bzip2/libbzip2 version 1.0.8 of 13 July 2019
-
---------------------------------------------------------------------------
-
-================================================================================
 mimalloc native allocator
 ================================================================================
 
@@ -122,6 +72,44 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
+Zstandard native compression library
+================================================================================
+
+Source: https://crates.io/crates/zstd-sys/2.0.16%2Bzstd.1.5.7 (zstd/LICENSE)
+Inclusion: statically linked for checkpoint archive compression
+
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
 SQLite 3.50.2 amalgamation
 ================================================================================
 
@@ -130,37 +118,6 @@ Inclusion: statically linked into Mjolnir by libsqlite3-sys with its bundled fea
 
 SQLite is dedicated to the public domain.
 https://www.sqlite.org/copyright.html
-
-================================================================================
-sherpa-onnx native static payload 1.13.3
-================================================================================
-
-Source: https://crates.io/crates/sherpa-onnx-sys/1.13.3
-Inclusion: statically linked into mj-voice-worker on Linux, macOS, and Windows
-
-The sherpa-onnx-sys build downloads a native archive that contains only static libraries, without legal files. The linked payload was audited against these exact upstream revisions:
-
-- sherpa-onnx v1.13.3: Apache-2.0
-  https://github.com/k2-fsa/sherpa-onnx/tree/v1.13.3
-- kaldi-decoder v0.3.0: Apache-2.0
-  https://github.com/k2-fsa/kaldi-decoder/tree/v0.3.0
-- OpenFst v1.8.5-2026-04-11: Apache-2.0; Copyright 2005-2026 Google LLC
-  https://github.com/csukuangfj/openfst/tree/v1.8.5-2026-04-11
-- kaldi-native-fbank v1.22.3: Apache-2.0
-  https://github.com/csukuangfj/kaldi-native-fbank/tree/v1.22.3
-- KissFFT febd4caeed32e33ad8b2e0bb5ea77542c40f18ec: BSD-3-Clause
-  https://github.com/mborgerding/kissfft/tree/febd4caeed32e33ad8b2e0bb5ea77542c40f18ec
-- Piper phonemize 78a788e0b719013401572d70fef372e77bff8e43: MIT; Copyright (c) 2023 Michael Hansen
-  https://github.com/csukuangfj/piper-phonemize/tree/78a788e0b719013401572d70fef372e77bff8e43
-- eSpeak NG f6fed6c58b5e0998b8e68c6610125e2d07d595a7: GPL-3.0-or-later, with BSD-2-Clause and Unicode data terms for identified portions
-  https://github.com/csukuangfj/espeak-ng/tree/f6fed6c58b5e0998b8e68c6610125e2d07d595a7
-- uni-algo incorporated by Piper phonemize: public-domain dedication
-- ONNX Runtime v1.24.4: MIT, plus its bundled third-party notices
-  https://github.com/microsoft/onnxruntime/tree/v1.24.4
-- simple-sentencepiece v0.7: Apache-2.0
-  https://github.com/pkufool/simple-sentencepiece/tree/v0.7
-
-The Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, and GPLv3 texts are included in THIRD_PARTY_LICENSES.html or LICENSE. Exact additional terms are shipped in licenses/native/.
 
 ================================================================================
 Embedded web fonts

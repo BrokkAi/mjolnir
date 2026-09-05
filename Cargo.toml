@@ -64,6 +64,8 @@ rust-version = "1.96"
 # `node scripts/release-version.mjs check` (run in CI) fails when these fall
 # behind the workspace version.
 [workspace.dependencies]
+# Subscription transcription is newer than the published 0.27.1 crate.
+anvil-llm = { package = "brokk-anvil-llm", git = "https://github.com/BrokkAi/anvil", rev = "73ca21b23632a5082884ab0adbc774eb5c64e4da", version = "0.27.1" }
 hel = { path = ".", package = "brokk-mj-core", version = "2.0.0", default-features = false }
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.0.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.0.0" }

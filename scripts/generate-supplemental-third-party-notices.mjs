@@ -33,7 +33,6 @@ const auditedLinksPackages = new Set([
   "objc2-exception-helper",
   "webkit2gtk-sys",
   "alsa-sys",
-  "bzip2-sys",
   "libmimalloc-sys",
   "libsqlite3-sys",
   "prettyplease",
@@ -41,8 +40,9 @@ const auditedLinksPackages = new Set([
   // script does not link or ship a native library.
   "rayon-core",
   "ring",
-  "sherpa-onnx-sys",
   "wasm-bindgen-shared",
+  // Vendored zstd has its own BSD-3-Clause license, included below.
+  "zstd-sys",
 ]);
 const auditedFonts = new Set([
   "jetbrains-mono.woff2",
@@ -174,50 +174,6 @@ async function checkedInLegalFile(relativePath) {
   return relativePath;
 }
 
-async function sherpaNativePayload(metadata) {
-  const packageInfo = resolvedPackage(metadata, "sherpa-onnx-sys", "1.13.3");
-  const legalFiles = [
-    "LICENSE",
-    "licenses/native/ONNXRUNTIME_LICENSE.txt",
-    "licenses/native/ONNXRUNTIME_THIRD_PARTY_NOTICES.txt",
-    "licenses/native/PIPER_PHONEMIZE_LICENSE.txt",
-    "licenses/native/ESPEAK_NG_BSD2.txt",
-    "licenses/native/ESPEAK_NG_UCD.txt",
-    "licenses/native/UNI_ALGO_LICENSE.txt",
-    "licenses/native/KISSFFT_COPYING.txt",
-  ];
-  await Promise.all(legalFiles.map(checkedInLegalFile));
-  return {
-    component: `sherpa-onnx native static payload ${packageInfo.version}`,
-    source: packageUrl(packageInfo),
-    scope: "statically linked into mj-voice-worker on Linux, macOS, and Windows",
-    text: [
-      "The sherpa-onnx-sys build downloads a native archive that contains only static libraries, without legal files. The linked payload was audited against these exact upstream revisions:",
-      "",
-      "- sherpa-onnx v1.13.3: Apache-2.0",
-      "  https://github.com/k2-fsa/sherpa-onnx/tree/v1.13.3",
-      "- kaldi-decoder v0.3.0: Apache-2.0",
-      "  https://github.com/k2-fsa/kaldi-decoder/tree/v0.3.0",
-      "- OpenFst v1.8.5-2026-04-11: Apache-2.0; Copyright 2005-2026 Google LLC",
-      "  https://github.com/csukuangfj/openfst/tree/v1.8.5-2026-04-11",
-      "- kaldi-native-fbank v1.22.3: Apache-2.0",
-      "  https://github.com/csukuangfj/kaldi-native-fbank/tree/v1.22.3",
-      "- KissFFT febd4caeed32e33ad8b2e0bb5ea77542c40f18ec: BSD-3-Clause",
-      "  https://github.com/mborgerding/kissfft/tree/febd4caeed32e33ad8b2e0bb5ea77542c40f18ec",
-      "- Piper phonemize 78a788e0b719013401572d70fef372e77bff8e43: MIT; Copyright (c) 2023 Michael Hansen",
-      "  https://github.com/csukuangfj/piper-phonemize/tree/78a788e0b719013401572d70fef372e77bff8e43",
-      "- eSpeak NG f6fed6c58b5e0998b8e68c6610125e2d07d595a7: GPL-3.0-or-later, with BSD-2-Clause and Unicode data terms for identified portions",
-      "  https://github.com/csukuangfj/espeak-ng/tree/f6fed6c58b5e0998b8e68c6610125e2d07d595a7",
-      "- uni-algo incorporated by Piper phonemize: public-domain dedication",
-      "- ONNX Runtime v1.24.4: MIT, plus its bundled third-party notices",
-      "  https://github.com/microsoft/onnxruntime/tree/v1.24.4",
-      "- simple-sentencepiece v0.7: Apache-2.0",
-      "  https://github.com/pkufool/simple-sentencepiece/tree/v0.7",
-      "",
-      "The Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, and GPLv3 texts are included in THIRD_PARTY_LICENSES.html or LICENSE. Exact additional terms are shipped in licenses/native/.",
-    ].join("\n"),
-  };
-}
 
 async function sqliteNativePayload(metadata) {
   const packageInfo = resolvedPackage(metadata, "libsqlite3-sys", "0.35.0");
@@ -306,22 +262,21 @@ async function main() {
     ),
     await legalFile(
       metadata,
-      "bzip2-sys",
-      "0.1.13+1.0.8",
-      "bzip2-1.0.8/LICENSE",
-      "bzip2/libbzip2 1.0.8",
-      "used while unpacking sherpa-onnx native libraries during the voice-worker build",
-    ),
-    await legalFile(
-      metadata,
       "libmimalloc-sys",
       "0.1.49",
       "c_src/mimalloc/v3/LICENSE",
       "mimalloc native allocator",
       "statically linked into the musl Linux Mjolnir controller and worker",
     ),
+    await legalFile(
+      metadata,
+      "zstd-sys",
+      "2.0.16+zstd.1.5.7",
+      "zstd/LICENSE",
+      "Zstandard native compression library",
+      "statically linked for checkpoint archive compression",
+    ),
     await sqliteNativePayload(metadata),
-    await sherpaNativePayload(metadata),
     await embeddedFontsNotice(),
   ];
   await writeFile(outputPath, render(sections), "utf8");
