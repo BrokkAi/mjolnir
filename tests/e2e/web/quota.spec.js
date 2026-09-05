@@ -58,6 +58,8 @@ for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }
     await mount(page, profiles());
     const rows = page.locator('.quota-profile');
     await expect(rows).toHaveCount(7);
+    await expect(page.locator('.quota-overview-heading span')).toHaveText(['% left', 'Week', '5H']);
+    await expect(page.locator('[data-profile-id="claude"] summary .quota-value')).toHaveText(['100%', '90% !']);
     const metrics = await page.evaluate(() => ({
       width: document.documentElement.scrollWidth,
       height: document.documentElement.scrollHeight,

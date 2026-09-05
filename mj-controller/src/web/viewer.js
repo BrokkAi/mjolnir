@@ -964,7 +964,11 @@ function renderQuota() {
   // and an unfamiliar provider must not disappear from the overview.
   const labels = [...new Set(profiles.flatMap(profile =>
     (profile.quota?.windows || []).map(window => window.label),
-  ))].sort();
+  ))].sort((a, b) => {
+    // Match the TUI: weekly quota first, then the five-hour window.
+    const rank = label => label === 'Week' ? 0 : label === '5H' ? 1 : 2;
+    return rank(a) - rank(b) || a.localeCompare(b);
+  });
   quotaPanel.style.setProperty('--quota-columns', Math.max(1, labels.length));
   const heading = el('div', 'quota-overview-heading');
   heading.append(el('span', '', '% left'));
