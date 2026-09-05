@@ -61,6 +61,8 @@ pub(super) fn queued(id: &str, text: &str) -> QueuedPrompt {
         id: id.into(),
         text: text.into(),
         kind: QueuedCommandKind::Prompt,
+        image: None,
+        attachments_unsupported: false,
     }
 }
 

@@ -253,7 +253,7 @@ impl ChatState {
         self.entries.push(ChatEntry::plain(
             self.latest_seq,
             ChatRole::System,
-            format!("Available commands:\n!<command> — run a Bash command in this session [mj]\n{commands}"),
+            format!("Clipboard: Ctrl-Alt-V paste text/image · Ctrl-X remove image · Ctrl-Alt-R restore latest unsent prompt (empty composer)\n\nAvailable commands:\n!<command> — run a Bash command in this session [mj]\n{commands}"),
         ));
     }
 }

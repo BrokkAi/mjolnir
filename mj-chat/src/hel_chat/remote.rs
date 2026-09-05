@@ -8,7 +8,10 @@ use hel::hel_state::{QueuedCommandKind, config_command_text};
 use hel::hel_worker::RelayCommand;
 use mj_controller::hel_session_manager::{ManagedSessionHandle, SessionManagerControl};
 
-use super::{ChatState, PlanControl, PlanReviewFollowup, UnsentKind, queued_prompt_preview};
+use super::{
+    ChatState, PlanControl, PlanReviewFollowup, PromptPayload, UnsentKind, queued_prompt_preview,
+};
+use crate::hel_clipboard::ClipboardImage;
 
 const CHAT_REMOTE_QUEUE_CAPACITY: usize = 32;
 const SESSION_ACTOR_REPLACEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -19,6 +22,7 @@ pub(super) enum ChatRemoteOperation {
     Prompt {
         command_id: String,
         text: String,
+        image: Option<ClipboardImage>,
     },
     RunShell {
         command_id: String,
@@ -59,6 +63,7 @@ pub(super) enum ChatRemoteResult {
     Sync(std::result::Result<(), String>),
     Prompt {
         text: String,
+        image: Option<ClipboardImage>,
         result: std::result::Result<u64, String>,
     },
     RunShell {
@@ -319,15 +324,32 @@ async fn enqueue_chat_remote_operation(
                 );
             }
         },
-        ChatRemoteOperation::Prompt { command_id, text } => {
-            let response = session
-                .enqueue_submit(
-                    command_id,
-                    RelayCommand::Prompt {
-                        prompt: vec![ContentBlock::Text(TextContent::new(text.clone()))],
+        ChatRemoteOperation::Prompt {
+            command_id,
+            text,
+            image,
+        } => {
+            let prompt = PromptPayload {
+                text: text.clone(),
+                image: image.clone(),
+            }
+            .content_blocks();
+            let command = RelayCommand::Prompt { prompt };
+            if serde_json::to_vec(&command)
+                .is_ok_and(|bytes| bytes.len() > hel::hel_worker::RELAY_COMMAND_BYTE_BUDGET)
+            {
+                publish_chat_remote_result(
+                    results,
+                    attached,
+                    ChatRemoteResult::Prompt {
+                        text,
+                        image,
+                        result: Err("Prompt exceeds the 1 MiB limit; shorten the text or use a smaller image".into()),
                     },
-                )
-                .await;
+                );
+                return;
+            }
+            let response = session.enqueue_submit(command_id, command).await;
             match response {
                 Ok(response) => {
                     let results = results.clone();
@@ -341,6 +363,7 @@ async fn enqueue_chat_remote_operation(
                                     &attached,
                                     ChatRemoteResult::Prompt {
                                         text,
+                                        image,
                                         result: Err(format!("{error:#}")),
                                     },
                                 );
@@ -352,6 +375,7 @@ async fn enqueue_chat_remote_operation(
                             &attached,
                             ChatRemoteResult::Prompt {
                                 text: text.clone(),
+                                image: image.clone(),
                                 result: Ok(ordinal),
                             },
                         );
@@ -363,6 +387,7 @@ async fn enqueue_chat_remote_operation(
                         attached,
                         ChatRemoteResult::Prompt {
                             text,
+                            image,
                             result: Err(format!("{error:#}")),
                         },
                     );
@@ -677,6 +702,15 @@ pub(super) fn restore_unsent_input(chat: &mut ChatState, input: &str) {
     }
 }
 
+pub(super) fn restore_unsent_prompt(
+    chat: &mut ChatState,
+    text: String,
+    image: Option<ClipboardImage>,
+) {
+    chat.restore_prompt_image(image);
+    restore_unsent_input(chat, &text);
+}
+
 pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteResult) {
     // Most failures are intentionally converted into a notice so the user can
     // keep reading and editing the chat. Keep the diagnostic in the process
@@ -700,11 +734,12 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         }
         ChatRemoteResult::Prompt {
             text,
+            image,
             result: Ok(ordinal),
         } => {
             // The same text has now reached the relay, so the record of the
             // earlier refusal has nothing left to report.
-            chat.clear_unsent_prompt(UnsentKind::Prompt, &text);
+            chat.clear_unsent_prompt(UnsentKind::Prompt, &text, image.as_ref());
             chat.set_notice(format!(
                 "Prompt accepted by relay at {ordinal}: {}",
                 queued_prompt_preview(&text)
@@ -712,17 +747,18 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         }
         ChatRemoteResult::Prompt {
             text,
+            image,
             result: Err(error),
         } => {
-            restore_unsent_input(chat, &text);
+            restore_unsent_prompt(chat, text.clone(), image.clone());
             chat.set_notice(format!("{}: {error}", UnsentKind::Prompt.headline()));
-            chat.record_unsent_prompt(UnsentKind::Prompt, text, error);
+            chat.record_unsent_prompt(UnsentKind::Prompt, text, image, error);
         }
         ChatRemoteResult::RunShell {
             command,
             result: Ok(ordinal),
         } => {
-            chat.clear_unsent_prompt(UnsentKind::Shell, &command);
+            chat.clear_unsent_prompt(UnsentKind::Shell, &command, None);
             chat.set_notice(format!(
                 "Shell command accepted by relay at {ordinal}: {}",
                 queued_prompt_preview(&command)
@@ -734,7 +770,7 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         } => {
             restore_unsent_input(chat, &format!("!{command}"));
             chat.set_notice(format!("{}: {error}", UnsentKind::Shell.headline()));
-            chat.record_unsent_prompt(UnsentKind::Shell, command, error);
+            chat.record_unsent_prompt(UnsentKind::Shell, command, None, error);
         }
         ChatRemoteResult::RemoveQueuedPrompt { result: Ok(()), .. } => {
             chat.set_notice("Queued prompt removed")
@@ -820,7 +856,15 @@ pub(super) fn queue_chat_remote_operation(
     if let Err(error) = operations.try_send(operation) {
         let operation = error.into_inner();
         match operation {
-            ChatRemoteOperation::Prompt { text, .. } => restore_unsent_input(chat, &text),
+            ChatRemoteOperation::Prompt { text, image, .. } => {
+                restore_unsent_prompt(chat, text.clone(), image.clone());
+                chat.record_unsent_prompt(
+                    UnsentKind::Prompt,
+                    text,
+                    image,
+                    "session command queue is full".into(),
+                );
+            }
             ChatRemoteOperation::RunShell { command, .. } => {
                 restore_unsent_input(chat, &format!("!{command}"));
             }
@@ -875,6 +919,7 @@ mod tests {
             .send(ChatRemoteOperation::Prompt {
                 command_id: "prompt-1".into(),
                 text: "keep going".into(),
+                image: None,
             })
             .await
             .unwrap();
@@ -887,8 +932,90 @@ mod tests {
             result,
             ChatRemoteResult::Prompt {
                 text,
+                image: None,
                 result: Ok(73)
             } if text == "keep going"
+        ));
+    }
+
+    #[tokio::test]
+    async fn image_bytes_reach_the_session_actor_and_oversized_prompts_are_refused_intact() {
+        let mut fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "image-session",
+            19,
+        );
+        let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
+        // A payload larger than pipe buffers also proves this path does not
+        // replace embedded bytes with a host-local file name or preview.
+        let image = ClipboardImage {
+            data_base64: "A".repeat(96 * 1024),
+            mime_type: "image/png".into(),
+        };
+        for text in ["", "inspect this"] {
+            remote
+                .operations()
+                .send(ChatRemoteOperation::Prompt {
+                    command_id: format!("image-{text}"),
+                    text: text.into(),
+                    image: Some(image.clone()),
+                })
+                .await
+                .unwrap();
+            let command =
+                tokio::time::timeout(std::time::Duration::from_secs(2), fixture.submitted.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                command,
+                RelayCommand::Prompt {
+                    prompt: PromptPayload::with_image(text, image.clone()).content_blocks()
+                }
+            );
+            assert!(matches!(
+                remote.recv().await,
+                Some(ChatRemoteResult::Prompt { result: Ok(19), .. })
+            ));
+        }
+        let huge = "x".repeat(hel::hel_worker::RELAY_COMMAND_BYTE_BUDGET);
+        remote
+            .operations()
+            .send(ChatRemoteOperation::Prompt {
+                command_id: "too-big".into(),
+                text: huge.clone(),
+                image: Some(image.clone()),
+            })
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), remote.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, ChatRemoteResult::Prompt { text, image: Some(returned), result: Err(_) } if text == huge && returned == image)
+        );
+        assert!(
+            fixture.submitted.try_recv().is_err(),
+            "oversized input must not reach the actor"
+        );
+    }
+
+    #[test]
+    fn prompt_content_blocks_keep_image_for_image_only_and_mixed_prompts() {
+        let image = ClipboardImage {
+            data_base64: "encoded-png".into(),
+            mime_type: "image/png".into(),
+        };
+        let image_only = PromptPayload::with_image("", image.clone()).content_blocks();
+        assert!(matches!(
+            image_only.as_slice(),
+            [ContentBlock::Image(content)]
+                if content.data == "encoded-png" && content.mime_type == "image/png"
+        ));
+        let mixed = PromptPayload::with_image("describe this", image).content_blocks();
+        assert!(matches!(
+            mixed.as_slice(),
+            [ContentBlock::Text(_), ContentBlock::Image(_)]
         ));
     }
 
@@ -904,6 +1031,7 @@ mod tests {
             ChatRemoteOperation::Prompt {
                 command_id: "prompt-1".into(),
                 text: "unsent prompt".into(),
+                image: None,
             },
             &mut chat,
         );
@@ -963,6 +1091,7 @@ mod tests {
             &mut chat,
             ChatRemoteResult::Prompt {
                 text: "ship it".into(),
+                image: None,
                 result: Ok(42),
             },
         );
@@ -1000,6 +1129,7 @@ mod tests {
             &mut chat,
             ChatRemoteResult::Prompt {
                 text: "read the journal\nand summarise it".into(),
+                image: None,
                 result: Err("relay attach failed".into()),
             },
         );
@@ -1043,6 +1173,7 @@ mod tests {
             &mut chat,
             ChatRemoteResult::Prompt {
                 text: "read the journal".into(),
+                image: None,
                 result: Err("relay attach failed".into()),
             },
         );
@@ -1051,6 +1182,7 @@ mod tests {
             &mut chat,
             ChatRemoteResult::Prompt {
                 text: "something else entirely".into(),
+                image: None,
                 result: Ok(11),
             },
         );
@@ -1063,6 +1195,7 @@ mod tests {
             &mut chat,
             ChatRemoteResult::Prompt {
                 text: "read the journal".into(),
+                image: None,
                 result: Ok(12),
             },
         );
