@@ -36,8 +36,8 @@ use hel::hel_state::{MaterializedExecutionState, MaterializedSession};
 use hel::hel_worker::{RelayCommand, RelayEvent, RelayObservation};
 
 use hel::hel_review::driver::{
-    INTENT_ROLE, Resolution, ReviewRequest, RoleStatus, SUPERVISOR_ROLE, TurnReviewDriver,
-    TurnReviewPhase, TurnReviewSeed,
+    INTENT_ROLE, Resolution, ReviewRequest, RoleState, RoleStatus, SUPERVISOR_ROLE,
+    TurnReviewDriver, TurnReviewPhase, TurnReviewSeed,
 };
 use hel::hel_review::lanes::{ReviewTier, UserMessage};
 use hel::hel_review::verdict::ReviewVerdict;
@@ -59,6 +59,31 @@ pub struct RuntimeReviewView {
     pub status: String,
     /// Present once the review has reached a verdict the user must answer.
     pub verdict: Option<VerdictView>,
+}
+
+impl RuntimeReviewView {
+    /// A compact activity label for session lists and headers. Read typed
+    /// state rather than matching the driver's human-facing progress text.
+    #[must_use]
+    pub fn activity_label(&self) -> Option<&'static str> {
+        match &self.phase {
+            TurnReviewPhase::Resolved(_) => None,
+            TurnReviewPhase::Verdict(verdict) => Some(match verdict {
+                ReviewVerdict::Findings { .. } => "Findings",
+                ReviewVerdict::Failed { .. } => "Review failed",
+                ReviewVerdict::Clean => "Review complete",
+            }),
+            TurnReviewPhase::Running { roles }
+                if roles.iter().any(|role| {
+                    role.role == hel::hel_review::driver::VALIDATOR_ROLE
+                        && matches!(role.state, RoleState::Pending | RoleState::Running)
+                }) =>
+            {
+                Some("Validating")
+            }
+            _ => Some("Reviewing"),
+        }
+    }
 }
 
 /// A verdict as a surface renders it.
@@ -2115,6 +2140,39 @@ mod tests {
     /// session id would release each other's locks.
     fn session_id(test: &str) -> String {
         format!("018f9dd2-a3b4-7c8d-9000-{test}")
+    }
+
+    #[test]
+    fn review_activity_follows_typed_transitions_without_reading_progress_prose() {
+        let mut view = RuntimeReviewView {
+            session_id: "activity".to_owned(),
+            tier: ReviewTier::Quick,
+            phase: TurnReviewPhase::LaunchingReviewer,
+            roles: Vec::new(),
+            status: "validating configuration".to_owned(),
+            verdict: None,
+        };
+        assert_eq!(view.activity_label(), Some("Reviewing"));
+        view.phase = TurnReviewPhase::Running {
+            roles: vec![RoleStatus {
+                role: hel::hel_review::driver::VALIDATOR_ROLE.to_owned(),
+                label: "Validator".to_owned(),
+                state: RoleState::Running,
+            }],
+        };
+        view.status = "checking source".to_owned();
+        assert_eq!(view.activity_label(), Some("Validating"));
+        view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
+            synthesis: "[P2] app.py:1 -- incorrect bounds".to_owned(),
+            evidence: Default::default(),
+        });
+        assert_eq!(view.activity_label(), Some("Findings"));
+        view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Failed {
+            reason: "reviewer unavailable".to_owned(),
+        });
+        assert_eq!(view.activity_label(), Some("Review failed"));
+        view.phase = TurnReviewPhase::Resolved(Resolution::Cancelled);
+        assert_eq!(view.activity_label(), None);
     }
 
     #[test]

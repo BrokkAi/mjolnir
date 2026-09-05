@@ -94,8 +94,14 @@ for line in sys.stdin:
         write({"jsonrpc": "2.0", "id": ident, "result": {
             "configOptions": load("options-%s.json" % value, load("options.json", [])),
         }})
+    elif method == "session/cancel":
+        with open(os.path.join(here, "cancel-observed"), "a") as handle:
+            handle.write("cancel\n")
+        if ident is not None:
+            write({"jsonrpc": "2.0", "id": ident, "result": {}})
     elif method == "session/prompt":
         prompts += 1
+        canceled = False
         if os.path.exists(os.path.join(here, "ask-form")):
             # Ask the client a question, and answer nothing until it replies.
             write({"jsonrpc": "2.0", "id": "form-1", "method": "elicitation/create",
@@ -116,6 +122,16 @@ for line in sys.stdin:
                 answered = json.loads(reply)
                 if answered.get("id") == "form-1":
                     break
+                if answered.get("method") == "session/cancel":
+                    with open(os.path.join(here, "cancel-observed"), "a") as handle:
+                        handle.write("cancel\n")
+                    canceled = True
+                    write({"jsonrpc": "2.0", "id": ident, "result": {
+                        "stopReason": "cancelled"
+                    }})
+                    break
+        if canceled:
+            continue
         text = "".join(
             block.get("text", "")
             for block in request["params"].get("prompt", [])
@@ -707,6 +723,82 @@ async fn a_reviewer_form_is_answered_on_the_connection() {
         })
         .await;
 
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn pausing_an_active_reviewer_delivers_cancel_before_restart() {
+    let mut fixture = Fixture::new(true);
+    let directory = fixture.script_directory();
+    write_options(&directory, "options.json", &[]);
+    // Keep the prompt active until the harness receives Hel's cancel
+    // notification. This makes the pause path's wait observable.
+    std::fs::write(directory.join("ask-form"), b"1").unwrap();
+
+    fixture.start(config(0)).await;
+    fixture
+        .request(ReviewerRequest::Submit {
+            command_id: "review-active".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new("hold this turn"),
+                )],
+            },
+        })
+        .await;
+    fixture
+        .await_events(Duration::from_secs(30), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    &event.observation,
+                    RelayObservation::ElicitationRequested { .. }
+                )
+            })
+        })
+        .await;
+
+    let body = fixture.request(ReviewerRequest::Pause).await;
+    assert!(
+        matches!(
+            body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ReviewerPaused
+            }
+        ),
+        "unexpected pause response: {body:?}"
+    );
+    let cancel_marker = directory.join("cancel-observed");
+    assert_eq!(
+        std::fs::read_to_string(&cancel_marker)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        1,
+        "an active pause must reach the harness exactly once"
+    );
+    let events = fixture.reviewer_events().await;
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.observation,
+                RelayObservation::CommandCompleted { command_id, .. }
+                    if command_id == "reviewer-cancel-1"
+            )
+        }),
+        "the durable cancel must complete before the reviewer is torn down"
+    );
+
+    // A compatible restart must not replay a cancel that was already settled.
+    let body = fixture.start(config(0)).await;
+    started_options(&body);
+    assert_eq!(
+        std::fs::read_to_string(cancel_marker)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        1,
+        "a settled cancel must not remain pending across restart"
+    );
     fixture.sidecar.pause_all().await;
 }
 

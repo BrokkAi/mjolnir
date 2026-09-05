@@ -589,7 +589,7 @@ pub struct ViewerTurnReview {
 #[serde(deny_unknown_fields)]
 pub struct ViewerReviewRole {
     pub label: String,
-    /// `pending`, `running`, `clean`, `findings`, or `failed`.
+    /// `pending`, `running`, `done`, `findings`, or `failed`.
     pub state: String,
 }
 
@@ -4603,7 +4603,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 .iter()
                 .map(|role| (role.label.as_str(), role.state.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("Supervisor", "clean"), ("Tests", "findings")]
+            vec![("Supervisor", "done"), ("Tests", "findings")]
         );
         let verdict = projected.verdict.expect("a findings verdict travels");
         assert_eq!(verdict.kind, "findings");

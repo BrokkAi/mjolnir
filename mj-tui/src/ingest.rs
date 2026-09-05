@@ -897,7 +897,30 @@ impl DashboardState {
         }
     }
 
-    /// Record whether a session has a second opinion in progress.
+    /// Replace the review projection published by the controller. The full
+    /// replacement is intentional: a missing session means its review closed
+    /// and must disappear from every row immediately.
+    pub fn set_session_reviews(
+        &mut self,
+        reviews: impl IntoIterator<Item = mj_controller::hel_review_host::RuntimeReviewView>,
+    ) {
+        self.session_reviews = reviews
+            .into_iter()
+            .map(|review| (review.session_id.clone(), review))
+            .collect();
+    }
+
+    /// The authoritative review currently open for a session, if any.
+    pub(crate) fn session_review(
+        &self,
+        session_id: &str,
+    ) -> Option<&mj_controller::hel_review_host::RuntimeReviewView> {
+        self.session_reviews.get(session_id)
+    }
+
+    /// Record whether the attached chat has a plan-review second opinion.
+    /// Turn reviews use [`Self::set_session_reviews`] and remain authoritative
+    /// even when no chat is attached.
     pub fn set_session_review_open(&mut self, session_id: &str, open: bool) {
         if open {
             self.sessions_with_review.insert(session_id.to_owned());
@@ -1012,6 +1035,27 @@ mod tests {
             dashboard.notice().as_deref(),
             Some("A later operation failed")
         );
+    }
+
+    #[test]
+    fn runtime_review_projection_restores_and_removes_session_activity() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let review = mj_controller::hel_review_host::RuntimeReviewView {
+            session_id: "session-1".into(),
+            tier: hel::hel_review::lanes::ReviewTier::Quick,
+            phase: hel::hel_review::driver::TurnReviewPhase::LaunchingReviewer,
+            roles: Vec::new(),
+            status: "starting the reviewer…".into(),
+            verdict: None,
+        };
+
+        dashboard.set_session_reviews([review]);
+        assert!(dashboard.session_review("session-1").is_some());
+
+        // Runtime snapshots are complete projections: an empty replacement
+        // closes the badge rather than leaving the previous review stuck.
+        dashboard.set_session_reviews(Vec::new());
+        assert!(dashboard.session_review("session-1").is_none());
     }
 
     /// The dashboard and every other view (chat, background workers) share

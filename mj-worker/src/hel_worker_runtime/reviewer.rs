@@ -837,7 +837,7 @@ impl ReviewerRole {
     /// Cancels any turn in flight and stops the reviewer's process group,
     /// keeping its staged profile, native session and journal.
     pub async fn pause(&mut self) {
-        let Some(running) = self.running.take() else {
+        let Some(_) = self.running.as_ref() else {
             return;
         };
         // Ask the harness to stop the turn first, so a paused reviewer is not
@@ -851,11 +851,17 @@ impl ReviewerRole {
             })
             .is_ok()
         {
-            let _ = running.dispatch_wake.try_send(());
+            if let Some(running) = self.running.as_ref() {
+                let _ = running.dispatch_wake.try_send(());
+            }
             let _ = self
                 .wait_for(CANCEL_TIMEOUT, |state| state.active_prompt.is_none())
                 .await;
         }
+
+        let Some(running) = self.running.take() else {
+            return;
+        };
 
         // The coordinator holds the only other command sender. Stopping it
         // first is what lets the runtime see a closed channel, shut its bridge

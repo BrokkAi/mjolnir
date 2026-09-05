@@ -18,6 +18,7 @@ use mj_chat::hel_chat::render_agent_message_head;
 #[cfg(test)]
 use mj_chat::hel_chat::render_agent_message_tail;
 use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
+use mj_controller::hel_review_host::RuntimeReviewView;
 
 use crate::combined::MINIMIZED_GRID_COLUMNS;
 use crate::dialogs::{
@@ -394,6 +395,7 @@ fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessio
                     continue;
                 };
                 let detail = dashboard.session_details.get(&session.id);
+                let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
                 let facts = SessionRowFacts {
                     detail,
@@ -425,6 +427,7 @@ fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessio
                         dashboard,
                         session,
                         detail,
+                        review,
                         unreachable,
                         operation,
                         now_epoch_seconds,
@@ -437,6 +440,7 @@ fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessio
                         prefix,
                         &target,
                         facts,
+                        review,
                         usize::from(width.saturating_sub(4)),
                         permission,
                     ));
@@ -468,6 +472,7 @@ fn expanded_session_lines(
     dashboard: &DashboardState,
     session: &SessionRecord,
     detail: Option<&SessionDetail>,
+    review: Option<&RuntimeReviewView>,
     unreachable: bool,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
@@ -481,6 +486,7 @@ fn expanded_session_lines(
         prefix,
         session,
         detail,
+        review,
         unreachable,
         operation,
         now_epoch_seconds,
@@ -968,6 +974,7 @@ fn render_sessions_grid(
                         continue;
                     };
                     let detail = dashboard.session_details.get(&session.id);
+                    let review = dashboard.session_review(&session.id);
                     let facts = SessionRowFacts {
                         detail,
                         unreachable: dashboard.unreachable_sessions.contains(&session.id),
@@ -979,6 +986,11 @@ fn render_sessions_grid(
                     } else {
                         facts.clock()
                     };
+                    // A review owns the compact activity slot while it is
+                    // open. The primary is idle during a review, so showing
+                    // both labels would suggest contradictory work states.
+                    let activity = review_status_label(review)
+                        .map_or_else(|| clock.clone(), |label| label.to_owned());
                     let prefix = if Some(*index) == selected_index {
                         "› "
                     } else {
@@ -986,7 +998,7 @@ fn render_sessions_grid(
                     };
                     // Reserve the prefix, a separating space, and the clock;
                     // the target takes whatever room is left and ellipsizes.
-                    let reserved = prefix.chars().count() + 1 + clock.chars().count();
+                    let reserved = prefix.chars().count() + 1 + activity.chars().count();
                     let target_room = (column_width as usize).saturating_sub(reserved);
                     let target = targets.get(*index).cloned().unwrap_or_default();
                     let target = crate::widgets::truncate_text(&target, target_room);
@@ -995,9 +1007,12 @@ fn render_sessions_grid(
                     // the target and the clock so the clocks line up in a
                     // column instead of trailing each target.
                     let used =
-                        prefix.chars().count() + target.chars().count() + clock.chars().count();
+                        prefix.chars().count() + target.chars().count() + activity.chars().count();
                     let gap = (column_width as usize).saturating_sub(used).max(1);
-                    Line::styled(format!("{prefix}{target}{:gap$}{clock}", ""), facts.style())
+                    Line::styled(
+                        format!("{prefix}{target}{:gap$}{activity}", ""),
+                        facts.style(),
+                    )
                 }
             };
             frame.render_widget(Paragraph::new(line), rect);
@@ -1017,10 +1032,13 @@ fn collapsed_session_line(
     prefix: &str,
     target: &str,
     facts: SessionRowFacts<'_>,
+    review: Option<&RuntimeReviewView>,
     width: usize,
     permission: Option<Span<'static>>,
 ) -> Line<'static> {
-    let clock = facts.clock();
+    // A review owns the compact activity slot while it is open. The primary
+    // is idle during a review, so do not append a contradictory `[idle]`.
+    let clock = review_status_label(review).map_or_else(|| facts.clock(), |label| label.to_owned());
     let fragment = facts.last_agent_line();
     let style = facts.style();
     let mut lead_width = prefix.chars().count() + target.chars().count() + 2;
@@ -1056,6 +1074,7 @@ fn session_top_line(
     prefix: &str,
     session: &SessionRecord,
     detail: Option<&SessionDetail>,
+    review: Option<&RuntimeReviewView>,
     unreachable: bool,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
@@ -1087,6 +1106,9 @@ fn session_top_line(
     };
     let queued_prompts = detail.map_or(0, |detail| detail.queued_prompts.len());
     let mut columns = vec![target.to_owned()];
+    if let Some(label) = review_status_label(review) {
+        columns.push(label.to_owned());
+    }
     if detail.is_some_and(|detail| !detail.pending_elicitations.is_empty()) {
         columns.push("Needs input".to_owned());
     }
@@ -1360,6 +1382,13 @@ fn session_updated_at_epoch_seconds(session: &SessionRecord) -> Option<u64> {
 
 fn session_name(session: &SessionRecord) -> &str {
     session.display_title()
+}
+
+/// Maps the controller's review projection to the short overlay that fits in
+/// every session row. The controller owns the detailed wording and verdict;
+/// the TUI only compresses that authoritative view for the list.
+fn review_status_label(review: Option<&RuntimeReviewView>) -> Option<&'static str> {
+    review.and_then(RuntimeReviewView::activity_label)
 }
 
 /// Color of an active session's summary band. An unreachable target is red so
@@ -3174,6 +3203,7 @@ mod tests {
                 state: SessionState::Running,
                 now_epoch_seconds: 1,
             },
+            None,
             80,
             None,
         );
@@ -3233,6 +3263,7 @@ mod tests {
                 state: SessionState::Running,
                 now_epoch_seconds: 1,
             },
+            None,
             80,
             None,
         );
@@ -3873,6 +3904,74 @@ mod tests {
             "{:?}",
             lines[first + 3]
         );
+    }
+
+    #[test]
+    fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
+        let mut first = running_session();
+        first.id = "session-first".into();
+        let mut second = running_session();
+        second.id = "session-second".into();
+        second.created_at = "2026-08-10T00:00:00Z".into();
+        let mut dashboard = DashboardState::new(
+            config(),
+            HelState {
+                version: hel::hel_state::STATE_VERSION,
+                sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
+                mount_history: BTreeMap::new(),
+                container_sizes: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+        );
+        dashboard.set_session_reviews([RuntimeReviewView {
+            session_id: "session-second".into(),
+            tier: hel::hel_review::lanes::ReviewTier::Quick,
+            phase: hel::hel_review::driver::TurnReviewPhase::Running { roles: Vec::new() },
+            roles: Vec::new(),
+            status: "the reviewer is reading the change…".into(),
+            verdict: None,
+        }]);
+
+        // Collapse the project so the test exercises the one-line session
+        // form; the reviewed session is intentionally unselected.
+        dashboard.focus_sessions();
+        dashboard.handle_key(crate::test_support::key(KeyCode::Char('1')));
+        let rendered = drawn(&mut dashboard, 140, 44).join("\n");
+        let review_line = rendered
+            .lines()
+            .find(|line| line.contains("Reviewing"))
+            .expect("review activity on the unselected compact row");
+        assert!(!review_line.contains("[idle]"), "{review_line}");
+
+        // Removing the complete runtime projection restores the primary
+        // session's ordinary activity clock.
+        dashboard.set_session_reviews(Vec::new());
+        let restored = drawn(&mut dashboard, 140, 44).join("\n");
+        assert!(
+            restored
+                .lines()
+                .any(|line| line.contains("podman") && line.contains("[idle]")),
+            "{restored}"
+        );
+
+        // The minimized grid uses the same compact activity slot and also
+        // must not pair a live review with the primary's idle marker.
+        dashboard.set_session_reviews([RuntimeReviewView {
+            session_id: "session-second".into(),
+            tier: hel::hel_review::lanes::ReviewTier::Quick,
+            phase: hel::hel_review::driver::TurnReviewPhase::Running { roles: Vec::new() },
+            roles: Vec::new(),
+            status: "the reviewer is reading the change…".into(),
+            verdict: None,
+        }]);
+        minimize_all_panes(&mut dashboard);
+        let grid = drawn(&mut dashboard, 140, 44).join("\n");
+        let grid_line = grid
+            .lines()
+            .find(|line| line.contains("Reviewing"))
+            .expect("review activity in the minimized grid");
+        let review_cell = &grid_line[grid_line.find("Reviewing").expect("review label")..];
+        assert!(!review_cell.contains("[idle]"), "{grid_line}");
     }
 
     /// `projects` projects, `per_project` live sessions in each, laid out so

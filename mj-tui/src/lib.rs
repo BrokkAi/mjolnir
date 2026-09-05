@@ -25,6 +25,7 @@ use hel::hel_targets::AdditionalMount;
 use mj_chat::hel_chat::Notices;
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_controller::hel_quota::ProfileQuota;
+use mj_controller::hel_review_host::RuntimeReviewView;
 
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
@@ -439,9 +440,15 @@ pub struct DashboardState {
     /// Sessions whose relay worker the controller currently cannot reach. Their
     /// summary band renders red so an unreachable target is obvious at a glance.
     pub(crate) unreachable_sessions: BTreeSet<String>,
-    /// Sessions with a second opinion in progress. Stopping one destroys its
-    /// target, and the reviewer's conversation goes with it, so the stop
-    /// confirmation says so first.
+    /// The controller's complete review projection, keyed by session. Review
+    /// state is an overlay on the primary session lifecycle and is replaced
+    /// as a whole whenever a runtime snapshot arrives, so removals clear
+    /// stale row badges as well as closing the review pane.
+    pub(crate) session_reviews: BTreeMap<String, RuntimeReviewView>,
+    /// Sessions with an attached plan-review second opinion. This is kept
+    /// separately from the controller's turn-review projection because the
+    /// chat owns this older reviewer workflow and its stop warning still
+    /// needs to follow the live chat state.
     pub(crate) sessions_with_review: BTreeSet<String>,
     pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
@@ -523,6 +530,7 @@ impl DashboardState {
             quota_refreshing: BTreeSet::new(),
             session_details: BTreeMap::new(),
             unreachable_sessions: BTreeSet::new(),
+            session_reviews: BTreeMap::new(),
             sessions_with_review: BTreeSet::new(),
             project_sources: BTreeMap::new(),
             checkpoint_archive_sizes: BTreeMap::new(),

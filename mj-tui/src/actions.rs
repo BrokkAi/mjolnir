@@ -724,7 +724,8 @@ impl DashboardState {
                     .session_details
                     .get(&session_id)
                     .is_some_and(|detail| detail.current_turn_started_at.is_some());
-                let reviewer_conversation = self.sessions_with_review.contains(&session_id);
+                let reviewer_conversation = self.session_reviews.contains_key(&session_id)
+                    || self.sessions_with_review.contains(&session_id);
                 self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::Close {
                     session_id,
                     active_turn,

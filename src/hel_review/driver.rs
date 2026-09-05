@@ -98,7 +98,7 @@ impl RoleState {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
-            Self::Clean => "clean",
+            Self::Clean => "done",
             Self::Findings => "findings",
             Self::Failed => "failed",
         }
@@ -163,9 +163,9 @@ pub const INTENT_ROLE: &str = "intent";
 #[derive(Debug, Clone)]
 pub struct TurnReviewSeed {
     pub tier: ReviewTier,
-    /// The session's opening user message: the turn's stated task.
+    /// The latest real user prompt; earlier requirements remain in the history.
     pub task: String,
-    /// User messages since the last completed review, chronological.
+    /// All real user messages in chronological order, excluding harness notes.
     pub user_messages: Vec<UserMessage>,
     /// The primary's closing message for the reviewed work.
     pub initial_result: String,
