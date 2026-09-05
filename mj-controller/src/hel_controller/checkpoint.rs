@@ -11,6 +11,7 @@ use crate::hel_session_manager::{
     ManagedSessionHandle, ManagedSessionLease, SessionManagerControl, StandaloneSession,
     new_command_id, worker_connect_needs_restart,
 };
+use crate::hel_worker_client::RelayRejected;
 use hel::hel_archive::{
     BundleManifest, CanonicalSessionSnapshot, SessionManifest, TargetManifest,
     verify_archive_streaming,
@@ -38,9 +39,14 @@ use super::{
 };
 
 /// How long an idle relay may fail to admit a barrier before its worker is
-/// treated as wedged. Busy recovery checkpoints defer immediately, and a
-/// confirmed active close interrupts immediately.
+/// treated as wedged. Busy recovery checkpoints defer immediately. A close
+/// sends a non-steering turn cancellation and gives the worker this same
+/// bounded interval to settle before recovery restarts it.
 const CHECKPOINT_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
+/// A close gets a fresh cancellation grace period once the worker accepts the
+/// request. This keeps an expensive status sync from consuming the whole
+/// cancellation budget before the worker has had a chance to settle.
+const CHECKPOINT_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 /// After a wedged ACP forces a worker restart, wait as long as native-session
 /// startup: session/load of a long kimi transcript can outlast 30s.
 const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration = Duration::from_secs(300);
@@ -759,6 +765,7 @@ impl Controller {
                     .await?;
                 wait_for_checkpoint_barrier(
                     connection,
+                    session_id,
                     &barrier_command_id,
                     timeout,
                     BarrierBusyPolicy::of(exclusivity),
@@ -1223,10 +1230,9 @@ enum BarrierBusyPolicy {
     /// end at the deadline, and the deadline means "wedged", which restarts
     /// the worker and kills the work in flight.
     DeferWhileRunning,
-    /// Interrupt the active turn immediately. Close has already asked the
-    /// person whether to stop it, so waiting for the turn to finish only makes
-    /// Stop look hung. Returning the restart marker here reuses the same
-    /// journal-recovery path as an unreachable barrier without its timeout.
+    /// Request non-steering cancellation and wait for the turn to settle.
+    /// Close may interrupt work, but only an unresponsive or incompatible
+    /// worker needs restart recovery.
     InterruptWhileRunning,
 }
 
@@ -1241,19 +1247,92 @@ impl BarrierBusyPolicy {
 
 async fn wait_for_checkpoint_barrier(
     relay: &mut StandaloneSession,
+    session_id: &str,
     command_id: &str,
     timeout: Duration,
     busy: BarrierBusyPolicy,
 ) -> Result<ManagedSessionSnapshot> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut cancel_submitted = false;
+    let mut cancel_deadline = None;
+    let mut cancel_started_at: Option<Instant> = None;
     loop {
         let snapshot = relay.sync().await?;
         if checkpoint_barrier_is_ready(&snapshot, command_id) {
+            if let Some(started_at) = cancel_started_at {
+                tracing::info!(
+                    session_id,
+                    barrier_command_id = command_id,
+                    cancellation_ms = started_at.elapsed().as_millis() as u64,
+                    "active turn cancellation settled before checkpoint barrier"
+                );
+            }
             return Ok(snapshot);
         }
-        let out_of_time = tokio::time::Instant::now() >= deadline;
-        if let Some(error) = checkpoint_barrier_wait_ended(&snapshot, command_id, busy, out_of_time)
+        if busy == BarrierBusyPolicy::InterruptWhileRunning
+            && snapshot.operational.execution == RelayExecutionState::Running
+            && !cancel_submitted
         {
+            let cancel_turn = RelayCommand::CancelTurn;
+            if relay.protocol_version() < cancel_turn.minimum_protocol() {
+                return Err(CheckpointBarrierUnreachable::cancel_turn_unavailable(
+                    command_id,
+                    relay.protocol_version(),
+                )
+                .into());
+            }
+            let cancel_command_id = new_command_id("checkpoint-cancel-turn")?;
+            match relay.submit(cancel_command_id, cancel_turn).await {
+                Ok(_) => {
+                    cancel_submitted = true;
+                    cancel_started_at = Some(Instant::now());
+                    cancel_deadline = Some(tokio::time::Instant::now() + CHECKPOINT_CANCEL_TIMEOUT);
+                    tracing::info!(
+                        session_id,
+                        barrier_command_id = command_id,
+                        "requested active turn cancellation before checkpoint barrier"
+                    );
+                }
+                Err(error) if checkpoint_cancel_turn_needs_worker_restart(&error) => {
+                    return Err(error.context(
+                        CheckpointBarrierUnreachable::cancel_turn_unavailable(
+                            command_id,
+                            relay.protocol_version(),
+                        ),
+                    ));
+                }
+                Err(error) if worker_connect_needs_restart(&error) => {
+                    return Err(error.context(
+                        CheckpointBarrierUnreachable::cancel_turn_unreachable(command_id),
+                    ));
+                }
+                Err(error) => {
+                    // The turn can finish between the status sync and this
+                    // submit. If the barrier won that race, continue from its
+                    // durable ready state; otherwise preserve the rejection.
+                    if let Ok(snapshot) = relay.sync().await
+                        && checkpoint_barrier_is_ready(&snapshot, command_id)
+                    {
+                        tracing::info!(
+                            session_id,
+                            barrier_command_id = command_id,
+                            "active turn settled while submitting checkpoint cancellation"
+                        );
+                        return Ok(snapshot);
+                    }
+                    return Err(error.context("cancel active ACP turn before checkpoint barrier"));
+                }
+            }
+            continue;
+        }
+        let out_of_time = tokio::time::Instant::now() >= cancel_deadline.unwrap_or(deadline);
+        if let Some(error) = checkpoint_barrier_wait_ended(
+            &snapshot,
+            command_id,
+            busy,
+            out_of_time,
+            cancel_submitted,
+        ) {
             return Err(error);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1263,14 +1342,15 @@ async fn wait_for_checkpoint_barrier(
 /// Why one sync of a barrier that is not ready yet ends the wait, or `None` to
 /// keep waiting.
 ///
-/// The deadline means "wedged": it restarts the worker, which kills whatever
-/// the harness had in flight. A checkpoint that can try again later defers as
-/// soon as it sees work; a confirmed Stop interrupts that work immediately.
+/// The deadline means "wedged": it restarts the worker only after a close has
+/// already requested cancellation and the turn still has not settled. A
+/// checkpoint that can try again later defers as soon as it sees work.
 fn checkpoint_barrier_wait_ended(
     snapshot: &ManagedSessionSnapshot,
     command_id: &str,
     busy: BarrierBusyPolicy,
     out_of_time: bool,
+    cancel_submitted: bool,
 ) -> Option<anyhow::Error> {
     if snapshot.operational.execution == RelayExecutionState::Closed {
         return Some(CheckpointBarrierUnreachable::runtime_stopped().into());
@@ -1278,9 +1358,10 @@ fn checkpoint_barrier_wait_ended(
     if snapshot.operational.execution == RelayExecutionState::Running {
         return Some(match busy {
             BarrierBusyPolicy::DeferWhileRunning => CheckpointDeferred::harness_busy().into(),
-            BarrierBusyPolicy::InterruptWhileRunning => {
-                CheckpointBarrierUnreachable::active_turn(command_id).into()
+            BarrierBusyPolicy::InterruptWhileRunning if out_of_time && cancel_submitted => {
+                CheckpointBarrierUnreachable::cancel_timed_out(command_id).into()
             }
+            BarrierBusyPolicy::InterruptWhileRunning => return None,
         });
     }
     out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into())
@@ -1306,9 +1387,22 @@ impl CheckpointBarrierUnreachable {
         ))
     }
 
-    fn active_turn(command_id: &str) -> Self {
+    fn cancel_timed_out(command_id: &str) -> Self {
         Self(format!(
-            "active ACP turn interrupted before checkpoint barrier {command_id}"
+            "active ACP turn did not settle after cancellation before checkpoint barrier {command_id}"
+        ))
+    }
+
+    fn cancel_turn_unavailable(command_id: &str, protocol_version: u32) -> Self {
+        Self(format!(
+            "worker protocol {protocol_version} cannot cancel the active ACP turn before checkpoint barrier {command_id} (requires protocol {})",
+            RelayCommand::CancelTurn.minimum_protocol(),
+        ))
+    }
+
+    fn cancel_turn_unreachable(command_id: &str) -> Self {
+        Self(format!(
+            "worker transport became unavailable while cancelling the active ACP turn before checkpoint barrier {command_id}"
         ))
     }
 }
@@ -1325,6 +1419,19 @@ fn checkpoint_barrier_needs_worker_restart(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<CheckpointBarrierUnreachable>()
         .is_some()
+}
+
+/// A worker that reports an incompatible protocol for `CancelTurn` needs to be
+/// replaced before the close can retry the checkpoint with cancellation
+/// available. The negotiated protocol is checked before submission; this
+/// handles a race with a worker-side protocol rejection as well.
+fn checkpoint_cancel_turn_needs_worker_restart(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let Some(rejected) = cause.downcast_ref::<RelayRejected>() else {
+            return false;
+        };
+        rejected.0.code == hel::hel_worker::RelayErrorCode::IncompatibleProtocol
+    })
 }
 
 /// The session was working, so this checkpoint did not run. Nothing is wrong
@@ -1972,7 +2079,7 @@ mod tests {
         CheckpointMetadata, HelState, ManagedSessionSnapshot, MaterializedSession, SessionState,
     };
     use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec};
-    use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
+    use hel::hel_worker::{RelayCommand, RelayCommandOutcome, RelayCursor, RelayExecutionState};
 
     use super::*;
 
@@ -2494,7 +2601,7 @@ mod tests {
     /// again later leaves at once instead of waiting out the deadline, which
     /// would restart the worker and kill the turn in flight.
     #[test]
-    fn a_working_session_defers_recovery_but_interrupts_for_close() {
+    fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         let cursor = RelayCursor {
             ordinal: 7,
             digest: "a".repeat(64),
@@ -2506,6 +2613,7 @@ mod tests {
             &snapshot,
             "checkpoint-1",
             BarrierBusyPolicy::DeferWhileRunning,
+            false,
             false,
         )
         .expect("a working session ends the wait at once");
@@ -2519,16 +2627,26 @@ mod tests {
             BarrierBusyPolicy::InterruptWhileRunning
         );
 
-        // Stop has explicit confirmation to interrupt an active turn, so it
-        // selects the existing restart path immediately instead of spending
-        // the barrier timeout waiting for that turn.
+        // Stop requests a non-steering cancellation and waits for the real
+        // turn boundary instead of selecting restart recovery immediately.
+        assert!(
+            checkpoint_barrier_wait_ended(
+                &snapshot,
+                "checkpoint-1",
+                BarrierBusyPolicy::InterruptWhileRunning,
+                false,
+                false,
+            )
+            .is_none()
+        );
         let interrupted = checkpoint_barrier_wait_ended(
             &snapshot,
             "checkpoint-1",
             BarrierBusyPolicy::InterruptWhileRunning,
-            false,
+            true,
+            true,
         )
-        .expect("an active close interrupts without waiting for the deadline");
+        .expect("an unresponsive cancellation ends the wait at the deadline");
         assert!(
             checkpoint_barrier_needs_worker_restart(&interrupted),
             "{interrupted:#}"
@@ -2543,6 +2661,7 @@ mod tests {
             "checkpoint-1",
             BarrierBusyPolicy::DeferWhileRunning,
             true,
+            false,
         )
         .expect("the deadline ends the wait");
         assert!(
@@ -2616,6 +2735,24 @@ mod tests {
         // no longer restarts a worker and rewording one cannot stop it either.
         assert!(!checkpoint_barrier_needs_worker_restart(&anyhow::anyhow!(
             "ACP relay did not reach checkpoint barrier checkpoint-1"
+        )));
+    }
+
+    #[test]
+    fn an_incompatible_cancel_turn_requests_worker_recovery() {
+        let error = anyhow::Error::new(RelayRejected(hel::hel_worker::RelayProtocolError {
+            code: hel::hel_worker::RelayErrorCode::IncompatibleProtocol,
+            message: "request uses protocol 6".into(),
+            retryable: false,
+            detail: None,
+        }))
+        .context("cancel active ACP turn before checkpoint barrier");
+        assert!(
+            checkpoint_cancel_turn_needs_worker_restart(&error),
+            "{error:#}"
+        );
+        assert!(checkpoint_barrier_needs_worker_restart(&error.context(
+            CheckpointBarrierUnreachable::cancel_turn_unavailable("checkpoint-1", 6,)
         )));
     }
     #[test]
@@ -2697,6 +2834,7 @@ mod tests {
     const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
     const LATCH_RELAY_STARTS: &str = "MJ_TEST_LATCH_RELAY_STARTS";
     const LATCH_RELAY_REJECT_RELEASE: &str = "MJ_TEST_LATCH_REJECT_RELEASE";
+    const LATCH_RELAY_RUNNING: &str = "MJ_TEST_LATCH_RELAY_RUNNING";
     #[cfg(unix)]
     const LATCH_TEST_CHILD: &str = "MJ_TEST_LATCH_CHILD";
     #[cfg(unix)]
@@ -2747,6 +2885,32 @@ mod tests {
             hel::hel_worker::DurableRelay::open(Path::new(&root), LATCH_RELAY_SESSION, "1.0.0")
                 .expect("open the test relay journal");
         let reject_release = std::env::var_os(LATCH_RELAY_REJECT_RELEASE).is_some();
+        #[cfg(unix)]
+        let running = std::env::var_os(LATCH_RELAY_RUNNING).is_some();
+        #[cfg(unix)]
+        if running && relay.operational_state().active_prompt.is_none() {
+            let response = relay.handle(hel::hel_worker::RelayRequestEnvelope {
+                request_id: "seed-running-request".into(),
+                protocol_version: hel::hel_worker::RELAY_PROTOCOL_VERSION,
+                request: hel::hel_worker::RelayRequest::Submit {
+                    command_id: "seed-running-prompt".into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::Text(TextContent::new("running"))],
+                    },
+                },
+            });
+            assert!(matches!(
+                response.body,
+                hel::hel_worker::RelayResponseBody::Ok {
+                    payload: hel::hel_worker::RelayResponsePayload::Accepted { .. }
+                }
+            ));
+            let claimed = relay
+                .claim_pending_commands(true)
+                .expect("seed the running prompt");
+            assert_eq!(claimed.len(), 1);
+            assert_eq!(claimed[0].command_id, "seed-running-prompt");
+        }
         let mut reader = std::io::stdin().lock();
         let mut writer = std::io::stdout().lock();
         while let Some(request) =
@@ -2763,10 +2927,30 @@ mod tests {
                 .claim_pending_commands(true)
                 .expect("claim relay commands")
             {
-                if matches!(claimed.command, RelayCommand::BeginCheckpoint { .. }) {
-                    relay
-                        .record_checkpoint_ready(&claimed.command_id)
-                        .expect("report the checkpoint barrier ready");
+                match claimed.command {
+                    RelayCommand::BeginCheckpoint { .. } => {
+                        relay
+                            .record_checkpoint_ready(&claimed.command_id)
+                            .expect("report the checkpoint barrier ready");
+                    }
+                    #[cfg(unix)]
+                    RelayCommand::CancelTurn if running => {
+                        relay
+                            .record_command_completed(
+                                &claimed.command_id,
+                                RelayCommandOutcome::Cancelled,
+                            )
+                            .expect("complete the cancellation");
+                        relay
+                            .record_command_completed(
+                                "seed-running-prompt",
+                                RelayCommandOutcome::Prompt {
+                                    stop_reason: "cancelled".into(),
+                                },
+                            )
+                            .expect("complete the cancelled prompt");
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2806,6 +2990,7 @@ mod tests {
         relay_root: &Path,
         starts: Option<&Path>,
         release: ReleaseSupport,
+        running: bool,
     ) -> crate::hel_session_manager::RelaySessionTarget {
         // `RelayClient` parses every stdout line as JSON, so libtest's own
         // progress lines are dropped before they reach the protocol reader.
@@ -2842,6 +3027,10 @@ mod tests {
             spec.env
                 .insert(LATCH_RELAY_REJECT_RELEASE.to_owned(), "1".to_owned());
         }
+        if running {
+            spec.env
+                .insert(LATCH_RELAY_RUNNING.to_owned(), "1".to_owned());
+        }
         crate::hel_session_manager::RelaySessionTarget {
             session_id: LATCH_RELAY_SESSION.to_owned(),
             spec,
@@ -2856,6 +3045,7 @@ mod tests {
         relay_root: &Path,
         starts: Option<&Path>,
         release: ReleaseSupport,
+        running: bool,
     ) -> (
         crate::hel_session_manager::SessionManagerChannels,
         ManagedSessionHandle,
@@ -2869,7 +3059,9 @@ mod tests {
         let channels = crate::hel_session_manager::spawn_session_manager().unwrap();
         channels
             .targets
-            .send(vec![latch_relay_target(relay_root, starts, release)])
+            .send(vec![latch_relay_target(
+                relay_root, starts, release, running,
+            )])
             .unwrap();
         let handle = channels
             .control
@@ -2893,6 +3085,7 @@ mod tests {
             .unwrap();
         let barrier = wait_for_checkpoint_barrier(
             connection,
+            LATCH_RELAY_SESSION,
             &barrier_command_id,
             CHECKPOINT_BARRIER_TIMEOUT,
             BarrierBusyPolicy::InterruptWhileRunning,
@@ -2905,6 +3098,66 @@ mod tests {
         );
         let cursor = barrier.operational.checkpoint_ready.clone().unwrap();
         (channels, handle, relay, barrier_command_id, cursor)
+    }
+
+    /// A close checkpoint cancels an active prompt and waits for the prompt's
+    /// terminal event before admitting its barrier. The scripted worker clears
+    /// the prompt only when it receives `CancelTurn`, so a single-start log
+    /// proves that a responsive cancellation did not take restart recovery.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_close_checkpoint_cancels_a_running_turn_without_restarting_the_worker() {
+        // MJ_DATA_DIR is process-global, so keep the database-backed relay
+        // actor isolated from unrelated tests.
+        if std::env::var_os(LATCH_TEST_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let test_name = format!(
+                "{}::a_close_checkpoint_cancels_a_running_turn_without_restarting_the_worker",
+                module_path!()
+                    .strip_prefix("mj_controller::")
+                    .unwrap_or(module_path!())
+            );
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(LATCH_TEST_CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated cancellation checkpoint test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        let relay_root = tempfile::tempdir().unwrap();
+        let start_log_directory = tempfile::tempdir().unwrap();
+        let start_log = start_log_directory.path().join("relay-starts");
+        let (_channels, _handle, mut relay, _barrier_command_id, _cursor) =
+            latch_a_live_checkpoint(
+                relay_root.path(),
+                Some(&start_log),
+                ReleaseSupport::Supported,
+                true,
+            )
+            .await;
+        let snapshot = relay.sync_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.operational.execution,
+            RelayExecutionState::Idle,
+            "the close wait returned before the cancelled turn became idle"
+        );
+        assert!(
+            snapshot.operational.active_prompt.is_none(),
+            "the close wait returned before the cancelled prompt settled"
+        );
+        assert_eq!(
+            relay_starts(&start_log),
+            1,
+            "responsive cancellation restarted worker"
+        );
     }
     /// The session actor absorbs a returned connection on its own task, so the
     /// first command after a latch ends may still be refused.
@@ -2961,7 +3214,8 @@ mod tests {
 
         let relay_root = tempfile::tempdir().unwrap();
         let (_channels, handle, mut relay, barrier_command_id, cursor) =
-            latch_a_live_checkpoint(relay_root.path(), None, ReleaseSupport::Supported).await;
+            latch_a_live_checkpoint(relay_root.path(), None, ReleaseSupport::Supported, false)
+                .await;
 
         // Latch phase: the projection must be read at the exact ready cursor,
         // so the actor cannot reach the relay at all.
@@ -3058,7 +3312,8 @@ mod tests {
 
         let relay_root = tempfile::tempdir().unwrap();
         let (_channels, handle, mut relay, barrier_command_id, cursor) =
-            latch_a_live_checkpoint(relay_root.path(), None, ReleaseSupport::Supported).await;
+            latch_a_live_checkpoint(relay_root.path(), None, ReleaseSupport::Supported, false)
+                .await;
         relay.end_latch();
         wait_until_the_actor_serves_again(&handle).await;
 
@@ -3170,6 +3425,7 @@ mod tests {
             relay_root.path(),
             Some(&start_log),
             ReleaseSupport::Rejected,
+            false,
         )
         .await;
         relay.end_latch();
@@ -3254,6 +3510,7 @@ mod tests {
             relay_root.path(),
             Some(&start_log),
             ReleaseSupport::Supported,
+            false,
         )
         .await;
         relay.end_latch();
@@ -3411,6 +3668,7 @@ mod tests {
                 &relay_root,
                 None,
                 ReleaseSupport::Supported,
+                false,
             )])
             .unwrap();
         let handle = channels

@@ -1125,6 +1125,10 @@ fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandRequest> {
             request_id,
             steering_prompt: claimed.steering_prompt.clone(),
         }),
+        RelayCommand::CancelTurn => Some(CommandRequest::Cancel {
+            request_id,
+            steering_prompt: None,
+        }),
         RelayCommand::Close { .. } => Some(CommandRequest::Close { request_id }),
         RelayCommand::BeginCheckpoint { .. }
         | RelayCommand::RunUserShell { .. }

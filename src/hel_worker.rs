@@ -171,7 +171,7 @@ const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// Current durable ACP relay protocol. Peers that only speak an older
 /// version in [`RELAY_MIN_PROTOCOL_VERSION`]..=this range still connect.
 /// Protocol 0 is the retired pre-relay worker protocol and is rejected.
-pub const RELAY_PROTOCOL_VERSION: u32 = 6;
+pub const RELAY_PROTOCOL_VERSION: u32 = 7;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::hel_archive::EVENT_FRONTIER_GENESIS_DIGEST;
@@ -1108,6 +1108,17 @@ impl DurableRelay {
                 None,
             )));
         }
+        // A late cancellation must not advance the checkpoint cursor or leave
+        // a cancellation queued for a future turn after the barrier releases.
+        if matches!(command, RelayCommand::CancelTurn) && self.snapshot.checkpoint_barrier.is_some()
+        {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "the checkpoint barrier is already admitted",
+                false,
+                None,
+            )));
+        }
         if let RelayCommand::Cancel = command
             && self.snapshot.active_prompt.is_none()
         {
@@ -1592,14 +1603,22 @@ impl DurableRelay {
                     .accepted_ordinal;
                 // Preserve controls accepted before the active prompt (they
                 // must reach ACP first), but keep later controls queued until
-                // that prompt finishes. Cancel is the one ACP control that
-                // deliberately bypasses a running prompt.
+                // that prompt finishes. The legacy Cancel control deliberately
+                // bypasses a running prompt and may carry steering; CancelTurn
+                // bypasses a pending checkpoint as well, but never steers.
                 if active_prompt_ordinal.is_some_and(|prompt| accepted > prompt)
-                    && !matches!(dispatch.command, RelayCommand::Cancel)
+                    && !matches!(
+                        dispatch.command,
+                        RelayCommand::Cancel | RelayCommand::CancelTurn
+                    )
                 {
                     return None;
                 }
-                if accepted < before_ordinal {
+                let running_turn =
+                    self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some();
+                if accepted < before_ordinal
+                    || (running_turn && matches!(dispatch.command, RelayCommand::CancelTurn))
+                {
                     Some((accepted, command_id.clone()))
                 } else {
                     None
@@ -4089,6 +4108,122 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn cancel_turn_bypasses_a_pending_checkpoint_without_steering_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        submit_relay(&mut relay, "active-prompt", prompt("keep running"));
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "active-prompt"
+        );
+        submit_relay(
+            &mut relay,
+            "pending-checkpoint",
+            RelayCommand::BeginCheckpoint { reason: None },
+        );
+        submit_relay(&mut relay, "queued-prompt", prompt("leave queued"));
+        submit_relay(&mut relay, "cancel-turn", RelayCommand::CancelTurn);
+
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "cancel-turn");
+        assert!(matches!(claimed[0].command, RelayCommand::CancelTurn));
+        assert!(claimed[0].steering_prompt.is_none());
+        assert_eq!(queued_command_ids(&relay), vec!["queued-prompt"]);
+
+        relay
+            .record_command_completed("cancel-turn", RelayCommandOutcome::Cancelled)
+            .unwrap();
+        let state = relay.operational_state();
+        assert_eq!(state.active_prompt.unwrap().command_id, "active-prompt");
+        assert!(state.harness_turn.is_none());
+        assert_eq!(queued_command_ids(&relay), vec!["queued-prompt"]);
+        assert!(state.checkpoint_barrier.is_none());
+    }
+
+    #[test]
+    fn cancel_turn_bypasses_a_pending_checkpoint_for_an_autonomous_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.record_session_update(tool_call_update()).unwrap();
+        assert!(relay.operational_state().harness_turn.is_some());
+        submit_relay(
+            &mut relay,
+            "pending-checkpoint",
+            RelayCommand::BeginCheckpoint { reason: None },
+        );
+        submit_relay(&mut relay, "queued-prompt", prompt("leave queued"));
+        submit_relay(&mut relay, "cancel-turn", RelayCommand::CancelTurn);
+
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "cancel-turn");
+        assert!(claimed[0].steering_prompt.is_none());
+        assert_eq!(queued_command_ids(&relay), vec!["queued-prompt"]);
+
+        relay
+            .record_command_completed("cancel-turn", RelayCommandOutcome::Cancelled)
+            .unwrap();
+        let state = relay.operational_state();
+        assert!(state.harness_turn.is_some());
+        assert_eq!(queued_command_ids(&relay), vec!["queued-prompt"]);
+
+        relay
+            .record_session_update(settling_usage_update("task-notification"))
+            .unwrap();
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "pending-checkpoint");
+        assert_eq!(queued_command_ids(&relay), vec!["queued-prompt"]);
+    }
+
+    #[test]
+    fn cancel_turn_never_bypasses_an_admitted_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        submit_relay(
+            &mut relay,
+            "admitted-checkpoint",
+            RelayCommand::BeginCheckpoint { reason: None },
+        );
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "admitted-checkpoint"
+        );
+        relay
+            .record_checkpoint_ready("admitted-checkpoint")
+            .unwrap();
+        let before = relay.operational_state();
+        let error = relay
+            .submit_command("cancel-turn", RelayCommand::CancelTurn)
+            .unwrap()
+            .expect_err("late cancellation must leave the checkpoint cursor intact");
+        assert_eq!(error.code, RelayErrorCode::InvalidState);
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+        assert_eq!(relay.operational_state(), before);
+        assert!(!relay.snapshot.dispatches.contains_key("cancel-turn"));
+    }
+
+    #[test]
+    fn cancel_turn_is_harmless_when_the_relay_is_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        submit_relay(&mut relay, "cancel-idle", RelayCommand::CancelTurn);
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(claimed[0].steering_prompt.is_none());
+        relay
+            .record_command_completed("cancel-idle", RelayCommandOutcome::Cancelled)
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+        assert!(state.active_prompt.is_none());
+        assert!(state.harness_turn.is_none());
+        assert!(state.is_quiet());
     }
 
     #[test]

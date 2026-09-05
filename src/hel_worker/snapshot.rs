@@ -54,6 +54,10 @@ pub enum RelayCommand {
     SetSessionMode {
         mode_id: String,
     },
+    /// Cancel the current turn without consuming a queued prompt. This is
+    /// separate from [`RelayCommand::Cancel`], whose UI semantics may steer
+    /// the next queued prompt into the running turn.
+    CancelTurn,
     Cancel,
     Close {
         barrier_command_id: String,
@@ -89,6 +93,7 @@ impl RelayCommand {
     pub const fn minimum_protocol(&self) -> u32 {
         match self {
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
+            Self::CancelTurn => 7,
             _ => super::RELAY_MIN_PROTOCOL_VERSION,
         }
     }
@@ -116,6 +121,7 @@ impl RelayCommand {
             Self::Prompt { .. }
                 | Self::SetConfig { .. }
                 | Self::SetSessionMode { .. }
+                | Self::CancelTurn
                 | Self::Cancel
                 | Self::Close { .. }
         )
@@ -137,6 +143,7 @@ impl RelayCommand {
             Self::ClearQueuedPrompts => RelayCommandKind::ClearQueuedPrompts,
             Self::SetConfig { .. } => RelayCommandKind::SetConfig,
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
+            Self::CancelTurn => RelayCommandKind::CancelTurn,
             Self::Cancel => RelayCommandKind::Cancel,
             Self::Close { .. } => RelayCommandKind::Close,
             Self::BeginCheckpoint { .. } => RelayCommandKind::BeginCheckpoint,
@@ -158,6 +165,7 @@ pub enum RelayCommandKind {
     ClearQueuedPrompts,
     SetConfig,
     SetSessionMode,
+    CancelTurn,
     Cancel,
     Close,
     BeginCheckpoint,
@@ -1391,7 +1399,8 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                 (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
                     snapshot.config.insert("mode".to_owned(), mode_id);
                 }
-                (RelayCommand::Cancel, RelayCommandOutcome::Cancelled) => {}
+                (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
+                | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled) => {}
                 (RelayCommand::Cancel, RelayCommandOutcome::Steered { queued_command_id }) => {
                     let queued = snapshot
                         .queued_prompts
@@ -1783,6 +1792,12 @@ mod tests {
         DurableRelay, RELAY_COMMAND_BYTE_BUDGET, RELAY_EVENT_BYTE_BUDGET, RELAY_STATE_BYTE_BUDGET,
         RelayErrorCode, RelayProtocolError, RelayRequest, RelayResponseBody,
     };
+
+    #[test]
+    fn cancel_turn_is_reserved_for_relay_protocol_v7() {
+        assert_eq!(RelayCommand::CancelTurn.minimum_protocol(), 7);
+        assert_eq!(RelayCommand::Cancel.minimum_protocol(), 1);
+    }
 
     /// Every way a session can still be holding work, each on its own, plus
     /// the one state in which replacing its worker destroys nothing.

@@ -273,7 +273,8 @@ impl RelayRequest {
 
     /// Oldest protocol that understands this method or command payload. Form
     /// answers landed in protocol 2, hidden context in 3, project-memory sync
-    /// in 4, user shell commands in 5, and the reviewer sidecar in 6.
+    /// in 4, user shell commands in 5, the reviewer sidecar in 6, and the
+    /// non-steering turn cancellation in 7.
     pub const fn minimum_protocol(&self) -> u32 {
         match self {
             Self::RespondElicitation { .. } => 2,
@@ -606,6 +607,13 @@ mod tests {
             }
             .supported_at(1)
         );
+        let cancel_turn = RelayRequest::Submit {
+            command_id: "cancel-turn".into(),
+            command: RelayCommand::CancelTurn,
+        };
+        assert_eq!(cancel_turn.minimum_protocol(), 7);
+        assert!(!cancel_turn.supported_at(6));
+        assert!(cancel_turn.supported_at(RELAY_PROTOCOL_VERSION));
     }
 
     #[test]

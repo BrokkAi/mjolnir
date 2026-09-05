@@ -1007,6 +1007,112 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
     coordinator.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_checkpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "active-prompt", prompt("running"));
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "active-prompt", "running");
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "pending-checkpoint",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    submit(
+        &mut relay.lock().unwrap(),
+        "queued-prompt",
+        prompt("leave queued"),
+    );
+    submit(
+        &mut relay.lock().unwrap(),
+        "cancel-turn",
+        RelayCommand::CancelTurn,
+    );
+    wake_tx.try_send(()).unwrap();
+
+    assert!(matches!(
+        command_rx.recv().await.unwrap(),
+        CommandRequest::Cancel {
+            request_id,
+            steering_prompt: None,
+        } if request_id == "cancel-turn"
+    ));
+    event_tx
+        .send(RuntimeEvent::CancelApplied {
+            request_id: "cancel-turn".into(),
+        })
+        .unwrap();
+    wait_until(
+        || {
+            let relay = relay.lock().unwrap();
+            let state = relay.operational_state();
+            let cancel_completed = relay
+                .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    matches!(
+                        &event.observation,
+                        RelayObservation::CommandCompleted {
+                            command_id,
+                            outcome: hel::hel_worker::RelayCommandOutcome::Cancelled,
+                        } if command_id == "cancel-turn"
+                    )
+                });
+            cancel_completed
+                && state.active_prompt.is_some()
+                && state
+                    .queued_prompts
+                    .iter()
+                    .any(|queued| queued.command_id == "queued-prompt")
+                && state.checkpoint_barrier.is_none()
+        },
+        "CancelApplied did not complete without admitting the pending checkpoint",
+    )
+    .await;
+
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            request_id: "active-prompt".into(),
+            stop_reason: "cancelled".into(),
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| {
+        state.active_prompt.is_none() && state.checkpoint_ready.is_some()
+    })
+    .await;
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .queued_prompts
+            .iter()
+            .any(|queued| queued.command_id == "queued-prompt")
+    );
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn proxy_transport_does_not_expire_an_idle_connection() {
     let (mut controller, proxy_client) = tokio::io::duplex(1024);

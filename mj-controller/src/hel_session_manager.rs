@@ -2422,6 +2422,13 @@ impl StandaloneSession {
         .await
     }
 
+    /// Protocol negotiated with the worker behind this connection. Lifecycle
+    /// operations use it to avoid sending a newly introduced command to an
+    /// older worker that cannot decode it.
+    pub fn protocol_version(&self) -> u32 {
+        self.client.protocol_version()
+    }
+
     async fn detach(self) -> Result<()> {
         self.client.detach().await
     }
