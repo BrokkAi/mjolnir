@@ -29,9 +29,12 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 /// What a session is doing right now, beyond whether a turn is running.
 ///
 /// The dashboard rows, the chat pane title and the phone all render the same
-/// three states from this, so they agree on what "idle" means.
+/// activity facts from this, so they agree on what "idle" means.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionActivity {
+    /// Relay execution state, when this activity came from an operational
+    /// snapshot. Materialized-only callers leave it unset.
+    pub execution: Option<hel::hel_worker::RelayExecutionState>,
     /// When the turn the harness started on its own began, in epoch
     /// milliseconds, while that turn is open. A session with one open is
     /// working even if the projection has not caught up yet.
@@ -42,39 +45,111 @@ pub struct SessionActivity {
     pub foreground_tool_started_at_ms: Option<i64>,
     /// Commands the agent left running with nothing waiting on them.
     pub background_commands: Vec<hel::hel_worker::BackgroundCommand>,
+    /// User shells still owned by the relay. These are separate from agent
+    /// background commands, but still make a session non-idle.
+    pub active_user_shells: Vec<hel::hel_worker::ActiveUserShell>,
 }
 
 impl SessionActivity {
     /// Read the activity out of what a session's relay last reported.
     pub fn of(operational: &hel::hel_worker::RelayOperationalState) -> Self {
         Self {
+            execution: Some(operational.execution),
             harness_turn_started_at_ms: operational.harness_turn.map(|turn| turn.started_at_ms),
             foreground_tool_started_at_ms: operational.foreground_tool_started_at_ms,
             background_commands: operational.background_commands.clone(),
+            active_user_shells: operational.active_user_shells.clone(),
         }
     }
 
-    fn foreground_tool_since(&self, current_turn_started_at: Option<u64>) -> Option<u64> {
-        if current_turn_started_at.is_some() || self.harness_turn_started_at_ms.is_some() {
-            return None;
-        }
-        self.foreground_tool_started_at_ms
-            .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok())
+    /// Whether the session has no foreground or background work in flight.
+    ///
+    /// Timestamps are deliberately tested for presence rather than validity:
+    /// an invalid timestamp still proves that work exists, and must not make a
+    /// row claim that the session is idle. The optional projected turn start is
+    /// kept separate because it is supplied by the materialized session rather
+    /// than the relay's operational snapshot.
+    #[must_use]
+    pub fn is_idle(&self, current_turn_started_at: Option<u64>) -> bool {
+        matches!(
+            self.kind(current_turn_started_at),
+            SessionActivityKind::Idle
+        )
     }
 
-    /// Epoch seconds the oldest background command started, while the session
-    /// has nothing else in flight. Background work is what a session is doing
-    /// when it is otherwise idle; during a turn the turn clock says more.
-    fn background_since(&self, current_turn_started_at: Option<u64>) -> Option<u64> {
+    fn kind(&self, current_turn_started_at: Option<u64>) -> SessionActivityKind {
         if current_turn_started_at.is_some() || self.harness_turn_started_at_ms.is_some() {
-            return None;
+            return SessionActivityKind::Turn;
         }
+        match self.execution {
+            Some(hel::hel_worker::RelayExecutionState::Running) => {
+                return SessionActivityKind::Turn;
+            }
+            Some(hel::hel_worker::RelayExecutionState::Closing) => {
+                return SessionActivityKind::Lifecycle("Closing");
+            }
+            Some(hel::hel_worker::RelayExecutionState::Closed) => {
+                return SessionActivityKind::Lifecycle("Closed");
+            }
+            Some(hel::hel_worker::RelayExecutionState::Idle) | None => {}
+        }
+        if self.foreground_tool_started_at_ms.is_some() {
+            return SessionActivityKind::ForegroundTool;
+        }
+        if !self.background_commands.is_empty() || !self.active_user_shells.is_empty() {
+            return SessionActivityKind::Background;
+        }
+        SessionActivityKind::Idle
+    }
+
+    fn harness_turn_since(&self) -> Option<u64> {
+        epoch_seconds(self.harness_turn_started_at_ms?)
+    }
+
+    fn foreground_tool_since(&self) -> Option<u64> {
+        epoch_seconds(self.foreground_tool_started_at_ms?)
+    }
+
+    /// Epoch seconds the oldest background command started. Invalid command
+    /// timestamps are ignored only for the clock; their presence still makes
+    /// [`Self::is_idle`] false.
+    fn background_since(&self) -> Option<u64> {
         self.background_commands
             .iter()
-            .map(|command| command.started_at_ms)
+            .filter_map(|command| epoch_seconds(command.started_at_ms))
+            .chain(
+                self.active_user_shells
+                    .iter()
+                    .filter_map(|shell| shell.started_at_ms)
+                    .filter_map(epoch_seconds),
+            )
             .min()
-            .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionActivityKind {
+    Turn,
+    ForegroundTool,
+    Background,
+    Lifecycle(&'static str),
+    Idle,
+}
+
+fn epoch_seconds(timestamp_ms: i64) -> Option<u64> {
+    u64::try_from(timestamp_ms).ok().map(|value| value / 1_000)
+}
+
+fn elapsed_label(label: &str, now_epoch_seconds: u64, started_at: Option<u64>) -> String {
+    started_at.map_or_else(
+        || label.to_owned(),
+        |started_at| {
+            format!(
+                "{label} {}",
+                format_clock(now_epoch_seconds.saturating_sub(started_at))
+            )
+        },
+    )
 }
 
 /// The clock columns a wide session row shows: the running turn and its
@@ -90,36 +165,37 @@ pub fn format_activity_columns(
     current_step_started_at_ms: Option<u64>,
     activity: &SessionActivity,
 ) -> Vec<String> {
-    if let Some(turn_started) = current_turn_started_at {
-        let step_started = current_step_started_at_ms
-            .map(|value| value / 1_000)
-            .unwrap_or(turn_started)
-            .max(turn_started);
-        return vec![
-            format!(
-                "Turn {}",
-                format_clock(now_epoch_seconds.saturating_sub(turn_started))
-            ),
-            format!(
-                "Step {}",
-                format_clock(now_epoch_seconds.saturating_sub(step_started))
-            ),
-        ];
-    }
-    if let Some(since) = activity.foreground_tool_since(current_turn_started_at) {
-        return vec![format!(
-            "Step {}",
-            format_clock(now_epoch_seconds.saturating_sub(since))
-        )];
-    }
-    match activity.background_since(current_turn_started_at) {
-        // The two leading spaces hold the width `Turn` takes, so the clocks
-        // stay in one column whichever state a row is in.
-        Some(since) => vec![format!(
-            "  BG {}",
-            format_clock(now_epoch_seconds.saturating_sub(since))
-        )],
-        None => vec!["[idle]".into()],
+    match activity.kind(current_turn_started_at) {
+        SessionActivityKind::Turn => {
+            let turn_started = current_turn_started_at.or_else(|| activity.harness_turn_since());
+            let step_started = current_step_started_at_ms
+                .map(|value| value / 1_000)
+                .or(turn_started)
+                .zip(turn_started)
+                .map(|(step, turn)| step.max(turn));
+            vec![
+                elapsed_label("Turn", now_epoch_seconds, turn_started),
+                elapsed_label("Step", now_epoch_seconds, step_started),
+            ]
+        }
+        SessionActivityKind::ForegroundTool => {
+            vec![elapsed_label(
+                "Step",
+                now_epoch_seconds,
+                activity.foreground_tool_since(),
+            )]
+        }
+        SessionActivityKind::Background => {
+            // The two leading spaces hold the width `Turn` takes, so the
+            // clocks stay in one column whichever state a row is in.
+            vec![elapsed_label(
+                "  BG",
+                now_epoch_seconds,
+                activity.background_since(),
+            )]
+        }
+        SessionActivityKind::Lifecycle(label) => vec![label.to_owned()],
+        SessionActivityKind::Idle => vec!["[idle]".into()],
     }
 }
 
@@ -129,18 +205,27 @@ pub fn format_activity_clock(
     current_turn_started_at: Option<u64>,
     activity: &SessionActivity,
 ) -> String {
-    if let Some(since) = activity.foreground_tool_since(current_turn_started_at) {
-        return format!(
-            "[Step {}]",
-            format_clock(now_epoch_seconds.saturating_sub(since))
-        );
-    }
-    match activity.background_since(current_turn_started_at) {
-        Some(since) => format!(
-            "[BG {}]",
-            format_clock(now_epoch_seconds.saturating_sub(since))
+    match activity.kind(current_turn_started_at) {
+        SessionActivityKind::Turn => {
+            if current_turn_started_at.is_some() {
+                format_turn_clock(now_epoch_seconds, current_turn_started_at)
+            } else {
+                format!(
+                    "[{}]",
+                    elapsed_label("Turn", now_epoch_seconds, activity.harness_turn_since())
+                )
+            }
+        }
+        SessionActivityKind::ForegroundTool => format!(
+            "[{}]",
+            elapsed_label("Step", now_epoch_seconds, activity.foreground_tool_since(),)
         ),
-        None => format_turn_clock(now_epoch_seconds, current_turn_started_at),
+        SessionActivityKind::Background => format!(
+            "[{}]",
+            elapsed_label("BG", now_epoch_seconds, activity.background_since())
+        ),
+        SessionActivityKind::Lifecycle(label) => format!("[{label}]"),
+        SessionActivityKind::Idle => "[idle]".into(),
     }
 }
 
@@ -201,12 +286,14 @@ mod tests {
 
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
+            execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 started_at_ms,
                 command: command.to_owned(),
             }],
+            active_user_shells: Vec::new(),
         }
     }
 
@@ -292,10 +379,116 @@ mod tests {
 
         assert_eq!(
             format_activity_columns(20_000, None, None, &activity),
-            vec!["[idle]".to_owned()],
-            "a row never claims background work while the harness has a turn open"
+            vec!["Turn 16m40s".to_owned(), "Step 16m40s".to_owned()],
+            "a row reports the harness turn while the projection catches up"
         );
-        assert_eq!(format_activity_clock(20_000, None, &activity), "[idle]");
+        assert_eq!(
+            format_activity_clock(20_000, None, &activity),
+            "[Turn 16m40s]"
+        );
+    }
+
+    #[test]
+    fn idle_requires_no_projected_or_relay_activity() {
+        let mut activity = SessionActivity::default();
+        assert!(activity.is_idle(None));
+        assert!(!activity.is_idle(Some(20_000)));
+
+        activity.harness_turn_started_at_ms = Some(19_000_000);
+        assert!(!activity.is_idle(None));
+
+        activity.harness_turn_started_at_ms = None;
+        activity.foreground_tool_started_at_ms = Some(19_000_000);
+        assert!(!activity.is_idle(None));
+
+        activity.foreground_tool_started_at_ms = None;
+        activity.background_commands = vec![hel::hel_worker::BackgroundCommand {
+            started_at_ms: 19_000_000,
+            command: "cargo test".into(),
+        }];
+        assert!(!activity.is_idle(None));
+    }
+
+    #[test]
+    fn invalid_activity_timestamps_still_report_work_without_fabricating_a_clock() {
+        let foreground = SessionActivity {
+            foreground_tool_started_at_ms: Some(-1),
+            ..SessionActivity::default()
+        };
+        assert!(!foreground.is_idle(None));
+        assert_eq!(
+            format_activity_columns(20_000, None, None, &foreground),
+            vec!["Step".to_owned()]
+        );
+        assert_eq!(format_activity_clock(20_000, None, &foreground), "[Step]");
+
+        let background = SessionActivity {
+            background_commands: vec![hel::hel_worker::BackgroundCommand {
+                started_at_ms: -1,
+                command: "cargo test".into(),
+            }],
+            ..SessionActivity::default()
+        };
+        assert!(!background.is_idle(None));
+        assert_eq!(
+            format_activity_columns(20_000, None, None, &background),
+            vec!["  BG".to_owned()]
+        );
+        assert_eq!(format_activity_clock(20_000, None, &background), "[BG]");
+    }
+
+    #[test]
+    fn relay_execution_and_user_shells_keep_activity_non_idle_without_timestamps() {
+        let running = SessionActivity {
+            execution: Some(hel::hel_worker::RelayExecutionState::Running),
+            ..SessionActivity::default()
+        };
+        assert!(!running.is_idle(None));
+        assert_eq!(
+            format_activity_columns(20_000, None, None, &running),
+            vec!["Turn".to_owned(), "Step".to_owned()]
+        );
+        assert_eq!(format_activity_clock(20_000, None, &running), "[Turn]");
+
+        for execution in [
+            hel::hel_worker::RelayExecutionState::Closing,
+            hel::hel_worker::RelayExecutionState::Closed,
+        ] {
+            let lifecycle = SessionActivity {
+                execution: Some(execution),
+                ..SessionActivity::default()
+            };
+            assert!(!lifecycle.is_idle(None));
+            let label = match execution {
+                hel::hel_worker::RelayExecutionState::Closing => "Closing",
+                hel::hel_worker::RelayExecutionState::Closed => "Closed",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                format_activity_columns(20_000, None, None, &lifecycle),
+                vec![label.to_owned()]
+            );
+            assert_eq!(
+                format_activity_clock(20_000, None, &lifecycle),
+                format!("[{label}]")
+            );
+        }
+
+        let shell = SessionActivity {
+            active_user_shells: vec![hel::hel_worker::ActiveUserShell {
+                command_id: "shell-1".into(),
+                command: "cargo test".into(),
+                created_at_ms: 20_000_000,
+                started_at_ms: None,
+            }],
+            ..SessionActivity::default()
+        };
+        assert!(!shell.is_idle(None));
+        assert_eq!(
+            format_activity_columns(20_000, None, None, &shell),
+            vec!["  BG".to_owned()]
+        );
+        assert_eq!(format_activity_clock(20_000, None, &shell), "[BG]");
     }
 
     #[test]

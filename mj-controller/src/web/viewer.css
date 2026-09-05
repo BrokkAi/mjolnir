@@ -45,6 +45,7 @@
   --plan-proposal: #e9b3ff;
   --system: #9aa39a;
   --accent: #b9ff5a;
+  --idle: #74b9ff;
 
   --focus: var(--user);
 
@@ -106,6 +107,10 @@ h2 {
 h3 {
   font-size: 16px;
   margin: 0 0 8px;
+}
+
+.idle-title {
+  color: var(--idle);
 }
 
 .dim {

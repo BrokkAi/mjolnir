@@ -370,6 +370,7 @@ impl ViewerSnapshot {
                     activity: String::new(),
                     operation: None,
                     chat_phase: ViewerChatPhase::default(),
+                    is_idle: false,
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
@@ -527,6 +528,10 @@ pub struct ViewerSession {
     pub operation: Option<ViewerOperation>,
     #[serde(default)]
     pub chat_phase: ViewerChatPhase,
+    /// Known live activity is idle: no foreground turn, tool, or background work.
+    /// Missing operational state must not be presented as confirmed idle.
+    #[serde(default)]
+    pub is_idle: bool,
     /// What this session is doing, in the words the dashboard row uses:
     /// `Turn 43m36s  Step 12s`, `BG 43m36s`, or `[idle]`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1146,7 +1151,19 @@ pub struct ControllerRequest {
 #[derive(Debug)]
 pub struct PreflightRequest {
     pub bundle_id: String,
-    pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, String>>,
+    pub target_id: String,
+    pub project_directory: Option<PathBuf>,
+    pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
+}
+
+/// A preflight can fail because the requested bare directory is unusable, or
+/// because the controller-side check itself could not complete. The HTTP
+/// surface keeps those outcomes distinct without carrying filesystem, Git, or
+/// SSH details to the phone.
+#[derive(Debug)]
+pub enum PreflightFailure {
+    Validation,
+    Controller(String),
 }
 
 /// What a preflight found.
@@ -1560,28 +1577,24 @@ async fn preflight_new(
     State(state): State<ServerState>,
     Json(request): Json<PreflightNewRequest>,
 ) -> Result<Json<PreflightNew>, ApiError> {
+    let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
         bundle_id: request.bundle_id.clone(),
-        target_id: request.target_id,
+        target_id: request.target_id.clone(),
         title: None,
         project_directory: request.project_directory.clone(),
         dirty_ack: Vec::new(),
     };
     validate_action(&action, &state.snapshot_rx.borrow())?;
-    // A bare target opens a directory the person named; there is no bundle to
-    // have uncommitted changes in.
-    if request.project_directory.is_some() {
-        return Ok(Json(PreflightNew {
-            dirty_repositories: Vec::new(),
-        }));
-    }
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .preflight_tx
         .send(PreflightRequest {
             bundle_id: request.bundle_id,
+            target_id: request.target_id,
+            project_directory: request.project_directory,
             reply,
         })
         .await
@@ -1590,11 +1603,14 @@ async fn preflight_new(
         .await
         .map_err(|_| ApiError::controller_unavailable())?
         .map(Json)
-        .map_err(|_| {
-            ApiError::new(
+        .map_err(|failure| match failure {
+            PreflightFailure::Validation if project_validation => ApiError::bad_request(
+                "project validation failed; check that the directory exists, is accessible, and contains a Git repository with a valid HEAD",
+            ),
+            PreflightFailure::Validation | PreflightFailure::Controller(_) => ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "the controller could not check this project",
-            )
+            ),
         })
 }
 
@@ -3663,13 +3679,13 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         }
     }
 
-    /// A bare target opens a directory the person named, so there is no bundle
-    /// whose repositories could be dirty and nothing to ask the controller.
+    /// A bare target opens a directory the person named. The controller still
+    /// validates that directory before answering, because the server's state
+    /// projection cannot inspect the filesystem or an SSH host.
     #[tokio::test]
-    async fn a_bare_preflight_answers_without_the_controller() {
+    async fn a_bare_preflight_forwards_directory_validation_to_the_controller() {
         let (app, _, _, mut preflights, _) = app();
-        let response = app
-            .oneshot(
+        let response = tokio::spawn(app.oneshot(
                 Request::post("/api/preflight/new")
                     .header(COOKIE, cookie())
                     .header(CONTENT_TYPE, "application/json")
@@ -3677,14 +3693,85 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
                         r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw","project_directory":"/work/project"}"#,
                     ))
                     .unwrap(),
-            )
-            .await
+            ));
+        let request = preflights.recv().await.expect("the controller was asked");
+        assert_eq!(request.bundle_id, "hel");
+        assert_eq!(request.target_id, "raw");
+        assert_eq!(
+            request.project_directory,
+            Some(PathBuf::from("/work/project"))
+        );
+        request
+            .reply
+            .send(Ok(PreflightNew {
+                dirty_repositories: Vec::new(),
+            }))
             .unwrap();
+        let response = response.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(preflights.try_recv().is_err(), "the controller was asked");
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let answer: PreflightNew = serde_json::from_slice(&body).unwrap();
         assert!(answer.dirty_repositories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bare_preflight_validation_failure_is_actionable_without_its_details() {
+        let (app, _, _, mut preflights, _) = app();
+        let response = tokio::spawn(app.oneshot(
+            Request::post("/api/preflight/new")
+                .header(COOKIE, cookie())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw","project_directory":"/private/project"}"#,
+                ))
+                .unwrap(),
+        ));
+        let request = preflights.recv().await.expect("the controller was asked");
+        request
+            .reply
+            .send(Err(PreflightFailure::Validation))
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": "project validation failed; check that the directory exists, is accessible, and contains a Git repository with a valid HEAD"
+            })
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("/private/project"));
+    }
+
+    #[tokio::test]
+    async fn a_bundle_preflight_controller_failure_keeps_the_generic_service_error() {
+        let (app, _, _, mut preflights, _) = app();
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/preflight/new")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"podman"}"#,
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let request = preflights.recv().await.expect("the controller was asked");
+        request
+            .reply
+            .send(Err(PreflightFailure::Controller(
+                "private /source/hel details".into(),
+            )))
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": "the controller could not check this project"})
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("/source/hel"));
     }
 
     /// A bundle preflight asks the controller, because whether a working tree
@@ -3705,6 +3792,8 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         );
         let request = preflights.recv().await.expect("the controller was asked");
         assert_eq!(request.bundle_id, "hel");
+        assert_eq!(request.target_id, "podman");
+        assert_eq!(request.project_directory, None);
         request
             .reply
             .send(Ok(PreflightNew {

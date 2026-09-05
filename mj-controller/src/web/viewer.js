@@ -361,7 +361,8 @@ function sessionCard(session) {
   const card = el('article', 'card session');
   card.dataset.sessionId = session.id;
 
-  const heading = el('h3', '', session.title);
+  const heading = el('h3');
+  renderSessionTitle(heading, session);
   card.append(heading);
 
   const status = el('p', 'session-status');
@@ -470,6 +471,7 @@ const NEW_STEPS = [
 ];
 
 let newDraft = null;
+let pendingNewPreflight = null;
 
 function freshDraft() {
   return {
@@ -608,6 +610,13 @@ function renderNewForm() {
     }
   }
   newStep.replaceChildren(body);
+  const checking = pendingNewPreflight === newDraft;
+  if (checking) {
+    newNextButton.textContent = 'Checking…';
+    newBackButton.disabled = true;
+  }
+  newNextButton.disabled = checking || newDraft.committing === true;
+  for (const input of newStep.querySelectorAll('input, select')) input.disabled = checking;
 }
 
 function pickerField(label, id, items, value, onChange) {
@@ -635,21 +644,35 @@ function textField(label, id, value, onInput) {
 /// Ask the daemon whether this combination would launch, and what to warn
 /// about, before the person commits to it.
 async function preflightNew() {
-  const bare = targetIsBare(newDraft.targetId);
-  const answer = await request('/api/preflight/new', {
-    method: 'POST',
-    body: JSON.stringify({
-      workspace_id: selectedWorkspaceId(),
-      profile_id: newDraft.profileId,
-      bundle_id: newDraft.bundleId,
-      target_id: newDraft.targetId,
-      project_directory: bare ? newDraft.projectDirectory : null,
-    }),
-  });
-  newDraft.dirty = answer.dirty_repositories || [];
-  newDraft.preflighted = true;
-  // A set the person has not seen cannot already be acknowledged.
-  if (!newDraft.dirty.length) newDraft.acknowledged = false;
+  const draft = newDraft;
+  if (pendingNewPreflight === draft) return false;
+  const bare = targetIsBare(draft.targetId);
+  pendingNewPreflight = draft;
+  renderNewForm();
+  try {
+    const answer = await request('/api/preflight/new', {
+      method: 'POST',
+      body: JSON.stringify({
+        workspace_id: selectedWorkspaceId(),
+        profile_id: draft.profileId,
+        bundle_id: draft.bundleId,
+        target_id: draft.targetId,
+        project_directory: bare ? draft.projectDirectory : null,
+      }),
+    });
+    if (newDraft !== draft) return false;
+    draft.dirty = answer.dirty_repositories || [];
+    draft.preflighted = true;
+    // A set the person has not seen cannot already be acknowledged.
+    if (!draft.dirty.length) draft.acknowledged = false;
+    return true;
+  } catch (error) {
+    if (newDraft !== draft) return false;
+    throw error;
+  } finally {
+    if (pendingNewPreflight === draft) pendingNewPreflight = null;
+    if (newDraft === draft) renderNewForm();
+  }
 }
 
 async function advanceNew() {
@@ -662,7 +685,7 @@ async function advanceNew() {
       newError.textContent = 'Name the project directory to open.';
       return;
     }
-    await preflightNew();
+    if (!(await preflightNew())) return;
     newDraft.step = Math.min(newDraft.step + 1, visibleSteps().length - 1);
     renderNewForm();
     return;
@@ -680,6 +703,8 @@ async function advanceNew() {
 }
 
 async function commitNew() {
+  const draft = newDraft;
+  if (draft.committing) return;
   const bare = targetIsBare(newDraft.targetId);
   const body = {
     action: 'new',
@@ -691,6 +716,7 @@ async function commitNew() {
     dirty_ack: newDraft.acknowledged ? newDraft.dirty : [],
   };
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
+  draft.committing = true;
   newNextButton.disabled = true;
   try {
     await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
@@ -700,6 +726,7 @@ async function commitNew() {
   } catch (err) {
     newError.textContent = err.message;
   } finally {
+    draft.committing = false;
     newNextButton.disabled = false;
   }
 }
@@ -2280,8 +2307,13 @@ async function openConversation(id) {
 ///
 /// The placeholder says whether Send will send or queue, because a person
 /// pressing it deserves to know which of those is about to happen.
+function renderSessionTitle(node, session) {
+  node.textContent = session.title;
+  node.classList.toggle('idle-title', session.is_idle === true);
+}
+
 function renderConversationHeader(session) {
-  document.querySelector('#conversation-title').textContent = session.title;
+  renderSessionTitle(document.querySelector('#conversation-title'), session);
   const state = document.querySelector('#conversation-state');
   state.textContent = session.state;
   state.className = `pill state-${session.lifecycle}`;

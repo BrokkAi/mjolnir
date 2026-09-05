@@ -1362,14 +1362,12 @@ fn session_name(session: &SessionRecord) -> &str {
     session.display_title()
 }
 
-/// Color of an active session's summary band. An unreachable target is red so
-/// it stands out; otherwise unread sessions are highlighted and the rest keep
-/// the default. A session whose detail has not loaded yet keeps the default.
 /// The colour a session's summary rows carry.
 ///
 /// Red means the session needs attention rather than reading: its relay is
-/// unreachable, or the session itself failed. Everything else distinguishes
-/// unread work from work already seen.
+/// unreachable, or the session itself failed. A live, truly idle session is
+/// blue even after its messages have been read. Pending questions remain an
+/// attention signal, and lifecycle states do not claim to be idle.
 fn session_band_color(
     detail: Option<&SessionDetail>,
     unreachable: bool,
@@ -1378,21 +1376,21 @@ fn session_band_color(
     if unreachable || state == SessionState::Error {
         return Color::Red;
     }
-    match detail {
-        Some(detail) if detail.has_unread() && detail.current_turn_started_at.is_none() => {
-            if detail.activity.background_commands.is_empty()
-                && detail.activity.foreground_tool_started_at_ms.is_none()
-            {
-                Color::LightBlue
-            } else {
-                Color::LightYellow
-            }
-        }
-        Some(detail) if detail.has_unread() => Color::LightYellow,
+    let Some(detail) = detail else {
+        return Color::Yellow;
+    };
+    if !detail.pending_elicitations.is_empty() {
+        return Color::LightYellow;
+    }
+    if state == SessionState::Running && detail.activity.is_idle(detail.current_turn_started_at) {
+        return Color::LightBlue;
+    }
+    if detail.has_unread() {
         // ANSI yellow is the orange/amber ink in common terminal palettes;
         // bright yellow remains distinct for unread sessions.
-        _ => Color::Yellow,
+        return Color::LightYellow;
     }
+    Color::Yellow
 }
 
 #[cfg(test)]
@@ -2856,12 +2854,14 @@ mod tests {
         let background = SessionDetail {
             last_activity_at_ms: Some(1_297_000),
             activity: mj_chat::usage_format::SessionActivity {
+                execution: None,
                 harness_turn_started_at_ms: None,
                 foreground_tool_started_at_ms: None,
                 background_commands: vec![hel::hel_worker::BackgroundCommand {
                     started_at_ms: 1_000_000,
                     command: "cargo test".into(),
                 }],
+                active_user_shells: Vec::new(),
             },
             ..SessionDetail::default()
         };
@@ -3136,7 +3136,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_band_colors_distinguish_normal_unread_and_unread_idle() {
+    fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         let normal = SessionDetail {
             current_turn_started_at: Some(1),
             ..SessionDetail::default()
@@ -3165,11 +3165,17 @@ mod tests {
             Color::LightBlue
         );
 
+        let read_idle = SessionDetail::default();
+        assert_eq!(
+            session_band_color(Some(&read_idle), false, SessionState::Running),
+            Color::LightBlue
+        );
+
         let collapsed = collapsed_session_line(
             "› ",
             "podman",
             SessionRowFacts {
-                detail: Some(&unread_idle),
+                detail: Some(&read_idle),
                 unreachable: false,
                 state: SessionState::Running,
                 now_epoch_seconds: 1,
@@ -3178,6 +3184,19 @@ mod tests {
             None,
         );
         assert_eq!(collapsed.style.fg, Some(Color::LightBlue));
+
+        let foreground = SessionDetail {
+            activity: mj_chat::usage_format::SessionActivity {
+                foreground_tool_started_at_ms: Some(1),
+                ..mj_chat::usage_format::SessionActivity::default()
+            },
+            ..SessionDetail::default()
+        };
+        assert_eq!(
+            session_band_color(Some(&foreground), false, SessionState::Running),
+            Color::Yellow,
+            "foreground work is not idle"
+        );
 
         let unread_background = SessionDetail {
             unread_agent_messages: 1,
@@ -3194,6 +3213,15 @@ mod tests {
             session_band_color(Some(&unread_background), false, SessionState::Running),
             Color::LightYellow,
             "background work does not use the blue idle-unread band"
+        );
+        let read_background = SessionDetail {
+            activity: unread_background.activity.clone(),
+            ..SessionDetail::default()
+        };
+        assert_eq!(
+            session_band_color(Some(&read_background), false, SessionState::Running),
+            Color::Yellow,
+            "background work is not idle after it has been read"
         );
 
         let restarted_idle = SessionDetail {
@@ -3213,6 +3241,46 @@ mod tests {
         assert_eq!(
             session_band_color(Some(&restarted_running), false, SessionState::Running),
             Color::LightYellow
+        );
+
+        let needs_input = SessionDetail {
+            pending_elicitations: vec![
+                hel::hel_elicitation::ElicitationRequest::from_acp_params(
+                    "request-1",
+                    serde_json::json!({
+                        "mode": "form",
+                        "sessionId": "session-1",
+                        "message": "Choose a path",
+                        "requestedSchema": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}}
+                        }
+                    }),
+                )
+                .expect("valid test question"),
+            ],
+            ..SessionDetail::default()
+        };
+        assert_eq!(
+            session_band_color(Some(&needs_input), false, SessionState::Running),
+            Color::LightYellow,
+            "pending input overrides the idle blue"
+        );
+
+        assert_eq!(
+            session_band_color(Some(&read_idle), false, SessionState::Provisioning),
+            Color::Yellow,
+            "provisioning is a lifecycle state, not a live idle session"
+        );
+        assert_eq!(
+            session_band_color(Some(&read_idle), false, SessionState::Error),
+            Color::Red,
+            "error overrides idle"
+        );
+        assert_eq!(
+            session_band_color(None, false, SessionState::Running),
+            Color::Yellow,
+            "unknown detail stays at the default"
         );
 
         // An unreachable target is red, overriding every other state.
@@ -3812,12 +3880,14 @@ mod tests {
     fn background_work_reaches_both_session_row_forms() {
         let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
         let activity = mj_chat::usage_format::SessionActivity {
+            execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 started_at_ms,
                 command: "cargo test".into(),
             }],
+            active_user_shells: Vec::new(),
         };
 
         let mut dashboard = dashboard_with_session(running_session());
@@ -4010,7 +4080,7 @@ mod tests {
     }
 
     /// A session cell is coloured by the same state rule the expanded rows
-    /// use: a healthy running session is yellow, a failed one red.
+    /// use: idle is blue, active work yellow, and a failed session red.
     #[test]
     fn the_minimized_grid_colours_a_session_cell_by_state() {
         let colour_of = |mut dashboard: DashboardState| {
@@ -4028,7 +4098,14 @@ mod tests {
         };
 
         let healthy = minimized_grid_dashboard(1, 1);
-        assert_eq!(colour_of(healthy), Color::Yellow);
+        assert_eq!(colour_of(healthy), Color::LightBlue);
+
+        let mut busy = minimized_grid_dashboard(1, 1);
+        busy.session_details
+            .get_mut("session-00")
+            .expect("the session detail")
+            .current_turn_started_at = Some(1);
+        assert_eq!(colour_of(busy), Color::Yellow);
 
         let mut failed = minimized_grid_dashboard(1, 1);
         {
@@ -4617,40 +4694,49 @@ mod tests {
     }
 
     #[test]
-    fn read_idle_session_uses_the_normal_summary_color() {
+    fn read_idle_session_stays_blue_in_expanded_and_collapsed_rows() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         // The detach cursor sits past the only agent message, so nothing is
-        // unread; the band still brightens because no turn is in flight.
+        // unread; a truly idle live session is still blue.
         session.viewed_through_event_ordinal = 1;
-        let mut dashboard = dashboard_with_session(session);
-        dashboard.focus = Focus::Quota;
-        let mut materialized =
-            materialized_session_for("session-1", vec![agent_message(1, "seen response")]);
-        materialized.execution = MaterializedExecutionState::Idle;
-        dashboard.apply_materialized_session(&materialized);
-        let mut terminal = Terminal::new(TestBackend::new(140, 28)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .expect("draw dashboard");
-        let buffer = terminal.backend().buffer();
-        let status_y = (buffer.area.y..buffer.area.bottom())
-            .find(|y| {
-                let row = (buffer.area.x..buffer.area.right())
-                    .map(|x| buffer[(x, *y)].symbol())
-                    .collect::<String>();
-                row.contains("podman")
-            })
-            .expect("the session's summary row");
-        let status = (buffer.area.x..buffer.area.right())
-            .map(|x| buffer[(x, status_y)].symbol())
-            .collect::<String>();
-        assert!(!status.contains("unread"));
-        assert!(
-            (buffer.area.x + 1..buffer.area.right() - 1)
-                .filter(|x| summary_text_cell(&buffer[(*x, status_y)]))
-                .all(|x| buffer[(x, status_y)].fg == Color::Yellow)
-        );
+        for collapsed in [false, true] {
+            let mut dashboard = dashboard_with_session(session.clone());
+            dashboard.focus = Focus::Quota;
+            let mut materialized =
+                materialized_session_for("session-1", vec![agent_message(1, "seen response")]);
+            materialized.execution = MaterializedExecutionState::Idle;
+            dashboard.apply_materialized_session(&materialized);
+            if collapsed {
+                dashboard.focus_sessions();
+                dashboard.handle_key(crate::test_support::key(KeyCode::Char('1')));
+                dashboard.focus = Focus::Quota;
+            }
+
+            let mut terminal = Terminal::new(TestBackend::new(140, 28)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &mut dashboard))
+                .expect("draw dashboard");
+            let buffer = terminal.backend().buffer();
+            let status_y = (buffer.area.y..buffer.area.bottom())
+                .find(|y| {
+                    let row = (buffer.area.x..buffer.area.right())
+                        .map(|x| buffer[(x, *y)].symbol())
+                        .collect::<String>();
+                    row.contains("podman")
+                })
+                .expect("the session's summary row");
+            let status = (buffer.area.x..buffer.area.right())
+                .map(|x| buffer[(x, status_y)].symbol())
+                .collect::<String>();
+            assert!(!status.contains("unread"));
+            assert!(
+                (buffer.area.x + 1..buffer.area.right() - 1)
+                    .filter(|x| summary_text_cell(&buffer[(*x, status_y)]))
+                    .all(|x| buffer[(x, status_y)].fg == Color::LightBlue),
+                "{collapsed}: {status}"
+            );
+        }
     }
 
     #[test]

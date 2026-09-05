@@ -8,17 +8,17 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::{HarnessProfile, PhoneConfig};
+use hel::hel_config::{HarnessProfile, HelConfig, PhoneConfig, is_bare_project_target};
 use hel::hel_state::{HelState, MaterializedSession, SessionRecord};
-use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor};
+use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, ProcessExecutor};
 use hel::hel_worker::RelayCommand;
 use hel::hel_workspace::WorkspaceRecord;
 use mj_controller::hel_controller::{Controller, SessionLaunchOptions};
 use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_server::{
-    ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, ReadReceiptRequest,
-    ResumeQueueDisposition, ServerOptions, ViewerQueuedPrompt, ViewerQuota, ViewerSnapshot,
-    ViewerUserShell,
+    ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, PreflightFailure,
+    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerQueuedPrompt, ViewerQuota,
+    ViewerSnapshot, ViewerUserShell,
 };
 use mj_controller::hel_session_manager::{
     SessionManagerChannels, SessionManagerControl, new_command_id,
@@ -27,6 +27,7 @@ use mj_controller::hel_tailscale::TailscaleTls;
 use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 
 use crate::daemon::{ResumeSessionRequest, RuntimeState, WebViewerStatus};
+use crate::dashboard::io::config_only_controller;
 use crate::pollers::{
     CredentialSyncNotices, CredentialSyncSignalTracker, QUOTA_STALE_AFTER, QuotaRefreshBatch,
     QuotaUpdate, apply_worker_record_update, credential_sync_targets, dashboard_worker_targets,
@@ -1216,30 +1217,46 @@ pub(crate) async fn run_server(
                     }
                 }
                 preflight = preflight_rx.recv() => {
-                    let Some(mj_controller::hel_server::PreflightRequest { bundle_id, reply }) = preflight else {
+                    let Some(mj_controller::hel_server::PreflightRequest {
+                        bundle_id,
+                        target_id,
+                        project_directory,
+                        reply,
+                    }) = preflight else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
                         break;
                     };
-                    // Reading a working tree's status touches the disk, so it
-                    // runs on its own task rather than on the loop that has to
-                    // stay responsive to every other feed.
-                    let bundle = controller.config.bundles.get(&bundle_id).cloned();
+                    // Reading a working tree's status or validating a project
+                    // directory touches the disk, so it runs on its own task
+                    // rather than on the loop that has to stay responsive to
+                    // every other feed.
+                    let config = controller.config.clone();
+                    let project_validation = project_directory.is_some();
                     tokio::spawn(async move {
                         let answer = tokio::task::spawn_blocking(move || {
-                            let bundle = bundle.context("unknown bundle")?;
-                            let dirty = hel::hel_local_git::dirty_local_repositories(&bundle)?
-                                .into_iter()
-                                .map(|repository| dirty_repository_label(&repository.path))
-                                .collect();
-                            anyhow::Ok(mj_controller::hel_server::PreflightNew {
-                                dirty_repositories: dirty,
-                            })
+                            run_new_preflight(config, bundle_id, target_id, project_directory)
                         })
                         .await;
                         let answer = match answer {
                             Ok(Ok(answer)) => Ok(answer),
-                            Ok(Err(error)) => Err(format!("{error:#}")),
-                            Err(error) => Err(format!("preflight task failed: {error}")),
+                            Ok(Err(error)) => {
+                                tracing::debug!(
+                                    error = %error,
+                                    project_validation,
+                                    "phone preflight check failed"
+                                );
+                                Err(if project_validation {
+                                    PreflightFailure::Validation
+                                } else {
+                                    PreflightFailure::Controller(format!("{error:#}"))
+                                })
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "phone preflight task failed");
+                                Err(PreflightFailure::Controller(format!(
+                                    "preflight task failed: {error}"
+                                )))
+                            }
                         };
                         if reply.send(answer).is_err() {
                             tracing::debug!("phone preflight reply dropped after client disconnect");
@@ -1720,6 +1737,48 @@ fn dirty_repository_label(path: &std::path::Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// Perform the filesystem half of a new-session preflight.
+///
+/// This runs on the blocking task owned by the phone server. Bare targets
+/// need the same directory-and-Git-HEAD validation as the dashboard; isolated
+/// targets instead inspect the configured bundle for dirty local repositories.
+fn run_new_preflight(
+    config: HelConfig,
+    bundle_id: String,
+    target_id: String,
+    project_directory: Option<PathBuf>,
+) -> Result<mj_controller::hel_server::PreflightNew> {
+    let target_is_bare = config
+        .targets
+        .get(&target_id)
+        .with_context(|| format!("unknown target template {target_id:?}"))
+        .map(is_bare_project_target)?;
+    if target_is_bare {
+        let directory =
+            project_directory.context("project directory is required for a bare target")?;
+        config_only_controller(config).validate_project_directory(
+            &target_id,
+            &directory,
+            &ProcessExecutor,
+        )?;
+        return Ok(mj_controller::hel_server::PreflightNew {
+            dirty_repositories: Vec::new(),
+        });
+    }
+    if project_directory.is_some() {
+        bail!("project directory is unsupported for this target");
+    }
+
+    let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
+    let dirty = hel::hel_local_git::dirty_local_repositories(bundle)?
+        .into_iter()
+        .map(|repository| dirty_repository_label(&repository.path))
+        .collect();
+    Ok(mj_controller::hel_server::PreflightNew {
+        dirty_repositories: dirty,
+    })
 }
 
 fn phone_action_capacity_available(active_actions: usize) -> bool {
@@ -2617,13 +2676,21 @@ fn viewer_snapshot(
                 .map(|prompt| prompt.started_at_ms)
                 .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms))
                 .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok());
+            let activity = mj_chat::usage_format::SessionActivity::of(state);
+            session.is_idle = controller
+                .state
+                .sessions
+                .get(&session.id)
+                .is_some_and(|record| record.state == hel::hel_state::SessionState::Running)
+                && session.operation.is_none()
+                && activity.is_idle(turn_started_at);
             session.activity = mj_chat::usage_format::format_activity_columns(
                 now,
                 turn_started_at,
                 state
                     .current_step_started_at_ms
                     .and_then(|value| u64::try_from(value).ok()),
-                &mj_chat::usage_format::SessionActivity::of(state),
+                &activity,
             )
             .join("  ")
             .trim()
@@ -2675,7 +2742,9 @@ fn viewer_snapshot(
 mod tests {
     use super::*;
     use crate::pollers::QUOTA_REFRESH_INTERVAL;
-    use hel::hel_config::{CONFIG_VERSION, HarnessKind, HelConfig};
+    use hel::hel_config::{
+        CONFIG_VERSION, HarnessKind, HelConfig, ProjectBundle, ProjectRepository, TargetTemplate,
+    };
     use hel::hel_state::SessionState;
 
     #[tokio::test]
@@ -2727,6 +2796,81 @@ mod tests {
                 .unwrap()
                 .contains("detection is disabled")
         );
+    }
+
+    fn bare_preflight_config() -> HelConfig {
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("raw".into(), TargetTemplate::LocalBare);
+        config
+    }
+
+    #[test]
+    fn new_preflight_rejects_a_bare_project_without_a_git_head() {
+        let error = run_new_preflight(
+            bare_preflight_config(),
+            "hel".into(),
+            "raw".into(),
+            Some(PathBuf::from("/definitely/not/a/project")),
+        )
+        .expect_err("a missing project directory must fail preflight");
+
+        assert!(
+            error
+                .to_string()
+                .contains("project directory does not exist or is not a directory")
+        );
+    }
+
+    #[test]
+    fn new_preflight_accepts_a_git_project_for_a_bare_target() {
+        let directory = std::env::current_dir().expect("the test has a working directory");
+        let answer = run_new_preflight(
+            bare_preflight_config(),
+            "hel".into(),
+            "raw".into(),
+            Some(directory),
+        )
+        .expect("the repository running the test has a valid Git HEAD");
+
+        assert!(answer.dirty_repositories.is_empty());
+    }
+
+    #[test]
+    fn new_preflight_keeps_bundle_dirty_check_for_isolated_targets() {
+        let mut config = HelConfig::default();
+        config.targets.insert(
+            "podman".into(),
+            TargetTemplate::LocalPodman {
+                container: hel::hel_config::ContainerTemplate {
+                    image: "test-image".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: Default::default(),
+                    workspace_storage: Default::default(),
+                },
+            },
+        );
+        config.bundles.insert(
+            "hel".into(),
+            ProjectBundle {
+                primary_repo: "hel".into(),
+                repositories: vec![ProjectRepository {
+                    id: "hel".into(),
+                    github: Some("owner/hel".into()),
+                    local: None,
+                    destination: "hel".into(),
+                    git_ref: None,
+                }],
+            },
+        );
+        let answer = run_new_preflight(config, "hel".into(), "podman".into(), None)
+            .expect("a GitHub-only bundle has no local dirty repositories");
+
+        assert!(answer.dirty_repositories.is_empty());
     }
 
     #[test]
@@ -2866,25 +3010,28 @@ mod tests {
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
         };
-        let operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
-        let snapshot = viewer_snapshot(
-            &controller,
-            &[],
-            &std::collections::BTreeMap::new(),
-            &PhoneSessionViews {
-                conversations: &std::collections::BTreeMap::new(),
-                queued_prompts: &std::collections::BTreeMap::new(),
-                active_user_shells: &std::collections::BTreeMap::new(),
-                pending_elicitations: &std::collections::BTreeMap::new(),
-                prompt_images: &std::collections::BTreeSet::new(),
-                operational: &operational,
-                operations: &std::collections::BTreeMap::new(),
-                capacity: &[],
-                launch_failures: &[],
-                reviews: &std::collections::BTreeMap::new(),
-            },
-            1,
-        );
+        let mut operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
+        let project = |operational: &std::collections::BTreeMap<String, RelayOperationalState>| {
+            viewer_snapshot(
+                &controller,
+                &[],
+                &std::collections::BTreeMap::new(),
+                &PhoneSessionViews {
+                    conversations: &std::collections::BTreeMap::new(),
+                    queued_prompts: &std::collections::BTreeMap::new(),
+                    active_user_shells: &std::collections::BTreeMap::new(),
+                    pending_elicitations: &std::collections::BTreeMap::new(),
+                    prompt_images: &std::collections::BTreeSet::new(),
+                    operational,
+                    operations: &std::collections::BTreeMap::new(),
+                    capacity: &[],
+                    launch_failures: &[],
+                    reviews: &std::collections::BTreeMap::new(),
+                },
+                1,
+            )
+        };
+        let snapshot = project(&operational);
         let session = &snapshot.sessions[0];
 
         assert!(session.capabilities.prompt);
@@ -2907,6 +3054,33 @@ mod tests {
         let inspect = session.available_commands.last().unwrap();
         assert_eq!(inspect.description, "Inspect the workspace");
         assert_eq!(inspect.argument.as_deref(), Some("query"));
+
+        assert!(session.is_idle);
+        assert_eq!(session.activity, "[idle]");
+        let state = operational.get_mut("session-1").unwrap();
+        state
+            .background_commands
+            .push(hel::hel_worker::BackgroundCommand {
+                started_at_ms: 1_000,
+                command: "background check".into(),
+            });
+        let background = project(&operational);
+        assert!(!background.sessions[0].is_idle);
+        assert!(background.sessions[0].activity.starts_with("BG "));
+        let state = operational.get_mut("session-1").unwrap();
+        state.background_commands.clear();
+        // Execution is authoritative even before its timestamp arrives.
+        state.execution = RelayExecutionState::Running;
+        let running = project(&operational);
+        assert!(!running.sessions[0].is_idle);
+        assert_ne!(running.sessions[0].activity, "[idle]");
+        operational.get_mut("session-1").unwrap().execution = RelayExecutionState::Idle;
+        let idle_again = project(&operational);
+        assert!(idle_again.sessions[0].is_idle);
+        assert_eq!(idle_again.sessions[0].activity, "[idle]");
+        let unknown = project(&std::collections::BTreeMap::new());
+        assert!(!unknown.sessions[0].is_idle);
+        assert!(unknown.sessions[0].activity.is_empty());
     }
 
     #[test]

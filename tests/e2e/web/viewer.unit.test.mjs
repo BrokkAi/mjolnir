@@ -48,6 +48,60 @@ function makeNode(tag = 'div') {
   };
 }
 
+test('session titles stay blue while truly idle and clear blue when activity resumes', () => {
+  const classes = new Set();
+  const node = {
+    textContent: '',
+    classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) },
+  };
+  const context = vm.createContext({ node, session: { title: 'Test session', is_idle: true } });
+  vm.runInContext(sourceBetween('function renderSessionTitle(', '\nfunction renderConversationHeader('), context);
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.equal(node.textContent, 'Test session');
+  assert.ok(classes.has('idle-title'));
+  // A read-cursor update does not change the operational idle classification.
+  context.session.latest_event_ordinal = 20;
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.ok(classes.has('idle-title'));
+  context.session.is_idle = false;
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.ok(!classes.has('idle-title'));
+  delete context.session.is_idle;
+  vm.runInContext('renderSessionTitle(node, session)', context);
+  assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
+});
+
+test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
+  let complete;
+  let requests = 0;
+  const draft = { profileId: 'test', targetId: 'raw', projectDirectory: '/project' };
+  const context = vm.createContext({
+    newDraft: draft,
+    pendingNewPreflight: null,
+    targetIsBare: () => true,
+    selectedWorkspaceId: () => 'test',
+    renderNewForm: () => {},
+    request: () => {
+      requests++;
+      return new Promise(resolve => { complete = resolve; });
+    },
+  });
+  vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
+  const pending = vm.runInContext('preflightNew()', context);
+  assert.equal(context.pendingNewPreflight, draft);
+  assert.equal(await vm.runInContext('preflightNew()', context), false);
+  assert.equal(requests, 1);
+  context.newDraft = { profileId: 'another wizard' };
+  complete({ dirty_repositories: ['old-project'] });
+  assert.equal(await pending, false);
+  assert.equal(context.newDraft.dirty, undefined);
+  assert.equal(context.pendingNewPreflight, null);
+  context.request = async () => { throw new Error('invalid project'); };
+  await assert.rejects(vm.runInContext('preflightNew()', context), /invalid project/);
+  assert.equal(context.pendingNewPreflight, null, 'failure releases the checking state');
+  assert.equal(context.newDraft.preflighted, undefined);
+});
+
 test('rolled-back launch errors remain visible only in their workspace and can be dismissed', () => {
   const notices = makeNode();
   const context = vm.createContext({
