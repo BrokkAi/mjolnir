@@ -63,7 +63,7 @@ def wait_marker_or_exit(marker: pathlib.Path, browser: subprocess.Popen[bytes]) 
 # partially redrawn frame can show two panes bordered alike for one frame,
 # whereas the footer is one line that is always rewritten whole.
 PANE_RING = ("Sessions", "Prompt", "Targets", "Quota")
-SESSIONS_FOCUSED = "Enter open \u2502 Alt-N new \u00b7 Alt-S resume \u00b7 Alt-A read"
+SESSIONS_FOCUSED = "Enter open \u00b7 Tab pane \u2502 Alt-N new \u00b7 Alt-S resume \u00b7 Alt-A read"
 
 
 def focus_sessions(client) -> None:
@@ -118,7 +118,7 @@ def run_layout_matrix(lab: Lab, web_root: pathlib.Path, environment: dict[str, s
     """
     log = (lab.root / "layout.log").open("wb")
     matrix_environment = dict(environment)
-    matrix_environment["MJ_BROWSER_SPEC"] = "layout.spec.js"
+    matrix_environment["MJ_BROWSER_SPEC"] = "{layout,quota}.spec.js"
     matrix = subprocess.Popen(
         [str(web_root / "node_modules/.bin/playwright"), "test"],
         cwd=web_root,
@@ -157,6 +157,12 @@ def run(lab: Lab) -> None:
     web_root = pathlib.Path(__file__).resolve().parent / "web"
     browser_log = (lab.root / "browser.log").open("wb")
     environment = lab.environment()
+    # The lab isolates managed harnesses with XDG_CACHE_HOME. Chromium remains
+    # in the caller's installed browser cache, not the empty harness cache.
+    environment.setdefault(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        str(pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "ms-playwright"),
+    )
     environment.update(
         {
             "MJ_BROWSER_BASE_URL": lab.base_url,
@@ -184,10 +190,12 @@ def run(lab: Lab) -> None:
         dashboard.wait_for(title)
         dashboard.resize(18, 72)
         time.sleep(0.2)
-        dashboard.resize(40, 150)
+        # Keep the pane-specific footer visible for focus_sessions; narrower
+        # layouts intentionally drop that group before the global shortcuts.
+        dashboard.resize(40, 200)
         time.sleep(0.5)
         dashboard.wait_for(title)
-        lab.record_action("dashboard-resized", rows=40, columns=150)
+        lab.record_action("dashboard-resized", rows=40, columns=200)
         stop_from_dashboard(dashboard)
         snapshot = lab.wait_snapshot(
             lambda value: any(

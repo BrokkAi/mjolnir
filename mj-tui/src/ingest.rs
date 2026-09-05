@@ -1253,6 +1253,33 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_restart_markers_keep_each_ordinal_for_unread_tracking() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        let mut materialized =
+            materialized_session_for("session-1", vec![session_restart(3), session_restart(4)]);
+        materialized.applied_event_ordinal = 4;
+        dashboard.apply_materialized_session(&materialized);
+
+        let detail = &dashboard.session_details["session-1"];
+        assert_eq!(detail.session_restart_event_ordinals, [3, 4]);
+        assert_eq!(detail.unread_session_restarts, 2);
+
+        let mut state = dashboard.state.clone();
+        state
+            .sessions
+            .get_mut("session-1")
+            .unwrap()
+            .viewed_through_event_ordinal = 3;
+        dashboard.set_state(state);
+        assert_eq!(
+            dashboard.session_details["session-1"].unread_session_restarts, 1,
+            "reading through the older marker leaves the newer ordinal unread"
+        );
+    }
+
+    #[test]
     fn materialized_message_update_does_not_duplicate_unread_count() {
         let mut session = stopped_session();
         session.state = SessionState::Running;

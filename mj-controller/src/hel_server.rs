@@ -81,6 +81,10 @@ const COOKIE_KEY_FILE: &str = "phone-cookie-key";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BrowserTranscript {
     pub latest_seq: u64,
+    /// Cursor boundary below which a client must replace its feed. Usually
+    /// this is the oldest retained entry, but presentation coalescing may
+    /// advance it so an append-only client drops a marker hidden by a newer
+    /// entry.
     pub window_start_seq: u64,
     pub reset: bool,
     pub entries: Vec<BrowserTranscriptEntry>,

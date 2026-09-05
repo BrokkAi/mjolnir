@@ -30,6 +30,8 @@ import urllib.request
 
 
 TIMEOUT = 20.0
+# Match the Codex spec in src/hel_harness_runtime.rs when updating that pin.
+MANAGED_CODEX_INSTALL_ID = "codex-acp-1.8.0_codex-0.153.4"
 
 
 def render_terminal(raw: bytes, rows: int = 32, columns: int = 140) -> str:
@@ -335,6 +337,11 @@ class Lab:
             {
                 "MJ_CONFIG_DIR": str(self.config),
                 "MJ_DATA_DIR": str(self.data),
+                # Local-bare workers use the managed harness policy. Keep its
+                # cache inside this lab so the deterministic fake ACP can be
+                # seeded there without downloading or launching a real Node
+                # adapter.
+                "XDG_CACHE_HOME": str(self.runtime_root / "cache"),
                 "MJ_CHAOS_ISOLATED": "1",
                 "RUST_LOG": "hel=debug,mj=debug,mj_controller=debug",
             }
@@ -484,9 +491,37 @@ for line in sys.stdin:
 """
         )
         bridge.chmod(0o700)
-        # The controller discovers the ambient Codex bridge through PATH. Keep
-        # the fixture on that same path instead of relying on the removed
-        # profile-level executable override.
+        # The local-bare target now resolves the exact managed Codex harness
+        # before startup, so PATH alone cannot replace its bridge. Seed the
+        # worker's isolated managed cache with the same manifest/entrypoint
+        # shape the worker validates, while retaining this Python fake and no
+        # network or real-provider dependency.
+        managed_install = (
+            self.runtime_root
+            / "cache"
+            / "mjolnir"
+            / "harnesses"
+            / "codex"
+            / MANAGED_CODEX_INSTALL_ID
+        )
+        managed_entrypoint = managed_install / "node_modules/.bin/codex-acp"
+        managed_entrypoint.parent.mkdir(parents=True)
+        managed_entrypoint.symlink_to(bridge)
+        managed_codex = managed_install / "node_modules/@openai/codex/bin/codex.js"
+        managed_codex.parent.mkdir(parents=True)
+        managed_codex.write_text("// deterministic reliability fixture\n")
+        (managed_install / "mj-harness.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "harness": "codex",
+                    "install_id": MANAGED_CODEX_INSTALL_ID,
+                }
+            )
+            + "\n"
+        )
+        # Keep the ambient shim too: it remains useful for any setup/probe
+        # command that runs before the worker takes the managed entrypoint.
         (fixture_bin / "codex-acp").symlink_to(bridge)
         port = self.free_port()
         tls_config = ""

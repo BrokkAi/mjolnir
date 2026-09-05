@@ -392,6 +392,18 @@ impl PartialEq for TranscriptSource {
 impl Eq for TranscriptSource {}
 
 impl ChatEntry {
+    /// Whether this entry is the durable marker emitted when a session's
+    /// control plane restarts. The source identity is authoritative for
+    /// materialized entries; the role/text check also covers entries built
+    /// from older worker snapshots that have no materialized source handle.
+    pub fn is_session_restart(&self) -> bool {
+        self.source
+            .0
+            .as_ref()
+            .is_some_and(|item| item.is_session_restart())
+            || (self.role == ChatRole::System && self.text == SESSION_RESTART_TEXT)
+    }
+
     pub fn plan(seq: u64, plan: Vec<PlanLine>) -> Self {
         Self {
             start_seq: seq,

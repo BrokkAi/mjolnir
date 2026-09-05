@@ -157,14 +157,24 @@ impl TranscriptSnapshot {
     }
 
     pub fn browser_transcript(&self, after_seq: Option<u64>) -> BrowserTranscript {
+        let collapsed_restarts =
+            collapsed_session_restart_states(&self.entries, TranscriptRenderMode::Rich);
+        let restart_collapse_window_start = restart_collapse_window_start_seq(
+            &self.entries,
+            &collapsed_restarts,
+            TranscriptRenderMode::Rich,
+        );
         let mut entries = self
             .entries
             .iter()
-            .filter(|entry| entry.start_seq > self.last_compaction_seq)
+            .enumerate()
+            .filter(|(index, entry)| {
+                entry.start_seq > self.last_compaction_seq && !collapsed_restarts[*index]
+            })
             // The remote viewer mirrors the Rich feed, so detail Rich leaves
             // out never reaches it.
-            .filter(|entry| !entry.raw_only)
-            .map(browser_entry)
+            .filter(|(_, entry)| !entry.raw_only)
+            .map(|(_, entry)| browser_entry(entry))
             .collect::<Vec<_>>();
         let mut remaining = BROWSER_TRANSCRIPT_LINES;
         for entry in entries.iter_mut().rev() {
@@ -191,7 +201,15 @@ impl TranscriptSnapshot {
                 entries.remove(0);
             }
         }
-        let window_start_seq = entries.first().map_or(self.latest_seq, |entry| entry.id);
+        // A collapse can remove an entry a viewer already received even when
+        // older, unrelated entries remain in the window. Move the reset
+        // boundary to the newest replacement marker so the append-only web
+        // feed is rebuilt in that case; the server applies this same boundary
+        // to cached projections when serving `after_seq` deltas.
+        let window_start_seq = entries
+            .first()
+            .map_or(self.latest_seq, |entry| entry.id)
+            .max(restart_collapse_window_start.unwrap_or_default());
         let reset = after_seq.is_some_and(|after| after < window_start_seq);
         if let Some(after) = after_seq.filter(|_| !reset) {
             entries.retain(|entry| entry.updated_seq > after);
@@ -789,6 +807,62 @@ fn collapse_revision_fingerprint(entries: &[ChatEntry]) -> u64 {
     })
 }
 
+/// Mark all but the newest restart in each run of restart markers. Entries
+/// omitted from the selected feed do not interrupt a run, because they cannot
+/// be visible between the markers. Raw mode has no omitted entries, while
+/// Rich omits clean terminal output. The returned positions let browser and
+/// TUI presentation use the same adjacency rule without mutating the durable
+/// transcript or its cursors.
+fn collapsed_session_restart_states(
+    entries: &[ChatEntry],
+    mode: TranscriptRenderMode,
+) -> Vec<bool> {
+    let mut hidden = vec![false; entries.len()];
+    let mut latest_restart = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if mode == TranscriptRenderMode::Rich && entry.raw_only {
+            continue;
+        }
+        if entry.is_session_restart() {
+            if let Some(previous) = latest_restart {
+                hidden[previous] = true;
+            }
+            latest_restart = Some(index);
+        } else {
+            latest_restart = None;
+        }
+    }
+    hidden
+}
+
+/// The conservative reset boundary for a browser feed whose previous restart
+/// marker may have been removed by a later projection. The wire shape only
+/// carries one `window_start_seq`, so use the newest replacement marker across
+/// all collapsed runs. This can resend a little history, but it guarantees a
+/// client never retains a hidden entry in its append-only DOM.
+fn restart_collapse_window_start_seq(
+    entries: &[ChatEntry],
+    collapsed_restarts: &[bool],
+    mode: TranscriptRenderMode,
+) -> Option<u64> {
+    let mut latest_restart = None;
+    let mut boundary = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if mode == TranscriptRenderMode::Rich && entry.raw_only {
+            continue;
+        }
+        if entry.is_session_restart() {
+            if latest_restart.is_some_and(|previous| collapsed_restarts[previous]) {
+                boundary = Some(boundary.map_or(entry.seq, |current: u64| current.max(entry.seq)));
+            }
+            latest_restart = Some(index);
+        } else {
+            latest_restart = None;
+        }
+    }
+    boundary
+}
+
 /// The newest completed tool keeps its full detail until a later user request,
 /// thought, or tool appears. Agent, plan, and system entries stay transparent
 /// so the existing protection behavior across those entries does not change.
@@ -812,17 +886,27 @@ fn protected_tool_index(entries: &[ChatEntry]) -> Option<usize> {
 /// streak. The protected newest result breaks streaks too and never joins one.
 /// A `raw_only` entry renders nothing at all and is transparent to a streak
 /// rather than breaking it, since nothing of it is on screen to separate the
-/// surrounding entries. Raw mode neither collapses nor omits, so the complete
-/// source stays inspectable.
+/// surrounding entries. Raw mode does not tool-collapse or omit entries, but
+/// it still coalesces adjacent restart markers as a presentation rule.
 fn entry_collapse_states(entries: &[ChatEntry], mode: TranscriptRenderMode) -> Vec<EntryCollapse> {
     let mut states = vec![EntryCollapse::None; entries.len()];
-    if mode != TranscriptRenderMode::Rich {
-        return states;
-    }
-    for (index, entry) in entries.iter().enumerate() {
-        if entry.raw_only {
-            states[index] = EntryCollapse::Omitted;
+    if mode == TranscriptRenderMode::Rich {
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.raw_only {
+                states[index] = EntryCollapse::Omitted;
+            }
         }
+    }
+    if mode != TranscriptRenderMode::Rich {
+        for (index, hidden) in collapsed_session_restart_states(entries, mode)
+            .into_iter()
+            .enumerate()
+        {
+            if hidden {
+                states[index] = EntryCollapse::Hidden;
+            }
+        }
+        return states;
     }
     let protected = protected_tool_index(entries);
     let streak_member = |index: usize| {
@@ -874,6 +958,17 @@ fn entry_collapse_states(entries: &[ChatEntry], mode: TranscriptRenderMode) -> V
             states[start + 1..end].fill(EntryCollapse::Hidden);
         }
         start = end;
+    }
+    // Apply restart coalescing last: unlike tool streaks, restart markers are
+    // never streak members, but keeping this pass last makes that invariant
+    // explicit if more Rich collapse rules are added later.
+    for (index, hidden) in collapsed_session_restart_states(entries, mode)
+        .into_iter()
+        .enumerate()
+    {
+        if hidden {
+            states[index] = EntryCollapse::Hidden;
+        }
     }
     states
 }
