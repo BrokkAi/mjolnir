@@ -16,8 +16,10 @@ Users should configure one global adversarial reviewer from F2, using actual mod
 - [x] Implement target-specific reviewer choice discovery and readiness checks shared with actual launch semantics; six remote-manager behavior tests pass.
 - [x] Integrate settings, acknowledged forwarding, and prompt calibration; validate representative behaviors including interrupted handoff, stable retry identity, independent reviewer connections, and worker disconnect cleanup.
 - [x] Run focused tests, full Cargo tests and Clippy; all pass. Live F2 verification/save passed on the actual disposable target.
-- [ ] Complete the live calibration/forwarding cycle and validate integration with updated upstream.
-- [ ] Record evidence, commit coherent validated changes on the current branch, and push to its upstream.
+- [x] Merge updated upstream on the current branch, preserving both review overlays and upstream session colors. Final integrated validation: 2,317 Cargo tests passed, 12 ignored; Clippy, formatting/diff checks, and 11 web unit checks passed.
+- [x] Complete the live calibration/forwarding cycle: revised Opus verdict retained two root causes at P1/P2; Sol fixed both, the independent six-test rerun passed, and automatic Opus follow-up was clean. Repeated Enter during active review did not cancel it; repeated Enter at forwarding produced one corrective turn. Cancelling a visibly checking readiness probe preserved the open review.
+- [x] Record evidence, commit coherent validated changes on the current branch, and stop/remove the disposable test container and isolated UI/daemon.
+- [ ] Push the completed work to the branch's upstream.
 
 ## Surprises & Discoveries
 
@@ -44,7 +46,11 @@ Forwarding must be an acknowledged transition with a stable command identity. Ke
 ## Outcomes & Retrospective
 
 
-The first live F2 probe on the disposable Podman target advertised Opus (1M context) and Medium, verified the adapter and Bifrost, and saved the global review configuration successfully. Sol medium created the make-work helpers and six passing tests. Controlled post-turn edits expose two independent defects and three failing assertions for the final calibration/forwarding run. Severity calibration was committed independently as `787da658` after its focused tests passed. Full Cargo tests and Clippy now pass; the worker cleanup tests were also rerun after final logging and test-module placement adjustments. Live calibration and upstream integration remain in progress.
+The live F2 probe on the disposable Podman target advertised Opus (1M context) and Medium, verified the adapter and Bifrost, and saved the global review configuration successfully. Sol medium created the make-work helpers and six passing tests. Controlled post-turn edits exposed two independent defects and three failing assertions. After the first calibration result prompted a shared-guidance revision, the same Opus/medium review returned P1 for the authorization bypass and P2 for the boundary defect, with no third finding for the stale test report. It still appended an unnecessary explanatory note; the small evaluation does not establish deterministic prompt compliance or a low failure rate.
+
+Forwarding through the real TUI produced one corrective Sol turn, a sent notice after acceptance, and an automatic clean Opus follow-up. The independent final `python3 -B -m unittest -v` rerun passed all six cases; no dependencies or fixture commits were introduced. The persisted review state ended with no active review or pending handoff. Global readiness could verify concurrently with an active review; cancelling a fresh probe while it showed `checking actual targets` preserved the findings, and no readiness/Claude harness remained afterward. The primary model was reset to Sol/medium after each automatic binary upgrade restored its profile default; model persistence across upgrades was outside this approved change.
+
+Final integrated validation passed 2,317 Cargo tests (12 ignored), Clippy with warnings denied, 11 web unit checks, formatting, and diff checks. Severity guidance and implementation were committed in coherent checkpoints; upstream was merged on the existing branch, resolving only a session-rendering conflict by retaining both behaviors. The isolated tmux/daemon and disposable container were stopped, then the container was removed; evidence remains under the ignored lab directory and user profile homes were preserved. The remaining step is the authorized push.
 
 ## Context and Orientation
 
@@ -90,3 +96,5 @@ Reuse `ReviewConfig`, `SessionConfigOption` and shared selector helpers, `Review
 Plan created 2026-09-05 for explicit approval of global review settings, calibration, readiness, and acknowledged forwarding; includes the user's subsequent push authorization.
 
 Updated 2026-09-05 after integration and full validation: repaired non-consuming disconnect observation so cancelling a watcher cannot discard a partial next frame; a 128 KiB socket fixture proves preservation. Worker cancellation tests check actual process death rather than a graceful-exit marker that a correct force-stop need not write.
+
+Updated after upstream integration and the first calibration observation: the live validator retained an over-prioritized boundary bug and a redundant stale-report finding. Both journals contained the intended rubric, so the shared semantic rule was tightened and the same fixture is being repeated. Details and limits are in `.agents/docs/review-calibration-evaluation.md`. No parser or output-protocol change was introduced.

@@ -2,6 +2,16 @@
 
 The user approved session-status and progress fixes, rejected changes to primary model selection, and requested safer handling of an extra Enter during review. Global configuration, severity calibration, and failure prevention were design questions; they are documented here without introducing per-session review settings or a new prompt protocol.
 
+The later approval of items 1, 4, and 5 is implemented in
+`.agents/plans/global-review-settings-and-reliability.md`. F2 now edits the one
+global review configuration with actual-target capability/readiness checks.
+Forwarding persists its pending command before submission, waits for durable
+acceptance, and retains findings plus the same identity for retry/recovery.
+Reviewer transport is independent of primary controls and propagates cancelled
+callers through to worker process cleanup. Shared severity guidance and its
+bounded live observations are in `.agents/docs/review-calibration-evaluation.md`.
+The design sections below remain the rationale for those implemented changes.
+
 ## Implemented behavior
 
 The TUI now retains the daemon's complete review projection for all sessions, including sessions that are not selected. Session rows and the active conversation title show typed review activity. Removing a review restores the underlying primary activity. Plan-review second-opinion stop warnings remain separate from turn-review state. Role completion is displayed as `done`, including in the web review projection, so a successfully completed supervisor is not labeled clean when it reports findings.

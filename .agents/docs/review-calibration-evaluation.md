@@ -2,7 +2,7 @@
 
 This is a small, bounded behavioral set for exercising the review prompts after
 the shared severity rubric changes. It is intended for a disposable repository
-and a coordinated live run; no paid model run is part of this change. Each case
+and a coordinated live run. The live observations below cover a subset. Each case
 contains only the task, a small representative patch or evidence packet, and
 the behavior to assess. The wording of a model's answer may vary.
 
@@ -132,3 +132,39 @@ validator/supervisor with the supplied untrusted report. Record the selected
 priority, finding count, root-cause consolidation, and clean/finding verdict.
 Keep the production parser and clean sentinels unchanged; this set evaluates
 review behavior rather than exact output text or a new fixture schema.
+
+## Live observations, 2026-09-05
+
+The disposable Podman session used codex3 with gpt-5.6-sol/medium as primary
+and claude2 with opus[1m]/medium as reviewer. Sol implemented three small
+Python helpers and six passing unittest cases. After that turn, the operator
+changed two return expressions: zero page size became one, and the export
+check used OR instead of AND. The unchanged tests then produced three failing
+assertions from two independent causes. The earlier passing report was true
+when written. This combines ordinary-boundary, independent-causes,
+root-cause-plus-test-symptom, and stale-report behavior without claiming a
+production deployment or proving all seven cases.
+
+The first quick review found both real defects and consolidated both
+authorization failures, but its validator kept P1 for the ordinary boundary
+bug and added a P2 finding about the earlier validation report. Inspection of
+both live journals confirmed the shared rubric was present. This result is
+evidence against treating the first prompt revision as calibrated.
+
+The shared rubric was revised to start ordinary defects at P2 and require an
+evidenced urgent consequence for promotion. Final validators must independently
+choose priorities. A separate incorrect-report finding requires contemporaneous
+evidence of that independent error; a later test failure belongs with its
+supported code cause. The revision changes semantic guidance only, with no
+new parser fields, output sentinels, or fixture-specific rules.
+
+Local evidence is retained under `target/adversarial-live/settings-*`, including
+the original prompts, reviewer journals, and before-calibration terminal
+capture. On the same fixture, the revised validator returned two findings:
+P1 for the authorization bypass and P2 for the zero-size boundary. It kept the
+failing tests with those causes and did not create a third report finding.
+It still appended an unnecessary unscored note comparing the earlier report
+with the current failure, despite the findings-only contract. The calibration
+improved in this observation; it is not evidence of deterministic compliance.
+The correction cycle is recorded in the execution plan after completion.
+These bounded observations cannot establish a failure rate.
