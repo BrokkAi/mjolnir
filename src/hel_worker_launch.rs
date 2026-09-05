@@ -19,6 +19,20 @@ pub const REVIEWER_DIR: &str = "reviewer";
 /// Where the controller stages the chosen profile, inside [`REVIEWER_DIR`].
 pub const REVIEWER_PROFILE_DIR: &str = "profile";
 
+/// Return the immutable profile snapshot staged for one reviewer generation.
+/// Generation zero keeps the original path so an upgraded worker can read a
+/// profile staged by an older controller; later generations are isolated from
+/// one another so staging cannot replace a source another role is copying.
+#[must_use]
+pub fn reviewer_staging_profile_home(worker_root: &Path, generation: u64) -> PathBuf {
+    let root = worker_root.join(REVIEWER_DIR);
+    if generation == 0 {
+        root.join(REVIEWER_PROFILE_DIR)
+    } else {
+        root.join(format!("{REVIEWER_PROFILE_DIR}-{generation}"))
+    }
+}
+
 /// Who owns the ACP adapter and harness executable selected by a worker.
 ///
 /// Ambient launch preserves container behavior. Managed launch resolves the
@@ -168,8 +182,8 @@ pub struct ReviewerLaunchConfig {
     #[serde(default)]
     pub environment: std::collections::BTreeMap<String, String>,
     pub execution_policy: ExecutionPolicy,
-    /// Model to apply once the session opens, or `None` when the harness
-    /// advertises no model selector.
+    /// Model to apply once the session opens, or `None` to keep the profile's
+    /// default. Explicit selections must be supported by the target adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

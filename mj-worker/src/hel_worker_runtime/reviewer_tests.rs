@@ -5,12 +5,15 @@
 //! durable relay are the real ones rather than in-memory stand-ins.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions,
 };
+use tokio::io::AsyncWriteExt;
+use tokio::net::UnixStream;
 
 use super::reviewer::{ReviewerPlacement, ReviewerSidecar};
 use super::{ReviewerLaunchConfig, unix};
@@ -41,6 +44,15 @@ import json, os, signal, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
 
+role = "default"
+for index, argument in enumerate(sys.argv):
+    if argument == "--spec" and index + 1 < len(sys.argv):
+        spec = os.path.dirname(os.path.abspath(sys.argv[index + 1]))
+        if os.path.basename(spec) != "reviewer":
+            role = os.path.basename(spec)
+        break
+block_session = os.path.join(here, "block-session-" + role)
+
 def load(name, default=None):
     path = os.path.join(here, name)
     if not os.path.exists(path):
@@ -57,9 +69,11 @@ def write(payload):
 
 # A kill leaves this behind. Hel's graceful path should never need it: the
 # runtime closes stdin and the harness exits on its own.
-signal.signal(signal.SIGTERM, lambda *_: (touch("harness-terminated"), sys.exit(0)))
+signal.signal(signal.SIGTERM, lambda *_: (touch("harness-terminated-" + role), sys.exit(0)))
 
 with open(os.path.join(here, "harness-pid"), "w") as handle:
+    handle.write(str(os.getpid()))
+with open(os.path.join(here, "harness-pid-" + role), "w") as handle:
     handle.write(str(os.getpid()))
 prompts = 0
 for line in sys.stdin:
@@ -75,19 +89,38 @@ for line in sys.stdin:
             "agentCapabilities": {"loadSession": True},
         }})
     elif method in ("session/new", "session/load"):
+        with open(os.path.join(here, "session-method"), "a") as handle:
+            handle.write(method + "\n")
+        if os.path.exists(block_session):
+            touch("session-blocked-" + role)
+            for blocked in sys.stdin:
+                pass
+            continue
         write({"jsonrpc": "2.0", "id": ident, "result": {
             "sessionId": "reviewer-native",
             "configOptions": load("options.json", []),
         }})
     elif method == "session/set_config_option":
         value = request["params"]["value"]
+        if os.path.exists(os.path.join(here, "reject-" + value)):
+            write({"jsonrpc": "2.0", "id": ident, "error": {
+                "code": -32602,
+                "message": "unsupported model " + value,
+            }})
+            continue
         with open(os.path.join(here, "applied"), "a") as handle:
             handle.write("%s=%s\n" % (request["params"]["configId"], value))
         write({"jsonrpc": "2.0", "id": ident, "result": {
             "configOptions": load("options-%s.json" % value, load("options.json", [])),
         }})
+    elif method == "session/cancel":
+        with open(os.path.join(here, "cancel-observed"), "a") as handle:
+            handle.write("cancel\n")
+        if ident is not None:
+            write({"jsonrpc": "2.0", "id": ident, "result": {}})
     elif method == "session/prompt":
         prompts += 1
+        canceled = False
         if os.path.exists(os.path.join(here, "ask-form")):
             # Ask the client a question, and answer nothing until it replies.
             write({"jsonrpc": "2.0", "id": "form-1", "method": "elicitation/create",
@@ -108,6 +141,16 @@ for line in sys.stdin:
                 answered = json.loads(reply)
                 if answered.get("id") == "form-1":
                     break
+                if answered.get("method") == "session/cancel":
+                    with open(os.path.join(here, "cancel-observed"), "a") as handle:
+                        handle.write("cancel\n")
+                    canceled = True
+                    write({"jsonrpc": "2.0", "id": ident, "result": {
+                        "stopReason": "cancelled"
+                    }})
+                    break
+        if canceled:
+            continue
         text = "".join(
             block.get("text", "")
             for block in request["params"].get("prompt", [])
@@ -129,6 +172,7 @@ for line in sys.stdin:
 
 # Reached only when the runtime closed this harness's stdin, which is the
 # shutdown that terminates the bridge's process group in production.
+touch("harness-stdin-closed-" + role)
 touch("harness-stdin-closed")
 "#,
     )
@@ -172,7 +216,7 @@ struct Fixture {
     /// Where the bridge script keeps its markers, which is also the reviewer's
     /// staged profile directory.
     profile_home: PathBuf,
-    sidecar: ReviewerSidecar,
+    sidecar: Arc<ReviewerSidecar>,
 }
 
 impl Fixture {
@@ -189,14 +233,14 @@ impl Fixture {
             std::fs::create_dir_all(&profile_home).unwrap();
         }
         let bridge = bridge_script(temp.path());
-        let sidecar = ReviewerSidecar::new(ReviewerPlacement {
+        let sidecar = Arc::new(ReviewerSidecar::new(ReviewerPlacement {
             worker_root: worker_root.clone(),
             session_id: SESSION_ID.to_owned(),
             cwd: workspace,
             additional_directories: Vec::new(),
             worker_executable: bridge,
             harness_runtime: hel::hel_worker_launch::HarnessRuntimePolicy::Ambient,
-        });
+        }));
         Self {
             _temp: temp,
             worker_root,
@@ -216,6 +260,17 @@ impl Fixture {
 
     fn marker(&self, name: &str) -> PathBuf {
         self.script_directory().join(name)
+    }
+
+    fn stage_generation(&self, generation: u64) {
+        if generation == 0 {
+            return;
+        }
+        let destination = self
+            .worker_root
+            .join("reviewer")
+            .join(format!("profile-{generation}"));
+        copy_tree_for_test(&self.profile_home, &destination);
     }
 
     /// The scripted harness's process id, recorded when it started.
@@ -298,6 +353,20 @@ impl Fixture {
     }
 }
 
+fn copy_tree_for_test(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let source = entry.path();
+        let destination = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree_for_test(&source, &destination);
+        } else {
+            std::fs::copy(source, destination).unwrap();
+        }
+    }
+}
+
 fn config(generation: u64) -> ReviewerLaunchConfig {
     ReviewerLaunchConfig {
         profile_id: "reviewer-profile".into(),
@@ -337,6 +406,109 @@ fn error_message(body: &RelayResponseBody) -> String {
     }
 }
 
+/// Connects a test client to the same socket-serving path the worker daemon
+/// uses, with a separate relay journal so opening the reviewer's own relay is
+/// never raced by a test reader.
+async fn reviewer_socket(
+    fixture: &Fixture,
+) -> (UnixStream, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let relay_root = fixture.script_directory().join("primary-relay");
+    let relay = hel::hel_worker::DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap();
+    let (dispatch_wake, _dispatch_wake_rx) = tokio::sync::mpsc::channel(1);
+    let (fatal, _fatal_rx) = tokio::sync::mpsc::channel(1);
+    let (client, server) = UnixStream::pair().unwrap();
+    let server = tokio::spawn(unix::serve_client_with_reviewer(
+        server,
+        Arc::new(std::sync::Mutex::new(relay)),
+        dispatch_wake,
+        Err("test has no credentials".to_owned()),
+        None,
+        fixture.sidecar.clone(),
+        fatal,
+    ));
+    (client, server)
+}
+
+async fn send_reviewer_request(
+    client: &mut UnixStream,
+    role: Option<&str>,
+    request: ReviewerRequest,
+) {
+    let envelope = RelayRequestEnvelope {
+        request_id: "socket-test".to_owned(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Reviewer {
+            role: role.map(str::to_owned),
+            request,
+        },
+    };
+    let mut line = serde_json::to_vec(&envelope).unwrap();
+    line.push(b'\n');
+    client.write_all(&line).await.unwrap();
+}
+
+async fn wait_for_marker(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("marker {} did not appear", path.display()));
+}
+
+struct EnvironmentGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvironmentGuard {
+    fn set(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: these tests are run with a dedicated worker fixture and
+        // restore the process-global override when the guard is dropped.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvironmentGuard {
+    fn drop(&mut self) {
+        // SAFETY: restore exactly the value observed by `set`.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+fn blocking_bifrost_script(directory: &Path) -> PathBuf {
+    let path = directory.join("blocking-bifrost.py");
+    std::fs::write(
+        &path,
+        r#"#!/usr/bin/env python3
+import os
+import time
+
+here = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(here, "bifrost-pid"), "w") as handle:
+    handle.write(str(os.getpid()))
+open(os.path.join(here, "bifrost-started"), "w").close()
+while True:
+    time.sleep(1)
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    path
+}
+
 #[tokio::test]
 async fn a_reviewer_cannot_start_before_its_profile_is_staged() {
     let mut fixture = Fixture::new(false);
@@ -374,6 +546,150 @@ async fn starting_opens_a_native_session_and_reports_what_the_harness_advertises
     assert!(reused, "the same configuration reuses the running reviewer");
 
     fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn disconnecting_during_start_pauses_only_the_in_flight_role() {
+    let fixture = Fixture::new(true);
+    let directory = fixture.script_directory();
+    write_options(&directory, "options.json", &[]);
+    // The default role blocks before it can advertise SessionConfigured. The
+    // named role deliberately has no block marker, proving that cancellation
+    // of one role does not serialize or tear down another role.
+    std::fs::write(directory.join("block-session-default"), b"1").unwrap();
+
+    let (mut client, server) = reviewer_socket(&fixture).await;
+    send_reviewer_request(
+        &mut client,
+        None,
+        ReviewerRequest::Start {
+            config: Box::new(config(0)),
+        },
+    )
+    .await;
+    wait_for_marker(&directory.join("session-blocked-default")).await;
+    let blocked_harness: i32 = std::fs::read_to_string(directory.join("harness-pid-default"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let other = fixture
+        .sidecar
+        .handle(
+            RelayRequestEnvelope {
+                request_id: "other-role".to_owned(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::Reviewer {
+                    role: Some("tests".to_owned()),
+                    request: ReviewerRequest::Start {
+                        config: Box::new(config(0)),
+                    },
+                },
+            },
+            Some("tests".to_owned()),
+            ReviewerRequest::Start {
+                config: Box::new(config(0)),
+            },
+        )
+        .await;
+    started_options(&other.body);
+    assert!(
+        process_alive(
+            std::fs::read_to_string(directory.join("harness-pid-tests"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        ),
+        "another role stays live while the default role is blocked"
+    );
+
+    drop(client);
+    let _ = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("disconnecting a blocked start must finish promptly");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while process_alive(blocked_harness) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("disconnecting a blocked start must reap the partial harness");
+
+    // The independent role is still reusable after the default role's socket
+    // disconnect caused its partial launch to be paused.
+    let other_again = fixture
+        .sidecar
+        .handle(
+            RelayRequestEnvelope {
+                request_id: "other-role-again".to_owned(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::Reviewer {
+                    role: Some("tests".to_owned()),
+                    request: ReviewerRequest::Start {
+                        config: Box::new(config(0)),
+                    },
+                },
+            },
+            Some("tests".to_owned()),
+            ReviewerRequest::Start {
+                config: Box::new(config(0)),
+            },
+        )
+        .await;
+    let (_, reused) = started_options(&other_again.body);
+    assert!(reused, "the unrelated role was not torn down");
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn disconnecting_during_analysis_kills_bifrost_before_pausing_the_reviewer() {
+    let mut fixture = Fixture::new(true);
+    let directory = fixture.script_directory();
+    write_options(&directory, "options.json", &[]);
+    fixture.start(config(0)).await;
+    let bifrost = blocking_bifrost_script(&directory);
+    let _bifrost_override =
+        EnvironmentGuard::set(hel::hel_review::bifrost::BIFROST_BIN_ENV, &bifrost);
+
+    let (mut client, server) = reviewer_socket(&fixture).await;
+    send_reviewer_request(
+        &mut client,
+        None,
+        ReviewerRequest::AnalyzeDelta {
+            repositories: vec![hel::hel_worker::AnalyzeDeltaRepository {
+                root: directory.clone(),
+                baseline_tree: Some("base".to_owned()),
+                current_tree: "target".to_owned(),
+            }],
+        },
+    )
+    .await;
+    wait_for_marker(&directory.join("bifrost-started")).await;
+    let bifrost_pid: i32 = std::fs::read_to_string(directory.join("bifrost-pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let harness_pid: i32 = std::fs::read_to_string(directory.join("harness-pid-default"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    drop(client);
+    let _ = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("disconnecting analysis must finish promptly");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while process_alive(bifrost_pid) || process_alive(harness_pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("disconnecting analysis must reap Bifrost and the reviewer promptly");
+    assert!(!process_alive(bifrost_pid));
 }
 
 #[tokio::test]
@@ -440,6 +756,7 @@ async fn a_new_generation_replaces_the_running_reviewer() {
     let replaced = fixture.harness_pid();
     assert!(process_alive(replaced));
 
+    fixture.stage_generation(1);
     let body = fixture.start(config(1)).await;
     let (_, reused) = started_options(&body);
     assert!(!reused, "a new generation is a new reviewer");
@@ -451,6 +768,70 @@ async fn a_new_generation_replaces_the_running_reviewer() {
         fixture.harness_pid(),
         replaced,
         "the replacement is a different process"
+    );
+
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn a_new_generation_starts_a_fresh_native_conversation() {
+    let mut fixture = Fixture::new(true);
+    fixture.start(config(0)).await;
+    fixture.sidecar.pause_all().await;
+
+    fixture.stage_generation(1);
+    fixture.start(config(1)).await;
+
+    let methods = std::fs::read_to_string(fixture.marker("session-method")).unwrap();
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec!["session/new", "session/new"]
+    );
+    assert!(
+        fixture
+            .worker_root
+            .join("reviewer")
+            .join("relay-archive")
+            .exists(),
+        "the previous relay is retained outside the live generation"
+    );
+
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn a_failed_model_start_can_retry_with_a_corrected_model() {
+    let mut fixture = Fixture::new(true);
+    let directory = fixture.script_directory();
+    write_options(
+        &directory,
+        "options.json",
+        &[select_option("model", "opus[1m]", &["opus[1m]"])],
+    );
+    std::fs::write(directory.join("reject-opus"), b"1").unwrap();
+
+    let mut rejected = config(0);
+    rejected.model = Some("opus".into());
+    let body = fixture.start(rejected).await;
+    assert!(
+        matches!(body, RelayResponseBody::Error { .. }),
+        "the unsupported first model must fail: {body:?}"
+    );
+    fixture.sidecar.pause_all().await;
+
+    std::fs::remove_file(directory.join("reject-opus")).unwrap();
+    fixture.stage_generation(1);
+    let mut corrected = config(1);
+    corrected.model = Some("opus[1m]".into());
+    let body = fixture.start(corrected).await;
+    assert!(
+        matches!(body, RelayResponseBody::Ok { .. }),
+        "a corrected model must start a new reviewer: {body:?}"
+    );
+    let methods = std::fs::read_to_string(fixture.marker("session-method")).unwrap();
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec!["session/new", "session/new"]
     );
 
     fixture.sidecar.pause_all().await;
@@ -609,6 +990,82 @@ async fn a_reviewer_form_is_answered_on_the_connection() {
         })
         .await;
 
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn pausing_an_active_reviewer_delivers_cancel_before_restart() {
+    let mut fixture = Fixture::new(true);
+    let directory = fixture.script_directory();
+    write_options(&directory, "options.json", &[]);
+    // Keep the prompt active until the harness receives Hel's cancel
+    // notification. This makes the pause path's wait observable.
+    std::fs::write(directory.join("ask-form"), b"1").unwrap();
+
+    fixture.start(config(0)).await;
+    fixture
+        .request(ReviewerRequest::Submit {
+            command_id: "review-active".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
+                    agent_client_protocol::schema::v1::TextContent::new("hold this turn"),
+                )],
+            },
+        })
+        .await;
+    fixture
+        .await_events(Duration::from_secs(30), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    &event.observation,
+                    RelayObservation::ElicitationRequested { .. }
+                )
+            })
+        })
+        .await;
+
+    let body = fixture.request(ReviewerRequest::Pause).await;
+    assert!(
+        matches!(
+            body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ReviewerPaused
+            }
+        ),
+        "unexpected pause response: {body:?}"
+    );
+    let cancel_marker = directory.join("cancel-observed");
+    assert_eq!(
+        std::fs::read_to_string(&cancel_marker)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        1,
+        "an active pause must reach the harness exactly once"
+    );
+    let events = fixture.reviewer_events().await;
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.observation,
+                RelayObservation::CommandCompleted { command_id, .. }
+                    if command_id == "reviewer-cancel-1"
+            )
+        }),
+        "the durable cancel must complete before the reviewer is torn down"
+    );
+
+    // A compatible restart must not replay a cancel that was already settled.
+    let body = fixture.start(config(0)).await;
+    started_options(&body);
+    assert_eq!(
+        std::fs::read_to_string(cancel_marker)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        1,
+        "a settled cancel must not remain pending across restart"
+    );
     fixture.sidecar.pause_all().await;
 }
 
@@ -812,6 +1269,15 @@ async fn two_review_roles_run_side_by_side_with_their_own_homes_and_journals() {
     let body = fixture.start(config(0)).await;
     let (_, reused) = started_options(&body);
     assert!(!reused, "the default role starts its own harness");
+    assert!(
+        fixture
+            .worker_root
+            .join("reviewer")
+            .join("runtime-profile")
+            .join("credentials")
+            .exists(),
+        "the default role runs from a private copy of the staged profile"
+    );
 
     let body = fixture
         .request_as(

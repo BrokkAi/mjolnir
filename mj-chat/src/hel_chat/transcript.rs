@@ -1822,8 +1822,22 @@ pub(super) fn render_transcript(
 }
 
 fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> String {
+    let review_activity = chat
+        .turn_review()
+        .and_then(|review| review.view.activity_label());
     let summary = if chat.header_target.is_empty() || chat.header_profile.is_empty() {
-        "Conversation".to_owned()
+        review_activity.map_or_else(
+            || "Conversation".to_owned(),
+            |activity| format!("Conversation · {activity}"),
+        )
+    } else if let Some(activity) = review_activity {
+        let mut columns = vec![chat.header_target.clone()];
+        if !chat.queued_prompts.is_empty() {
+            columns.push(format!("[Q {}]", chat.queued_prompts.len()));
+        }
+        columns.push(format!("[{activity}]"));
+        columns.push(chat.header_profile.clone());
+        columns.join("  ")
     } else {
         crate::usage_format::format_session_summary(
             &chat.header_target,

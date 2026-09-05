@@ -11,6 +11,7 @@ use hel::hel_targets::CancellableProcessExecutor;
 use hel_tui::WebViewerAccess;
 use hel_tui::{DashboardAction, SessionOperationKind};
 use mj_controller::hel_controller::{Controller, ResumeRepositorySourceReceipt};
+use mj_controller::hel_review_settings::ReviewProbeRequest;
 use mj_controller::hel_setup::SetupOutcome;
 
 use crate::daemon;
@@ -20,7 +21,7 @@ use crate::dashboard::io::{
     spawn_archive_write, spawn_cancellable_io, spawn_cancellable_io_with_token,
     spawn_clipboard_read, spawn_config_rename, spawn_create_bundle,
     spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_io, spawn_lifecycle_operation,
+    spawn_io, spawn_lifecycle_operation, spawn_review_settings_probe, spawn_review_settings_save,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -62,6 +63,43 @@ pub(crate) async fn apply_dashboard_action(
             }
             SetupOutcome::Cancelled => context.dashboard.set_notice("Setup cancelled."),
         },
+        DashboardAction::ProbeReviewSettings {
+            generation,
+            profile_id,
+            model,
+            effort,
+        } => {
+            if let Some(cancelled) = context.review_probe_cancel.take() {
+                cancelled.store(true, Ordering::Release);
+            }
+            let request = ReviewProbeRequest {
+                profile: profile_id.clone(),
+                model: model.clone(),
+                effort: effort.clone(),
+            };
+            context.review_probe_cancel = Some(spawn_review_settings_probe(
+                context.worker_commands_tx.clone(),
+                request,
+                generation,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            ));
+        }
+        DashboardAction::CancelReviewSettingsProbe => {
+            if let Some(cancelled) = context.review_probe_cancel.take() {
+                cancelled.store(true, Ordering::Release);
+            }
+        }
+        DashboardAction::SaveReviewSettings { review } => {
+            if let Some(cancelled) = context.review_probe_cancel.take() {
+                cancelled.store(true, Ordering::Release);
+            }
+            spawn_review_settings_save(
+                review,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.
         DashboardAction::RefreshAll => {

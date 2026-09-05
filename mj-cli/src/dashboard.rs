@@ -400,6 +400,9 @@ pub(crate) struct DashboardContext {
     quota: Feed<Receiver<QuotaUpdate>>,
     pub(crate) manual_quota_refresh_generation: Option<u64>,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
+    /// The one active global review capability probe. New profile/model
+    /// selections cancel the old request before starting another one.
+    pub(crate) review_probe_cancel: Option<Arc<AtomicBool>>,
 
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
@@ -945,12 +948,16 @@ impl DashboardContext {
         let worker_shutdown = remote_worker.shutdown;
         let runtime_lifecycles_rx = remote_worker.lifecycles;
         let runtime_reviews_rx = remote_worker.reviews;
-        let runtime_review_views = runtime_reviews_rx
+        let runtime_review_views: BTreeMap<
+            String,
+            mj_controller::hel_review_host::RuntimeReviewView,
+        > = runtime_reviews_rx
             .borrow()
             .iter()
             .cloned()
             .map(|review| (review.session_id.clone(), review))
             .collect();
+        dashboard.set_session_reviews(runtime_review_views.values().cloned());
         let runtime_notices_rx = remote_worker.notices;
         // Notices already queued when this surface attaches belong to whatever
         // was on screen before it, so start after them rather than replaying
@@ -1017,6 +1024,7 @@ impl DashboardContext {
             quota: Feed::new(quota_updates_rx),
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
+            review_probe_cancel: None,
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_lifecycles: Feed::new(runtime_lifecycles_rx),
@@ -1798,6 +1806,9 @@ impl DashboardContext {
     /// cooperative, so this only requests it.
     fn cancel_background_work(&self) {
         self.critical_operations.cancel_all();
+        if let Some(cancelled) = &self.review_probe_cancel {
+            cancelled.store(true, Ordering::Release);
+        }
         for operation in self.lifecycle_operations.values() {
             operation.cancelled.store(true, Ordering::Release);
         }
@@ -1832,12 +1843,7 @@ impl DashboardContext {
         self.refresh_open_review();
     }
 
-    /// Keeps the stop confirmation's warning current.
-    ///
-    /// A review can only be started from inside a chat, so the open chat is
-    /// the authority while there is one. This is an in-memory read: the loop
-    /// never touches the database for it.
-    /// Hands the open chat whatever review the daemon is running for it.
+    /// Hands the open chat whatever turn review the daemon is running for it.
     ///
     /// The chat draws the pane and sends the resolutions; it hosts nothing.
     /// A session with no review gets `None`, which closes the pane.
@@ -1853,6 +1859,8 @@ impl DashboardContext {
             .into_iter()
             .map(|review| (review.session_id.clone(), review))
             .collect();
+        self.dashboard
+            .set_session_reviews(self.runtime_review_views.values().cloned());
         self.apply_runtime_review_to_active_chat();
     }
 
@@ -1888,13 +1896,16 @@ impl DashboardContext {
         chat.apply_review_view(review);
     }
 
+    /// Keeps the stop confirmation aware of the attached chat's plan-review
+    /// second opinion. Turn reviews come from `runtime_review_views` and are
+    /// projected independently, including for sessions without an open chat.
     fn refresh_open_review(&mut self) {
         let Some(chat) = self.active_chat.as_ref() else {
             return;
         };
         let session_id = chat.session_id().to_owned();
-        let open = chat.has_open_review();
-        self.dashboard.set_session_review_open(&session_id, open);
+        self.dashboard
+            .set_session_review_open(&session_id, chat.has_open_review());
     }
 
     fn drain_quota_updates(&mut self) {

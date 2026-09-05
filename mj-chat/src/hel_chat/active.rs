@@ -2047,6 +2047,16 @@ impl ActiveChat {
             self.reviewed_roles.remove(&role);
             return;
         }
+        if !self
+            .state
+            .turn_review()
+            .is_some_and(|review| review.role_is_active(&role))
+        {
+            // A verdict retains role rows for navigation, but their harnesses
+            // have already been paused and need no further journal attaches.
+            self.reviewed_roles.remove(&role);
+            return;
+        }
         self.poll_turn_review_role_after(
             &role,
             if idle {
@@ -2311,22 +2321,11 @@ pub(super) fn render_in(
     chat.reviewer_area = None;
     if let Some(area) = reviewer_area {
         if chat.turn_review_split() {
-            let status = chat
-                .turn_review()
-                .map(super::turn_review::TurnReview::status)
-                .unwrap_or_default();
-            let strip = chat.turn_review().and_then(super::turn_review::role_strip);
-            let title = super::turn_review::verdict_title(chat.turn_review()).to_owned();
             if let Some(review) = chat.turn_review_mut() {
-                let (inner, top, total) = super::second_opinion::render_reviewer_titled(
-                    frame,
-                    area,
-                    review.selected_pane(),
-                    &status,
-                    &title,
-                    strip,
-                );
-                chat.reviewer_area = Some(inner);
+                let (inner, top, total) =
+                    super::turn_review::render_turn_review_pane(frame, area, review);
+                // Route the wheel to whichever review tab is selected.
+                chat.reviewer_area = Some(area);
                 chat.frame_surfaces.push(SurfaceFrame::scrollable(
                     SurfaceId::ReviewerTranscript,
                     inner,

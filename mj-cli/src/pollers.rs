@@ -1660,8 +1660,15 @@ async fn forward_remote_session_request(request: RemoteSessionRequest) {
             session_id,
             command_id,
             command,
+            admission,
             reply,
         } => {
+            if admission.is_some() {
+                let _ = reply.send(Err(
+                    "review delivery admissions cannot cross the daemon request bridge".into(),
+                ));
+                return;
+            }
             let result = async {
                 daemon::connect_or_start()
                     .await?
@@ -1703,15 +1710,17 @@ async fn forward_remote_session_request(request: RemoteSessionRequest) {
             session_id,
             role,
             action,
-            reply,
+            mut reply,
         } => {
-            let result = async {
-                daemon::connect_or_start()
-                    .await?
-                    .reviewer_action(session_id, role, action)
-                    .await
+            let result = tokio::select! {
+                _ = reply.closed() => return,
+                result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .reviewer_action(session_id, role, action)
+                        .await
+                } => result,
             }
-            .await
             .map_err(|error| format!("{error:#}"));
             let _ = reply.send(result);
         }

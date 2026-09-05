@@ -1037,6 +1037,22 @@ impl HelConfig {
         self.save_to(&config_path())
     }
 
+    /// Loads the current file, replaces only its global review section, and
+    /// writes it atomically. Callers use this for the dashboard editor so a
+    /// stale dashboard snapshot cannot overwrite profiles, bundles, targets,
+    /// or phone settings changed concurrently by another client.
+    pub fn save_review(review: ReviewConfig) -> Result<Self> {
+        Self::save_review_to(&config_path(), review)
+    }
+
+    /// As [`Self::save_review`], using an explicit path for tests and tools.
+    pub fn save_review_to(path: &Path, review: ReviewConfig) -> Result<Self> {
+        let mut config = Self::load_from(path)?;
+        config.review = review;
+        config.save_to(path)?;
+        Ok(config)
+    }
+
     /// Refuses when the file belongs to a newer Mjolnir -- judged by the marker
     /// this config loaded with *and* a fresh look at the file, since a newer
     /// build may have written it since. Overwriting would silently drop
@@ -1745,6 +1761,42 @@ mod tests {
                         .ends_with(".tmp")
                 })
         );
+    }
+
+    #[test]
+    fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let initial = sample_config();
+        initial.save_to(&path).unwrap();
+
+        // Simulate a concurrent dashboard changing an unrelated section after
+        // the editor opened. The review save must start from this newer file.
+        let mut latest = HelConfig::load_from(&path).unwrap();
+        latest.phone.enabled = false;
+        latest
+            .profiles
+            .get_mut("codex-1")
+            .unwrap()
+            .environment
+            .insert("LATEST_SETTING".into(), "kept".into());
+        latest.save_to(&path).unwrap();
+
+        let review = ReviewConfig {
+            enabled: true,
+            tier: crate::hel_review::lanes::ReviewTier::Extended,
+            profile: Some("codex-1".into()),
+            model: Some("review-model".into()),
+            effort: Some("high".into()),
+        };
+        let saved = HelConfig::save_review_to(&path, review.clone()).unwrap();
+        assert_eq!(saved.review, review);
+        assert!(!saved.phone.enabled);
+        assert_eq!(
+            saved.profiles["codex-1"].environment.get("LATEST_SETTING"),
+            Some(&"kept".to_owned())
+        );
+        assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
     }
 
     #[test]

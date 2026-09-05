@@ -442,6 +442,7 @@ pub enum RemoteSessionRequest {
         session_id: String,
         command_id: String,
         command: RelayCommand,
+        admission: Option<ReviewDeliveryAdmission>,
         reply: oneshot::Sender<std::result::Result<u64, String>>,
     },
     Sync {
@@ -487,7 +488,13 @@ impl RemoteSessionRequest {
 /// waits on its own session's previous request and nothing else.
 #[derive(Default)]
 pub struct SessionRequestOrder {
-    latest: std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
+    latest: std::collections::HashMap<SessionRequestStream, tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum SessionRequestStream {
+    Primary(String),
+    Reviewer(String, Option<String>),
 }
 
 impl SessionRequestOrder {
@@ -497,7 +504,8 @@ impl SessionRequestOrder {
     }
 
     /// Runs `forward` for `request` after everything already queued for the
-    /// same session has finished.
+    /// same primary or reviewer role has finished. Independent reviewers
+    /// must not delay primary controls or one another.
     pub fn dispatch<F, Fut>(&mut self, request: RemoteSessionRequest, forward: F)
     where
         F: FnOnce(RemoteSessionRequest) -> Fut + Send + 'static,
@@ -507,18 +515,25 @@ impl SessionRequestOrder {
         // them here so the map tracks live work rather than every session the
         // bridge has ever served.
         self.latest.retain(|_, handle| !handle.is_finished());
-        let session_id = request.session_id().to_owned();
-        let previous = self.latest.remove(&session_id);
+        let stream = match &request {
+            RemoteSessionRequest::Reviewer {
+                session_id, role, ..
+            } => SessionRequestStream::Reviewer(session_id.clone(), role.clone()),
+            _ => SessionRequestStream::Primary(request.session_id().to_owned()),
+        };
+        let previous = self.latest.remove(&stream);
         let handle = tokio::spawn(async move {
             if let Some(previous) = previous {
                 // A panicked predecessor still releases its successor: the
                 // request behind it is the user's, and dropping it silently
                 // would be worse than running it late.
-                let _ = previous.await;
+                if let Err(error) = previous.await {
+                    tracing::error!(%error, "previous session request task failed");
+                }
             }
             forward(request).await;
         });
-        self.latest.insert(session_id, handle);
+        self.latest.insert(stream, handle);
     }
 }
 
@@ -638,6 +653,38 @@ pub struct ManagedSessionHandle {
     view: watch::Receiver<ManagedSessionView>,
 }
 
+/// A one-command capability issued by the review host while its prompt hold
+/// is open. It is intentionally opaque to callers: the session actor checks
+/// it against the host's live hold registry before bypassing prompt refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewDeliveryAdmission {
+    session_id: String,
+    epoch: u64,
+    command_id: String,
+}
+
+impl ReviewDeliveryAdmission {
+    pub(crate) fn new(session_id: String, epoch: u64, command_id: String) -> Self {
+        Self {
+            session_id,
+            epoch,
+            command_id,
+        }
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub(crate) fn command_id(&self) -> &str {
+        &self.command_id
+    }
+}
+
 /// Exclusive ownership of a session actor's existing relay connection.
 ///
 /// Lifecycle operations use this instead of opening a competing projection
@@ -742,16 +789,42 @@ impl ManagedSessionHandle {
         self.enqueue_submit(command_id, command).await?.wait().await
     }
 
+    /// Submit the review's corrective prompt through the one admission that
+    /// corresponds to its live prompt hold. Generic submissions continue to
+    /// use [`Self::submit`] and remain subject to review refusal.
+    pub(crate) async fn submit_review_delivery(
+        &self,
+        admission: ReviewDeliveryAdmission,
+        command: RelayCommand,
+    ) -> Result<u64> {
+        let command_id = admission.command_id.clone();
+        self.enqueue_submit_with_admission(command_id, command, Some(admission))
+            .await?
+            .wait()
+            .await
+    }
+
     pub async fn enqueue_submit(
         &self,
         command_id: String,
         command: RelayCommand,
+    ) -> Result<PendingRelaySubmit> {
+        self.enqueue_submit_with_admission(command_id, command, None)
+            .await
+    }
+
+    async fn enqueue_submit_with_admission(
+        &self,
+        command_id: String,
+        command: RelayCommand,
+        admission: Option<ReviewDeliveryAdmission>,
     ) -> Result<PendingRelaySubmit> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(ActorCommand::Submit {
                 command_id,
                 command,
+                admission,
                 reply,
             })
             .await
@@ -913,6 +986,7 @@ enum ActorCommand {
     Submit {
         command_id: String,
         command: RelayCommand,
+        admission: Option<ReviewDeliveryAdmission>,
         reply: oneshot::Sender<std::result::Result<u64, String>>,
     },
     Sync {
@@ -1011,6 +1085,7 @@ struct ReturnedConnection {
 struct DeferredSubmit {
     command_id: String,
     command: RelayCommand,
+    admission: Option<ReviewDeliveryAdmission>,
     reply: oneshot::Sender<std::result::Result<u64, String>>,
 }
 
@@ -1194,11 +1269,13 @@ async fn run_remote_session_actor(
             ActorCommand::Submit {
                 command_id,
                 command,
+                admission,
                 reply,
             } => RemoteSessionRequest::Submit {
                 session_id: session_id.clone(),
                 command_id,
                 command,
+                admission,
                 reply,
             },
             ActorCommand::Sync { reply } => RemoteSessionRequest::Sync {
@@ -1550,6 +1627,10 @@ async fn run_session_actor(
     let mut lifecycle = ActorLifecycle::default();
     let mut deferred_submits: VecDeque<DeferredSubmit> = VecDeque::new();
     let mut next_lease_id = 1_u64;
+    let mut reviewer_tasks = tokio::task::JoinSet::new();
+    let mut reviewer_connections = BTreeMap::new();
+    let mut reviewer_tails = BTreeMap::new();
+    let mut reviewer_cancellation = tokio_util::sync::CancellationToken::new();
     let mut interval = tokio::time::interval(SESSION_SYNC_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1558,6 +1639,11 @@ async fn run_session_actor(
             break;
         }
         tokio::select! {
+            completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    tracing::error!(session_id = %target.session_id, %error, "reviewer operation task failed");
+                }
+            }
             _ = interval.tick() => {
                 lifecycle.set_retirement_requested(*retirement.borrow());
                 if lifecycle.should_stop() {
@@ -1738,14 +1824,33 @@ async fn run_session_actor(
                     continue;
                 }
                 match command {
-                    ActorCommand::Submit { command_id, command, reply } => {
-                        // A turn under review holds its session's prompts, and
-                        // this is where that is enforced: the process that owns
-                        // the review owns the refusal, so no surface can bypass
-                        // it and no stale record can outlive it. The review's
-                        // own corrective prompt is submitted after the review
-                        // resolves, so it is never the one refused.
-                        if matches!(command, RelayCommand::Prompt { .. })
+                    ActorCommand::Submit {
+                        command_id,
+                        command,
+                        admission,
+                        reply,
+                    } => {
+                        // A turn under review holds its session's prompts. The
+                        // sole exception is a capability issued by the review
+                        // host for this exact corrective command; ordinary
+                        // prompts and controller-authored notices still take
+                        // the refusal path below.
+                        let admitted = admission.as_ref().is_some_and(|admission| {
+                            matches!(&command, RelayCommand::Prompt { .. })
+                                && admission.command_id() == command_id
+                                && crate::hel_review_host::review_delivery_admitted(
+                                    &target.session_id,
+                                    admission,
+                                )
+                        });
+                        if admission.is_some() && !admitted {
+                            let _ = reply.send(Err(
+                                "review delivery admission is no longer valid".to_owned(),
+                            ));
+                            continue;
+                        }
+                        if matches!(&command, RelayCommand::Prompt { .. })
+                            && !admitted
                             && let Some(refusal) =
                                 crate::hel_review_host::prompt_refusal(&target.session_id)
                         {
@@ -1764,6 +1869,7 @@ async fn run_session_actor(
                             deferred_submits.push_back(DeferredSubmit {
                                 command_id,
                                 command,
+                                admission,
                                 reply,
                             });
                             continue;
@@ -1771,9 +1877,7 @@ async fn run_session_actor(
                         deliver_submit(
                             &target,
                             &mut connection,
-                            command_id,
-                            command,
-                            reply,
+                            DeferredSubmit { command_id, command, admission, reply },
                             &view_tx,
                             &updates,
                         )
@@ -1855,37 +1959,24 @@ async fn run_session_actor(
                             }
                             continue;
                         }
-                        let operation = action.operation_name();
-                        let result = async {
-                            sync_actor_connection(&target, &mut connection).await?;
-                            let connection =
-                                connection.as_mut().context("relay is disconnected")?;
-                            drive_reviewer(connection, role, action).await
-                        }
-                        .await;
-                        match &result {
-                            Ok(_) => {}
-                            Err(error) if !is_final_rejection(error) => connection = None,
-                            Err(_) => {}
-                        }
-                        if let Err(error) = &result {
-                            tracing::warn!(
-                                session_id = %target.session_id,
-                                %operation,
-                                error = %error,
-                                "reviewer action failed"
-                            );
-                        }
-                        if reply
-                            .send(result.map_err(|error| format!("{error:#}")))
-                            .is_err()
-                        {
-                            tracing::debug!(
-                                session_id = %target.session_id,
-                                %operation,
-                                "reviewer result receiver was already closed"
-                            );
-                        }
+                        // A slow harness startup or analysis must not occupy
+                        // the primary's relay or serialize independent roles.
+                        // Cache each role's connection so transcript polling
+                        // does not launch a new SSH/Podman proxy every time.
+                        let cached = reviewer_connections.entry(role.clone())
+                            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+                            .clone();
+                        let (finished, tail) = oneshot::channel::<()>();
+                        let previous = reviewer_tails.insert(role.clone(), tail);
+                        let target = target.clone();
+                        let cancelled = reviewer_cancellation.clone();
+                        reviewer_tasks.spawn(async move {
+                            if let Some(previous) = previous {
+                                let _ = previous.await;
+                            }
+                            run_reviewer_operation(target, role, action, reply, cached, cancelled).await;
+                            drop(finished);
+                        });
                     }
                     ActorCommand::RespondElicitation {
                         elicitation_id,
@@ -1976,6 +2067,10 @@ async fn run_session_actor(
                             continue;
                         }
                         let lease_id = next_lease_id;
+                        reviewer_cancellation.cancel();
+                        reviewer_cancellation = tokio_util::sync::CancellationToken::new();
+                        reviewer_connections.clear();
+                        reviewer_tails.clear();
                         let result = sync_actor_connection(
                             &target,
                             &mut connection,
@@ -2049,9 +2144,7 @@ async fn run_session_actor(
                         deliver_submit(
                             &target,
                             &mut connection,
-                            deferred.command_id,
-                            deferred.command,
-                            deferred.reply,
+                            deferred,
                             &view_tx,
                             &updates,
                         )
@@ -2064,6 +2157,14 @@ async fn run_session_actor(
                     break;
                 }
             }
+        }
+    }
+    reviewer_cancellation.cancel();
+    reviewer_connections.clear();
+    reviewer_tails.clear();
+    while let Some(completed) = reviewer_tasks.join_next().await {
+        if let Err(error) = completed {
+            tracing::error!(session_id = %target.session_id, %error, "reviewer operation task failed during shutdown");
         }
     }
     if let Some(connection) = connection.take()
@@ -2096,12 +2197,26 @@ async fn run_session_actor(
 async fn deliver_submit(
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
-    command_id: String,
-    command: RelayCommand,
-    reply: oneshot::Sender<std::result::Result<u64, String>>,
+    submission: DeferredSubmit,
     view_tx: &watch::Sender<ManagedSessionView>,
     updates: &CoalescedUpdateSender,
 ) {
+    let DeferredSubmit {
+        command_id,
+        command,
+        admission,
+        reply,
+    } = submission;
+    if let Some(admission) = admission.as_ref()
+        && (!matches!(&command, RelayCommand::Prompt { .. })
+            || admission.command_id() != command_id
+            || !crate::hel_review_host::review_delivery_admitted(&target.session_id, admission))
+    {
+        let _ = reply.send(Err(
+            "review delivery admission is no longer valid".to_owned()
+        ));
+        return;
+    }
     let result = submit_actor_command(target, connection, &command_id, &command).await;
     if let Err(error) = result.as_ref() {
         tracing::warn!(
@@ -2228,12 +2343,52 @@ async fn submit_actor_command(
 ///
 /// The reviewer's own relay answers most of these, so the outcomes mirror the
 /// primary's: an attach page, an acknowledgement cursor, an accepted command.
+async fn run_reviewer_operation(
+    target: RelaySessionTarget,
+    role: Option<String>,
+    action: ReviewerAction,
+    mut reply: oneshot::Sender<std::result::Result<ReviewerOutcome, String>>,
+    cached: Arc<tokio::sync::Mutex<Option<RelayClient>>>,
+    cancelled: tokio_util::sync::CancellationToken,
+) {
+    let operation = action.operation_name();
+    let keep_connection = !matches!(&action, ReviewerAction::Pause);
+    let result = tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => Err(anyhow::anyhow!("reviewer operation cancelled for session lifecycle change")),
+        _ = reply.closed() => return,
+        result = async {
+            let mut cache = cached.lock().await;
+            // Take ownership while a request is in flight: dropping this
+            // future closes its connection instead of leaving a late reply
+            // available for the next request to misinterpret.
+            let mut client = match cache.take() {
+                Some(client) => client,
+                None => RelayClient::connect(&target.spec, &target.session_id).await?,
+            };
+            let result = drive_reviewer(&mut client, role, action).await;
+            if keep_connection && (result.is_ok() || result.as_ref().is_err_and(is_final_rejection)) {
+                *cache = Some(client);
+            }
+            result
+        } => result,
+    };
+    if let Err(error) = &result {
+        tracing::warn!(session_id = %target.session_id, %operation, error = %error, "reviewer action failed");
+    }
+    if reply
+        .send(result.map_err(|error| format!("{error:#}")))
+        .is_err()
+    {
+        tracing::debug!(session_id = %target.session_id, %operation, "reviewer result receiver was already closed");
+    }
+}
+
 async fn drive_reviewer(
-    connection: &mut StandaloneSession,
+    client: &mut RelayClient,
     role: Option<String>,
     action: ReviewerAction,
 ) -> Result<ReviewerOutcome> {
-    let client = &mut connection.client;
     let role = role.as_deref();
     Ok(match action {
         ReviewerAction::Start { config } => {
@@ -2944,6 +3099,7 @@ mod tests {
                 key: "effort".into(),
                 value: "high".into(),
             },
+            admission: None,
             reply,
         }
     }
@@ -3035,6 +3191,44 @@ mod tests {
         })
         .await
         .expect("the held request ran once released");
+    }
+
+    #[tokio::test]
+    async fn slow_reviewer_does_not_delay_primary_or_another_role_at_the_bridge() {
+        let mut order = SessionRequestOrder::new();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (done, mut received) = mpsc::unbounded_channel();
+        let reviewer = |role: &str| RemoteSessionRequest::Reviewer {
+            session_id: "one-session".to_owned(),
+            role: Some(role.to_owned()),
+            action: ReviewerAction::Pause,
+            reply: oneshot::channel().0,
+        };
+        let held = release.clone();
+        order.dispatch(
+            reviewer("slow"),
+            move |_| async move { held.notified().await },
+        );
+        let done_role = done.clone();
+        order.dispatch(reviewer("other"), move |_| async move {
+            done_role.send("other").unwrap();
+        });
+        order.dispatch(
+            ordering_request("one-session", "prompt"),
+            move |_| async move {
+                done.send("primary").unwrap();
+            },
+        );
+        let first = tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first, second);
+        release.notify_one();
     }
 
     /// A session that has gone quiet must not leave a handle behind for ever:
@@ -4005,6 +4199,33 @@ mod tests {
             "1.0.0",
         )
         .expect("open the test relay journal");
+        if let Some(marker) = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER") {
+            let mut input = std::io::stdin().lock();
+            let mut output = std::io::stdout().lock();
+            while let Some(request) = hel::hel_worker::read_relay_frame(&mut input).unwrap() {
+                let response = if let hel::hel_worker::RelayRequest::Reviewer { role, .. } =
+                    &request.request
+                {
+                    if role.as_deref() == Some("slow") {
+                        std::fs::write(&marker, b"started").unwrap();
+                        std::io::copy(&mut input, &mut std::io::sink()).unwrap();
+                        std::fs::write(&marker, b"disconnected").unwrap();
+                        return;
+                    }
+                    hel::hel_worker::RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: hel::hel_worker::RelayResponseBody::Ok {
+                            payload: hel::hel_worker::RelayResponsePayload::ReviewerPaused,
+                        },
+                    }
+                } else {
+                    relay.handle(request)
+                };
+                hel::hel_worker::write_relay_frame(&mut output, &response).unwrap();
+            }
+            return;
+        }
         hel::hel_worker::serve_relay_json_lines(
             &mut std::io::stdin().lock(),
             &mut std::io::stdout().lock(),
@@ -4077,6 +4298,72 @@ mod tests {
             .await
             .expect("manager shutdown stayed within its deadline")
             .expect("manager shutdown task completed cleanly");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_blocked_reviewer_keeps_primary_responsive_and_disconnects_on_cancellation() {
+        const CHILD: &str = "MJ_TEST_REVIEWER_CANCELLATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_in_isolated_child(
+                CHILD,
+                "a_blocked_reviewer_keeps_primary_responsive_and_disconnects_on_cancellation",
+            );
+            return;
+        }
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        register_leased_relay_session();
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("reviewer-status");
+        let mut target = leased_relay_target(directory.path());
+        target.spec.env.insert(
+            "MJ_TEST_BLOCKED_REVIEWER".into(),
+            marker.to_string_lossy().into_owned(),
+        );
+        let manager = spawn_session_manager().unwrap();
+        manager.targets.send_replace(vec![target]);
+        let session = manager
+            .control
+            .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(5))
+            .await
+            .unwrap();
+        session.sync_now().await.unwrap();
+        let slow = session.clone();
+        let blocked = tokio::spawn(async move {
+            slow.reviewer_as(Some("slow".into()), ReviewerAction::Pause)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("slow reviewer started");
+        tokio::time::timeout(Duration::from_secs(2), session.sync_now())
+            .await
+            .expect("primary sync must not wait for reviewer")
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            session.reviewer_as(Some("other".into()), ReviewerAction::Pause),
+        )
+        .await
+        .expect("another role must remain responsive")
+        .unwrap();
+        blocked.abort();
+        assert!(blocked.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::fs::read(&marker).unwrap() != b"disconnected" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelling the caller must disconnect its in-flight reviewer proxy");
+        tokio::time::timeout(Duration::from_secs(2), manager.shutdown.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -4395,6 +4682,7 @@ mod tests {
                 command: RelayCommand::Prompt {
                     prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
                 },
+                admission: None,
                 reply,
             })
             .await
@@ -4617,6 +4905,7 @@ mod tests {
                 session_id,
                 command_id,
                 command: RelayCommand::Cancel,
+                admission: None,
                 reply,
             } => {
                 assert_eq!(session_id, "session-1");

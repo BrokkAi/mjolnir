@@ -593,6 +593,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 23 {
+        let add_pending_forward =
+            if table_has_column(connection, "turn_review_state", "pending_forward")? {
+                ""
+            } else {
+                "ALTER TABLE turn_review_state ADD COLUMN pending_forward TEXT;"
+            };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_pending_forward}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (23, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 23;
+             COMMIT;"
+        ))?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

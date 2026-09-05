@@ -342,6 +342,41 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
 }
 
 #[test]
+fn conversation_title_shows_review_activity_then_restores_primary_activity() {
+    use hel::hel_review::driver::{RoleState, RoleStatus, TurnReviewPhase, VALIDATOR_ROLE};
+    use mj_controller::hel_review_host::RuntimeReviewView;
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_header_summary("podman", "codex3");
+    let idle = transcript_title(&chat, 20_000);
+    assert!(idle.contains("[idle]"));
+    let mut view = RuntimeReviewView {
+        session_id: "session".to_owned(),
+        tier: hel::hel_review::lanes::ReviewTier::Quick,
+        phase: TurnReviewPhase::LaunchingReviewer,
+        roles: Vec::new(),
+        status: "starting the reviewer".to_owned(),
+        verdict: None,
+    };
+    chat.set_turn_review(Some(view.clone()));
+    assert_eq!(
+        transcript_title(&chat, 20_000),
+        " podman  [Reviewing]  codex3 "
+    );
+    view.phase = TurnReviewPhase::Running {
+        roles: vec![RoleStatus {
+            role: VALIDATOR_ROLE.to_owned(),
+            label: "Validator".to_owned(),
+            state: RoleState::Running,
+        }],
+    };
+    chat.set_turn_review(Some(view));
+    assert!(transcript_title(&chat, 20_000).contains("[Validating]"));
+    chat.set_turn_review(None);
+    assert_eq!(transcript_title(&chat, 20_000), idle);
+}
+
+#[test]
 fn live_unclaimed_terminal_renders_a_quiet_running_card() {
     let started_at_ms = hel::clock::epoch_millis();
     let terminal = hel::hel_worker::ActiveAgentTerminal {

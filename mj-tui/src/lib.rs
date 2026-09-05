@@ -25,6 +25,7 @@ use hel::hel_targets::AdditionalMount;
 use mj_chat::hel_chat::Notices;
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_controller::hel_quota::ProfileQuota;
+use mj_controller::hel_review_host::RuntimeReviewView;
 
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
@@ -35,6 +36,7 @@ use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
+use crate::review_settings::ReviewSettingsDialog;
 use crate::wizards::{MountFocus, NewWizard, ResumeWizard, WizardStep};
 
 mod actions;
@@ -45,6 +47,7 @@ mod ingest;
 mod palette;
 mod render;
 mod resume;
+mod review_settings;
 mod widgets;
 mod wizards;
 
@@ -61,6 +64,7 @@ pub use crate::ingest::{
     PreparedMaterializedSessionSummary,
 };
 pub use crate::resume::resume_profile_placeholders;
+pub use crate::review_settings::{ReviewSettingsProbeResult, ReviewTargetReadiness};
 
 /// One drawn row of the Sessions pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +210,20 @@ pub enum DashboardAction {
         include_untracked: bool,
     },
     OpenConfig,
+    /// Probe the selected reviewer profile against actual targets. The
+    /// generation ties the response to the current dialog draft.
+    ProbeReviewSettings {
+        generation: u64,
+        profile_id: String,
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    /// Cancel a reviewer capability probe that is no longer visible.
+    CancelReviewSettingsProbe,
+    /// Persist only the global `[review]` section.
+    SaveReviewSettings {
+        review: hel::hel_config::ReviewConfig,
+    },
     /// Per-session container provisioning inputs, taking effect the next time
     /// the container is created.
     SaveContainerSettings {
@@ -382,6 +400,8 @@ pub(crate) enum Mode {
     Help(HelpOverlay),
     /// The `F2` command palette: every command that applies right now.
     Palette(CommandPalette),
+    /// The global `[review]` configuration editor, opened from the F2 palette.
+    ReviewSettings(ReviewSettingsDialog),
 }
 
 /// What a key press means for a focusable button row.
@@ -439,9 +459,15 @@ pub struct DashboardState {
     /// Sessions whose relay worker the controller currently cannot reach. Their
     /// summary band renders red so an unreachable target is obvious at a glance.
     pub(crate) unreachable_sessions: BTreeSet<String>,
-    /// Sessions with a second opinion in progress. Stopping one destroys its
-    /// target, and the reviewer's conversation goes with it, so the stop
-    /// confirmation says so first.
+    /// The controller's complete review projection, keyed by session. Review
+    /// state is an overlay on the primary session lifecycle and is replaced
+    /// as a whole whenever a runtime snapshot arrives, so removals clear
+    /// stale row badges as well as closing the review pane.
+    pub(crate) session_reviews: BTreeMap<String, RuntimeReviewView>,
+    /// Sessions with an attached plan-review second opinion. This is kept
+    /// separately from the controller's turn-review projection because the
+    /// chat owns this older reviewer workflow and its stop warning still
+    /// needs to follow the live chat state.
     pub(crate) sessions_with_review: BTreeSet<String>,
     pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
@@ -509,6 +535,10 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
+    /// Monotonic identity for global review settings probes. Keeping it on
+    /// the dashboard prevents a late result from an older dialog instance
+    /// matching a newly opened dialog with the same values.
+    pub(crate) review_settings_generation: u64,
     pub(crate) notices: Notices,
     /// The workspace name, shown at the right of the Sessions title bar.
     pub(crate) workspace_name: String,
@@ -523,6 +553,7 @@ impl DashboardState {
             quota_refreshing: BTreeSet::new(),
             session_details: BTreeMap::new(),
             unreachable_sessions: BTreeSet::new(),
+            session_reviews: BTreeMap::new(),
             sessions_with_review: BTreeSet::new(),
             project_sources: BTreeMap::new(),
             checkpoint_archive_sizes: BTreeMap::new(),
@@ -553,6 +584,7 @@ impl DashboardState {
             collapsed_project_keys: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
+            review_settings_generation: 0,
             notices: Notices::default(),
             workspace_name: String::new(),
         };
@@ -847,6 +879,7 @@ impl DashboardState {
             Mode::Confirm(dialog) => self.handle_confirmation_key(key, dialog),
             Mode::Help(overlay) => self.handle_help_key(key, overlay),
             Mode::Palette(_) => unreachable!("the command palette is handled in place"),
+            Mode::ReviewSettings(dialog) => self.handle_review_settings_key(key, dialog),
         }
     }
 
@@ -1427,7 +1460,7 @@ impl DashboardState {
         self.config.profiles.is_empty() || self.config.targets.is_empty()
     }
 
-    pub(crate) fn cancel_modal(&mut self) {
+    pub fn cancel_modal(&mut self) {
         self.mode = Mode::Dashboard;
         self.rebuild_resume_rows();
     }
