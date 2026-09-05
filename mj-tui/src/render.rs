@@ -28,6 +28,7 @@ use crate::dialogs::{
 };
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
+use crate::review_settings::render_review_settings;
 use crate::widgets::{focus_border, format_resource_bytes};
 use crate::wizards::{render_new_wizard, render_resume_wizard};
 use crate::{
@@ -172,6 +173,7 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::Palette(palette) => {
             crate::palette::render_palette(frame, area, dashboard, palette, &mut surfaces)
         }
+        Mode::ReviewSettings(dialog) => render_review_settings(frame, area, dialog, &mut surfaces),
         Mode::Dashboard => {}
     }
     dashboard.frame_surfaces = surfaces;

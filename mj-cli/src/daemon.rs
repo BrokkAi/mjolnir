@@ -34,6 +34,10 @@ use mj_controller::hel_session_manager::{
     ManagedSessionView, RemoteSessionPublisher, RemoteSessionRequest, SessionManagerChannels,
     SessionManagerControl, ViewError, spawn_remote_session_manager, spawn_session_manager,
 };
+#[cfg(test)]
+use mj_controller::hel_session_manager::{
+    RelaySessionTarget, RemoteSessionRequests, SessionManagerShutdown,
+};
 use mj_controller::hel_worker_upgrade::{WorkerUpgradeObservation, WorkerUpgradeObserver};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3685,8 +3689,15 @@ async fn forward_in_process_session_request(
             session_id,
             command_id,
             command,
+            admission,
             reply,
         } => {
+            if admission.is_some() {
+                let _ = reply.send(Err(
+                    "review delivery admissions cannot cross the daemon request bridge".into(),
+                ));
+                return;
+            }
             let result = async {
                 manager
                     .session(session_id)
@@ -3725,16 +3736,18 @@ async fn forward_in_process_session_request(
             session_id,
             role,
             action,
-            reply,
+            mut reply,
         } => {
-            let result = async {
-                manager
-                    .session(session_id)
-                    .await?
-                    .reviewer_as(role, action)
-                    .await
+            let result = tokio::select! {
+                _ = reply.closed() => return,
+                result = async {
+                    manager
+                        .session(session_id)
+                        .await?
+                        .reviewer_as(role, action)
+                        .await
+                } => result,
             }
-            .await
             .map_err(|error| format!("{error:#}"));
             let _ = reply.send(result);
         }
@@ -3789,9 +3802,38 @@ async fn serve_client(
             // stop should not be refused.
             Err("daemon is shutting down; retry to reach a fresh daemon".to_owned())
         } else {
-            handle_action(request.action, &metadata, &state, &cancellation)
-                .await
-                .map_err(|error| format!("{error:#}"))
+            let reviewer = matches!(&request.action, DaemonAction::ReviewerAction { .. });
+            if reviewer {
+                // A reviewer action is a long-lived sidecar operation. If its
+                // client goes away, drop the future so the session actor sees
+                // its reply receiver close and tears down the reviewer. A
+                // one-byte peek observes EOF without consuming a pipelined
+                // frame; buffered work therefore remains for the next loop.
+                let mut peer_probe = [0_u8; 1];
+                let mut action = Box::pin(handle_action(
+                    request.action,
+                    &metadata,
+                    &state,
+                    &cancellation,
+                ));
+                tokio::select! {
+                    result = &mut action => result.map_err(|error| format!("{error:#}")),
+                    peer = stream.peek(&mut peer_probe) => {
+                        match peer {
+                            Ok(0) => return Ok(()),
+                            Ok(_) => action.await.map_err(|error| format!("{error:#}")),
+                            Err(error) => {
+                                tracing::debug!(%error, "reviewer client connection became unreadable");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            } else {
+                handle_action(request.action, &metadata, &state, &cancellation)
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            }
         };
         // Echo the caller's protocol version: replies must stay readable in the
         // client's own dialect, and the shapes it can receive here are frozen.
@@ -4569,6 +4611,265 @@ mod tests {
                 })
             },
         ))
+    }
+
+    struct TestRemoteManager {
+        control: SessionManagerControl,
+        requests: RemoteSessionRequests,
+        publisher: RemoteSessionPublisher,
+        _shutdown: SessionManagerShutdown,
+        _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
+    }
+
+    impl TestRemoteManager {
+        async fn new() -> Self {
+            let channels = spawn_remote_session_manager().expect("remote manager");
+            let session_id = "session-1";
+            channels.targets.send_replace(vec![RelaySessionTarget {
+                session_id: session_id.to_owned(),
+                spec: CommandSpec::new("true", Vec::<String>::new()),
+                worker_recovery: None,
+                project_memory: None,
+            }]);
+            let manager = Self {
+                control: channels.control,
+                requests: channels.requests,
+                publisher: channels.publisher,
+                _shutdown: channels.shutdown,
+                _targets: channels.targets,
+            };
+            manager
+                .publisher
+                .publish(session_id.to_owned(), ManagedSessionView::default())
+                .await
+                .expect("publish test session view");
+            manager
+                .control
+                .wait_for_session(session_id, Duration::from_secs(5))
+                .await
+                .expect("remote manager creates test session");
+            manager
+        }
+    }
+
+    fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
+        let recovery =
+            mj_controller::hel_recovery::RecoveryCoordinator::spawn(manager.control.clone());
+        let upgrades = mj_controller::hel_worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            manager.control.clone(),
+            &recovery.observer(),
+        );
+        Arc::new(RuntimeState::new_with_controller_loader(
+            manager.control.clone(),
+            Controller {
+                config: HelConfig::default(),
+                state: hel::hel_state::HelState::default(),
+            },
+            recovery.observer(),
+            upgrades.observer(),
+            Vec::new(),
+            || {
+                Ok(Controller {
+                    config: HelConfig::default(),
+                    state: hel::hel_state::HelState::default(),
+                })
+            },
+        ))
+    }
+
+    fn test_metadata(address: SocketAddr) -> DaemonMetadata {
+        DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: 1,
+            address,
+            token: "right-token".into(),
+            started_at: "now".into(),
+            build_version: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
+        let mut manager = TestRemoteManager::new().await;
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let forwarding = tokio::spawn(forward_in_process_session_request(
+            RemoteSessionRequest::Reviewer {
+                session_id: "session-1".into(),
+                role: None,
+                action: mj_controller::hel_session_manager::ReviewerAction::Status,
+                reply,
+            },
+            manager.control.clone(),
+        ));
+        let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
+            .await
+            .expect("reviewer forwarding did not reach the manager")
+            .expect("manager request stream ended");
+        let RemoteSessionRequest::Reviewer { mut reply, .. } = request else {
+            panic!("expected the forwarded reviewer request")
+        };
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(5), reply.closed())
+            .await
+            .expect("in-process forwarding kept the actor reply alive");
+        forwarding.await.expect("forwarding task panicked");
+    }
+
+    #[tokio::test]
+    async fn daemon_drops_in_flight_reviewer_work_when_the_client_eof_arrives() {
+        let mut manager = TestRemoteManager::new().await;
+        let state = test_runtime_state_with_manager(&manager);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                test_metadata(address),
+                state,
+                CancellationToken::new(),
+            )
+            .await
+        });
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        write_frame(
+            &mut stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: "right-token".into(),
+                action: DaemonAction::ReviewerAction {
+                    session_id: "session-1".into(),
+                    role: None,
+                    action: mj_controller::hel_session_manager::ReviewerAction::Status,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
+            .await
+            .expect("reviewer request did not reach the manager")
+            .expect("manager request stream ended");
+        let RemoteSessionRequest::Reviewer { mut reply, .. } = request else {
+            panic!("expected a reviewer request")
+        };
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(5), reply.closed())
+            .await
+            .expect("daemon kept reviewer work alive after client EOF");
+        assert!(server.await.expect("daemon task panicked").is_ok());
+    }
+
+    #[tokio::test]
+    async fn daemon_peek_keeps_a_pipelined_request_for_the_next_loop() {
+        let mut manager = TestRemoteManager::new().await;
+        let state = test_runtime_state_with_manager(&manager);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                test_metadata(address),
+                state,
+                CancellationToken::new(),
+            )
+            .await
+        });
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        for (request_id, action) in [
+            (
+                1,
+                DaemonAction::ReviewerAction {
+                    session_id: "session-1".into(),
+                    role: None,
+                    action: mj_controller::hel_session_manager::ReviewerAction::Pause,
+                },
+            ),
+            (2, DaemonAction::Ping),
+        ] {
+            write_frame(
+                &mut stream,
+                &RequestEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id,
+                    token: "right-token".into(),
+                    action,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
+            .await
+            .expect("reviewer request did not reach the manager")
+            .expect("manager request stream ended");
+        let RemoteSessionRequest::Reviewer { reply, .. } = request else {
+            panic!("expected a reviewer request")
+        };
+        reply
+            .send(Ok(
+                mj_controller::hel_session_manager::ReviewerOutcome::Paused,
+            ))
+            .expect("daemon still awaits the reviewer reply");
+
+        let first: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+        assert!(matches!(
+            first.result,
+            Ok(DaemonReply::Reviewer(outcome))
+                if matches!(*outcome, mj_controller::hel_session_manager::ReviewerOutcome::Paused)
+        ));
+        let second: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+        assert!(matches!(second.result, Ok(DaemonReply::Pong)));
+        drop(stream);
+        let _ = server.await.expect("daemon task panicked");
+    }
+
+    #[tokio::test]
+    async fn daemon_client_eof_does_not_cancel_a_submitted_mutation() {
+        let mut manager = TestRemoteManager::new().await;
+        let state = test_runtime_state_with_manager(&manager);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                test_metadata(address),
+                state,
+                CancellationToken::new(),
+            )
+            .await
+        });
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        write_frame(
+            &mut stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: "right-token".into(),
+                action: DaemonAction::SubmitSessionCommand {
+                    session_id: "session-1".into(),
+                    command_id: "command-1".into(),
+                    command: RelayCommand::ClearQueuedPrompts,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
+            .await
+            .expect("submit request did not reach the manager")
+            .expect("manager request stream ended");
+        let RemoteSessionRequest::Submit { reply, .. } = request else {
+            panic!("expected a submitted mutation")
+        };
+        drop(stream);
+        reply
+            .send(Ok(7))
+            .expect("daemon incorrectly cancelled a non-reviewer mutation");
+        let _ = server.await.expect("daemon task panicked");
     }
 
     fn runtime_test_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {

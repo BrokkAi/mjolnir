@@ -3800,6 +3800,7 @@ fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other(
 
 #[test]
 fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
+    use crate::hel_review::driver::PendingForward;
     use crate::hel_review::lanes::PriorReviewContext;
 
     let directory = tempfile::tempdir().unwrap();
@@ -3823,6 +3824,16 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
             evidence: Default::default(),
         }),
         active: Some("{\"phase\":\"running\"}".to_string()),
+        pending_forward: Some(PendingForward {
+            synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
+            evidence: Default::default(),
+            command_id: "turn-review-forward-1".to_string(),
+            trees: std::collections::BTreeMap::from([(
+                std::path::PathBuf::from("/workspace/app"),
+                "5678efgh".to_string(),
+            )]),
+            reviewed_through_ordinal: 43,
+        }),
     };
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
     assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
@@ -3838,6 +3849,7 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     assert_eq!(restored.active, None);
     assert_eq!(restored.baselines, state.baselines);
     assert_eq!(restored.reviewed_through_ordinal, 42);
+    assert_eq!(restored.pending_forward, state.pending_forward);
 }
 
 /// Arming review moved into `config.toml`, so the per-workspace row it used to
@@ -3895,6 +3907,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
 /// baseline it never advanced stays where it was.
 #[test]
 fn clearing_interrupted_reviews_keeps_every_baseline() {
+    use crate::hel_review::driver::PendingForward;
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
@@ -3912,6 +3925,13 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             reviewed_through_ordinal: 42,
             prior_review: None,
             active: Some("{\"opened_at_ordinal\":42}".to_string()),
+            pending_forward: Some(PendingForward {
+                synthesis: "[P1] broken".to_string(),
+                evidence: Default::default(),
+                command_id: "forward-1".to_string(),
+                trees: baselines.clone(),
+                reviewed_through_ordinal: 42,
+            }),
         },
     )
     .unwrap();
@@ -3923,6 +3943,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
             reviewed_through_ordinal: 7,
             prior_review: None,
             active: None,
+            pending_forward: None,
         },
     )
     .unwrap();
@@ -3937,10 +3958,10 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         "the baseline is left alone, so the next review covers the same change"
     );
     assert_eq!(restored.reviewed_through_ordinal, 42);
-    assert!(
-        clear_interrupted_turn_reviews_in(&database)
-            .unwrap()
-            .is_empty(),
-        "a second sweep has nothing to clear"
+    assert!(restored.pending_forward.is_some());
+    assert_eq!(
+        clear_interrupted_turn_reviews_in(&database).unwrap(),
+        vec!["session-1".to_string()],
+        "a pending handoff remains recoverable until its command is accepted"
     );
 }

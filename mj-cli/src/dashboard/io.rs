@@ -19,11 +19,12 @@ use hel::hel_state::{
 use hel::hel_targets::CancellableProcessExecutor;
 use hel_tui::{
     DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
-    SessionOperationKind, WebViewerAccess,
+    ReviewSettingsProbeResult, ReviewTargetReadiness, SessionOperationKind, WebViewerAccess,
 };
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_controller::ResumeRepositorySourcePreflight;
 use mj_controller::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
+use mj_controller::hel_session_manager::SessionManagerControl;
 use mj_controller::hel_setup::github_repository_from_origin;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
@@ -90,6 +91,16 @@ pub(crate) enum DashboardIoUpdate {
     ConfigReloaded(std::result::Result<Controller, String>),
     WebAccess(WebViewerAccess),
     SetupReloaded(std::result::Result<Controller, String>),
+    ReviewSettingsProbed {
+        generation: u64,
+        profile_id: String,
+        model: Option<String>,
+        effort: Option<String>,
+        result: std::result::Result<ReviewSettingsProbeResult, String>,
+    },
+    ReviewSettingsSaved {
+        result: std::result::Result<HelConfig, String>,
+    },
     DetachedSessionState {
         session_id: String,
         result: std::result::Result<(), String>,
@@ -346,6 +357,71 @@ pub(crate) fn spawn_hidden_native_sessions_load(
         updates,
         hel::hel_database::hidden_native_sessions,
         |result| DashboardIoUpdate::HiddenNativeSessions { result },
+    )
+}
+
+/// Discovers the advertised reviewer selectors and actual target readiness in
+/// a supervised asynchronous task. A fresh generation is included in the
+/// reply; the TUI drops replies for edits that happened after this request.
+pub(crate) fn spawn_review_settings_probe(
+    control: SessionManagerControl,
+    request: mj_controller::hel_review_settings::ReviewProbeRequest,
+    generation: u64,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> Arc<AtomicBool> {
+    let profile_id = request.profile.clone();
+    let model = request.model.clone();
+    let effort = request.effort.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = tracker.begin_cancellable("checking review readiness", cancelled.clone());
+    let worker_cancelled = cancelled.clone();
+    tokio::spawn(async move {
+        let result = mj_controller::hel_review_settings::probe_review_settings(
+            control,
+            request,
+            worker_cancelled,
+        )
+        .await
+        .map(|report| ReviewSettingsProbeResult {
+            model_choices: report.model_choices,
+            effort_choices: report.effort_choices,
+            targets: report
+                .targets
+                .into_iter()
+                .map(|target| ReviewTargetReadiness {
+                    target: target.target,
+                    ready: target.ready,
+                    message: target.message,
+                })
+                .collect(),
+        })
+        .map_err(|error| format!("{error:#}"));
+        if let Err(error) = updates.send(DashboardIoUpdate::ReviewSettingsProbed {
+            generation,
+            profile_id,
+            model,
+            effort,
+            result,
+        }) {
+            tracing::debug!(%error, "review settings probe result dropped after dashboard shutdown");
+        }
+        drop(guard);
+    });
+    cancelled
+}
+
+pub(crate) fn spawn_review_settings_save(
+    review: hel::hel_config::ReviewConfig,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_critical_io(
+        tracker,
+        "saving review settings",
+        updates,
+        move || HelConfig::save_review(review),
+        |result| DashboardIoUpdate::ReviewSettingsSaved { result },
     )
 }
 
@@ -1277,6 +1353,39 @@ impl DashboardContext {
                 Err(error) => {
                     self.dashboard
                         .set_notice(format!("Could not reload setup changes: {error}"));
+                }
+            },
+            DashboardIoUpdate::ReviewSettingsProbed {
+                generation,
+                profile_id,
+                model,
+                effort,
+                result,
+            } => {
+                if self.dashboard.apply_review_settings_probe(
+                    generation,
+                    &profile_id,
+                    model.as_deref(),
+                    effort.as_deref(),
+                    result,
+                ) {
+                    self.review_probe_cancel = None;
+                }
+            }
+            DashboardIoUpdate::ReviewSettingsSaved { result } => match result {
+                Ok(config) => {
+                    self.review_probe_cancel = None;
+                    self.controller.config = config.clone();
+                    self.dashboard.set_config(config);
+                    self.refresh_chat_context();
+                    self.dashboard.cancel_modal();
+                    self.dashboard
+                        .set_notice("Review settings saved; they apply to subsequent reviews.");
+                }
+                Err(error) => {
+                    self.dashboard.review_settings_save_failed(error.clone());
+                    self.dashboard
+                        .set_notice(format!("Could not save review settings: {error}"));
                 }
             },
             DashboardIoUpdate::ClipboardWritten(result) => {

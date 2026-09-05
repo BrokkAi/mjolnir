@@ -28,7 +28,7 @@ use crate::hel_workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 23;
 
 /// A deterministic projection integrity violation. Retrying cannot fix it, so
 /// callers must report it separately from transport failures.
@@ -3238,6 +3238,11 @@ pub struct TurnReviewState {
     /// A review that was running when the daemon stopped. On recovery it is
     /// cleared without advancing the baseline.
     pub active: Option<String>,
+    /// A corrective prompt that was submitted while its relay acceptance was
+    /// still ambiguous. It survives a daemon restart so the exact command can
+    /// be retried and reconciled without losing the findings.
+    #[serde(default)]
+    pub pending_forward: Option<crate::hel_review::driver::PendingForward>,
 }
 
 /// How far `session_id` has been reviewed, or a fresh state when it has never
@@ -3250,7 +3255,8 @@ fn turn_review_state_in(path: &Path, session_id: &str) -> Result<TurnReviewState
     let connection = open_reader(path)?;
     let row = connection
         .query_row(
-            "SELECT baselines, reviewed_through_ordinal, prior_review, active
+            "SELECT baselines, reviewed_through_ordinal, prior_review, active,
+                    pending_forward
              FROM turn_review_state WHERE session_id = ?1",
             [session_id],
             |row| {
@@ -3259,11 +3265,12 @@ fn turn_review_state_in(path: &Path, session_id: &str) -> Result<TurnReviewState
                     row.get::<_, i64>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((baselines, ordinal, prior, active)) = row else {
+    let Some((baselines, ordinal, prior, active, pending_forward)) = row else {
         return Ok(TurnReviewState::default());
     };
     Ok(TurnReviewState {
@@ -3274,6 +3281,10 @@ fn turn_review_state_in(path: &Path, session_id: &str) -> Result<TurnReviewState
             .transpose()
             .context("parse the stored prior review")?,
         active,
+        pending_forward: pending_forward
+            .map(|pending| serde_json::from_str(&pending))
+            .transpose()
+            .context("parse the stored pending review handoff")?,
     })
 }
 
@@ -3290,13 +3301,15 @@ fn save_turn_review_state_in(path: &Path, session_id: &str, state: &TurnReviewSt
     let connection = open(path)?;
     connection.execute(
         "INSERT INTO turn_review_state(
-             session_id, baselines, reviewed_through_ordinal, prior_review, active
-         ) VALUES (?1, ?2, ?3, ?4, ?5)
+             session_id, baselines, reviewed_through_ordinal, prior_review, active,
+             pending_forward
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(session_id) DO UPDATE SET
              baselines = excluded.baselines,
              reviewed_through_ordinal = excluded.reviewed_through_ordinal,
              prior_review = excluded.prior_review,
-             active = excluded.active",
+             active = excluded.active,
+             pending_forward = excluded.pending_forward",
         params![
             session_id,
             serde_json::to_string(&state.baselines)?,
@@ -3307,6 +3320,11 @@ fn save_turn_review_state_in(path: &Path, session_id: &str, state: &TurnReviewSt
                 .map(serde_json::to_string)
                 .transpose()?,
             state.active,
+            state
+                .pending_forward
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     Ok(())
@@ -3315,11 +3333,11 @@ fn save_turn_review_state_in(path: &Path, session_id: &str, state: &TurnReviewSt
 /// Clears every session's in-flight review flag.
 ///
 /// A review that was running when the daemon stopped is not resumed: the
-/// baseline never advanced, so the next review covers the same change, and half
-/// a multi-agent fan-out is not worth rebuilding. Baselines are deliberately
-/// left alone, which is what makes the interruption lossless. Returns the
-/// sessions whose review was interrupted, so the daemon can say so in each
-/// conversation.
+/// baseline never advanced, so the next review covers the same change, and
+/// half a multi-agent fan-out is not worth rebuilding. A pending corrective
+/// handoff is returned as well so the host can retry its exact command id.
+/// Baselines are deliberately left alone, which is what makes interruption
+/// lossless. Returns the sessions whose review or handoff was interrupted.
 pub fn clear_interrupted_turn_reviews() -> Result<Vec<String>> {
     submit_database_write("clear_interrupted_turn_reviews", move |_| {
         clear_interrupted_turn_reviews_in(&database_path())
@@ -3329,8 +3347,10 @@ pub fn clear_interrupted_turn_reviews() -> Result<Vec<String>> {
 fn clear_interrupted_turn_reviews_in(path: &Path) -> Result<Vec<String>> {
     let connection = open(path)?;
     let interrupted = {
-        let mut statement = connection
-            .prepare("SELECT session_id FROM turn_review_state WHERE active IS NOT NULL")?;
+        let mut statement = connection.prepare(
+            "SELECT session_id FROM turn_review_state
+                 WHERE active IS NOT NULL OR pending_forward IS NOT NULL",
+        )?;
         let mut rows = statement.query([])?;
         let mut interrupted = Vec::new();
         while let Some(row) = rows.next()? {

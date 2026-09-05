@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
-use super::reviewer::{ReviewerPlacement, ReviewerSidecar};
+use super::reviewer::{ReviewerCancellation, ReviewerPlacement, ReviewerSidecar};
 use super::{AcpSupervisorSpec, CredentialEndpoint, DISCOVER_LOGIN_PATH_ENV, WorkerLaunchConfig};
 
 pub(super) const PROXY_INITIAL_INPUT_TIMEOUT: std::time::Duration =
@@ -1317,6 +1317,35 @@ pub(super) async fn serve_client(
     .await
 }
 
+/// Test-only relay entry point that exposes the worker's reviewer sidecar.
+/// The production daemon supplies the same `ConnectionRuntime` from its live
+/// ACP setup; keeping this seam beside `serve_client` lets socket tests drive
+/// the real reviewer cancellation path without opening a second journal.
+#[cfg(test)]
+pub(super) async fn serve_client_with_reviewer(
+    stream: UnixStream,
+    relay: Arc<Mutex<DurableRelay>>,
+    dispatch_wake: mpsc::Sender<()>,
+    credentials: std::result::Result<CredentialEndpoint, String>,
+    commands: Option<mpsc::Sender<CommandRequest>>,
+    reviewer: Arc<ReviewerSidecar>,
+    fatal: mpsc::Sender<anyhow::Error>,
+) -> Result<()> {
+    serve_client_with_memory(
+        stream,
+        relay,
+        dispatch_wake,
+        credentials,
+        ConnectionRuntime {
+            commands,
+            reviewer: Some(reviewer),
+            ..ConnectionRuntime::default()
+        },
+        fatal,
+    )
+    .await
+}
+
 pub(super) async fn serve_client_with_memory(
     stream: UnixStream,
     relay: Arc<Mutex<DurableRelay>>,
@@ -1407,7 +1436,7 @@ pub(super) async fn serve_client_with_memory(
                 // harness process. Both live on this connection's worker, so
                 // the primary's relay never sees these.
                 let operation = envelope.request.method_name();
-                let response = reviewer_response(envelope, reviewer.as_ref()).await;
+                let response = reviewer_response(envelope, reviewer.as_ref(), &mut reader).await;
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }
@@ -1575,6 +1604,7 @@ async fn serve_one_review_dispatch(
 async fn reviewer_response(
     envelope: RelayRequestEnvelope,
     reviewer: Option<&Arc<ReviewerSidecar>>,
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
 ) -> RelayResponseEnvelope {
     if !envelope.request.supported_at(envelope.protocol_version) {
         return incompatible_request_protocol_response(
@@ -1598,7 +1628,32 @@ async fn reviewer_response(
     // Operations on one role are sequential by construction; operations on
     // different roles are not, so a lane launching cannot block the controller
     // reading the supervisor's journal.
-    reviewer.handle(envelope, role, request).await
+    reviewer
+        .handle_cancellable(
+            envelope,
+            role,
+            request,
+            wait_for_reviewer_disconnect(reader),
+        )
+        .await
+}
+
+/// Watches a review request's owning connection until it closes.
+///
+/// Do not consume input: cancellation of a line-reading future could discard
+/// half of the next frame. Buffered pipelined input is left for the ordinary
+/// request loop; only an idle input stream can signal EOF during this action.
+async fn wait_for_reviewer_disconnect(
+    reader: &mut (impl AsyncBufRead + Unpin),
+) -> ReviewerCancellation {
+    match reader.fill_buf().await {
+        Ok(bytes) if !bytes.is_empty() => std::future::pending().await,
+        Ok(_) => ReviewerCancellation::ClientDisconnected,
+        Err(error) => {
+            tracing::debug!(%error, "review client read failed during an in-flight operation");
+            ReviewerCancellation::ClientDisconnected
+        }
+    }
 }
 
 fn compaction_error(code: RelayErrorCode, message: &str) -> RelayResponseBody {
@@ -2553,5 +2608,41 @@ pub fn lead_process_group() {
     // own session and process-group membership.
     unsafe {
         libc::setsid();
+    }
+}
+
+#[cfg(test)]
+mod reviewer_disconnect_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn finishing_an_operation_preserves_a_partially_buffered_next_frame() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let payload = "x".repeat(128 * 1024);
+        let expected = payload.clone();
+        let writer = tokio::spawn(async move {
+            client.write_all(payload.as_bytes()).await.unwrap();
+            client.write_all(b"\n").await.unwrap();
+        });
+        let mut reader = BufReader::new(server);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                wait_for_reviewer_disconnect(&mut reader)
+            )
+            .await
+            .is_err(),
+            "buffered input is not a disconnect"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 256 * 1024).await.unwrap(),
+            Some(expected)
+        );
+        writer.await.unwrap();
+        assert_eq!(
+            wait_for_reviewer_disconnect(&mut reader).await,
+            ReviewerCancellation::ClientDisconnected
+        );
     }
 }

@@ -138,7 +138,9 @@ impl TurnReview {
     fn action_allowed_in_view(view: &RuntimeReviewView, action: Option<ReviewAction>) -> bool {
         match action {
             None => view.verdict.is_none(),
-            Some(ReviewAction::Cancel) => true,
+            Some(ReviewAction::Cancel) => {
+                !matches!(&view.phase, TurnReviewPhase::Forwarding { error: None, .. })
+            }
             Some(action) => view
                 .verdict
                 .as_ref()
@@ -331,6 +333,9 @@ impl TurnReview {
         if let Some(failure) = &self.failure {
             return failure.clone();
         }
+        if matches!(&self.view.phase, TurnReviewPhase::Forwarding { .. }) {
+            return self.view.status.clone();
+        }
         match self.verdict_kind() {
             Some(VerdictKind::Findings | VerdictKind::Failed) => {
                 "Enter to act · Tab switches agent".to_owned()
@@ -499,8 +504,8 @@ impl super::ChatState {
                 super::ChatAction::None
             }
             KeyCode::Enter => self.activate_turn_review_action(),
-            // Escape cancels at every stage before the review resolves, which
-            // is what keeps the composer one keypress away.
+            // Escape cancels every cancellable stage; an in-flight handoff
+            // remains visible until its relay acknowledgement arrives.
             KeyCode::Esc => self.resolve_turn_review(Resolution::Cancelled),
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.resolve_turn_review(Resolution::Cancelled)
@@ -516,9 +521,9 @@ impl super::ChatState {
         let Some(action) = review.action else {
             return super::ChatAction::None;
         };
-        // Cancel is always available; the rest wait for the verdict the daemon
-        // publishes, so pressing one early does nothing.
-        if action != ReviewAction::Cancel && !review.allows(action) {
+        // Actions wait for the daemon's typed phase. In particular, an
+        // in-flight handoff cannot be cancelled or submitted a second time.
+        if !review.allows(action) {
             return super::ChatAction::None;
         }
         self.resolve_turn_review(action.resolution())
@@ -526,6 +531,12 @@ impl super::ChatState {
 
     fn resolve_turn_review(&mut self, resolution: Resolution) -> super::ChatAction {
         if self.turn_review.is_none() {
+            return super::ChatAction::None;
+        }
+        if matches!(
+            self.turn_review.as_ref().map(|review| &review.view.phase),
+            Some(&TurnReviewPhase::Forwarding { error: None, .. })
+        ) {
             return super::ChatAction::None;
         }
         // The pane stays up until the daemon says the review is gone: the
@@ -729,7 +740,7 @@ pub(super) fn render_turn_review_actions(
     let mut buttons = Vec::new();
     let mut column = area.x;
     for candidate in ReviewAction::ORDER {
-        let available = candidate == ReviewAction::Cancel || review.allows(candidate);
+        let available = review.allows(candidate);
         let mut style = Style::default();
         if !available {
             style = style.fg(Color::DarkGray);
@@ -740,7 +751,16 @@ pub(super) fn render_turn_review_actions(
         if Some(candidate) == review.action {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        let label = format!(" {} ", candidate.label());
+        let failed_delivery = matches!(
+            review.view.phase,
+            TurnReviewPhase::Forwarding { error: Some(_), .. }
+        );
+        let label = match (failed_delivery, candidate) {
+            (true, ReviewAction::Forward) => "Retry delivery",
+            (true, ReviewAction::Cancel) => "Stop retrying",
+            _ => candidate.label(),
+        };
+        let label = format!(" {label} ");
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         if column < area.right() {
             buttons.push((
@@ -817,6 +837,20 @@ pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
 /// What the reviewer pane's title says while a verdict is up.
 #[must_use]
 pub(super) fn verdict_title(review: Option<&TurnReview>) -> &'static str {
+    if let Some(review) = review {
+        if matches!(
+            &review.view.phase,
+            TurnReviewPhase::Forwarding { error: None, .. }
+        ) {
+            return " Turn review · sending findings ";
+        }
+        if matches!(
+            &review.view.phase,
+            TurnReviewPhase::Forwarding { error: Some(_), .. }
+        ) {
+            return " Turn review · forward failed ";
+        }
+    }
     match review.and_then(TurnReview::verdict_kind) {
         Some(VerdictKind::Clean) => " Turn review · clean ",
         Some(VerdictKind::Findings) => " Turn review · findings ",
@@ -833,6 +867,7 @@ mod tests {
     use crossterm::event::KeyCode;
     use hel::hel_review::driver::{RoleStatus, TurnReviewPhase};
     use hel::hel_review::lanes::ReviewTier;
+    use hel::hel_review::verdict::ReviewPassEvidence;
     use mj_controller::hel_review_host::VerdictView;
 
     fn chat() -> super::super::ChatState {
@@ -870,6 +905,36 @@ mod tests {
                     Resolution::Dismissed,
                     Resolution::Cancelled,
                 ],
+            }),
+            ..running_view()
+        }
+    }
+
+    fn forwarding_view(error: Option<&str>) -> RuntimeReviewView {
+        let synthesis = "[P1] src/lib.rs:1 -- unbounded retry".to_owned();
+        RuntimeReviewView {
+            phase: TurnReviewPhase::Forwarding {
+                synthesis: synthesis.clone(),
+                evidence: ReviewPassEvidence::default(),
+                command_id: "turn-review-forward-1".to_owned(),
+                error: error.map(str::to_owned),
+            },
+            status: error.map_or_else(
+                || "sending findings to the primary agent…".to_owned(),
+                |error| {
+                    format!(
+                        "could not send findings to the primary agent: {error} · Retry or cancel"
+                    )
+                },
+            ),
+            verdict: Some(VerdictView {
+                kind: VerdictKind::Findings,
+                text: synthesis,
+                allowed: if error.is_some() {
+                    vec![Resolution::Forwarded, Resolution::Cancelled]
+                } else {
+                    Vec::new()
+                },
             }),
             ..running_view()
         }
@@ -935,6 +1000,43 @@ mod tests {
     fn the_action_bar_starts_on_an_enabled_action_at_each_verdict_stage() {
         let mut chat = chat();
         chat.set_turn_review(Some(findings_view()));
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::TurnReview(TurnReviewIntent::Resolve(Resolution::Forwarded))
+        );
+    }
+
+    #[test]
+    fn an_inflight_forward_has_no_retry_or_cancel_action() {
+        let mut chat = chat();
+        chat.set_turn_review(Some(forwarding_view(None)));
+        let review = chat.turn_review().expect("handoff remains visible");
+        assert_eq!(review.action, None);
+        assert!(review.status().contains("sending findings"));
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::None,
+            "repeated Enter cannot submit the same handoff twice"
+        );
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Esc)),
+            ChatAction::None,
+            "an ambiguous handoff cannot be cancelled before acknowledgement"
+        );
+    }
+
+    #[test]
+    fn a_rejected_forward_keeps_findings_and_selects_retry() {
+        let mut chat = chat();
+        chat.set_turn_review(Some(forwarding_view(Some("primary rejected it"))));
+        let review = chat.turn_review().expect("failed handoff remains visible");
+        assert_eq!(review.action, Some(ReviewAction::Forward));
+        assert!(
+            review
+                .verdict_text()
+                .is_some_and(|text| text.contains("unbounded retry"))
+        );
+        assert!(review.status().contains("primary rejected it"));
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter)),
             ChatAction::TurnReview(TurnReviewIntent::Resolve(Resolution::Forwarded))

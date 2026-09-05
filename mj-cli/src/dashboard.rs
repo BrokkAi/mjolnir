@@ -400,6 +400,9 @@ pub(crate) struct DashboardContext {
     quota: Feed<Receiver<QuotaUpdate>>,
     pub(crate) manual_quota_refresh_generation: Option<u64>,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
+    /// The one active global review capability probe. New profile/model
+    /// selections cancel the old request before starting another one.
+    pub(crate) review_probe_cancel: Option<Arc<AtomicBool>>,
 
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
@@ -1021,6 +1024,7 @@ impl DashboardContext {
             quota: Feed::new(quota_updates_rx),
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
+            review_probe_cancel: None,
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_lifecycles: Feed::new(runtime_lifecycles_rx),
@@ -1802,6 +1806,9 @@ impl DashboardContext {
     /// cooperative, so this only requests it.
     fn cancel_background_work(&self) {
         self.critical_operations.cancel_all();
+        if let Some(cancelled) = &self.review_probe_cancel {
+            cancelled.store(true, Ordering::Release);
+        }
         for operation in self.lifecycle_operations.values() {
             operation.cancelled.store(true, Ordering::Release);
         }

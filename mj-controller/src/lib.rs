@@ -15,6 +15,7 @@ pub mod hel_quota;
 pub mod hel_readline;
 pub mod hel_recovery;
 pub mod hel_review_host;
+pub mod hel_review_settings;
 pub mod hel_server;
 pub mod hel_session_manager;
 pub mod hel_setup;

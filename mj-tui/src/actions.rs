@@ -40,6 +40,7 @@ pub enum CommandId {
     WebViewer,
     QuitDetach,
     Palette,
+    ReviewSettings,
     Help,
 }
 
@@ -536,6 +537,17 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::ReviewSettings,
+        label: "Review settings…",
+        description: "Edit the global automatic review profile, tier, model, and effort.",
+        scope: Scope::Global,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Function,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::Help,
         label: "Help",
         description: "List every key this surface answers.",
@@ -707,6 +719,7 @@ impl DashboardState {
                 self.begin_palette();
                 DashboardAction::None
             }
+            CommandId::ReviewSettings => self.begin_review_settings(),
             CommandId::RenameSession => {
                 self.begin_rename();
                 DashboardAction::None

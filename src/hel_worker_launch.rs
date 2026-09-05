@@ -180,8 +180,8 @@ pub struct ReviewerLaunchConfig {
     #[serde(default)]
     pub environment: std::collections::BTreeMap<String, String>,
     pub execution_policy: ExecutionPolicy,
-    /// Model to apply once the session opens, or `None` when the harness
-    /// advertises no model selector.
+    /// Model to apply once the session opens, or `None` to keep the profile's
+    /// default. Explicit selections must be supported by the target adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

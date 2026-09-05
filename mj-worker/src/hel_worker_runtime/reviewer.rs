@@ -72,6 +72,27 @@ const DEFAULT_RUNTIME_PROFILE_DIR: &str = "runtime-profile";
 /// genuinely new native conversation while preserving forensic history.
 const RELAY_ARCHIVE_DIR: &str = "relay-archive";
 
+/// Why the client-side operation cancellation watcher fired.
+///
+/// This is an in-process signal, not a relay protocol variant. A relay client
+/// that disconnects while a reviewer action is still running must stop that
+/// action, while a client that disconnects after the action's response has been
+/// produced must leave the reviewer running for its next connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReviewerCancellation {
+    ClientDisconnected,
+}
+
+impl ReviewerCancellation {
+    fn message(self) -> &'static str {
+        match self {
+            Self::ClientDisconnected => {
+                "reviewer operation cancelled because the client disconnected"
+            }
+        }
+    }
+}
+
 /// Everything a reviewer inherits from the primary session it reviews for.
 #[derive(Debug, Clone)]
 pub struct ReviewerPlacement {
@@ -292,16 +313,45 @@ impl ReviewerSidecar {
     /// Serves one reviewer request. Every variant answers with an ordinary
     /// relay response, so the controller decodes reviewer replies with the
     /// code it already uses for the primary.
+    #[cfg(test)]
     pub async fn handle(
         &self,
         envelope: RelayRequestEnvelope,
         role: Option<String>,
         request: hel::hel_worker::ReviewerRequest,
     ) -> RelayResponseEnvelope {
+        self.handle_cancellable(
+            envelope,
+            role,
+            request,
+            std::future::pending::<ReviewerCancellation>(),
+        )
+        .await
+    }
+
+    /// Serves one request while watching the owning client connection.
+    ///
+    /// The cancellation future is polled while the role mutex is held and the
+    /// action future is in flight. Selecting the cancellation branch drops the
+    /// action before `pause` runs, which is what makes a partially completed
+    /// `Start` safe to tear down and lets Bifrost's `kill_on_drop` reap its
+    /// child. A completed action wins a simultaneous disconnect: the normal
+    /// sequential client may close immediately after receiving its response
+    /// and that must not stop a successfully started reviewer.
+    pub(super) async fn handle_cancellable<F>(
+        &self,
+        envelope: RelayRequestEnvelope,
+        role: Option<String>,
+        request: hel::hel_worker::ReviewerRequest,
+        disconnected: F,
+    ) -> RelayResponseEnvelope
+    where
+        F: std::future::Future<Output = ReviewerCancellation>,
+    {
         let request_id = envelope.request_id;
         let protocol_version = envelope.protocol_version;
         let role = role.unwrap_or_else(|| DEFAULT_ROLE.to_owned());
-        let body = match self.dispatch(&role, request).await {
+        let body = match self.dispatch(&role, request, disconnected).await {
             Ok(body) => body,
             Err(error) => reviewer_error(format!("{error:#}")),
         };
@@ -335,6 +385,7 @@ impl ReviewerSidecar {
         &self,
         role: &str,
         request: hel::hel_worker::ReviewerRequest,
+        disconnected: impl std::future::Future<Output = ReviewerCancellation>,
     ) -> Result<RelayResponseBody> {
         if let hel::hel_worker::ReviewerRequest::TakeLaneDispatches = request {
             return Ok(RelayResponseBody::Ok {
@@ -346,11 +397,90 @@ impl ReviewerSidecar {
         let handle = self.role(role);
         let lane_slots = self.lane_slots.clone();
         let mut role = handle.lock().await;
-        role.dispatch(&lane_slots, request).await
+        tokio::select! {
+            biased;
+            result = role.dispatch(&lane_slots, request) => result,
+            reason = disconnected => {
+                // The selected `role.dispatch` future is dropped before this
+                // branch runs. That ordering is essential: `pause` must own
+                // the role exclusively before it tears down a partial launch
+                // or the Bifrost child behind an analysis request.
+                role.pause_after_disconnect().await;
+                bail!("{}; reviewer was paused", reason.message());
+            }
+        }
     }
 }
 
 impl ReviewerRole {
+    /// Stops a role after its owning request connection disappeared.
+    ///
+    /// A normal pause can wait for a cooperative ACP cancel before closing
+    /// the runtime. That wait is not sufficient while `session/new` or
+    /// another startup request is blocked: the ACP request loop has not begun
+    /// receiving commands yet, so dropping the coordinator's sender cannot
+    /// wake it. Once the in-flight sidecar action has been dropped, aborting
+    /// the ACP task is the bounded cleanup path; its child is configured with
+    /// `kill_on_drop` and is therefore reaped with the runtime.
+    async fn pause_after_disconnect(&mut self) {
+        if self.running.is_none() {
+            return;
+        }
+
+        // Preserve the durable cancel intent for a role that was already
+        // serving a prompt. The runtime is then force-stopped below rather
+        // than waiting for a response that may never arrive.
+        self.config_sequence += 1;
+        let command_id = format!("reviewer-cancel-{}", self.config_sequence);
+        if self
+            .forward(RelayRequest::Submit {
+                command_id,
+                command: RelayCommand::Cancel,
+            })
+            .is_ok()
+        {
+            self.wake_dispatch();
+        }
+
+        let Some(running) = self.running.take() else {
+            return;
+        };
+        running.coordinator.abort();
+        if let Err(error) = running.coordinator.await
+            && !error.is_cancelled()
+        {
+            tracing::error!(%error, "reviewer coordinator failed while stopping after disconnect");
+        }
+        drop(running.commands);
+        drop(running.dispatch_wake);
+        running.acp.abort();
+        match tokio::time::timeout(PAUSE_TIMEOUT, running.acp).await {
+            Ok(Err(error)) if error.is_cancelled() => {}
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                tracing::debug!(
+                    operation = "reviewer_disconnect_pause",
+                    error = format!("{error:#}"),
+                    "the reviewer runtime reported a failure while stopping"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    operation = "reviewer_disconnect_pause",
+                    %error,
+                    "the reviewer runtime task stopped abnormally"
+                );
+            }
+            Err(_) => {
+                tracing::error!(
+                    operation = "reviewer_disconnect_pause",
+                    "the reviewer runtime did not stop within {PAUSE_TIMEOUT:?}; \
+                     its harness process group may still be running"
+                );
+            }
+        }
+    }
+
     async fn dispatch(
         &mut self,
         lane_slots: &Arc<tokio::sync::Semaphore>,
