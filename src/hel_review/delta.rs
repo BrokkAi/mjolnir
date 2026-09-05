@@ -110,20 +110,22 @@ pub fn capture_repository_deltas(
     for root in repositories {
         let current = capture_worktree_tree(git, root)
             .with_context(|| format!("capture the working tree of {}", root.display()))?;
-        // A baseline is only usable while its tree object is still in this
-        // repository. It is gone when the session has never been reviewed, and
-        // also after a resume onto a fresh target, where the workspace is
-        // restored from a checkpoint and the old capture's objects are not.
-        // Either way the honest answer is that coverage starts here: diffing
-        // against the empty tree would present the whole repository as this
-        // turn's work.
+        // A controller baseline takes precedence: it is the point a completed
+        // review recorded. The worker pin covers a new session before that
+        // first review has a controller baseline, and also a fresh target
+        // after a resume. Both are usable only while their tree object is
+        // still in this repository.
         let baseline = baselines
             .get(root)
             .filter(|tree| tree_exists(git, root, tree))
-            .cloned();
+            .cloned()
+            .or_else(|| pinned_review_baseline(git, root));
         let patch = match &baseline {
             Some(baseline) => diff_between_trees(git, root, Some(baseline), &current)
                 .with_context(|| format!("diff the captured trees of {}", root.display()))?,
+            // Neither baseline is usable. Keep the coverage reset honest: an
+            // empty-tree diff would report the restored or pre-existing
+            // repository as work from this turn.
             None => String::new(),
         };
         let summary = RawDiffSummary::from_patch(&patch);
@@ -137,6 +139,54 @@ pub fn capture_repository_deltas(
         });
     }
     Ok(deltas)
+}
+
+/// Pins the current worktree as the baseline for a fresh worker workspace.
+///
+/// This is deliberately separate from [`capture_repository_deltas`]: startup
+/// must establish the point before the primary harness can edit anything, but
+/// a daemon restart must not replace a baseline that may have unreviewed work
+/// after it. The caller decides whether this is a fresh startup; this function
+/// is idempotent and preserves every valid existing pin.
+pub fn initialize_review_baselines(
+    git: &dyn GitCommandRunner,
+    repositories: &[PathBuf],
+) -> Result<()> {
+    for root in repositories {
+        if pinned_review_baseline(git, root).is_some() {
+            continue;
+        }
+        let current = capture_worktree_tree(git, root)
+            .with_context(|| format!("capture the startup worktree of {}", root.display()))?;
+        pin_review_tree(git, root, REVIEW_BASELINE_REF, &current)
+            .with_context(|| format!("pin the startup review baseline of {}", root.display()))?;
+    }
+    Ok(())
+}
+
+/// Returns the tree held by the worker's durable baseline ref, if it still
+/// resolves to a tree in this repository.
+fn pinned_review_baseline(git: &dyn GitCommandRunner, repository: &Path) -> Option<String> {
+    let output = git
+        .run(
+            repository,
+            &crate::hel_archive::GitCommand {
+                arguments: vec![
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    format!("{REVIEW_BASELINE_REF}^{{tree}}").into(),
+                ],
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+        )
+        .ok()?;
+    if output.status != 0 {
+        return None;
+    }
+    let tree = String::from_utf8(output.stdout).ok()?;
+    let tree = tree.trim();
+    (!tree.is_empty()).then(|| tree.to_owned())
 }
 
 /// Whether this repository still holds the tree a baseline names.
@@ -395,6 +445,98 @@ mod capture_tests {
             baselines.values().next().map(String::as_str)
         );
         assert_eq!(second[0].changed_lines, 2);
+    }
+
+    #[test]
+    fn startup_baseline_makes_the_first_edits_reviewable() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let startup = pinned_review_baseline(&SystemGit, temp.path()).unwrap();
+
+        std::fs::write(temp.path().join("tracked.rs"), "fn main() { first(); }\n").unwrap();
+        std::fs::write(temp.path().join("new.rs"), "fn new() {}\n").unwrap();
+
+        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        assert!(has_changes(&deltas));
+        assert_eq!(deltas[0].baseline_tree.as_deref(), Some(startup.as_str()));
+        assert!(deltas[0].patch.contains("+fn main() { first(); }"));
+        assert!(deltas[0].patch.contains("new.rs"));
+    }
+
+    #[test]
+    fn startup_baseline_reviews_edits_committed_during_the_turn() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(
+            temp.path().join("tracked.rs"),
+            "fn main() { committed(); }\n",
+        )
+        .unwrap();
+        git(temp.path(), &["add", "tracked.rs"]);
+        git(temp.path(), &["commit", "-qm", "turn change"]);
+
+        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        assert!(has_changes(&deltas));
+        assert!(deltas[0].patch.contains("+fn main() { committed(); }"));
+    }
+
+    #[test]
+    fn persisted_review_baseline_takes_precedence_over_the_startup_pin() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("tracked.rs"), "fn main() { first(); }\n").unwrap();
+        let first = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        let persisted = captured_trees(&first);
+
+        std::fs::write(temp.path().join("tracked.rs"), "fn main() { second(); }\n").unwrap();
+        let second = capture_repository_deltas(&SystemGit, &roots, &persisted).unwrap();
+        assert!(has_changes(&second));
+        assert_eq!(second[0].baseline_tree, persisted.values().next().cloned());
+        assert!(second[0].patch.contains("+fn main() { second(); }"));
+        assert!(!second[0].patch.contains("+fn main() { first(); }"));
+    }
+
+    #[test]
+    fn startup_baseline_excludes_dirty_files_present_before_the_turn() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        std::fs::write(temp.path().join("tracked.rs"), "base\nbefore\n").unwrap();
+        std::fs::write(temp.path().join("preexisting.rs"), "already here\n").unwrap();
+        initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("tracked.rs"), "base\nbefore\nafter\n").unwrap();
+        std::fs::write(temp.path().join("agent.rs"), "new work\n").unwrap();
+
+        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        assert!(has_changes(&deltas));
+        assert!(deltas[0].patch.contains("+after"));
+        assert!(!deltas[0].patch.contains("+before"));
+        assert!(deltas[0].patch.contains("agent.rs"));
+        assert!(!deltas[0].patch.contains("preexisting.rs"));
+    }
+
+    #[test]
+    fn restarting_preserves_the_startup_baseline_and_pending_changes() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let startup = pinned_review_baseline(&SystemGit, temp.path()).unwrap();
+
+        std::fs::write(temp.path().join("tracked.rs"), "fn main() { pending(); }\n").unwrap();
+        initialize_review_baselines(&SystemGit, &roots).unwrap();
+        assert_eq!(
+            pinned_review_baseline(&SystemGit, temp.path()).as_deref(),
+            Some(startup.as_str())
+        );
+
+        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        assert!(has_changes(&deltas));
+        assert!(deltas[0].patch.contains("+fn main() { pending(); }"));
     }
 
     #[test]

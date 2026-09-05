@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -98,6 +98,31 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
     }
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(arguments)
+        .current_dir(repository)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_repository(temp: &tempfile::TempDir) -> PathBuf {
+    let repository = temp.path().join("repository");
+    std::fs::create_dir(&repository).unwrap();
+    git(&repository, &["init", "-q", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Hel Test"]);
+    git(&repository, &["config", "user.email", "hel@example.test"]);
+    std::fs::write(repository.join("tracked.rs"), "fn main() {}\n").unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-qm", "base"]);
+    repository
 }
 
 fn test_credentials() -> std::result::Result<CredentialEndpoint, String> {
@@ -3594,6 +3619,61 @@ async fn first_daemon_start_does_not_record_a_restart_marker() {
             .iter()
             .any(|event| matches!(event.observation, RelayObservation::SessionRestarted))
     );
+}
+
+#[tokio::test]
+async fn first_daemon_start_pins_the_worktree_before_the_primary_harness() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    std::fs::write(repository.join("preexisting.rs"), "already here\n").unwrap();
+    let root = temp.path().join("relay");
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.bridge_command = temp.path().join("missing-acp-bridge");
+    config.cwd = repository.clone();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        unix::run_daemon(root.clone(), config),
+    )
+    .await
+    .expect("the scripted worker child must stop")
+    .expect_err("the test executable is not an ACP supervisor");
+    assert!(!format!("{result:#}").is_empty());
+
+    let baseline = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "refs/hel/review-baseline^{tree}"])
+        .current_dir(&repository)
+        .output()
+        .unwrap();
+    assert!(baseline.status.success());
+    assert!(!baseline.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn daemon_restart_without_a_baseline_does_not_hide_pending_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    let root = temp.path().join("relay");
+    DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.bridge_command = temp.path().join("missing-acp-bridge");
+    config.cwd = repository.clone();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        unix::run_daemon(root, config),
+    )
+    .await
+    .expect("the scripted worker child must stop")
+    .expect_err("the test executable is not an ACP supervisor");
+    assert!(!format!("{result:#}").is_empty());
+
+    let baseline = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "refs/hel/review-baseline^{tree}"])
+        .current_dir(repository)
+        .output()
+        .unwrap();
+    assert!(!baseline.status.success());
 }
 
 #[tokio::test]

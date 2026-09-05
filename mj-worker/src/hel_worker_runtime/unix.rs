@@ -116,8 +116,26 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         std::fs::remove_file(&socket)
             .with_context(|| format!("remove stale socket {}", socket.display()))?;
     }
-    let restarting =
-        root.join(RELAY_STATE_FILE).exists() || root.join(RESTORED_RELAY_SEED_FILE).exists();
+    let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
+    let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
+    // The first capture must have a point before the primary harness starts:
+    // users may enter a session with dirty or untracked files already in the
+    // checkout, and those files are not this turn's work. A relay restart is
+    // different: replacing a missing baseline then could hide changes from a
+    // review that was interrupted. A restored relay has no state file yet, so
+    // its restored worktree is a safe fresh-session boundary.
+    if !relay_state_exists {
+        let mut workspace_roots = vec![config.cwd.clone()];
+        workspace_roots.extend(config.additional_directories.iter().cloned());
+        tokio::task::spawn_blocking(move || {
+            let git = hel::hel_archive::SystemGit;
+            let repositories =
+                hel::hel_review::delta::discover_repositories(&git, &workspace_roots);
+            hel::hel_review::delta::initialize_review_baselines(&git, &repositories)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("review baseline initialization stopped: {error}"))??;
+    }
     // Validate and recover durable state before publishing a socket. A
     // failed startup must never leave a fresh endpoint that looks live.
     let mut durable_relay =
