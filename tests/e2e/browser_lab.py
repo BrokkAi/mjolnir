@@ -115,10 +115,12 @@ def run_layout_matrix(lab: Lab, web_root: pathlib.Path, environment: dict[str, s
     This runs after the reliability scenario against the same live daemon, so
     it costs one extra browser rather than a second lab, and it sees the real
     pages with real sessions on them rather than an empty shell.
+    Quota and plan-mode interaction cases use controlled API fixtures without
+    contacting providers or using live authentication.
     """
     log = (lab.root / "layout.log").open("wb")
     matrix_environment = dict(environment)
-    matrix_environment["MJ_BROWSER_SPEC"] = "{layout,quota}.spec.js"
+    matrix_environment["MJ_BROWSER_SPEC"] = "{layout,quota,plan-mode}.spec.js"
     matrix = subprocess.Popen(
         [str(web_root / "node_modules/.bin/playwright"), "test"],
         cwd=web_root,
