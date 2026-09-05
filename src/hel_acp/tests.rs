@@ -1148,7 +1148,9 @@ async fn mode_change_bridge(
         })
     };
     let modes = serde_json::json!({
-        "currentModeId": "default",
+        // Codex ACP can report its default Agent mode here even though Hel
+        // must force the explicit full-access mode before exposing the session.
+        "currentModeId": "agent",
             "availableModes": [
                 {"id": "default", "name": "Default"},
                 {"id": "plan", "name": "Plan"},
@@ -1167,12 +1169,13 @@ async fn mode_change_bridge(
         let id = message.get("id").cloned().unwrap_or_default();
         let response = match method {
             "initialize" => serde_json::json!({
-                "jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}
+                "jsonrpc": "2.0", "id": id,
+                "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true}}
             }),
-            "session/new" => {
+            "session/new" | "session/load" => {
                 let mut result = serde_json::json!({"sessionId": "scripted"});
                 if matches!(surface, ModeSurface::Both) {
-                    result["configOptions"] = serde_json::json!([mode_option("default")]);
+                    result["configOptions"] = serde_json::json!([mode_option("agent")]);
                 }
                 if matches!(surface, ModeSurface::Legacy | ModeSurface::Both) {
                     result["modes"] = modes.clone();
@@ -1273,8 +1276,10 @@ async fn set_session_mode_uses_the_mode_protocol_even_when_config_is_available()
     assert_eq!(request["method"], "session/set_mode");
 }
 
-#[tokio::test]
-async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
+async fn codex_full_access_is_enforced_before_session_is_reported(
+    execution_policy: ExecutionPolicy,
+    resume_session: Option<&str>,
+) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
     let bridge = tokio::spawn(mode_change_bridge(
@@ -1294,9 +1299,9 @@ async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
         additional_directories: Vec::new(),
         extra_mcp_servers: Vec::new(),
         project_memory: None,
-        resume_session: None,
+        resume_session: resume_session.map(str::to_owned),
         harness: HarnessKind::Codex,
-        execution_policy: ExecutionPolicy::Unconstrained,
+        execution_policy,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::hel_acp::StepClock::default(),
     };
@@ -1320,6 +1325,7 @@ async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
     assert_eq!(request["params"]["value"], "agent-full-access");
 
     let mut reported_mode = None;
+    let mut reported_resumed = None;
     let mut configured_mode = None;
     while reported_mode.is_none() || configured_mode.is_none() {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
@@ -1327,8 +1333,13 @@ async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
             .expect("the configured session must be reported")
             .expect("the runtime must keep its event channel open");
         match event {
-            RuntimeEvent::SessionStarted { execution_mode, .. } => {
+            RuntimeEvent::SessionStarted {
+                execution_mode,
+                resumed,
+                ..
+            } => {
                 reported_mode = execution_mode;
+                reported_resumed = Some(resumed);
             }
             RuntimeEvent::SessionConfigured { config_options } => {
                 configured_mode = Some(
@@ -1342,11 +1353,36 @@ async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
         }
     }
     assert_eq!(reported_mode.as_deref(), Some("agent-full-access"));
+    assert_eq!(reported_resumed, Some(resume_session.is_some()));
     assert_eq!(configured_mode.as_deref(), Some("agent-full-access"));
 
     drop(request_tx);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), driver).await;
     bridge.abort();
+}
+
+#[tokio::test]
+async fn codex_always_forces_full_access_for_a_new_session() {
+    codex_full_access_is_enforced_before_session_is_reported(
+        ExecutionPolicy::ConfiguredApprovals,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn codex_always_forces_full_access_when_resuming_a_session() {
+    codex_full_access_is_enforced_before_session_is_reported(
+        ExecutionPolicy::ConfiguredApprovals,
+        Some("native-session"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
+    codex_full_access_is_enforced_before_session_is_reported(ExecutionPolicy::Unconstrained, None)
+        .await;
 }
 
 #[tokio::test]
@@ -1710,7 +1746,19 @@ async fn steering_bridge(
                     "session/new" => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": {"sessionId": "steering-session"},
+                        "result": {
+                            "sessionId": "steering-session",
+                            "modes": {
+                                "currentModeId": "agent",
+                                "availableModes": [
+                                    {"id": "agent", "name": "Agent"},
+                                    {"id": "agent-full-access", "name": "Full access"},
+                                ],
+                            },
+                        },
+                    }),
+                    "session/set_mode" => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {},
                     }),
                     "session/prompt" => {
                         prompt_id = Some(id);

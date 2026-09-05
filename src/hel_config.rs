@@ -152,7 +152,9 @@ pub enum HarnessKind {
 
 /// The target-level execution policy Hel applies independently of the selected
 /// harness. Raw targets may preserve configured approvals; isolated targets
-/// force full access because their boundary contains the blast radius.
+/// force full access because their boundary contains the blast radius. Codex's
+/// ACP adapter is currently forced into full access on every target; see the
+/// workaround in [`HarnessKind::execution_enforcement`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPolicy {
@@ -289,20 +291,24 @@ impl HarnessKind {
     }
 
     /// How this harness realizes a target-level execution policy. Configured
-    /// approvals require no override; the imported profile and harness retain
-    /// control on raw localhost.
+    /// approvals require no override for harnesses that support them; Codex's
+    /// ACP adapter is forced into full access until its upstream mode handling
+    /// is fixed.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
-            (_, ExecutionPolicy::ConfiguredApprovals) => None,
-            (Self::Codex, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
+            // TODO: Remove this Codex workaround once codex-acp preserves
+            // configured sandbox permissions across turns:
+            // https://github.com/agentclientprotocol/codex-acp/issues/477
+            (Self::Codex, _) => Some(ExecutionEnforcement {
                 label: "agent-full-access",
                 acp_mode: Some("agent-full-access"),
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent-full-access")),
             }),
+            (_, ExecutionPolicy::ConfiguredApprovals) => None,
             (Self::Claude, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "bypassPermissions / sandbox-off",
                 acp_mode: Some("bypassPermissions"),
@@ -1526,8 +1532,22 @@ mod tests {
     }
 
     #[test]
-    fn configured_approvals_never_override_the_profile() {
-        for kind in HarnessKind::ALL {
+    fn configured_approvals_preserve_other_profiles_but_force_codex_full_access() {
+        let codex = HarnessKind::Codex
+            .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
+            .expect("Codex ACP always needs its full-access workaround");
+        assert_eq!(codex.acp_mode(), Some("agent-full-access"));
+        assert_eq!(
+            codex.launch_environment(),
+            Some(("INITIAL_AGENT_MODE", "agent-full-access"))
+        );
+
+        for kind in [
+            HarnessKind::Claude,
+            HarnessKind::Kimi,
+            HarnessKind::Grok,
+            HarnessKind::Deepseek,
+        ] {
             assert_eq!(
                 kind.execution_enforcement(ExecutionPolicy::ConfiguredApprovals),
                 None,

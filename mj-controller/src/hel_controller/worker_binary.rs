@@ -3321,7 +3321,7 @@ mod tests {
         );
     }
     #[test]
-    fn codex_execution_environment_follows_the_target_policy() {
+    fn codex_execution_environment_is_full_access_under_both_target_policies() {
         let mut podman_environment =
             BTreeMap::from([("INITIAL_AGENT_MODE".to_owned(), "read-only".to_owned())]);
         hel::hel_config::HarnessKind::Codex.configure_execution_environment(
@@ -3345,8 +3345,8 @@ mod tests {
             bare_environment
                 .get("INITIAL_AGENT_MODE")
                 .map(String::as_str),
-            Some("read-only"),
-            "raw localhost must preserve the profile's configured mode"
+            Some("agent-full-access"),
+            "Codex ACP must use full access even on raw localhost"
         );
     }
     #[test]
