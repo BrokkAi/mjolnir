@@ -498,6 +498,9 @@ pub struct DashboardState {
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
     /// Click targets for the three size controls in each support-pane title.
     pub(crate) pane_size_control_areas: Vec<(SupportPane, PaneSize, Rect)>,
+    /// Whether the current frame gives each pane a larger allocation when its
+    /// size changes from Standard to the exclusive Maximized state.
+    pane_maximize_enabled: [bool; DASHBOARD_PANE_COUNT],
     /// Projects the user has collapsed in the focused Sessions pane. Absent
     /// means expanded, so a project that appears later starts expanded without
     /// any extra bookkeeping.
@@ -546,6 +549,7 @@ impl DashboardState {
             session_row_areas: Vec::new(),
             project_heading_areas: Vec::new(),
             pane_size_control_areas: Vec::new(),
+            pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
@@ -606,6 +610,24 @@ impl DashboardState {
         self.pane_sizes.get(pane)
     }
 
+    pub(crate) fn pane_maximize_enabled(&self, pane: SupportPane) -> bool {
+        match pane {
+            SupportPane::Sessions => self.pane_maximize_enabled[0],
+            SupportPane::Targets => self.pane_maximize_enabled[1],
+            SupportPane::Quota => self.pane_maximize_enabled[2],
+        }
+    }
+
+    pub(crate) fn set_pane_maximize_enabled(&mut self, enabled: [(SupportPane, bool); 3]) {
+        for (pane, enabled) in enabled {
+            match pane {
+                SupportPane::Sessions => self.pane_maximize_enabled[0] = enabled,
+                SupportPane::Targets => self.pane_maximize_enabled[1] = enabled,
+                SupportPane::Quota => self.pane_maximize_enabled[2] = enabled,
+            }
+        }
+    }
+
     /// Selects one pane size. A maximum is exclusive; the previous maximum
     /// becomes Standard while every other explicit choice stays untouched.
     pub fn set_pane_size(&mut self, pane: SupportPane, size: PaneSize) {
@@ -631,7 +653,11 @@ impl DashboardState {
             self.set_notice("Select Sessions, Targets, or Quota before pressing Alt-Z.");
             return;
         };
-        self.set_pane_size(pane, self.pane_size(pane).cycled());
+        let mut next = self.pane_size(pane).cycled();
+        if next == PaneSize::Maximized && !self.pane_maximize_enabled(pane) {
+            next = next.cycled();
+        }
+        self.set_pane_size(pane, next);
     }
 
     /// Alt-G's stable global preset: restore any custom arrangement to all
@@ -962,6 +988,11 @@ impl DashboardState {
                 .iter()
                 .find(|(_, _, area)| rect_contains(*area, mouse.column, mouse.row))
             {
+                if size == PaneSize::Maximized && !self.pane_maximize_enabled(pane) {
+                    // Keep the disabled control's hitbox consuming the click
+                    // so it cannot fall through to pane focus or row actions.
+                    return DashboardAction::None;
+                }
                 self.set_pane_size(pane, size);
                 return DashboardAction::None;
             }
@@ -1830,6 +1861,24 @@ mod tests {
             dashboard.pane_size(SupportPane::Targets),
             PaneSize::Standard
         );
+    }
+
+    #[test]
+    fn alt_z_skips_a_maximum_that_cannot_grow_the_focused_pane() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus = Focus::Targets;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw dashboard");
+
+        assert!(!dashboard.pane_maximize_enabled(SupportPane::Targets));
+        dashboard.handle_key(alt_key('z'));
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Targets),
+            PaneSize::Minimized
+        );
+        assert_eq!(dashboard.focus, Focus::Targets);
     }
 
     #[test]

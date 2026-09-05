@@ -77,6 +77,13 @@ struct PaneBand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneDimensions {
+    minimized: u16,
+    full: u16,
+    standard_cap: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CombinedHeights {
     sessions: u16,
     transcript: u16,
@@ -84,6 +91,16 @@ struct CombinedHeights {
     targets: u16,
     quota: u16,
     footer: u16,
+}
+
+impl CombinedHeights {
+    fn pane(self, pane: SupportPane) -> u16 {
+        match pane {
+            SupportPane::Sessions => self.sessions,
+            SupportPane::Targets => self.targets,
+            SupportPane::Quota => self.quota,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +179,85 @@ fn allocate_combined_heights(
     CombinedAllocation::Fits(heights)
 }
 
+/// Whether making each pane Maximized would give it more rows than Standard
+/// at this frame size. Maximized is exclusive, so the hypothetical maximum
+/// demotes any other maximum before running the same allocator used to draw
+/// the frame.
+fn maximized_pane_is_effective(
+    frame_height: u16,
+    dimensions: [(SupportPane, PaneDimensions); 3],
+    desired_prompt: u16,
+    sizes: [(SupportPane, PaneSize); 3],
+) -> [(SupportPane, bool); 3] {
+    let bands = dimensions;
+    std::array::from_fn(|index| {
+        let (pane, _) = bands[index];
+        let standard_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Standard);
+        let maximum_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Maximized);
+        let bands_for = |sizes: [(SupportPane, PaneSize); 3]| {
+            std::array::from_fn(|index| {
+                let (_, size) = sizes[index];
+                let dimensions = bands[index].1;
+                sized_band(
+                    size,
+                    dimensions.minimized,
+                    dimensions.full,
+                    dimensions.standard_cap,
+                )
+            })
+        };
+        let standard_bands: [PaneBand; 3] = bands_for(standard_sizes);
+        let maximum_bands: [PaneBand; 3] = bands_for(maximum_sizes);
+        let effective = match (
+            allocate_combined_heights(
+                frame_height,
+                standard_bands[0],
+                standard_bands[1],
+                standard_bands[2],
+                desired_prompt,
+                standard_sizes,
+            ),
+            allocate_combined_heights(
+                frame_height,
+                maximum_bands[0],
+                maximum_bands[1],
+                maximum_bands[2],
+                desired_prompt,
+                maximum_sizes,
+            ),
+        ) {
+            (CombinedAllocation::Fits(standard), CombinedAllocation::Fits(maximum)) => {
+                maximum.pane(pane) > standard.pane(pane)
+            }
+            // Both allocations use the same minimum requirements, so this is
+            // only defensive if that invariant changes later.
+            _ => false,
+        };
+        (pane, effective)
+    })
+}
+
+fn sizes_with_pane_size(
+    sizes: [(SupportPane, PaneSize); 3],
+    pane: SupportPane,
+    size: PaneSize,
+) -> [(SupportPane, PaneSize); 3] {
+    let mut adjusted = sizes;
+    if size == PaneSize::Maximized {
+        for (candidate, candidate_size) in &mut adjusted {
+            if *candidate != pane && *candidate_size == PaneSize::Maximized {
+                *candidate_size = PaneSize::Standard;
+            }
+        }
+    }
+    for (candidate, candidate_size) in &mut adjusted {
+        if *candidate == pane {
+            *candidate_size = size;
+        }
+    }
+    adjusted
+}
+
 fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u16) -> PaneBand {
     match size {
         PaneSize::Minimized => PaneBand {
@@ -234,24 +330,51 @@ pub fn render_combined(
         ),
         (SupportPane::Quota, dashboard.pane_size(SupportPane::Quota)),
     ];
-    let sessions = sized_band(
-        sizes[0].1,
-        minimized_grid_rows(area.height, dashboard.sessions_rows().len()).saturating_add(2),
-        sessions_content_height(dashboard, area.width).saturating_add(2),
-        area.height / 3,
-    );
-    let targets = sized_band(
-        sizes[1].1,
-        SUMMARY_ROW,
-        table_height(dashboard.capacity_details.len()),
-        area.height / 4,
-    );
-    let quota = sized_band(
-        sizes[2].1,
-        SUMMARY_ROW,
-        table_height(dashboard.config.profiles.len()),
-        area.height / 4,
-    );
+    let dimensions = [
+        (
+            SupportPane::Sessions,
+            PaneDimensions {
+                minimized: minimized_grid_rows(area.height, dashboard.sessions_rows().len())
+                    .saturating_add(2),
+                full: sessions_content_height(dashboard, area.width).saturating_add(2),
+                standard_cap: area.height / 3,
+            },
+        ),
+        (
+            SupportPane::Targets,
+            PaneDimensions {
+                minimized: SUMMARY_ROW,
+                full: table_height(dashboard.capacity_details.len()),
+                standard_cap: area.height / 4,
+            },
+        ),
+        (
+            SupportPane::Quota,
+            PaneDimensions {
+                minimized: SUMMARY_ROW,
+                full: table_height(dashboard.config.profiles.len()),
+                standard_cap: area.height / 4,
+            },
+        ),
+    ];
+    let bands: [PaneBand; 3] = std::array::from_fn(|index| {
+        let (_, dimensions) = dimensions[index];
+        sized_band(
+            sizes[index].1,
+            dimensions.minimized,
+            dimensions.full,
+            dimensions.standard_cap,
+        )
+    });
+    let sessions = bands[0];
+    let targets = bands[1];
+    let quota = bands[2];
+    dashboard.set_pane_maximize_enabled(maximized_pane_is_effective(
+        area.height,
+        dimensions,
+        desired_prompt,
+        sizes,
+    ));
     let allocation =
         allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
     let heights = match allocation {
@@ -356,7 +479,10 @@ pub fn render_combined(
                     pane_title_content_width(targets_area.width),
                     focused,
                 ))
-                .title(minimized_pane_size_controls(focused)),
+                .title(minimized_pane_size_controls(
+                    focused,
+                    dashboard.pane_maximize_enabled(SupportPane::Targets),
+                )),
             targets_area,
         );
     } else {
@@ -377,7 +503,10 @@ pub fn render_combined(
                     pane_title_content_width(quota_area.width),
                     focused,
                 ))
-                .title(minimized_pane_size_controls(focused)),
+                .title(minimized_pane_size_controls(
+                    focused,
+                    dashboard.pane_maximize_enabled(SupportPane::Quota),
+                )),
             quota_area,
         );
     } else {
