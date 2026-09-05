@@ -17,7 +17,8 @@ use super::worker_binary::{bridge_launch, stage_profile};
 use super::{Controller, execute_checked, scp_command_spec, ssh_command_spec};
 use hel::hel_targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
 use hel::hel_worker_launch::{
-    REVIEWER_DIR, REVIEWER_PROFILE_DIR, ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig,
+    REVIEWER_DIR, ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig,
+    reviewer_staging_profile_home,
 };
 
 impl Controller {
@@ -108,7 +109,7 @@ impl Controller {
             configure_staged_review_mcp(profile.kind, &local, mcp_servers)
                 .with_context(|| format!("configure reviewer MCP servers for {profile_id:?}"))?;
         }
-        upload_reviewer_profile(executor, &backend, &worker_root, &local)?;
+        upload_reviewer_profile(executor, &backend, &worker_root, generation, &local)?;
 
         let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
         let mut environment = profile.environment.clone();
@@ -228,23 +229,30 @@ fn review_dispatch_server(worker_root: &str) -> ReviewMcpServer {
     }
 }
 
-/// Where the reviewer's staged profile lives on the target.
-fn reviewer_profile_home(worker_root: &str) -> String {
-    format!("{worker_root}/{REVIEWER_DIR}/{REVIEWER_PROFILE_DIR}")
+/// Where one immutable reviewer profile snapshot lives on the target.
+///
+/// The worker copies this source into each role's private harness home before
+/// launch. Keeping generations in separate directories means staging a lane
+/// cannot replace the profile a running role is using.
+fn reviewer_profile_home(worker_root: &str, generation: u64) -> String {
+    reviewer_staging_profile_home(Path::new(worker_root), generation)
+        .to_string_lossy()
+        .into_owned()
 }
 
-/// Replace the reviewer's staged profile with a fresh copy of `local`.
+/// Replace this generation's staged profile with a fresh copy of `local`.
 ///
-/// The previous copy is removed first: a reviewer profile is a snapshot of the
-/// user's configured home, and merging a new copy over an old one would leave
-/// credentials and skills the source no longer has.
+/// The previous snapshot for this generation is removed first: a reviewer
+/// profile is a snapshot of the user's configured home, and merging a new copy
+/// over an old one would leave credentials and skills the source no longer has.
 fn upload_reviewer_profile(
     executor: &impl CommandExecutor,
     locator: &hel_targets::TargetLocator,
     worker_root: &str,
+    generation: u64,
     local: &Path,
 ) -> Result<()> {
-    let home = reviewer_profile_home(worker_root);
+    let home = reviewer_profile_home(worker_root, generation);
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => {
             for command in [
@@ -344,7 +352,7 @@ fn upload_reviewer_profile(
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => {
-            let upload = format!("{worker_root}/.reviewer-upload");
+            let upload = format!("{worker_root}/.reviewer-upload-{generation}");
             execute_checked(
                 executor,
                 ssh_command_spec(ssh, ["rm", "-rf", "--", &upload])

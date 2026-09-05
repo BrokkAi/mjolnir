@@ -62,8 +62,15 @@ const MAX_PARALLEL_LANES: usize = 3;
 /// is the turn review's own reviewer role, so the two features name the same
 /// harness the same way.
 pub use hel::hel_review::driver::REVIEWER_ROLE as DEFAULT_ROLE;
-/// File inside a role's home naming the reviewer generation it was copied for.
+/// File inside a role root naming the reviewer generation it was copied for.
 const ROLE_GENERATION_MARKER: &str = ".hel-reviewer-generation";
+/// The default role keeps its relay at the historical role root, but its
+/// harness home must be separate from the controller's staged profile.
+const DEFAULT_RUNTIME_PROFILE_DIR: &str = "runtime-profile";
+/// Old reviewer relay files are retained here when a new generation starts.
+/// Keeping them out of the live root lets [`DurableRelay::open`] create a
+/// genuinely new native conversation while preserving forensic history.
+const RELAY_ARCHIVE_DIR: &str = "relay-archive";
 
 /// Everything a reviewer inherits from the primary session it reviews for.
 #[derive(Debug, Clone)]
@@ -93,7 +100,20 @@ impl ReviewerPlacement {
     /// is a copy of this one.
     #[must_use]
     pub fn profile_home(&self) -> PathBuf {
-        self.root().join(REVIEWER_PROFILE_DIR)
+        hel::hel_worker_launch::reviewer_staging_profile_home(&self.worker_root, 0)
+    }
+
+    /// Where the controller stages one immutable profile snapshot. Generation
+    /// zero retains the original path for workers upgraded in place; later
+    /// generations get their own path so concurrent role launches never
+    /// replace a snapshot another launch is reading.
+    #[must_use]
+    fn staged_profile_home(&self, generation: u64) -> PathBuf {
+        if generation == 0 {
+            self.profile_home()
+        } else {
+            hel::hel_worker_launch::reviewer_staging_profile_home(&self.worker_root, generation)
+        }
     }
 
     /// Where one role lives. The default role keeps the original layout, so a
@@ -112,7 +132,7 @@ impl ReviewerPlacement {
     #[must_use]
     fn role_profile_home(&self, role: &str) -> PathBuf {
         if role == DEFAULT_ROLE {
-            self.profile_home()
+            self.root().join(DEFAULT_RUNTIME_PROFILE_DIR)
         } else {
             self.role_root(role).join(REVIEWER_PROFILE_DIR)
         }
@@ -509,7 +529,7 @@ impl ReviewerRole {
         lane_slots: &Arc<tokio::sync::Semaphore>,
         config: ReviewerLaunchConfig,
     ) -> Result<RelayResponseBody> {
-        let profile_home = self.placement.profile_home();
+        let profile_home = self.placement.staged_profile_home(config.generation);
         if !profile_home.is_dir() {
             bail!(
                 "reviewer profile has not been staged at {}",
@@ -553,10 +573,16 @@ impl ReviewerRole {
         let root = self.placement.role_root(&self.role);
         std::fs::create_dir_all(&root)
             .with_context(|| format!("create reviewer root {}", root.display()))?;
-        // Every role but the default runs from its own copy of the staged
-        // profile: two harnesses sharing one config home would race over the
-        // same session files and credentials.
-        let profile_home = self.role_profile_home(config.generation)?;
+        // The staged profile is a source snapshot. It is never the harness's
+        // home: replacing it for another role or generation therefore cannot
+        // delete files from a running harness.
+        let generation_changed = self.prepare_generation(&root, config).await?;
+        let profile_home = self
+            .role_profile_home(config.generation, generation_changed)
+            .await?;
+        if generation_changed {
+            self.commit_generation(&root, config).await?;
+        }
         // A lane waits for a slot before its harness starts, so a supervisor
         // that dispatches the whole roster cannot fill the container.
         let lane_slot = if is_lane(&self.role) {
@@ -870,30 +896,96 @@ impl ReviewerRole {
     /// This role's own harness home, refreshed from the staged profile when it
     /// is missing or belongs to an older reviewer generation.
     ///
-    /// The controller stages one copy of the chosen profile; every role but
-    /// the default runs from a copy of that copy, so concurrent harnesses
-    /// never share a config home. The generation marker keeps a repeat review
-    /// from re-copying a large profile on every lane launch while still
-    /// refreshing it when the reviewer's lifetime changes.
-    fn role_profile_home(&self, generation: u64) -> Result<PathBuf> {
+    /// The controller stages one immutable snapshot of the chosen profile;
+    /// every role runs from a copy of that snapshot, so concurrent harnesses
+    /// never share a config home. The role marker keeps a compatible resume
+    /// from re-copying a large profile while still refreshing it when the
+    /// reviewer's lifetime changes.
+    async fn role_profile_home(
+        &self,
+        generation: u64,
+        generation_changed: bool,
+    ) -> Result<PathBuf> {
         let home = self.placement.role_profile_home(&self.role);
-        if self.role == DEFAULT_ROLE {
-            return Ok(home);
+        let source = self.placement.staged_profile_home(generation);
+        let result_home = home.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            if !generation_changed && home.is_dir() {
+                return Ok(());
+            }
+            if home.exists() {
+                std::fs::remove_dir_all(&home)
+                    .with_context(|| format!("clear the reviewer role home {}", home.display()))?;
+            }
+            copy_tree(&source, &home).with_context(|| {
+                format!("copy the staged reviewer profile into {}", home.display())
+            })?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("reviewer profile copy stopped: {error}"))??;
+        Ok(result_home)
+    }
+
+    /// Starts a new relay conversation when the role's profile or generation
+    /// changes. The running process is already paused by `start` before this
+    /// method is reached, so moving its files cannot race a live writer.
+    async fn prepare_generation(
+        &mut self,
+        root: &std::path::Path,
+        config: &ReviewerLaunchConfig,
+    ) -> Result<bool> {
+        let marker = root.join(ROLE_GENERATION_MARKER);
+        let identity = format!(
+            "{}:{}:{:?}",
+            config.generation, config.profile_id, config.harness
+        );
+        let previous = tokio::task::spawn_blocking({
+            let marker = marker.clone();
+            move || std::fs::read_to_string(marker).ok()
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("read reviewer generation stopped: {error}"))?;
+        if previous.as_deref() == Some(identity.as_str()) {
+            return Ok(false);
         }
-        let marker = home.join(ROLE_GENERATION_MARKER);
-        let staged = std::fs::read_to_string(&marker).ok();
-        if staged.as_deref() == Some(generation.to_string().as_str()) {
-            return Ok(home);
-        }
-        if home.exists() {
-            std::fs::remove_dir_all(&home)
-                .with_context(|| format!("clear the reviewer role home {}", home.display()))?;
-        }
-        copy_tree(&self.placement.profile_home(), &home)
-            .with_context(|| format!("copy the staged reviewer profile into {}", home.display()))?;
-        std::fs::write(&marker, generation.to_string())
-            .with_context(|| format!("record the reviewer role generation {}", marker.display()))?;
-        Ok(home)
+
+        // Do not keep an in-memory relay pointing at files that are about to
+        // move. Dropping it before the archive is what makes the next open
+        // use the fresh state on disk.
+        self.relay.take();
+        let root = root.to_owned();
+        let archive_identity = previous.clone().unwrap_or_else(|| "legacy".to_owned());
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            archive_relay(&root, &archive_identity)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("archive reviewer generation stopped: {error}"))??;
+        Ok(true)
+    }
+
+    /// Marks a generation only after its private profile home was copied
+    /// successfully. If the copy fails, the next attempt still sees the old
+    /// marker and retries the archive and copy instead of trusting a partial
+    /// home.
+    async fn commit_generation(
+        &self,
+        root: &std::path::Path,
+        config: &ReviewerLaunchConfig,
+    ) -> Result<()> {
+        let marker = root.join(ROLE_GENERATION_MARKER);
+        let identity = format!(
+            "{}:{}:{:?}",
+            config.generation, config.profile_id, config.harness
+        );
+        tokio::task::spawn_blocking(move || {
+            std::fs::write(&marker, identity)
+                .with_context(|| format!("record reviewer generation at {}", marker.display()))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("record reviewer generation stopped: {error}"))??;
+        Ok(())
     }
 
     /// Opens the reviewer's relay, creating its journal on first use.
@@ -1042,6 +1134,56 @@ impl ReviewerRole {
 /// are single-instance roles and are not what the cap protects against.
 fn is_lane(role: &str) -> bool {
     hel::hel_review::lanes::lane_by_id(role).is_some()
+}
+
+/// Moves a role's old relay files out of the live root. A relay journal is
+/// append-only while it is live, so deleting it would lose the previous
+/// conversation and leave a stale native id available for a new generation.
+fn archive_relay(root: &std::path::Path, identity: &str) -> Result<()> {
+    let state = root.join(hel::hel_worker::RELAY_STATE_FILE);
+    let journal = root.join(hel::hel_worker::RELAY_JOURNAL_DIR);
+    if !state.exists() && !journal.exists() {
+        return Ok(());
+    }
+
+    let archive_root = root.join(RELAY_ARCHIVE_DIR);
+    std::fs::create_dir_all(&archive_root)
+        .with_context(|| format!("create reviewer relay archive {}", archive_root.display()))?;
+    let component = identity
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let component = if component.is_empty() {
+        "legacy".to_owned()
+    } else {
+        component
+    };
+    let mut destination = archive_root.join(&component);
+    let mut suffix = 0_u64;
+    while destination.exists() {
+        suffix = suffix.saturating_add(1);
+        destination = archive_root.join(format!("{component}-{suffix}"));
+    }
+    std::fs::create_dir_all(&destination)
+        .with_context(|| format!("create reviewer relay archive {}", destination.display()))?;
+    if state.exists() {
+        std::fs::rename(&state, destination.join(hel::hel_worker::RELAY_STATE_FILE))
+            .with_context(|| format!("archive reviewer relay state {}", state.display()))?;
+    }
+    if journal.exists() {
+        std::fs::rename(
+            &journal,
+            destination.join(hel::hel_worker::RELAY_JOURNAL_DIR),
+        )
+        .with_context(|| format!("archive reviewer relay journal {}", journal.display()))?;
+    }
+    Ok(())
 }
 
 /// Recursively copies a staged profile into a role's own home.

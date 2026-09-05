@@ -11,9 +11,11 @@ Validate the restored adversarial review feature through the actual terminal int
 - [x] (2026-09-05 15:33Z) Inspected configuration, restored review implementation, and built current host and musl worker binaries.
 - [x] (2026-09-05 15:38Z) Created isolated tmux workspace and container; confirmed Sol at medium effort; completed the first five-test Python task.
 - [x] (2026-09-05 15:42Z) Reproduced first-turn coverage loss, hidden failed-review diagnostic, disabled default action, and failed reviewer retry after correcting the model ID.
-- [ ] Repair baseline initialization, verdict display/action selection, and reviewer conversation lifetime.
-- [ ] Rebuild and rerun live quick review, finding forwarding/correction, extended review, and cancellation checks.
-- [ ] Run required Cargo tests and Clippy, review integrated changes, document evidence and recommendations, clean up owned live resources, and commit on the current branch.
+- [x] (2026-09-05 16:21Z) Repaired baseline initialization, verdict display/action selection, and reviewer conversation lifetime; committed the validated baseline checkpoint as `ff0512c5`.
+- [x] (2026-09-05 16:28Z) Rebuilt and reran first-turn automatic review, visible failure/dismissal, retry, extended intent, cancellation, findings navigation/forwarding, correction, and clean follow-up review.
+- [x] (2026-09-05 16:29Z) Reviewed integrated changes; full Cargo suite passed 2,260 tests and Clippy passed; documented evidence and UX recommendations.
+- [x] (2026-09-05 16:32Z) Final full rerun after the forwarding-copy correction passed: 2,260 tests, 0 failed, 12 ignored; Clippy with warnings denied, rustfmt, and diff-whitespace checks passed. Stopped the isolated daemon, stopped and removed the three owned containers, and closed the isolated tmux server.
+- [x] (2026-09-05 16:32Z) Prepared the remaining reviewed source, tests, report, and this plan for the final commit on `hel2`; no push requested.
 
 ## Surprises & Discoveries
 
@@ -23,6 +25,8 @@ Claude's live bridge advertises `opus[1m]`, rather than `opus`. The initial revi
 
 After correcting the model ID and retrying the same delta, the reviewer tried to load its old native conversation and failed with `Resource not found`. Controller staging replaces the default reviewer's harness home; the worker retains and reloads the old conversation ID. Review generations also restart from zero in each host review slot.
 
+The findings verdict removed the driver's role list, making completed reviewer transcripts unreachable through Tab. Clean review was recorded as manual dismissal. Extended review incorrectly identified the first-ever prompt as the current task, even after a later parser task; the intent analyst explicitly rejected the parser request as superseded. The repaired chronological context correctly identifies the parser. The forwarding wrapper also overstated validator participation for extended reviews.
+
 ## Decision Log
 
 Use isolated state under `target/adversarial-live/`, a separate tmux socket named `mj-adv-live`, and a local fixture repository. Reuse the authorized profile homes as credential sources without changing their configuration. Use the actual advertised Opus ID, `opus[1m]`, to fulfill the requested model choice.
@@ -31,9 +35,13 @@ Capture the initial worktree before primary edits, including dirty and untracked
 
 Delegate independent fixes to Luna agents with separate file ownership. The parent owns design integration, live evidence, full validation, and the final commit. Preserve native conversation reuse only where the profile and conversation lifetime remain compatible; never remove an active harness's files.
 
+Use a fresh random generation identity per independent role launch, including across host restarts. Stage immutable per-generation profile snapshots separately from every role's live harness home. Archive prior relay state and journals before opening a fresh native conversation, and record the generation only after copying succeeds. Run bulk profile and archive work in supervised blocking tasks. Retain snapshots and archived journals until worker teardown; retention limits are a future improvement.
+
+Keep the driver's authoritative role statuses available at a verdict and add a separate scrollable Verdict tab in the TUI. Preserve typed verdict context through resolution for accurate notices. For intent, use the latest non-control user prompt plus all chronological real user requirements; keep trajectory restricted to the review boundary. This preserves earlier requirements when the latest message is only steering. These decisions follow live failures observed on 2026-09-05.
+
 ## Outcomes & Retrospective
 
-Work is in progress. The live test has exposed defects before a successful review; success is not yet claimed.
+The repaired live workflow now reviews the first changed turn, explains configuration failures, retries with a fresh native conversation, displays actionable findings while preserving role transcripts, forwards findings to Sol, and automatically reviews the correction. The final parser fixture passed all 10 tests and received a clean review. Cancelling a running supervisor restored the prompt within two seconds; retry still reviewed the seeded defect. Exact final model/effort values were verified in journals. Extended review used Intent and Supervisor but elected not to launch specialists, so live fan-out is not claimed. Automated role tests cover isolation. The final full suite and required Clippy checks passed, and cleanup is complete. Remaining UX recommendations, evidence, and limitations are recorded in `.agents/docs/adversarial-review-live-2026-09-05.md`.
 
 ## Context and Orientation
 
@@ -58,13 +66,13 @@ From `/home/jonathan/Projects/hel2`, build with:
     cargo build -p brokk-mjolnir --bin mj
     cargo build --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
 
-The isolated environment is `target/adversarial-live/env.sh`; it sets `MJ_CONFIG_DIR`, `MJ_DATA_DIR`, and `MJ_WORKER_BINARY`. Its configuration defines only the two requested profiles, the local fixture bundle, Podman target, and `[review]` with automatic quick review and `model = "opus[1m]"`, `effort = "medium"`.
+The isolated environment is `target/adversarial-live/env.sh`; it sets `MJ_CONFIG_DIR`, `MJ_DATA_DIR`, and `MJ_WORKER_BINARY`. Its configuration defines only the two requested profiles, the local fixture bundle, Podman target, and `[review]` with automatic review and `model = "opus[1m]"`, `effort = "medium"`. It began with quick review and ended with `tier = "extended"`.
 
 The live terminal is inspected with:
 
     tmux -L mj-adv-live capture-pane -p -t review
 
-Use `/model gpt-5.6-sol` and `/effort medium` in Prompt, accepting completion and submitting as separate actions where needed. The prompt heading must show both values. `/review` starts an on-demand review. Arrow keys and Enter resolve a verdict; Escape cancels. Change the isolated configuration to `tier = "extended"` for the specialist path.
+Use `/model gpt-5.6-sol` and `/effort medium` in Prompt. With Prompt focused, one Enter submitted each exact command; verify the heading shows both values. `/review` starts an on-demand review. Arrow keys and Enter resolve a verdict; Escape cancels. Avoid sending a second Enter blindly: while review is running, its enabled default action is Cancel. Change the isolated configuration to `tier = "extended"` for the supervisor path, which may dispatch specialists.
 
 ## Validation and Acceptance
 
@@ -72,7 +80,7 @@ Run every Cargo test outside the restricted sandbox. Focused behavioral tests mu
 
 ## Idempotence and Recovery
 
-Operate only on the lab's daemon, tmux socket, and recorded container IDs. Existing user sessions must remain untouched. Detaching a terminal does not stop the daemon or container; stop the owned session through the product before stopping its isolated daemon and tmux server. Keep test evidence but do not commit credential files or runtime databases. Do not delete working files while their owning processes are still running. Commit only changed source, tests, and agent documentation, directly on the current branch; do not push.
+Operate only on the lab's daemon, tmux socket, and recorded container IDs. Existing user sessions must remain untouched. Detaching a terminal does not stop the daemon or container. Final cleanup detached the TUI, stopped the isolated daemon, then used `podman stop --time 10` before `podman rm` on exactly `mj-394a8abab76d-52cd23`, `mj-0174f9e2aa11-39acd0`, and `mj-5d1c8d71459f-64670d`. The `mj-adv-live` tmux server was closed. Keep test evidence but do not commit credential files or runtime databases. Do not delete working files while their owning processes are still running. Commit only changed source, tests, and agent documentation, directly on the current branch; do not push.
 
 ## Artifacts and Notes
 
@@ -82,4 +90,4 @@ Live captures are under `target/adversarial-live/`, including `primary.capture`,
 
 Use existing `GitCommandRunner`, `capture_worktree_tree`, `REVIEW_BASELINE_REF`, and shared subprocess facilities for repository capture. Use Tokio background tasks for blocking work and existing durable relay observations for reviewer state. The UI consumes `RuntimeReviewView` and sends existing `Resolution` values; avoid new protocol commands unless required by a demonstrated lifecycle boundary. No new workspace crate or third-party dependency is needed.
 
-Plan created 2026-09-05 after live failures expanded the task into coordinated lifecycle and rendering fixes.
+Plan created 2026-09-05 after live failures expanded the task into coordinated lifecycle and rendering fixes. Updated after the final live pass to record the additional intent and notice defects, completed acceptance evidence, and the limit that the small extended fixture did not trigger specialist dispatch.

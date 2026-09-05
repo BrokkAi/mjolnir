@@ -106,6 +106,21 @@ pub const PROMPT_HELD_MESSAGE: &str =
 /// ever.
 static PROMPT_LOCK: LazyLock<Mutex<BTreeSet<String>>> = LazyLock::new(Mutex::default);
 
+/// Fresh reviewer conversations need an identity that is unique across all
+/// roles, reviews, and controller restarts. A slot-local counter makes an
+/// extended review's next supervisor collide with a previous supervisor, so
+/// use a random nonce.
+fn next_review_generation() -> Result<u64, String> {
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random)
+        .map_err(|error| format!("generate reviewer generation: {error}"))?;
+    let generation = u64::from_le_bytes(random);
+    if generation == 0 {
+        return Err("generate reviewer generation: random nonce was zero".to_owned());
+    }
+    Ok(generation)
+}
+
 /// Whether a prompt for `session_id` must be refused, and why.
 #[must_use]
 pub fn prompt_refusal(session_id: &str) -> Option<&'static str> {
@@ -575,8 +590,9 @@ struct ReviewSlot {
     roles: BTreeMap<String, RoleTranscript>,
     reviewer: ReviewerIdentity,
     state: TurnReviewState,
-    /// Bumped per role launch: the sidecar reads a new generation as "this is
-    /// a different reviewer" and refuses to reuse the running one.
+    /// The sidecar reads a new generation as "this is a different reviewer".
+    /// Fresh role launches receive a random nonce, so a later review cannot
+    /// reuse the native conversation left by an earlier one.
     generation: u64,
 }
 
@@ -1098,6 +1114,9 @@ impl HostState {
                         roles: BTreeMap::new(),
                         reviewer: pending.prepared.reviewer,
                         state: pending.prepared.state,
+                        // `start_role` assigns a process-wide generation before
+                        // every fresh role. Zero remains the explicit
+                        // generation for a role that resumes in place.
                         generation: 0,
                     },
                 );
@@ -1113,10 +1132,9 @@ impl HostState {
                         "could not clear the active review marker"
                     );
                 }
-                let notice = self
-                    .reviews
-                    .get(&session_id)
-                    .and_then(|slot| resolution_notice(slot.driver.phase()));
+                let notice = self.reviews.get(&session_id).and_then(|slot| {
+                    resolution_notice(slot.driver.phase(), slot.driver.last_verdict())
+                });
                 self.reviews.remove(&session_id);
                 release_prompts(&session_id);
                 if let Some(notice) = notice {
@@ -1339,6 +1357,20 @@ impl HostState {
 
     /// Stages the configured reviewer profile and starts one role under it.
     fn start_role(&mut self, session_id: &str, role: String, fresh: bool) {
+        let fresh_generation = if fresh {
+            match next_review_generation() {
+                Ok(generation) => Some(generation),
+                Err(error) => {
+                    self.fail(
+                        session_id,
+                        format!("the reviewer could not allocate a fresh conversation: {error}"),
+                    );
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return;
         };
@@ -1346,8 +1378,8 @@ impl HostState {
         // validator judges the reviewer's claims against source, so it must
         // not inherit them. Bumping the generation is what the sidecar reads
         // as "this is a different reviewer".
-        if fresh {
-            slot.generation = slot.generation.saturating_add(1);
+        if let Some(generation) = fresh_generation {
+            slot.generation = generation;
         }
         let generation = slot.generation;
         let epoch = slot.epoch;
@@ -1957,14 +1989,28 @@ async fn prepare(
 
 /// The transcript line a resolution leaves behind, on every surface.
 #[must_use]
-pub fn resolution_notice(phase: &TurnReviewPhase) -> Option<String> {
+pub fn resolution_notice(
+    phase: &TurnReviewPhase,
+    last_verdict: Option<&ReviewVerdict>,
+) -> Option<String> {
     let TurnReviewPhase::Resolved(resolution) = phase else {
         return None;
     };
     Some(match resolution {
         Resolution::Forwarded => "Review findings sent to the agent".to_owned(),
-        Resolution::Dismissed => "Review dismissed".to_owned(),
-        Resolution::Cancelled => "Review cancelled".to_owned(),
+        Resolution::Dismissed => match last_verdict {
+            Some(ReviewVerdict::Clean) => "Review complete: no material findings".to_owned(),
+            Some(ReviewVerdict::Failed { .. }) => {
+                "Review failed; the change stays unreviewed".to_owned()
+            }
+            _ => "Review dismissed".to_owned(),
+        },
+        Resolution::Cancelled => match last_verdict {
+            Some(ReviewVerdict::Failed { .. }) => {
+                "Review failed; the change stays unreviewed".to_owned()
+            }
+            _ => "Review cancelled".to_owned(),
+        },
         Resolution::NothingToReview => "Nothing to review: the turn changed no files".to_owned(),
         Resolution::CoverageStarted => {
             "Review coverage starts here; the next completed turn is reviewed".to_owned()
@@ -1975,8 +2021,8 @@ pub fn resolution_notice(phase: &TurnReviewPhase) -> Option<String> {
 /// Builds the review's seed from the session's own projection.
 ///
 /// This is the daemon-side twin of what the chat used to read out of its view
-/// state: the opening prompt is the task, the user messages after the last
-/// completed review are the intent, the agent's closing message is the result,
+/// state: the latest user prompt is the task, all chronological user messages
+/// are the intent context, the agent's closing message is the result,
 /// and a compact trajectory says what it did.
 fn seed_from_session(
     session: &MaterializedSession,
@@ -1997,17 +2043,16 @@ fn seed_from_session(
                 if text.is_empty() {
                     continue;
                 }
-                if task.is_empty() {
-                    task = text.to_owned();
+                if hel::hel_second_opinion::is_control_origin_prompt(text) {
+                    continue;
                 }
-                if item.position > reviewed_through
-                    && !hel::hel_second_opinion::is_control_origin_prompt(text)
-                {
-                    // Mjolnir's own generated prompts -- a forwarded review, a
-                    // plan-review context request -- are not user intent, and
-                    // reading them as intent would let a review grade the
-                    // agent against Mjolnir's words.
-                    user_messages.push(UserMessage::prompt(text));
+                task = text.to_owned();
+                // The intent analyst needs the complete chronological user
+                // history to distinguish a current steering prompt from an
+                // earlier requirement. `task` separately identifies the
+                // latest outer prompt.
+                user_messages.push(UserMessage::prompt(text));
+                if item.position > reviewed_through {
                     trajectory.push(format!("user: {text}"));
                 }
             }
@@ -2041,12 +2086,6 @@ fn seed_from_session(
             _ => {}
         }
     }
-    if task.is_empty() {
-        task = user_messages
-            .first()
-            .map(|message| message.text.clone())
-            .unwrap_or_default();
-    }
     TurnReviewSeed {
         tier,
         task,
@@ -2076,6 +2115,90 @@ mod tests {
     /// session id would release each other's locks.
     fn session_id(test: &str) -> String {
         format!("018f9dd2-a3b4-7c8d-9000-{test}")
+    }
+
+    #[test]
+    fn resolution_notices_keep_the_verdict_context_after_close() {
+        let resolved_dismissed = TurnReviewPhase::Resolved(Resolution::Dismissed);
+        assert_eq!(
+            resolution_notice(&resolved_dismissed, Some(&ReviewVerdict::Clean)),
+            Some("Review complete: no material findings".to_owned())
+        );
+        assert_eq!(
+            resolution_notice(
+                &TurnReviewPhase::Resolved(Resolution::Cancelled),
+                Some(&ReviewVerdict::Failed {
+                    reason: "harness failed".to_owned(),
+                }),
+            ),
+            Some("Review failed; the change stays unreviewed".to_owned())
+        );
+        assert_eq!(
+            resolution_notice(
+                &resolved_dismissed,
+                Some(&ReviewVerdict::Findings {
+                    synthesis: "[P1] broken".to_owned(),
+                    evidence: Default::default(),
+                }),
+            ),
+            Some("Review dismissed".to_owned())
+        );
+    }
+
+    fn user_prompt(position: u64, text: &str) -> Arc<hel::hel_state::TranscriptItem> {
+        Arc::new(hel::hel_state::TranscriptItem {
+            stable_id: format!("user:{position}"),
+            position,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: hel::hel_state::TranscriptBody::User {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                })],
+            },
+        })
+    }
+
+    #[test]
+    fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
+        let mut session = MaterializedSession::empty("seed-prompts");
+        session.applied_event_ordinal = 5;
+        session.transcript = vec![
+            user_prompt(1, "implement the old parser"),
+            user_prompt(2, "support parse_range"),
+            user_prompt(3, "[HARNESS NOTE: review the parser]"),
+            user_prompt(4, "also finish the parser error path"),
+            user_prompt(5, "[HARNESS NOTE: forwarded findings]"),
+        ];
+        let mut state = TurnReviewState {
+            reviewed_through_ordinal: 1,
+            ..TurnReviewState::default()
+        };
+
+        let seed = seed_from_session(&session, ReviewTier::Extended, &state, "manual");
+        assert_eq!(seed.task, "also finish the parser error path");
+        assert_eq!(
+            seed.user_messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "implement the old parser",
+                "support parse_range",
+                "also finish the parser error path",
+            ],
+            "intent receives real prompts in chronological order"
+        );
+        assert!(!seed.trajectory.contains("HARNESS NOTE"));
+
+        // A corrective-only pass still has no new user prompt, but retains the
+        // latest real prompt as its current outer task.
+        state.reviewed_through_ordinal = 5;
+        let corrective = seed_from_session(&session, ReviewTier::Extended, &state, "manual");
+        assert_eq!(corrective.task, "also finish the parser error path");
+        assert_eq!(corrective.user_messages.len(), 3);
     }
 
     /// An idle reviewer's operational state. Built through serde because the
@@ -3220,10 +3343,11 @@ mod tests {
 
         // The reviewer ran under the configured profile, and only the
         // supervisor is ever given the tool that launches specialists.
-        assert_eq!(
-            environment.staged_roles(),
-            vec![("reviewer".to_owned(), 1, false)]
-        );
+        let staged = environment.staged_roles();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].0, "reviewer");
+        assert_ne!(staged[0].1, 0, "fresh reviewer generation");
+        assert!(!staged[0].2);
         // A resolved review records what it reviewed through, so the next one
         // measures from here.
         let recorded = environment.state();

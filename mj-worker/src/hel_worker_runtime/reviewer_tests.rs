@@ -75,12 +75,20 @@ for line in sys.stdin:
             "agentCapabilities": {"loadSession": True},
         }})
     elif method in ("session/new", "session/load"):
+        with open(os.path.join(here, "session-method"), "a") as handle:
+            handle.write(method + "\n")
         write({"jsonrpc": "2.0", "id": ident, "result": {
             "sessionId": "reviewer-native",
             "configOptions": load("options.json", []),
         }})
     elif method == "session/set_config_option":
         value = request["params"]["value"]
+        if os.path.exists(os.path.join(here, "reject-" + value)):
+            write({"jsonrpc": "2.0", "id": ident, "error": {
+                "code": -32602,
+                "message": "unsupported model " + value,
+            }})
+            continue
         with open(os.path.join(here, "applied"), "a") as handle:
             handle.write("%s=%s\n" % (request["params"]["configId"], value))
         write({"jsonrpc": "2.0", "id": ident, "result": {
@@ -218,6 +226,17 @@ impl Fixture {
         self.script_directory().join(name)
     }
 
+    fn stage_generation(&self, generation: u64) {
+        if generation == 0 {
+            return;
+        }
+        let destination = self
+            .worker_root
+            .join("reviewer")
+            .join(format!("profile-{generation}"));
+        copy_tree_for_test(&self.profile_home, &destination);
+    }
+
     /// The scripted harness's process id, recorded when it started.
     fn harness_pid(&self) -> i32 {
         std::fs::read_to_string(self.marker("harness-pid"))
@@ -294,6 +313,20 @@ impl Fixture {
                 "the reviewer did not reach the expected state in {timeout:?}"
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
+fn copy_tree_for_test(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let source = entry.path();
+        let destination = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree_for_test(&source, &destination);
+        } else {
+            std::fs::copy(source, destination).unwrap();
         }
     }
 }
@@ -440,6 +473,7 @@ async fn a_new_generation_replaces_the_running_reviewer() {
     let replaced = fixture.harness_pid();
     assert!(process_alive(replaced));
 
+    fixture.stage_generation(1);
     let body = fixture.start(config(1)).await;
     let (_, reused) = started_options(&body);
     assert!(!reused, "a new generation is a new reviewer");
@@ -451,6 +485,70 @@ async fn a_new_generation_replaces_the_running_reviewer() {
         fixture.harness_pid(),
         replaced,
         "the replacement is a different process"
+    );
+
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn a_new_generation_starts_a_fresh_native_conversation() {
+    let mut fixture = Fixture::new(true);
+    fixture.start(config(0)).await;
+    fixture.sidecar.pause_all().await;
+
+    fixture.stage_generation(1);
+    fixture.start(config(1)).await;
+
+    let methods = std::fs::read_to_string(fixture.marker("session-method")).unwrap();
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec!["session/new", "session/new"]
+    );
+    assert!(
+        fixture
+            .worker_root
+            .join("reviewer")
+            .join("relay-archive")
+            .exists(),
+        "the previous relay is retained outside the live generation"
+    );
+
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn a_failed_model_start_can_retry_with_a_corrected_model() {
+    let mut fixture = Fixture::new(true);
+    let directory = fixture.script_directory();
+    write_options(
+        &directory,
+        "options.json",
+        &[select_option("model", "opus[1m]", &["opus[1m]"])],
+    );
+    std::fs::write(directory.join("reject-opus"), b"1").unwrap();
+
+    let mut rejected = config(0);
+    rejected.model = Some("opus".into());
+    let body = fixture.start(rejected).await;
+    assert!(
+        matches!(body, RelayResponseBody::Error { .. }),
+        "the unsupported first model must fail: {body:?}"
+    );
+    fixture.sidecar.pause_all().await;
+
+    std::fs::remove_file(directory.join("reject-opus")).unwrap();
+    fixture.stage_generation(1);
+    let mut corrected = config(1);
+    corrected.model = Some("opus[1m]".into());
+    let body = fixture.start(corrected).await;
+    assert!(
+        matches!(body, RelayResponseBody::Ok { .. }),
+        "a corrected model must start a new reviewer: {body:?}"
+    );
+    let methods = std::fs::read_to_string(fixture.marker("session-method")).unwrap();
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec!["session/new", "session/new"]
     );
 
     fixture.sidecar.pause_all().await;
@@ -812,6 +910,15 @@ async fn two_review_roles_run_side_by_side_with_their_own_homes_and_journals() {
     let body = fixture.start(config(0)).await;
     let (_, reused) = started_options(&body);
     assert!(!reused, "the default role starts its own harness");
+    assert!(
+        fixture
+            .worker_root
+            .join("reviewer")
+            .join("runtime-profile")
+            .join("credentials")
+            .exists(),
+        "the default role runs from a private copy of the staged profile"
+    );
 
     let body = fixture
         .request_as(
