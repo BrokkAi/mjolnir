@@ -23,8 +23,8 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 
 use hel::hel_config::{
-    HelConfig, SshConnection, TargetTemplate, atomic_write, config_path, container_size_host,
-    data_dir, is_bare_project_target, mount_history_host,
+    HelConfig, SshConnection, TargetTemplate, atomic_write, container_size_host, data_dir,
+    is_bare_project_target, mount_history_host,
 };
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
@@ -503,15 +503,11 @@ impl Controller {
 
     pub fn rename_profile_id(&mut self, old_id: &str, new_id: &str) -> Result<()> {
         hel::hel_config::validate_id("profile", new_id)?;
-        ensure!(
-            self.config.profiles.contains_key(old_id),
-            "unknown profile {old_id:?}"
-        );
-        ensure!(
-            old_id == new_id || !self.config.profiles.contains_key(new_id),
-            "profile {new_id:?} already exists"
-        );
         if old_id == new_id {
+            ensure!(
+                self.config.profiles.contains_key(old_id),
+                "unknown profile {old_id:?}"
+            );
             return Ok(());
         }
         let journal = ConfigRenameJournal {
@@ -520,28 +516,58 @@ impl Controller {
             new_id: new_id.to_owned(),
         };
         write_config_rename_journal(&journal)?;
-        let previous = self.config.clone();
-        let profile = self
-            .config
-            .profiles
-            .remove(old_id)
-            .expect("profile checked");
-        self.config.profiles.insert(new_id.to_owned(), profile);
-        if let Err(error) = self.config.save() {
-            self.config = previous;
-            remove_config_rename_journal()
-                .context("remove profile rename journal after config save failed")?;
-            return Err(error).context("save renamed profile configuration");
-        }
+        let (config, ()) = match HelConfig::update(|config| {
+            ensure!(
+                config.profiles.contains_key(old_id),
+                "unknown profile {old_id:?}"
+            );
+            ensure!(
+                !config.profiles.contains_key(new_id),
+                "profile {new_id:?} already exists"
+            );
+            let profile = config
+                .profiles
+                .remove(old_id)
+                .expect("profile was checked in the transaction");
+            config.profiles.insert(new_id.to_owned(), profile);
+            Ok(())
+        }) {
+            Ok(result) => result,
+            Err(error) => {
+                remove_config_rename_journal()
+                    .context("remove profile rename journal after config save failed")?;
+                return Err(error).context("save renamed profile configuration");
+            }
+        };
+        self.config = config;
         hel::hel_test_hooks::reach_test_hook("config_replacement_before_reference_migration")?;
         if let Err(error) = hel::hel_database::rename_profile_references(old_id, new_id) {
-            if let Err(restore_error) = previous.save() {
+            let restore = HelConfig::update(|config| {
+                let profile = config
+                    .profiles
+                    .remove(new_id)
+                    .with_context(|| format!("renamed profile {new_id:?} is missing"))?;
+                ensure!(
+                    !config.profiles.contains_key(old_id),
+                    "cannot restore profile rename: both {old_id:?} and {new_id:?} exist"
+                );
+                config.profiles.insert(old_id.to_owned(), profile);
+                Ok(())
+            });
+            let restored = match restore {
+                Ok((config, ())) => config,
+                Err(restore_error) => {
+                    return Err(error).context(format!(
+                        "rename profile references; additionally failed to restore config: {restore_error:#}"
+                    ));
+                }
+            };
+            self.config = restored;
+            if let Err(restore_error) = remove_config_rename_journal() {
                 return Err(error).context(format!(
-                    "rename profile references; additionally failed to restore config: {restore_error:#}"
+                    "rename profile references; additionally failed to remove rename journal: {restore_error:#}"
                 ));
             }
-            self.config = previous;
-            remove_config_rename_journal()?;
             return Err(error).context("rename profile references");
         }
         for session in self.state.sessions.values_mut() {
@@ -555,15 +581,11 @@ impl Controller {
 
     pub fn rename_target_id(&mut self, old_id: &str, new_id: &str) -> Result<()> {
         hel::hel_config::validate_id("target template", new_id)?;
-        ensure!(
-            self.config.targets.contains_key(old_id),
-            "unknown target {old_id:?}"
-        );
-        ensure!(
-            old_id == new_id || !self.config.targets.contains_key(new_id),
-            "target {new_id:?} already exists"
-        );
         if old_id == new_id {
+            ensure!(
+                self.config.targets.contains_key(old_id),
+                "unknown target {old_id:?}"
+            );
             return Ok(());
         }
         let journal = ConfigRenameJournal {
@@ -572,24 +594,58 @@ impl Controller {
             new_id: new_id.to_owned(),
         };
         write_config_rename_journal(&journal)?;
-        let previous = self.config.clone();
-        let target = self.config.targets.remove(old_id).expect("target checked");
-        self.config.targets.insert(new_id.to_owned(), target);
-        if let Err(error) = self.config.save() {
-            self.config = previous;
-            remove_config_rename_journal()
-                .context("remove target rename journal after config save failed")?;
-            return Err(error).context("save renamed target configuration");
-        }
+        let (config, ()) = match HelConfig::update(|config| {
+            ensure!(
+                config.targets.contains_key(old_id),
+                "unknown target {old_id:?}"
+            );
+            ensure!(
+                !config.targets.contains_key(new_id),
+                "target {new_id:?} already exists"
+            );
+            let target = config
+                .targets
+                .remove(old_id)
+                .expect("target was checked in the transaction");
+            config.targets.insert(new_id.to_owned(), target);
+            Ok(())
+        }) {
+            Ok(result) => result,
+            Err(error) => {
+                remove_config_rename_journal()
+                    .context("remove target rename journal after config save failed")?;
+                return Err(error).context("save renamed target configuration");
+            }
+        };
+        self.config = config;
         hel::hel_test_hooks::reach_test_hook("config_replacement_before_reference_migration")?;
         if let Err(error) = hel::hel_database::rename_target_references(old_id, new_id) {
-            if let Err(restore_error) = previous.save() {
+            let restore = HelConfig::update(|config| {
+                let target = config
+                    .targets
+                    .remove(new_id)
+                    .with_context(|| format!("renamed target {new_id:?} is missing"))?;
+                ensure!(
+                    !config.targets.contains_key(old_id),
+                    "cannot restore target rename: both {old_id:?} and {new_id:?} exist"
+                );
+                config.targets.insert(old_id.to_owned(), target);
+                Ok(())
+            });
+            let restored = match restore {
+                Ok((config, ())) => config,
+                Err(restore_error) => {
+                    return Err(error).context(format!(
+                        "rename target references; additionally failed to restore config: {restore_error:#}"
+                    ));
+                }
+            };
+            self.config = restored;
+            if let Err(restore_error) = remove_config_rename_journal() {
                 return Err(error).context(format!(
-                    "rename target references; additionally failed to restore config: {restore_error:#}"
+                    "rename target references; additionally failed to remove rename journal: {restore_error:#}"
                 ));
             }
-            self.config = previous;
-            remove_config_rename_journal()?;
             return Err(error).context("rename target references");
         }
         for session in self.state.sessions.values_mut() {
@@ -613,26 +669,29 @@ impl Controller {
         };
         let journal: ConfigRenameJournal =
             serde_json::from_slice(&body).with_context(|| format!("parse {}", path.display()))?;
-        let mut config = HelConfig::load_from(&config_path())?;
         match journal.kind {
             ConfigRenameKind::Profile => {
-                finish_config_map_rename(
-                    &mut config.profiles,
-                    &journal.old_id,
-                    &journal.new_id,
-                    "profile",
-                )?;
-                config.save()?;
+                HelConfig::update(|config| {
+                    finish_config_map_rename(
+                        &mut config.profiles,
+                        &journal.old_id,
+                        &journal.new_id,
+                        "profile",
+                    )?;
+                    Ok(())
+                })?;
                 hel::hel_database::rename_profile_references(&journal.old_id, &journal.new_id)?;
             }
             ConfigRenameKind::Target => {
-                finish_config_map_rename(
-                    &mut config.targets,
-                    &journal.old_id,
-                    &journal.new_id,
-                    "target",
-                )?;
-                config.save()?;
+                HelConfig::update(|config| {
+                    finish_config_map_rename(
+                        &mut config.targets,
+                        &journal.old_id,
+                        &journal.new_id,
+                        "target",
+                    )?;
+                    Ok(())
+                })?;
                 hel::hel_database::rename_target_references(&journal.old_id, &journal.new_id)?;
             }
         }

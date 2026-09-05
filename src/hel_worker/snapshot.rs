@@ -1394,7 +1394,13 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                     terminalize_removed_prompts(snapshot, removed_command_ids, event.ordinal)?;
                 }
                 (RelayCommand::SetConfig { key, value }, RelayCommandOutcome::Configured) => {
-                    snapshot.config.insert(key, value);
+                    snapshot.config.insert(key.clone(), value.clone());
+                    crate::hel_acp::AcceptedSessionConfig::record_completed(
+                        &mut snapshot.config,
+                        &key,
+                        &value,
+                        &snapshot.config_options,
+                    );
                 }
                 (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
                     snapshot.config.insert("mode".to_owned(), mode_id);

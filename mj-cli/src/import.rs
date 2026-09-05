@@ -264,16 +264,20 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
 
-    let mut config = HelConfig::load()?;
+    let config = HelConfig::load()?;
     let mut state = HelState::load()?;
     state.validate_against_config(&config)?;
     let targets = session_edit_targets(&transcript, &home)?;
-    let bundle_id =
-        resolve_import_bundle(&mut config, &transcript, &targets, args.bundle.as_deref())?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
         println!("{IMPORT_CANCELLED_MESSAGE}");
         return Ok(());
     }
+    // Resolve and persist a synthesized bundle while holding the config lock;
+    // the archive scan then runs outside that lock so other settings do not
+    // wait behind a large import.
+    let (config, bundle_id) = HelConfig::update(|config| {
+        resolve_import_bundle(config, &transcript, &targets, args.bundle.as_deref())
+    })?;
     let imported = (located.import)(
         &config,
         &mut state,
@@ -281,10 +285,6 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
         &bundle_id,
         args.title.as_deref(),
     )?;
-    // Both writes are atomic. The archive was already written and reopened by
-    // `write_archive_atomic`; persist a synthesized config before the state
-    // record that references it.
-    config.save()?;
     let session = state
         .sessions
         .get_mut(&imported.session_id)

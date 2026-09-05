@@ -848,11 +848,8 @@ pub(crate) fn spawn_create_bundle(
         "creating bundle",
         updates,
         move || {
-            // Load fresh so a concurrent background save (e.g. an import
-            // apply) is not clobbered by a stale UI-time config snapshot.
-            let mut config = Controller::load()?.config;
-            let bundle_id = create_quick_bundle(&mut config, &source)?;
-            config.save()?;
+            let (config, bundle_id) =
+                HelConfig::update(|config| create_quick_bundle(config, &source))?;
             Ok(CreatedBundleUpdate { config, bundle_id })
         },
         |result| DashboardIoUpdate::CreatedBundle {
@@ -885,11 +882,20 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            let mut config = Controller::load()?.config;
-            config
-                .bundles
-                .insert(session.bundle_id.clone(), bundle.clone());
-            config.save()?;
+            HelConfig::update(|config| {
+                if let Some(existing) = config.bundles.get(&session.bundle_id) {
+                    anyhow::ensure!(
+                        existing == &bundle,
+                        "bundle {:?} changed during import; retry the import",
+                        session.bundle_id
+                    );
+                } else {
+                    config
+                        .bundles
+                        .insert(session.bundle_id.clone(), bundle.clone());
+                }
+                Ok(())
+            })?;
             persist_imported_session(&session)?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,

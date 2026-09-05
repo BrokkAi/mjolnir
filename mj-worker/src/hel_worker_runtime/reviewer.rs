@@ -779,12 +779,19 @@ impl ReviewerRole {
         };
         // One acquisition: a guard taken inside the struct literal below
         // would live until the literal ends and deadlock the next one.
-        let (resume_session, acp_activity, step_clock) = {
+        let (resume_session, acp_activity, step_clock, accepted_config) = {
             let relay = relay.lock().expect("reviewer relay lock poisoned");
+            let state = relay.operational_state();
             (
-                relay.operational_state().native_session_id,
+                state.native_session_id,
                 relay.acp_activity_clock(),
                 relay.step_clock(),
+                Arc::new(Mutex::new(
+                    hel_acp::AcceptedSessionConfig::from_configuration(
+                        &state.config,
+                        &state.config_options,
+                    ),
+                )),
             )
         };
         let spec = LaunchSpec {
@@ -803,6 +810,7 @@ impl ReviewerRole {
             project_memory: None,
             extra_mcp_servers: config.mcp_servers.clone(),
             resume_session,
+            accepted_config,
             harness: config.harness,
             execution_policy: config.execution_policy,
             acp_activity,
