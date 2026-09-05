@@ -83,6 +83,26 @@ test('a very long unbroken dashboard title stays bounded and remains readable', 
   await expect(page.getByRole('heading', { name: title, exact: true })).toHaveCount(1);
 });
 
+test('paperclip stays hidden for sessions without image support', async ({ page }) => {
+  const html = fs.readFileSync(
+    path.resolve(__dirname, '../../../mj-controller/src/web/viewer.html'),
+    'utf8',
+  );
+  await page.setContent(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace(/<link\b[^>]*>/g, ''));
+  await page.addStyleTag({ content: VIEWER_CSS });
+  await page.evaluate(() => {
+    document.querySelector('#app').classList.remove('hidden');
+    document.querySelector('#conversation').classList.remove('hidden');
+  });
+  const attach = page.getByRole('button', { name: 'Attach one or more images', includeHidden: true });
+  await expect(attach).toBeHidden();
+  await attach.evaluate(node => { node.hidden = false; });
+  await expect(attach).toBeVisible();
+  const box = await attach.boundingBox();
+  expect(box.width).toBeGreaterThanOrEqual(44);
+  expect(box.height).toBeGreaterThanOrEqual(44);
+});
+
 for (const viewport of VIEWPORTS) {
   test(`the viewer fits ${viewport.name} and stays reachable`, async ({ browser }) => {
     const baseUrl = required('MJ_BROWSER_BASE_URL');

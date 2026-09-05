@@ -14,6 +14,14 @@ fn completed_tool(seq: u64, title: &str) -> ChatEntry {
     ChatEntry::tool(seq, title, None, ToolStatus::Completed)
 }
 
+fn session_restart(seq: u64) -> ChatEntry {
+    ChatEntry::plain(
+        seq,
+        ChatRole::System,
+        hel::hel_transcript::SESSION_RESTART_TEXT,
+    )
+}
+
 fn keypad_key(code: KeyCode) -> KeyEvent {
     KeyEvent::new_with_kind_and_state(
         code,
@@ -78,6 +86,135 @@ fn every_role_publishes_the_glyph_and_tone_the_terminal_draws() {
             "{role:?} carries a tool state"
         );
     }
+}
+
+#[test]
+fn adjacent_session_restart_markers_keep_only_the_latest_presentation() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut second_restart = session_restart(2);
+    second_restart.recorded_at_ms = Some(2_000);
+    chat.entries = vec![
+        session_restart(1),
+        second_restart,
+        ChatEntry::plain(3, ChatRole::User, "continue"),
+        session_restart(4),
+        session_restart(5),
+    ];
+    chat.latest_seq = 5;
+
+    let rich = transcript_text(&mut chat, 80);
+    assert_eq!(
+        rich.iter()
+            .filter(|line| line.contains(hel::hel_transcript::SESSION_RESTART_TEXT))
+            .count(),
+        2,
+        "one marker survives each adjacent run: {rich:?}"
+    );
+    assert_eq!(
+        chat.entries.len(),
+        5,
+        "presentation collapse does not rewrite the projected transcript"
+    );
+    chat.render_mode = TranscriptRenderMode::Raw;
+    let raw = transcript_text(&mut chat, 80);
+    assert_eq!(
+        raw.iter()
+            .filter(|line| line.contains(hel::hel_transcript::SESSION_RESTART_TEXT))
+            .count(),
+        2,
+        "raw mode coalesces the markers while keeping its visible source rows"
+    );
+
+    let mut raw_only = ChatEntry::plain(10, ChatRole::System, "captured terminal output");
+    raw_only.raw_only = true;
+    let mut raw_chat = ChatState::new(&snapshot(), &[]);
+    raw_chat.entries = vec![session_restart(8), raw_only, session_restart(12)];
+    raw_chat.render_mode = TranscriptRenderMode::Raw;
+    let raw_with_visible_detail = transcript_text(&mut raw_chat, 80);
+    assert_eq!(
+        raw_with_visible_detail
+            .iter()
+            .filter(|line| line.contains(hel::hel_transcript::SESSION_RESTART_TEXT))
+            .count(),
+        2,
+        "a Raw-visible detail separates restart markers"
+    );
+
+    raw_chat.render_mode = TranscriptRenderMode::Rich;
+    let rich_with_omitted_detail = transcript_text(&mut raw_chat, 80);
+    assert_eq!(
+        rich_with_omitted_detail
+            .iter()
+            .filter(|line| line.contains(hel::hel_transcript::SESSION_RESTART_TEXT))
+            .count(),
+        1,
+        "a Rich-omitted detail does not separate restart markers"
+    );
+
+    let browser = chat.transcript_snapshot().browser_transcript(None);
+    assert_eq!(
+        browser
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [2, 3, 5],
+        "the browser receives the newest marker from each run"
+    );
+    assert_eq!(browser.entries[0].recorded_at_ms, Some(2_000));
+    assert_eq!(browser.latest_seq, 5);
+    assert_eq!(browser.window_start_seq, 5);
+
+    // A viewer that had the older marker must be told to replace its feed;
+    // otherwise the append-only browser DOM would retain the hidden entry.
+    let delta = chat.transcript_snapshot().browser_transcript(Some(1));
+    assert!(delta.reset);
+    assert_eq!(
+        delta
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [2, 3, 5]
+    );
+}
+
+#[test]
+fn browser_restart_collapse_resets_when_a_delivered_marker_is_replaced() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries = vec![
+        ChatEntry::plain(1, ChatRole::User, "before restart"),
+        session_restart(2),
+    ];
+    chat.latest_seq = 2;
+    let opened = chat.transcript_snapshot().browser_transcript(None);
+    assert_eq!(
+        opened
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(opened.window_start_seq, 1);
+
+    chat.entries.push(session_restart(3));
+    chat.latest_seq = 3;
+    let delta = chat.transcript_snapshot().browser_transcript(Some(2));
+    assert!(delta.reset, "the old marker was already delivered");
+    assert_eq!(delta.window_start_seq, 3);
+    assert_eq!(
+        delta
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [1, 3]
+    );
+
+    let settled = chat.transcript_snapshot().browser_transcript(Some(3));
+    assert!(!settled.reset);
+    assert!(settled.entries.is_empty());
 }
 
 #[test]

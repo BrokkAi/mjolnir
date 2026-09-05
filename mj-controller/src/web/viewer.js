@@ -48,6 +48,10 @@ const login = document.querySelector('#login'),
   sendButton = document.querySelector('#send-button'),
   queue = document.querySelector('#conversation-queue'),
   shells = document.querySelector('#conversation-shells'),
+  conversationSide = document.querySelector('#conversation-side'),
+  conversationSummary = conversationSide?.querySelector('summary'),
+  queueHeading = queue?.previousElementSibling,
+  shellsHeading = shells?.previousElementSibling,
   elicitations = document.querySelector('#elicitations'),
   reviewHost = document.querySelector('#turn-review'),
   promptText = document.querySelector('#prompt-text'),
@@ -344,8 +348,10 @@ function renderSessions() {
       list.setAttribute('role', 'list');
       for (const session of group.sessions) {
         const row = sessionCard(session);
-        row.setAttribute('role', 'listitem');
-        list.append(row);
+        const item = el('div');
+        item.setAttribute('role', 'listitem');
+        item.append(row);
+        list.append(item);
       }
       section.append(list);
       return section;
@@ -360,6 +366,13 @@ function renderSessions() {
 function sessionCard(session) {
   const card = el('article', 'card session');
   card.dataset.sessionId = session.id;
+  const can = session.capabilities || {};
+  if (can.open) {
+    card.dataset.openable = 'true';
+    card.setAttribute('role', 'link');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-label', `Open session ${session.title || session.id}`);
+  }
 
   const heading = el('h3');
   renderSessionTitle(heading, session);
@@ -369,7 +382,7 @@ function sessionCard(session) {
   const state = el('span', `pill state-${session.lifecycle}`);
   state.append(
     withHiddenGlyph(LIFECYCLE_ICON[session.lifecycle] || '○'),
-    el('span', '', session.state),
+    el('span', '', sessionLifecycleLabel(session)),
   );
   status.append(state);
   if (session.has_error) status.append(el('span', 'pill alert', 'needs attention'));
@@ -399,8 +412,6 @@ function sessionCard(session) {
   }
 
   const actions = el('div', 'row');
-  const can = session.capabilities || {};
-  if (can.open) actions.append(action('Open', '', { action: 'open', id: session.id }));
   if (can.rename)
     actions.append(action('Rename', 'secondary', { action: 'rename', id: session.id }));
   if (can.cancel_operation) {
@@ -421,6 +432,12 @@ function sessionCard(session) {
   return card;
 }
 
+// Durable "running" means the session is alive, not that a turn or background
+// command is running. Leave activity to the separate turn/BG/idle indicator.
+function sessionLifecycleLabel(session) {
+  return session.state === 'running' ? 'live' : session.state;
+}
+
 /// A glyph that repeats what an adjacent word already says, so it is
 /// decoration to a screen reader rather than a second reading of the same fact.
 function withHiddenGlyph(glyph) {
@@ -433,6 +450,29 @@ function action(label, className, data) {
   const node = button(label, className, data);
   node.disabled = pendingActions.has(`${data.action}:${data.id}`);
   return node;
+}
+
+/// Find a session card for an event without treating one of its controls as
+/// a request to open the conversation. Card summaries remain ordinary text:
+/// selecting text is not a separate interaction the card needs to preserve.
+function sessionCardFromEvent(event) {
+  const target = event.target;
+  if (!target || target.closest('button')) return null;
+  const card = target.closest('.session[data-session-id]');
+  return card?.dataset.openable === 'true' ? card : null;
+}
+
+function openSessionCard(event) {
+  const card = sessionCardFromEvent(event);
+  if (!card) return false;
+  navigate({ name: 'conversation', sessionId: card.dataset.sessionId });
+  return true;
+}
+
+function handleSessionCardKeydown(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (!openSessionCard(event)) return;
+  event.preventDefault();
 }
 
 // ---------------------------------------------------------------------------
@@ -749,7 +789,7 @@ function resumableCard(session) {
   const card = el('article', 'card session');
   card.dataset.sessionId = session.id;
   card.append(el('h3', '', session.title));
-  card.append(el('p', 'dim', `${session.state} · ${session.profile_id}`));
+  card.append(el('p', 'dim', `${sessionLifecycleLabel(session)} · ${session.profile_id}`));
 
   if (!session.compatible_resume_targets?.length) {
     card.append(
@@ -909,21 +949,74 @@ function renderTargets() {
 }
 
 function renderQuota() {
+  const focused = document.activeElement;
+  const focusedProfile = focused?.closest('.quota-profile')?.dataset.profileId;
+  const focusedControl = focused?.matches('summary') ? 'summary' : focused?.matches('button[data-refresh]') ? 'button[data-refresh]' : null;
+  const expanded = new Set(
+    [...quotaPanel.querySelectorAll('details[open]')].map(row => row.dataset.profileId),
+  );
+  const profiles = snapshot.profiles || [];
+  if (!profiles.length) {
+    quotaPanel.replaceChildren(el('p', 'dim', 'No profiles configured.'));
+    return;
+  }
+  // Keep the provider's actual period labels. Missing windows are not zero,
+  // and an unfamiliar provider must not disappear from the overview.
+  const labels = [...new Set(profiles.flatMap(profile =>
+    (profile.quota?.windows || []).map(window => window.label),
+  ))].sort();
+  quotaPanel.style.setProperty('--quota-columns', Math.max(1, labels.length));
+  const heading = el('div', 'quota-overview-heading');
+  heading.append(el('span', '', '% left'));
+  for (const label of labels) heading.append(el('span', '', label));
+  const hint = el('p', 'dim quota-hint', 'Tap a profile for resets and details.');
   quotaPanel.replaceChildren(
-    ...(snapshot.profiles || []).map(profile => {
-      const card = el('article', 'card');
-      const heading = el('h3');
-      heading.append(el('span', '', profile.id));
+    hint,
+    heading,
+    ...profiles.map(profile => {
+      const disclosure = el('details', 'quota-profile');
+      disclosure.dataset.profileId = profile.id;
+      disclosure.open = expanded.has(profile.id);
+      const summary = el('summary', 'quota-overview-row');
       const quota = profile.quota;
-      if (quota?.has_error) heading.append(el('span', 'pill reading-low', 'unavailable'));
-      else if (quota?.stale) heading.append(el('span', 'pill reading-mid', 'stale'));
-      card.append(heading);
+      const name = el('span', 'quota-profile-name', profile.id);
+      if (quota?.has_error) name.append(el('small', 'reading-low', 'probe failed'));
+      else if (quota?.stale) name.append(el('small', 'reading-mid', 'stale'));
+      summary.append(name);
+      const spoken = [profile.id, quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : ''];
+      if (quota?.windows?.length) {
+        for (const label of labels) {
+          const window = quota.windows.find(window => window.label === label);
+          const used = window?.percent_used;
+          const remaining = used == null ? null : 100 - used;
+          const warning = window?.projects_exhaustion_before_reset;
+          const value = window ? remaining === null ? '?' : `${remaining}%` : '—';
+          const cell = el('span', `quota-value ${band(remaining)}`, value + (warning ? ' !' : ''));
+          const description = `${label}: ${window ? remaining === null ? 'unknown' : `${remaining}% left` : 'not reported'}${warning ? ', projected to run out before reset' : ''}`;
+          cell.title = description;
+          summary.append(cell);
+          spoken.push(description);
+        }
+      } else {
+        const state = el('span', 'quota-no-windows dim', quota?.has_error ? 'Unavailable' : quota?.summary || 'No reading yet');
+        summary.append(state);
+        spoken.push(state.textContent);
+      }
+      summary.append(el('span', 'quota-chevron', '›'));
+      summary.lastChild.setAttribute('aria-hidden', 'true');
+      summary.setAttribute('aria-label', spoken.filter(Boolean).join('. '));
+      disclosure.append(summary);
+      const card = el('div', 'quota-details');
+      disclosure.append(card);
       card.append(el('p', 'dim', profile.harness_kind));
+      const error = el('p', 'quota-error');
+      error.setAttribute('role', 'alert');
+      card.append(error);
 
       if (!quota) {
         card.append(el('p', 'dim', 'No reading yet.'));
         card.append(refreshRow('refresh-quota', { profile_id: profile.id }));
-        return card;
+        return disclosure;
       }
       const windows = quota.windows || [];
       if (!windows.length) {
@@ -969,9 +1062,14 @@ function renderQuota() {
         );
       }
       card.append(refreshRow('refresh-quota', { profile_id: profile.id }));
-      return card;
+      return disclosure;
     }),
   );
+  if (focusedProfile && focusedControl) {
+    [...quotaPanel.querySelectorAll('.quota-profile')]
+      .find(row => row.dataset.profileId === focusedProfile)
+      ?.querySelector(focusedControl)?.focus({ preventScroll: true });
+  }
 }
 
 /// The refresh control both pages carry.
@@ -985,6 +1083,7 @@ function refreshRow(actionName, payload) {
 
 async function runRefresh(target, errorNode) {
   const body = { action: target.dataset.refresh, ...JSON.parse(target.dataset.payload) };
+  if (errorNode) errorNode.textContent = '';
   target.disabled = true;
   try {
     await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
@@ -1078,34 +1177,44 @@ async function restoreRoute() {
 function renderQueue(session) {
   const prompts = session.queued_prompts || [];
   queue.replaceChildren(
-    ...(prompts.length
-      ? prompts.map((prompt, index) => {
-          const row = el('div', 'queue-item');
-          row.append(el('span', '', `${index + 1}. ${prompt.text}`));
-          const controls = el('div', 'row');
-          // The newest queued prompt can be taken back into the composer, the
-          // way the terminal's edit-latest does, because the last thing you
-          // queued is the one you most often want to change.
-          if (index === prompts.length - 1) {
-            controls.append(button('Edit', 'secondary', { editQueueId: prompt.id }));
-          }
-          controls.append(button('Remove', 'danger', { queueId: prompt.id }));
-          row.append(controls);
-          return row;
-        })
-      : [el('p', 'dim', 'No queued prompts.')]),
+    ...prompts.map((prompt, index) => {
+      const row = el('div', 'queue-item');
+      row.append(el('span', '', `${index + 1}. ${prompt.text}`));
+      const controls = el('div', 'row');
+      // The newest queued prompt can be taken back into the composer, the
+      // way the terminal's edit-latest does, because the last thing you
+      // queued is the one you most often want to change.
+      if (index === prompts.length - 1) {
+        controls.append(button('Edit', 'secondary', { editQueueId: prompt.id }));
+      }
+      controls.append(button('Remove', 'danger', { queueId: prompt.id }));
+      row.append(controls);
+      return row;
+    }),
   );
+  queue.hidden = prompts.length === 0;
+  if (queueHeading) queueHeading.hidden = prompts.length === 0;
+
   const running = session.active_user_shells || [];
   shells.replaceChildren(
-    ...(running.length
-      ? running.map(shell => {
-          const row = el('div', 'queue-item');
-          row.append(el('span', '', `$ ${shell.command}`));
-          row.append(button('Cancel', 'danger', { shellId: shell.id }));
-          return row;
-        })
-      : [el('p', 'dim', 'No running shells.')]),
+    ...running.map(shell => {
+      const row = el('div', 'queue-item');
+      row.append(el('span', '', `$ ${shell.command}`));
+      row.append(button('Cancel', 'danger', { shellId: shell.id }));
+      return row;
+    }),
   );
+  shells.hidden = running.length === 0;
+  if (shellsHeading) shellsHeading.hidden = running.length === 0;
+  if (conversationSummary) {
+    conversationSummary.textContent =
+      prompts.length && running.length
+        ? 'Queue and shells'
+        : prompts.length
+          ? 'Queued prompts'
+          : 'Shell commands';
+  }
+  conversationSide.hidden = prompts.length === 0 && running.length === 0;
 }
 // Every snapshot revision re-renders the conversation. Rebuilding a card the
 // user is answering would wipe the half-filled form and steal focus, so each
@@ -2291,7 +2400,7 @@ async function openConversation(id) {
   entryNodes.clear();
   feed.replaceChildren();
   document.querySelector('#conversation-title').textContent = session.title;
-  document.querySelector('#conversation-state').textContent = session.state;
+  document.querySelector('#conversation-state').textContent = sessionLifecycleLabel(session);
   renderQueue(session);
   renderElicitations(session);
   renderTurnReview(session);
@@ -2315,7 +2424,7 @@ function renderSessionTitle(node, session) {
 function renderConversationHeader(session) {
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   const state = document.querySelector('#conversation-state');
-  state.textContent = session.state;
+  state.textContent = sessionLifecycleLabel(session);
   state.className = `pill state-${session.lifecycle}`;
   cancelTurnButton.classList.toggle('hidden', !session.capabilities?.cancel_turn);
 
@@ -2337,7 +2446,7 @@ function renderConversationHeader(session) {
   promptText.setAttribute('contenteditable', String(canPrompt));
   sendButton.disabled = !canPrompt || promptInFlight;
   if (session.plan_mode_active) {
-    state.textContent = `${session.state} · plan`;
+    state.textContent = `${sessionLifecycleLabel(session)} · plan`;
   }
 }
 
@@ -2438,7 +2547,7 @@ window.addEventListener('hashchange', applyRoute);
 for (const panel of [targetsPanel, quotaPanel]) {
   panel.onclick = async event => {
     const target = event.target.closest('button[data-refresh]');
-    if (target) await runRefresh(target);
+    if (target) await runRefresh(target, target.closest('.quota-profile')?.querySelector('.quota-error'));
   };
 }
 
@@ -2508,9 +2617,14 @@ async function runSessionAction(dataset, errorNode, extra) {
 
 sessions.onclick = async e => {
   const target = e.target.closest('button[data-action]');
-  if (!target) return;
-  await runSessionAction(target.dataset, actionError);
+  if (target) {
+    await runSessionAction(target.dataset, actionError);
+    return;
+  }
+  openSessionCard(e);
 };
+
+sessions.onkeydown = handleSessionCardKeydown;
 
 resumable.onclick = async e => {
   const target = e.target.closest('button[data-action]');

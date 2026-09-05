@@ -85,7 +85,8 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await expect(page.locator('#quota')).toContainText('fake');
     // The lab's harness reports no usable quota, so the page has to say that
     // rather than draw an empty bar and imply a healthy limit.
-    await expect(page.locator('#quota')).toContainText('unavailable');
+    await expect(page.locator('#quota')).toContainText(/unavailable/i);
+    await page.locator('#quota summary').first().click();
     await page.locator('#quota').getByRole('button', { name: 'Refresh' }).first().click();
 
     // Targets is a page too, and it says what state its readings are in.
@@ -127,9 +128,10 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     // Scoped to the dashboard: the resume page renders session cards too, and
     // a hidden page's nodes are still in the document.
     const session = page.locator('#sessions .session').filter({ hasText: title });
-    await expect(session).toContainText('running');
+    await expect(session.locator('.state-live')).toHaveText(/live$/);
     stage('session-running');
-    await session.getByRole('button', { name: 'Open' }).click();
+    await expect(session).toHaveAttribute('role', 'link');
+    await session.locator('h3').click();
     await expect(page).toHaveURL(/#conversation\//);
     await expect(page.locator('#conversation-title')).toHaveText(title);
 
@@ -185,7 +187,7 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await expect(resumable).toBeVisible();
     await resumable.getByRole('button', { name: 'Resume' }).click();
     await page.getByRole('button', { name: 'Back' }).click();
-    await expect(session).toContainText('running');
+    await expect(session.locator('.state-live')).toHaveText(/live$/);
     // A stop needs the daemon's session manager to have adopted the session,
     // and adoption is asynchronous, so a stop issued moments after a resume can
     // fail with "is not managed". The terminal surface offers Retry stop for

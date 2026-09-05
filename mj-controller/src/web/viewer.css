@@ -883,6 +883,80 @@ details.block-fold > pre {
   gap: 12px;
 }
 
+.quota-hint {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.quota-overview-heading,
+.quota-overview-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) repeat(var(--quota-columns, 2), minmax(0, 1fr)) 16px;
+  align-items: center;
+  column-gap: 8px;
+}
+
+.quota-overview-heading {
+  color: var(--dim);
+  font-size: 13px;
+  padding: 4px 8px;
+}
+
+.quota-overview-heading > span:not(:first-child),
+.quota-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-profile {
+  border-bottom: 1px solid var(--border);
+}
+
+.quota-overview-row {
+  min-height: var(--touch);
+  box-sizing: border-box;
+  padding: 4px 8px;
+  cursor: pointer;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
+.quota-overview-row::-webkit-details-marker {
+  display: none;
+}
+
+.quota-overview-row:hover,
+.quota-overview-row:focus-visible {
+  background: var(--surface-raised);
+}
+
+.quota-profile-name small {
+  display: block;
+  font-size: 11px;
+}
+
+.quota-no-windows {
+  grid-column: 2 / -2;
+  font-size: 13px;
+}
+
+.quota-chevron {
+  color: var(--dim);
+  text-align: center;
+}
+
+.quota-profile[open] .quota-chevron {
+  transform: rotate(90deg);
+}
+
+.quota-details {
+  padding: 0 8px 12px;
+}
+
+.quota-error:empty {
+  display: none;
+}
+
 /* The bar repeats the number beside it, so nothing is said by length alone. */
 .meter {
   height: 6px;
@@ -1120,4 +1194,58 @@ body[data-connection='reconnecting'] .connection::before {
   .readings dt {
     margin-top: 6px;
   }
+}
+
+/* ---- interactive session cards, compact queue, and paperclip control ---- */
+
+/* A persistent chevron makes navigation discoverable on touch screens too. */
+.session[data-openable='true'] {
+  position: relative;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.session[data-openable='true']::after {
+  content: '›';
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+.session[data-openable='true'] > h3 {
+  padding-right: 20px;
+}
+
+.session[data-openable='true']:hover {
+  background: var(--surface-raised);
+  border-color: var(--focus);
+}
+
+.session[data-openable='true']:focus-visible {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.queue-item > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.queue-item > .row {
+  flex: 0 0 auto;
+}
+
+.paperclip-button:not([hidden]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+}
+
+.paperclip-button svg {
+  display: block;
+  width: 20px;
+  height: 20px;
 }

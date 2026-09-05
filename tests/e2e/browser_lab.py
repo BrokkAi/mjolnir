@@ -118,7 +118,7 @@ def run_layout_matrix(lab: Lab, web_root: pathlib.Path, environment: dict[str, s
     """
     log = (lab.root / "layout.log").open("wb")
     matrix_environment = dict(environment)
-    matrix_environment["MJ_BROWSER_SPEC"] = "layout.spec.js"
+    matrix_environment["MJ_BROWSER_SPEC"] = "{layout,quota}.spec.js"
     matrix = subprocess.Popen(
         [str(web_root / "node_modules/.bin/playwright"), "test"],
         cwd=web_root,
