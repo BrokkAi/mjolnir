@@ -19,7 +19,7 @@ Users should configure one global adversarial reviewer from F2, using actual mod
 - [x] Merge updated upstream on the current branch, preserving both review overlays and upstream session colors. Final integrated validation: 2,317 Cargo tests passed, 12 ignored; Clippy, formatting/diff checks, and 11 web unit checks passed.
 - [x] Complete the live calibration/forwarding cycle: revised Opus verdict retained two root causes at P1/P2; Sol fixed both, the independent six-test rerun passed, and automatic Opus follow-up was clean. Repeated Enter during active review did not cancel it; repeated Enter at forwarding produced one corrective turn. Cancelling a visibly checking readiness probe preserved the open review.
 - [x] Record evidence, commit coherent validated changes on the current branch, and stop/remove the disposable test container and isolated UI/daemon.
-- [ ] Push the completed work to the branch's upstream.
+- [x] Push the completed work to the branch's upstream: `9e71fec9` was accepted on `origin/master`, including all implementation and live-test evidence.
 
 ## Surprises & Discoveries
 
@@ -50,7 +50,7 @@ The live F2 probe on the disposable Podman target advertised Opus (1M context) a
 
 Forwarding through the real TUI produced one corrective Sol turn, a sent notice after acceptance, and an automatic clean Opus follow-up. The independent final `python3 -B -m unittest -v` rerun passed all six cases; no dependencies or fixture commits were introduced. The persisted review state ended with no active review or pending handoff. Global readiness could verify concurrently with an active review; cancelling a fresh probe while it showed `checking actual targets` preserved the findings, and no readiness/Claude harness remained afterward. The primary model was reset to Sol/medium after each automatic binary upgrade restored its profile default; model persistence across upgrades was outside this approved change.
 
-Final integrated validation passed 2,317 Cargo tests (12 ignored), Clippy with warnings denied, 11 web unit checks, formatting, and diff checks. Severity guidance and implementation were committed in coherent checkpoints; upstream was merged on the existing branch, resolving only a session-rendering conflict by retaining both behaviors. The isolated tmux/daemon and disposable container were stopped, then the container was removed; evidence remains under the ignored lab directory and user profile homes were preserved. The remaining step is the authorized push.
+Final integrated validation passed 2,317 Cargo tests (12 ignored), Clippy with warnings denied, 11 web unit checks, formatting, and diff checks. Severity guidance and implementation were committed in coherent checkpoints; upstream was merged on the existing branch, resolving only a session-rendering conflict by retaining both behaviors. The isolated tmux/daemon and disposable container were stopped, then the container was removed; evidence remains under the ignored lab directory and user profile homes were preserved. The authorized push succeeded at `9e71fec9`; this final documentation update records completion.
 
 ## Context and Orientation
 
