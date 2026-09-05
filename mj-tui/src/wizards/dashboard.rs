@@ -1460,7 +1460,7 @@ impl DashboardState {
     /// Open the resume wizard for one session by id. The dashboard reaches
     /// this for a failed but checkpointed session; the resume dialog reaches it
     /// for a stopped one.
-    pub(crate) fn begin_resume_for(&mut self, session_id: &str) -> DashboardAction {
+    pub fn begin_resume_for(&mut self, session_id: &str) -> DashboardAction {
         let Some(session) = self.state.sessions.get(session_id).cloned() else {
             return DashboardAction::None;
         };

@@ -135,6 +135,47 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
 }
 
 #[test]
+fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
+    let mut config = config();
+    config
+        .targets
+        .insert("z-target".into(), config.targets["podman"].clone());
+
+    let mut imported = stopped_session();
+    imported.id = "imported-session".into();
+    imported.last_profile = "codex-2".into();
+    imported.target_template_id = "z-target".into();
+
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let state = HelState {
+        version: STATE_VERSION,
+        sessions: BTreeMap::from([(imported.id.clone(), imported)]),
+        mount_history: BTreeMap::new(),
+        container_sizes: BTreeMap::new(),
+    };
+    dashboard.set_state(state);
+
+    assert_eq!(
+        dashboard.begin_resume_for("imported-session"),
+        DashboardAction::None
+    );
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("expected the imported session to open the resume wizard");
+    };
+    assert_eq!(wizard.session_id, "imported-session");
+    let compatible_profiles = dashboard.compatible_profiles(&wizard.session_id);
+    assert_eq!(
+        compatible_profiles[wizard.profile].0, "codex-2",
+        "codex-2 remains the selected profile"
+    );
+    assert_eq!(
+        nth_key(&dashboard.config.targets, wizard.target),
+        "z-target",
+        "z-target remains the selected target"
+    );
+}
+
+#[test]
 fn new_session_can_request_a_repository_when_no_bundle_exists() {
     let mut config = config();
     config.bundles.clear();

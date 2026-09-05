@@ -1324,6 +1324,7 @@ impl DashboardContext {
             },
             DashboardIoUpdate::ImportedSessionApplied { result } => match *result {
                 Ok(applied) => {
+                    let session_id = applied.session.id.clone();
                     self.controller
                         .config
                         .bundles
@@ -1331,7 +1332,7 @@ impl DashboardContext {
                     self.controller
                         .state
                         .sessions
-                        .insert(applied.session.id.clone(), applied.session);
+                        .insert(session_id.clone(), applied.session);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
                     self.resolve_project_sources();
@@ -1340,6 +1341,12 @@ impl DashboardContext {
                         "Imported {} session {}.",
                         applied.harness, applied.native_session_id
                     ));
+                    if let DashboardAction::ResolveAwsResourceOptions {
+                        target_template_ids,
+                    } = self.dashboard.begin_resume_for(&session_id)
+                    {
+                        self.resolve_aws_resource_options(target_template_ids);
+                    }
                 }
                 Err(error) => self.dashboard.set_notice(format!("Import failed: {error}")),
             },
