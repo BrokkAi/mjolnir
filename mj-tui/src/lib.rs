@@ -65,6 +65,7 @@ pub use crate::ingest::{
 };
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsProbeResult, ReviewTargetReadiness};
+pub use hel::hel_workspace::{PaneSize, PaneSizes};
 
 /// One drawn row of the Sessions pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,55 +328,23 @@ pub(crate) enum SelectionDirection {
 pub(crate) const FOCUS_ORDER: [Focus; 4] =
     [Focus::Sessions, Focus::Prompt, Focus::Targets, Focus::Quota];
 
-/// The explicit height requested for one support pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PaneSize {
-    Minimized,
-    #[default]
-    Standard,
-    Maximized,
-}
-
-impl PaneSize {
-    /// The next title-bar control, wrapping from maximum to minimum.
-    #[must_use]
-    pub fn cycled(self) -> Self {
-        match self {
-            Self::Minimized => Self::Standard,
-            Self::Standard => Self::Maximized,
-            Self::Maximized => Self::Minimized,
-        }
+/// Read one pane size without making the shared workspace model depend on the
+/// TUI's pane enum.
+fn pane_size_for(sizes: PaneSizes, pane: SupportPane) -> PaneSize {
+    match pane {
+        SupportPane::Sessions => sizes.sessions,
+        SupportPane::Targets => sizes.targets,
+        SupportPane::Quota => sizes.quota,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct PaneSizes {
-    sessions: PaneSize,
-    targets: PaneSize,
-    quota: PaneSize,
-}
-
-impl PaneSizes {
-    fn get(self, pane: SupportPane) -> PaneSize {
-        match pane {
-            SupportPane::Sessions => self.sessions,
-            SupportPane::Targets => self.targets,
-            SupportPane::Quota => self.quota,
-        }
-    }
-
-    fn get_mut(&mut self, pane: SupportPane) -> &mut PaneSize {
-        match pane {
-            SupportPane::Sessions => &mut self.sessions,
-            SupportPane::Targets => &mut self.targets,
-            SupportPane::Quota => &mut self.quota,
-        }
-    }
-
-    fn all_standard(self) -> bool {
-        [self.sessions, self.targets, self.quota]
-            .into_iter()
-            .all(|size| size == PaneSize::Standard)
+/// Mutably access one pane size without coupling the shared workspace model to
+/// the TUI's pane enum.
+fn pane_size_for_mut(sizes: &mut PaneSizes, pane: SupportPane) -> &mut PaneSize {
+    match pane {
+        SupportPane::Sessions => &mut sizes.sessions,
+        SupportPane::Targets => &mut sizes.targets,
+        SupportPane::Quota => &mut sizes.quota,
     }
 }
 
@@ -607,7 +576,23 @@ impl DashboardState {
 
     #[must_use]
     pub fn pane_size(&self, pane: SupportPane) -> PaneSize {
-        self.pane_sizes.get(pane)
+        pane_size_for(self.pane_sizes, pane)
+    }
+
+    /// Capture the current dashboard arrangement for workspace persistence.
+    #[must_use]
+    pub fn pane_sizes(&self) -> PaneSizes {
+        self.pane_sizes
+    }
+
+    /// Restore a persisted dashboard arrangement and clamp list selections to
+    /// the current data. Restoring is independent of whether this frame has
+    /// enough room to grow a pane to its maximum size.
+    pub fn restore_pane_sizes(&mut self, sizes: PaneSizes) -> anyhow::Result<()> {
+        sizes.validate()?;
+        self.pane_sizes = sizes;
+        self.clamp_selections();
+        Ok(())
     }
 
     pub(crate) fn pane_maximize_enabled(&self, pane: SupportPane) -> bool {
@@ -637,12 +622,12 @@ impl DashboardState {
                 SupportPane::Targets,
                 SupportPane::Quota,
             ] {
-                if other != pane && self.pane_sizes.get(other) == PaneSize::Maximized {
-                    *self.pane_sizes.get_mut(other) = PaneSize::Standard;
+                if other != pane && pane_size_for(self.pane_sizes, other) == PaneSize::Maximized {
+                    *pane_size_for_mut(&mut self.pane_sizes, other) = PaneSize::Standard;
                 }
             }
         }
-        *self.pane_sizes.get_mut(pane) = size;
+        *pane_size_for_mut(&mut self.pane_sizes, pane) = size;
         self.clamp_selections();
     }
 
@@ -1749,6 +1734,48 @@ mod tests {
             PaneSize::Minimized
         );
         assert_eq!(dashboard.focus, Focus::Targets);
+    }
+
+    #[test]
+    fn pane_sizes_capture_and_restore_a_nondefault_arrangement() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
+        dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
+        let captured = dashboard.pane_sizes();
+
+        dashboard.set_pane_size(SupportPane::Quota, PaneSize::Maximized);
+        dashboard.set_pane_maximize_enabled([
+            (SupportPane::Sessions, false),
+            (SupportPane::Targets, true),
+            (SupportPane::Quota, true),
+        ]);
+        dashboard.restore_pane_sizes(captured).unwrap();
+
+        assert_eq!(dashboard.pane_sizes(), captured);
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Maximized
+        );
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Targets),
+            PaneSize::Minimized
+        );
+        assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Standard);
+    }
+
+    #[test]
+    fn invalid_pane_size_restore_leaves_the_current_arrangement_unchanged() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
+        let before = dashboard.pane_sizes();
+        let invalid = PaneSizes {
+            sessions: PaneSize::Maximized,
+            targets: PaneSize::Maximized,
+            quota: PaneSize::Standard,
+        };
+
+        assert!(dashboard.restore_pane_sizes(invalid).is_err());
+        assert_eq!(dashboard.pane_sizes(), before);
     }
 
     #[test]

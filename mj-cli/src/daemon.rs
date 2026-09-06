@@ -49,7 +49,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 8;
+pub(crate) const PROTOCOL_VERSION: u32 = 9;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -317,6 +317,10 @@ enum DaemonAction {
     RememberReviewerSelection {
         workspace_id: String,
         selection: hel::hel_second_opinion::ReviewerSelection,
+    },
+    SaveWorkspacePaneSizes {
+        workspace_id: String,
+        sizes: hel::hel_workspace::PaneSizes,
     },
     PersistImportedSession {
         session: Box<SessionRecord>,
@@ -2554,6 +2558,23 @@ impl DaemonClient {
         }
     }
 
+    pub(crate) async fn save_workspace_pane_sizes(
+        &mut self,
+        workspace_id: String,
+        sizes: hel::hel_workspace::PaneSizes,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::SaveWorkspacePaneSizes {
+                workspace_id,
+                sizes,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected pane-size save reply {reply:?}"),
+        }
+    }
+
     pub(crate) async fn persist_imported_session(&mut self, session: SessionRecord) -> Result<()> {
         match self
             .request(DaemonAction::PersistImportedSession {
@@ -2933,7 +2954,10 @@ impl DaemonClient {
 }
 
 pub(crate) async fn connect_existing() -> Result<DaemonClient> {
-    DaemonClient::connect(read_metadata()?).await
+    let metadata = tokio::task::spawn_blocking(read_metadata)
+        .await
+        .context("read daemon metadata task failed")??;
+    DaemonClient::connect(metadata).await
 }
 
 /// A handle to whatever daemon the metadata file advertises, regardless of its
@@ -4093,6 +4117,14 @@ async fn handle_action(
             .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::SaveWorkspacePaneSizes {
+            workspace_id,
+            sizes,
+        } => {
+            blocking(move || hel::hel_database::save_workspace_pane_sizes(&workspace_id, sizes))
+                .await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::PersistImportedSession { session } => {
             blocking(move || crate::import::persist_imported_session_locally(&session)).await?;
             refresh_runtime_controller(state).await;
@@ -5154,7 +5186,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
         let state = test_runtime_state();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();

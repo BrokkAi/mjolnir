@@ -12,6 +12,7 @@
 
 pub(crate) mod actions;
 pub(crate) mod io;
+mod pane_sizes;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -355,6 +356,7 @@ pub(crate) struct DashboardContext {
     pub(crate) workspace_id: String,
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
+    pane_size_persistence: pane_sizes::PaneSizePersistence,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
     notices: mj_chat::hel_chat::Notices,
@@ -574,6 +576,9 @@ pub(crate) async fn run_dashboard_for_workspace(
         // The winning arm takes the message that woke the loop; the drains
         // below batch whatever is queued behind it, so one wakeup is one draw.
         tokio::select! {
+            () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {
+                context.dirty = true;
+            }
             _ = termination.cancelled(), if !context.shutdown_requested => {
                 context.begin_shutdown(false);
             }
@@ -754,6 +759,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
         }
         context.drain_feeds();
+        context
+            .pane_size_persistence
+            .update(context.dashboard.pane_sizes());
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
@@ -775,6 +783,10 @@ pub(crate) async fn run_dashboard_for_workspace(
     // the background feeds are torn down after, as the rest of the context
     // drops.
     drop(context.terminal);
+    if let Err(error) = context.pane_size_persistence.finish().await {
+        tracing::warn!(%error, "workspace pane-size final flush failed");
+        eprintln!("{error:#}");
+    }
     if let Some(shutdown) = context.worker_shutdown.take() {
         shutdown
             .shutdown()
@@ -920,6 +932,9 @@ impl DashboardContext {
             controller.state.clone(),
             BTreeMap::new(),
         );
+        let pane_sizes = hel::hel_database::load_workspace_pane_sizes(workspace_id)
+            .context("load workspace pane sizes")?;
+        dashboard.restore_pane_sizes(pane_sizes)?;
         let notices = mj_chat::hel_chat::Notices::default();
         dashboard.share_notices(notices.clone());
         for (session_id, queued) in projected_queued_prompts(&controller)? {
@@ -1002,6 +1017,11 @@ impl DashboardContext {
             tokio::sync::mpsc::channel::<DashboardImportUpdate>(8);
         let (dashboard_io_tx, dashboard_io_rx) =
             tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
+        let pane_size_persistence = pane_sizes::PaneSizePersistence::start(
+            workspace_id.to_owned(),
+            pane_sizes,
+            notices.clone(),
+        );
 
         let mut context = Self {
             terminal,
@@ -1009,6 +1029,7 @@ impl DashboardContext {
             workspace_id: workspace_id.to_owned(),
             client_id: client_id.to_owned(),
             dashboard,
+            pane_size_persistence,
             notices,
             events: Some(event::EventStream::new()),
             active_chat: None,

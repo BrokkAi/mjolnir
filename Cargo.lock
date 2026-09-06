@@ -732,6 +732,7 @@ dependencies = [
 name = "brokk-mj-tui"
 version = "2.0.0"
 dependencies = [
+ "anyhow",
  "brokk-mj-chat",
  "brokk-mj-controller",
  "brokk-mj-core",

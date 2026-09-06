@@ -643,6 +643,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 25 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE workspace_pane_sizes (
+                 workspace_id TEXT PRIMARY KEY REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+                 sessions TEXT NOT NULL CHECK(sessions IN ('minimized', 'standard', 'maximized')),
+                 targets TEXT NOT NULL CHECK(targets IN ('minimized', 'standard', 'maximized')),
+                 quota TEXT NOT NULL CHECK(quota IN ('minimized', 'standard', 'maximized')),
+                 CHECK((sessions = 'maximized') + (targets = 'maximized') + (quota = 'maximized') <= 1)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (25, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 25;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

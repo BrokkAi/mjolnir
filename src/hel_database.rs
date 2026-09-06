@@ -24,11 +24,11 @@ use crate::hel_state::{
 use crate::hel_targets::AdditionalMount;
 use crate::hel_worker::RELAY_EVENT_GENESIS_DIGEST;
 use crate::hel_workspace::{
-    DEFAULT_WORKSPACE_ID, DetachedDraft, WorkspaceRecord, new_workspace_id,
+    DEFAULT_WORKSPACE_ID, DetachedDraft, PaneSize, PaneSizes, WorkspaceRecord, new_workspace_id,
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 /// A deterministic projection integrity violation. Retrying cannot fix it, so
 /// callers must report it separately from transport failures.
@@ -428,6 +428,83 @@ pub fn load_state() -> Result<HelState> {
 
 pub fn list_workspaces() -> Result<Vec<WorkspaceRecord>> {
     list_workspaces_from(&database_path())
+}
+
+impl rusqlite::types::ToSql for PaneSize {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(match self {
+            Self::Minimized => "minimized",
+            Self::Standard => "standard",
+            Self::Maximized => "maximized",
+        }
+        .into())
+    }
+}
+
+impl rusqlite::types::FromSql for PaneSize {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_str()? {
+            "minimized" => Ok(Self::Minimized),
+            "standard" => Ok(Self::Standard),
+            "maximized" => Ok(Self::Maximized),
+            other => Err(rusqlite::types::FromSqlError::Other(
+                format!("unknown pane size {other:?}").into(),
+            )),
+        }
+    }
+}
+
+pub fn load_workspace_pane_sizes(workspace_id: &str) -> Result<PaneSizes> {
+    load_workspace_pane_sizes_from(&database_path(), workspace_id)
+}
+
+pub fn load_workspace_pane_sizes_from(path: &Path, workspace_id: &str) -> Result<PaneSizes> {
+    let connection = open_reader(path)?;
+    let sizes = connection
+        .query_row(
+            "SELECT coalesce(p.sessions, 'standard'), coalesce(p.targets, 'standard'),
+                    coalesce(p.quota, 'standard')
+             FROM workspaces w LEFT JOIN workspace_pane_sizes p USING(workspace_id)
+             WHERE w.workspace_id = ?1",
+            [workspace_id],
+            |row| {
+                Ok(PaneSizes {
+                    sessions: row.get(0)?,
+                    targets: row.get(1)?,
+                    quota: row.get(2)?,
+                })
+            },
+        )
+        .optional()?
+        .with_context(|| format!("unknown workspace {workspace_id:?}"))?;
+    sizes.validate()?;
+    Ok(sizes)
+}
+
+pub fn save_workspace_pane_sizes(workspace_id: &str, sizes: PaneSizes) -> Result<()> {
+    let workspace_id = workspace_id.to_owned();
+    submit_database_write("save_workspace_pane_sizes", move |_| {
+        save_workspace_pane_sizes_to(&database_path(), &workspace_id, sizes)
+    })
+}
+
+pub fn save_workspace_pane_sizes_to(
+    path: &Path,
+    workspace_id: &str,
+    sizes: PaneSizes,
+) -> Result<()> {
+    sizes.validate()?;
+    let connection = open(path)?;
+    connection
+        .execute(
+            "INSERT INTO workspace_pane_sizes(workspace_id, sessions, targets, quota)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+             sessions = excluded.sessions, targets = excluded.targets, quota = excluded.quota",
+            params![workspace_id, sizes.sessions, sizes.targets, sizes.quota],
+        )
+        .with_context(|| format!("save pane sizes for workspace {workspace_id:?}"))?;
+    Ok(())
 }
 
 pub fn list_workspaces_from(path: &Path) -> Result<Vec<WorkspaceRecord>> {
