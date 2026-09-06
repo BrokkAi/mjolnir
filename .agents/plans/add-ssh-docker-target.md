@@ -12,8 +12,8 @@ A user can configure `kind = "ssh-docker"`, launch coding sessions in Docker on 
 - [x] (2026-09-06) Added shared types, SSH command transport, remote Docker mount smoke, and schema 24 migration; eight focused SSH Docker tests and the migration test pass.
 - [x] (2026-09-06) Integrated controller lifecycle, setup, doctor, UI, and documentation; focused tests and all-target compilation pass.
 - [x] (2026-09-06) Full `cargo test`, formatting, and Clippy with warnings denied pass; host CLI and portable musl worker built.
-- [ ] Perform live acceptance tests (completed: new EC2 instance i-097865482bc2da7d5, Docker 29.8.0 ready; remaining: full lifecycle, failure injection, and orphan adoption).
-- [ ] Collect evidence and remove test resources (implementation checkpoint committed as 9b82b0e8; final test-runner/fix commit pending).
+- [x] (2026-09-06) Live acceptance passed across acceptance-2, acceptance-extra-2, and the targeted orphan-crash-2 retry: remote doctor, real coding, checkpoint restore, failure injection, reconnect, crash-orphan adoption, and exact session cleanup.
+- [x] (2026-09-06) Collected evidence; terminated EC2 and independently verified its root volume, security group, and key pair absent. Final review and validated delivery changes are complete.
 
 ## Surprises & Discoveries
 
@@ -21,7 +21,7 @@ Live EC2 doctor exposed a preexisting naming mismatch: resource_name emits mj-* 
 
 Docker writable attachments are managed Linux OverlayFS volumes. The existing smoke runner creates its lower directory with local filesystem calls, so it cannot simply be wrapped in SSH. Both source creation and post-write verification must run on the remote host. Existing SSH Podman code already stages worker binaries in a content-addressed remote cache, then copies them into containers.
 
-The database is currently schema 23. The constrained session_targets table gained Docker in schema 20 and workspace_storage in schema 22. Its rebuild must preserve every column. The user's working tree has an unrelated AGENTS.md edit; exclude it from commits.
+The database started at schema 23; this implementation migrates it to schema 24. The constrained session_targets table gained Docker in schema 20 and workspace_storage in schema 22. Its rebuild must preserve every column. The user's working tree has an unrelated AGENTS.md edit; exclude it from commits.
 
 Planning verified default AWS credentials, default VPC vpc-0050fb351b91024e5 in us-east-1, public subnet subnet-06587855564853ad7 in us-east-1a, and Canonical's Ubuntu 24.04 AMD64 public AMI parameter. Recheck cloud facts before launch.
 
@@ -35,7 +35,7 @@ Planning verified default AWS credentials, default VPC vpc-0050fb351b91024e5 in 
 
 ## Outcomes & Retrospective
 
-Core and product integration pass automated validation. Fixed Docker cleanup naming, added executable rollback/close tests, and fixed SSH host checkpoint staging cleanup while preserving unverified source archives. Remote doctor OverlayFS smoke now passes, and two real SSH Docker coding sessions have launched. The disposable EC2 host is running Docker 29.8.0; live acceptance and resource cleanup remain. Resource ledger: target/ssh-docker-e2e/implementation-20260906/ledger.json.
+Core and product integration pass automated validation. The full live lifecycle and failure-injection checks passed, including real coding tasks, unchanged attachment sources, fresh-container checkpoint restore, controller restart, Docker outage recovery, and independent cleanup. Live testing also fixed preexisting Docker cleanup naming, early provisioning discard persistence, SSH checkpoint staging cleanup, and adoption into a database missing the original workspace. Crash-orphan adoption, continued coding, and exact cleanup passed. Docker was installed only on the new EC2 host; the host is now terminated and all ancillary resources are absent. The existing constraints on pruned relay history and untouched Codex conversations are recorded below. Resource ledger: target/ssh-docker-e2e/implementation-20260906/ledger.json.
 
 ## Context and Orientation
 
@@ -86,7 +86,17 @@ Work from /home/jonathan/Projects/hel3. Run Cargo tests with elevated permission
     cargo build -p brokk-mjolnir --bin mj
     cargo build -p brokk-mj-worker --bin mj-worker --target x86_64-unknown-linux-musl
 
-Expected result: all commands exit zero, with no new ignored tests or relaxed coverage rules. Run relevant web unit tests if web files change. Update this section with exact opt-in live runner commands and artifact locations after implementation.
+All commands exited zero, with existing ignored tests unchanged. Focused regressions additionally passed: Docker cleanup 19 tests; checkpoint module 61 passed and 2 ignored; provisioning 24 tests; recovery 6 tests. Final host rebuild, formatting, and all-target Clippy passed after the recovery workspace fix. Both Python runners compile and their help commands succeed.
+
+The reusable live commands are documented in docs/DOCKER.md:
+
+    python3 tests/e2e/ssh_docker_lab.py create --artifact-dir target/ssh-docker-e2e/<run>
+    python3 tests/e2e/ssh_docker_acceptance.py run --ledger target/ssh-docker-e2e/<run>/ledger.json --artifact-dir target/ssh-docker-e2e/<run>/lifecycle
+    python3 tests/e2e/ssh_docker_acceptance.py extra --ledger target/ssh-docker-e2e/<run>/ledger.json --artifact-dir target/ssh-docker-e2e/<run>/recovery
+    python3 tests/e2e/ssh_docker_lab.py collect --artifact-dir target/ssh-docker-e2e/<run>
+    python3 tests/e2e/ssh_docker_lab.py cleanup --artifact-dir target/ssh-docker-e2e/<run>
+
+Actual evidence root: target/ssh-docker-e2e/implementation-20260906. acceptance-2 passed the main lifecycle. acceptance-extra-2 passed failed-image rollback, read-only enforcement, checkpoint replacement, outage responsiveness, surviving-container recovery, and independent cleanup before exposing the workspace and pruned-history adoption constraints. The final orphan-crash-2 retry uses AcceptanceLab.run_orphan from the same runner and passed fresh-state adoption, another real coding turn, and exact cleanup. Its invocation is preserved as orphan-crash-invocation.py in the private evidence root. This is combined acceptance evidence, not a claim that the earlier failed runs passed unchanged.
 
 ## Validation and Acceptance
 
@@ -117,3 +127,13 @@ Plan revision 2026-09-06: Recorded successful corrected smoke, real session laun
 Plan revision 2026-09-06: The main live lifecycle run passed in acceptance-2: two coding tasks, unchanged attachment sources, checkpoint/close/restore, restart/reconnect, and normal close. Extra failure tests found early provisioning discard was only in memory, leaving a database ghost; fixing and regression-testing persistence before repetition. The extra checkpoint fixture must send an initial Codex turn because Codex does not create a native rollout for an untouched conversation. Its leftover session was identified through recovery scan and removed using exact-ID recovery destroy.
 
 Plan revision 2026-09-06: Early provisioning discard now persists before returning its original error. The isolated reload regression and all 24 provisioning tests pass; repeated live failed-image launch removed both its cloud resources and controller row. Host CLI rebuilt and Clippy passed. Final extended recovery run is in progress.
+
+Plan revision 2026-09-06: Extended live checks confirmed different Docker container IDs after checkpoint restore, preserved repository contents, read-only enforcement, useful stopped-daemon diagnostics, a 3 ms viewer response during the Docker outage, recovery of both surviving containers without replacement, and independent session cleanup. Fresh-state adoption found an unknown original workspace ID; adoption now resolves missing controller-local workspaces into a durable Recovered workspace while preserving known/default identities. The exact orphan remains on EC2 for a targeted retry.
+
+Plan revision 2026-09-06: The workspace adoption fix passed its six-test recovery module, host build, formatting, and Clippy. Retrying the existing orphan then correctly rejected missing event history: graceful controller shutdown had verified a checkpoint and allowed relay pruning through ordinal 124. Worker retention is min(acknowledged frontier, verified checkpoint frontier); the protocol supplies operational state, not a replacement canonical transcript. Do not skip the missing history or seed the fresh database from the old one. The runner now separately tests abrupt controller loss using a new conversation before checkpointing. Recovery after pruning requires retaining/importing the original checkpoint archive; this existing constraint is documented. The exact pruned worker was destroyed through recovery destroy and its resources verified absent.
+
+Plan revision 2026-09-06: Completed crash-orphan adoption at 16:45 UTC with session 751a18b23ff787a1e374a00e8291d28f. The controller was killed before checkpoint pruning, a fresh database adopted it into Recovered, a new real coding turn completed, and close removed its container, volumes, backing directories, and clone snapshot. Collection then reported Docker 29.8.0 with zero containers. The accepted image digest was sha256:04ad4c2ddb05b95189a13ded17b1fd2792eba5f1fb9429477540eeedc0e43aef.
+
+Final cleanup evidence: ledger state cleaned; independent AWS reads confirmed instance i-097865482bc2da7d5 terminated, volume vol-058a13016cd65fb46 absent, security group sg-02a28b55b594942c1 absent, and key mj-ssh-docker-20260906T155036Z-60b33c31f1-key absent. Temporary SSH key files were removed. Private logs and cleanup-verification.json remain under the evidence root. No Docker installation or host configuration changes were made on existing machines.
+
+Remaining limitations are existing recovery behavior, not silent fallbacks: an untouched Codex conversation has no native rollout to restore, so live checkpoint fixtures send a real first turn; a worker whose journal was pruned requires its verified checkpoint archive to reconstruct the earlier transcript in a new database. No transcript events were skipped. Feature work and validation are complete; commits stay on the current branch and are not pushed.
