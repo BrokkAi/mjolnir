@@ -431,7 +431,7 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
-            Interaction::Activate(id) => self.activate_new_control(&mut wizard, id),
+            Interaction::Activate(id) => self.activate_new_control(wizard, id),
         }
     }
 
@@ -490,7 +490,7 @@ impl DashboardState {
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
-            Interaction::Activate(id) => self.activate_resume_control(&mut wizard, id),
+            Interaction::Activate(id) => self.activate_resume_control(wizard, id),
         }
     }
 
@@ -703,7 +703,7 @@ impl DashboardState {
 
     fn activate_new_control(
         &mut self,
-        wizard: &mut NewWizard,
+        mut wizard: NewWizard,
         id: WizardControl,
     ) -> DashboardAction {
         match id {
@@ -718,13 +718,13 @@ impl DashboardState {
                     .min(wizard.mounts.completion_candidates.len() - 1);
                 wizard.mounts.source = wizard.mounts.completion_candidates[index].clone().into();
                 wizard.mounts.completion_candidates.clear();
-                self.mode = Mode::New(wizard.clone());
+                self.mode = Mode::New(wizard);
                 return DashboardAction::None;
             }
             WizardControl::MountReadOnly => {
                 wizard.mounts.toggle_read_only();
                 wizard.mounts.focus = MountFocus::ReadOnly;
-                self.mode = Mode::New(wizard.clone());
+                self.mode = Mode::New(wizard);
                 return DashboardAction::None;
             }
             WizardControl::MountSource => wizard.mounts.focus = MountFocus::Source,
@@ -748,12 +748,12 @@ impl DashboardState {
                 } else if wizard.step == WizardStep::ProjectDirectory {
                     wizard.step = WizardStep::Target;
                     wizard.focus = WizardFocus::Content;
-                    self.mode = Mode::New(wizard.clone());
+                    self.mode = Mode::New(wizard);
                     return DashboardAction::None;
                 } else if wizard.step == WizardStep::NewBundle {
                     wizard.step = WizardStep::Bundle;
                     wizard.focus = WizardFocus::Content;
-                    self.mode = Mode::New(wizard.clone());
+                    self.mode = Mode::New(wizard);
                     return DashboardAction::None;
                 } else {
                     wizard.focus = WizardFocus::Back;
@@ -768,19 +768,15 @@ impl DashboardState {
             }
             WizardControl::DiscardQueue => {}
         }
-        let action = self.handle_new_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            wizard.clone(),
-        );
-        if matches!(self.mode, Mode::Dashboard) {
-            self.mode = Mode::New(wizard.clone());
-        }
-        action
+        // The delegated handler owns the draft from here. In particular, a
+        // successful submit may intentionally leave the modal closed; do not
+        // restore a stale clone after it returns.
+        self.handle_new_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), wizard)
     }
 
     fn activate_resume_control(
         &mut self,
-        wizard: &mut ResumeWizard,
+        mut wizard: ResumeWizard,
         id: WizardControl,
     ) -> DashboardAction {
         match id {
@@ -795,13 +791,13 @@ impl DashboardState {
                     .min(wizard.mounts.completion_candidates.len() - 1);
                 wizard.mounts.source = wizard.mounts.completion_candidates[index].clone().into();
                 wizard.mounts.completion_candidates.clear();
-                self.mode = Mode::Resume(wizard.clone());
+                self.mode = Mode::Resume(wizard);
                 return DashboardAction::None;
             }
             WizardControl::MountReadOnly => {
                 wizard.mounts.toggle_read_only();
                 wizard.mounts.focus = MountFocus::ReadOnly;
-                self.mode = Mode::Resume(wizard.clone());
+                self.mode = Mode::Resume(wizard);
                 return DashboardAction::None;
             }
             WizardControl::MountSource => wizard.mounts.focus = MountFocus::Source,
@@ -833,14 +829,10 @@ impl DashboardState {
             WizardControl::BundleList => wizard.focus = WizardFocus::Content,
             WizardControl::ProjectDirectory | WizardControl::NewBundleSource => {}
         }
-        let action = self.handle_resume_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            wizard.clone(),
-        );
-        if matches!(self.mode, Mode::Dashboard) {
-            self.mode = Mode::Resume(wizard.clone());
-        }
-        action
+        // The delegated handler owns the draft from here. A successful
+        // resume's preflight keeps the modal pending, while cancellation or
+        // completion may close it explicitly.
+        self.handle_resume_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), wizard)
     }
 }
 

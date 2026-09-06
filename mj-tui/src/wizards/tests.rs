@@ -51,6 +51,7 @@ fn new_session_wizard_returns_all_three_choices() {
             }),
         }
     );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -262,7 +263,21 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         .collect::<String>();
     assert!(rendered.contains("Error: remote project directory /srv/project does not exist"));
 
-    dashboard.apply_project_directory_validation("/srv/project", Ok(()));
+    dashboard.handle_paste("/srv/repaired");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("invalid project validation should keep the wizard open");
+    };
+    assert_eq!(wizard.project_directory, "/srv/repaired");
+    assert_eq!(wizard.project_directory_error, None);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::ValidateProjectDirectory {
+            target_template_id: "machine".into(),
+            directory: "/srv/repaired".into(),
+        }
+    );
+
+    dashboard.apply_project_directory_validation("/srv/repaired", Ok(()));
 
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -274,15 +289,15 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Project directory: /srv/project"));
+    assert!(rendered.contains("Project directory: /srv/repaired"));
     assert!(!rendered.contains("Attached directories"));
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             profile_id: "claude-1".into(),
-            bundle_id: raw_project_context_id("/srv/project"),
-            project_directory: Some("/srv/project".into()),
+            bundle_id: raw_project_context_id("/srv/repaired"),
+            project_directory: Some("/srv/repaired".into()),
             target_template_id: "machine".into(),
             additional_mounts: Vec::new(),
             allow_dirty_local: false,
@@ -681,6 +696,12 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
             }),
         }
     );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("mount validation should keep the new-session wizard open");
+    };
+    assert_eq!(wizard.mounts.mounts.len(), 1);
+    dashboard.finish_session_mount_preflight();
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -835,6 +856,62 @@ fn resume_can_convert_to_another_harness() {
             }),
         }
     );
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
+    dashboard.finish_resume_repository_preflight();
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    // Target step: Tab reaches Cancel, then Back. Activating Back returns to
+    // Profile while keeping the wizard open with its draft state.
+    dashboard.handle_key(key(KeyCode::Tab));
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("Back should keep the new-session wizard open");
+    };
+    assert_eq!(wizard.step, WizardStep::Profile);
+
+    // The same explicit button path then closes the modal.
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn resume_back_activation_preserves_the_draft_and_cancel_closes_it() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    open_resume_wizard(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    dashboard.handle_key(key(KeyCode::Tab));
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("Back should keep the resume wizard open");
+    };
+    assert_eq!(wizard.step, WizardStep::Profile);
+
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
