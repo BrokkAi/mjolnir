@@ -2649,6 +2649,12 @@ fn dispatch_event(
                 context.dashboard.focus_prompt();
             }
             over_chat
+                || (matches!(
+                    mouse.kind,
+                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                ) && context
+                    .visible_chat()
+                    .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
         }
         _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
     };
@@ -3243,6 +3249,50 @@ mod tests {
         assert_eq!(
             route_selection_event(&mut selection, &surfaces, drag.clone()),
             SelectionRouting::Forward(drag)
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_scrollbar_gestures_bypass_text_selection() {
+        let mut chat = open_test_chat("scrollbar-selection");
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                chat.draw_in(
+                    frame,
+                    mj_chat::hel_chat::ChatRegions {
+                        transcript: Rect::new(0, 0, 60, 15),
+                        prompt: Rect::new(0, 15, 60, 5),
+                        footer: None,
+                        overlay: frame.area(),
+                    },
+                    true,
+                    false,
+                );
+            })
+            .expect("draw chat");
+        let surfaces = chat.frame_surfaces();
+        let transcript = surfaces.surface(SurfaceId::Transcript).expect("transcript");
+        assert_eq!(transcript.rect.right(), 59);
+        let mut selection = SelectionState::new();
+        for event in [
+            mouse(MouseEventKind::Down(MouseButton::Left), 59, 5),
+            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 10),
+            mouse(MouseEventKind::Up(MouseButton::Left), 30, 18),
+        ] {
+            assert_eq!(
+                route_selection_event(&mut selection, surfaces, event.clone()),
+                SelectionRouting::Forward(event)
+            );
+        }
+        assert!(selection.active_surface().is_none());
+        assert_eq!(
+            route_selection_event(
+                &mut selection,
+                surfaces,
+                mouse(MouseEventKind::Down(MouseButton::Left), 2, 5),
+            ),
+            SelectionRouting::Consumed
         );
     }
 

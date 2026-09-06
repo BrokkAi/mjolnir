@@ -41,6 +41,58 @@ struct CachedEntry {
     lines: Vec<Line<'static>>,
 }
 
+const SCROLLBAR_DEFAULT_ENTRY_ROWS: usize = 4;
+
+/// The one-cell primary transcript scrollbar. Its geometry is rebuilt after
+/// every draw. During a drag, frozen row estimates keep newly rendered
+/// history from shifting the thumb under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptScrollbarGeometry {
+    track: Rect,
+    thumb: Rect,
+    max_scroll: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct TranscriptScrollbarState {
+    geometry: Option<TranscriptScrollbarGeometry>,
+    dragging: bool,
+    grab_offset: u16,
+    metric_width: u16,
+    metric_mode: TranscriptRenderMode,
+    metric_generation: u64,
+    estimates: Vec<usize>,
+}
+
+impl Default for TranscriptScrollbarState {
+    fn default() -> Self {
+        Self {
+            geometry: None,
+            dragging: false,
+            grab_offset: 0,
+            metric_width: 0,
+            metric_mode: TranscriptRenderMode::Rich,
+            metric_generation: 0,
+            estimates: Vec::new(),
+        }
+    }
+}
+
+impl TranscriptScrollbarState {
+    fn clear_geometry(&mut self) {
+        self.geometry = None;
+        self.dragging = false;
+        self.grab_offset = 0;
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.clear_geometry();
+        self.metric_width = 0;
+        self.metric_generation = 0;
+        self.estimates.clear();
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct TranscriptRenderCache {
     width: u16,
@@ -1109,6 +1161,260 @@ impl TranscriptRenderCache {
 }
 
 impl ChatState {
+    /// Whether the host must keep routing left-button motion to this chat.
+    /// The pointer may leave the pane while a thumb is held.
+    pub(super) fn transcript_scrollbar_dragging(&self) -> bool {
+        self.transcript_scrollbar.dragging && !self.transcript_scrollbar_modal_blocked()
+    }
+
+    fn transcript_scrollbar_modal_blocked(&self) -> bool {
+        self.elicitation.is_some()
+            || self.config_picker_active()
+            || (self.second_opinion_active() && !self.second_opinion_split())
+            || (self.turn_review_active() && !self.turn_review_split())
+    }
+
+    /// Handles the primary transcript's one-cell scrollbar. A drag is kept
+    /// alive outside the transcript rectangle; the dashboard uses
+    /// [`Self::transcript_scrollbar_dragging`] to route those events here.
+    pub(super) fn handle_transcript_scrollbar_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+    ) -> bool {
+        if self.transcript_scrollbar_modal_blocked() {
+            let was_dragging = self.transcript_scrollbar.dragging;
+            self.transcript_scrollbar.clear_geometry();
+            return was_dragging;
+        }
+
+        if self.transcript_scrollbar.dragging {
+            match mouse.kind {
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                    self.move_transcript_scrollbar(mouse.row);
+                    return true;
+                }
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                    self.transcript_scrollbar.dragging = false;
+                    return true;
+                }
+                crossterm::event::MouseEventKind::Down(_) => {
+                    self.transcript_scrollbar.dragging = false;
+                }
+                // A held thumb owns the mouse until release. This also keeps
+                // a wheel event from changing the anchor behind the drag.
+                _ => return true,
+            }
+        }
+
+        if mouse.kind != crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        {
+            return false;
+        }
+        let Some(geometry) = self.transcript_scrollbar.geometry else {
+            return false;
+        };
+        if geometry.max_scroll == 0 || mouse.column != geometry.track.x {
+            return false;
+        }
+        let position = i32::from(mouse.row);
+        let track_start = i32::from(geometry.track.y);
+        let track_end = i32::from(geometry.track.bottom());
+        if position < track_start || position >= track_end {
+            return false;
+        }
+        let thumb_start = i32::from(geometry.thumb.y);
+        let thumb_end = i32::from(geometry.thumb.bottom());
+        self.transcript_scrollbar.grab_offset = if position >= thumb_start && position < thumb_end {
+            u16::try_from(position - thumb_start).unwrap_or_default()
+        } else {
+            geometry.thumb.height / 2
+        };
+        self.transcript_scrollbar.dragging = true;
+        if position < thumb_start || position >= thumb_end {
+            self.move_transcript_scrollbar(mouse.row);
+        }
+        true
+    }
+
+    fn move_transcript_scrollbar(&mut self, pointer_row: u16) {
+        let Some(geometry) = self.transcript_scrollbar.geometry else {
+            self.transcript_scrollbar.dragging = false;
+            return;
+        };
+        let track_start = i32::from(geometry.track.y);
+        let travel = i32::from(geometry.track.height.saturating_sub(geometry.thumb.height));
+        let requested =
+            i32::from(pointer_row).saturating_sub(i32::from(self.transcript_scrollbar.grab_offset));
+        let thumb_top = requested.clamp(track_start, track_start.saturating_add(travel));
+        let target_scroll = if travel == 0 {
+            0
+        } else {
+            let numerator = i64::from(thumb_top.saturating_sub(track_start))
+                .saturating_mul(i64::try_from(geometry.max_scroll).unwrap_or(i64::MAX));
+            usize::try_from((numerator + i64::from(travel) / 2) / i64::from(travel))
+                .unwrap_or(geometry.max_scroll)
+                .min(geometry.max_scroll)
+        };
+        self.set_transcript_scrollbar_target(target_scroll);
+    }
+
+    fn set_transcript_scrollbar_target(&mut self, target_scroll: usize) {
+        let Some(geometry) = self.transcript_scrollbar.geometry else {
+            return;
+        };
+        if target_scroll >= geometry.max_scroll {
+            self.anchor = TranscriptAnchor::Bottom;
+            return;
+        }
+        if self.entries.is_empty() {
+            self.anchor = TranscriptAnchor::Bottom;
+            return;
+        }
+        let mut remaining = target_scroll;
+        for entry in 0..self.transcript_scrollbar.estimates.len() {
+            let estimated = self.transcript_scrollbar.estimates[entry];
+            if remaining < estimated {
+                let actual = self.entry_rows(entry);
+                self.anchor = TranscriptAnchor::Row {
+                    entry,
+                    row: remaining.saturating_mul(actual) / estimated,
+                };
+                return;
+            }
+            remaining = remaining.saturating_sub(estimated);
+        }
+        self.anchor = TranscriptAnchor::Bottom;
+    }
+
+    fn prepare_transcript_scrollbar_metrics(&mut self, width: u16) {
+        let state = &mut self.transcript_scrollbar;
+        let key_changed = state.metric_width != width
+            || state.metric_mode != self.render_mode
+            || state.metric_generation != self.render_cache_generation;
+        if key_changed {
+            state.clear_geometry();
+        }
+        if state.dragging {
+            // Newly rendered entries must not move the thumb under a held pointer.
+            return;
+        }
+        state.metric_width = width;
+        state.metric_mode = self.render_mode;
+        state.metric_generation = self.render_cache_generation;
+        state.estimates = (0..self.entries.len())
+            .map(|index| {
+                if matches!(
+                    self.render_cache.collapse[index],
+                    EntryCollapse::Hidden | EntryCollapse::Omitted
+                ) {
+                    return 0;
+                }
+                self.render_cache
+                    .entries
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .filter(|cached| cached.revision == self.entries[index].revision)
+                    .map_or(SCROLLBAR_DEFAULT_ENTRY_ROWS, |cached| cached.lines.len())
+            })
+            .collect();
+    }
+
+    fn transcript_scrollbar_offset(&self, top: AnchorRow, anchor: TranscriptAnchor) -> usize {
+        if anchor == TranscriptAnchor::Bottom {
+            return usize::MAX;
+        }
+        let estimated = self
+            .transcript_scrollbar
+            .estimates
+            .get(top.entry)
+            .copied()
+            .unwrap_or(0);
+        let actual = self
+            .render_cache
+            .entries
+            .get(top.entry)
+            .and_then(Option::as_ref)
+            .map_or(estimated, |cached| cached.lines.len());
+        self.transcript_scrollbar
+            .estimates
+            .iter()
+            .take(top.entry)
+            .sum::<usize>()
+            .saturating_add(top.row.saturating_mul(estimated) / actual.max(1))
+    }
+
+    fn update_transcript_scrollbar(
+        &mut self,
+        track: Rect,
+        width: u16,
+        viewport_rows: usize,
+        top: AnchorRow,
+        anchor: TranscriptAnchor,
+    ) -> Option<TranscriptScrollbarGeometry> {
+        if track.width == 0 || track.height == 0 || self.transcript_scrollbar_modal_blocked() {
+            self.transcript_scrollbar.clear_geometry();
+            return None;
+        }
+        let old_track = self
+            .transcript_scrollbar
+            .geometry
+            .map(|geometry| geometry.track);
+        if self.transcript_scrollbar.dragging && old_track != Some(track) {
+            self.transcript_scrollbar.dragging = false;
+        }
+        self.prepare_transcript_scrollbar_metrics(width);
+        let viewport_rows = viewport_rows.max(1);
+        let total_rows = self
+            .transcript_scrollbar
+            .estimates
+            .iter()
+            .sum::<usize>()
+            .max(viewport_rows);
+        let max_scroll = total_rows.saturating_sub(viewport_rows);
+        let raw_scroll = self.transcript_scrollbar_offset(top, anchor);
+        let scroll = if raw_scroll == usize::MAX {
+            max_scroll
+        } else {
+            raw_scroll.min(max_scroll)
+        };
+        let track_height = usize::from(track.height);
+        let thumb_height = if max_scroll == 0 {
+            track_height
+        } else {
+            let proportional = (u64::from(track.height)
+                .saturating_mul(u64::try_from(viewport_rows).unwrap_or(u64::MAX))
+                / u64::try_from(total_rows).unwrap_or(u64::MAX))
+            .max(1);
+            usize::try_from(proportional)
+                .unwrap_or(track_height)
+                .min(track_height)
+        };
+        let travel = track_height.saturating_sub(thumb_height);
+        let thumb_offset = if max_scroll == 0 {
+            0
+        } else {
+            (u64::try_from(travel)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(u64::try_from(scroll).unwrap_or(u64::MAX))
+                / u64::try_from(max_scroll).unwrap_or(u64::MAX)) as usize
+        };
+        let thumb = Rect::new(
+            track.x,
+            track
+                .y
+                .saturating_add(u16::try_from(thumb_offset).unwrap_or(u16::MAX)),
+            track.width,
+            u16::try_from(thumb_height).unwrap_or(track.height),
+        );
+        let geometry = TranscriptScrollbarGeometry {
+            track,
+            thumb,
+            max_scroll,
+        };
+        self.transcript_scrollbar.geometry = Some(geometry);
+        Some(geometry)
+    }
+
     pub fn transcript_snapshot(&self) -> TranscriptSnapshot {
         TranscriptSnapshot {
             entries: self.entries.clone(),
@@ -1795,7 +2101,8 @@ pub(super) fn render_transcript(
 ) {
     let viewport_height = usize::from(area.height.saturating_sub(2));
     chat.last_viewport_height = viewport_height;
-    let window = chat.viewport(area.width, viewport_height);
+    let content_width = area.width.saturating_sub(1);
+    let window = chat.viewport(content_width, viewport_height);
     // The window resolves and clamps the anchor: an anchor inside the last
     // screenful snaps back to following the tail.
     chat.anchor = window.anchor;
@@ -1809,7 +2116,8 @@ pub(super) fn render_transcript(
         // stands out from the dim rule and the transcript's default text.
         .title(Line::styled(title, Style::default().fg(Color::White)))
         .border_style(Style::default().fg(Color::DarkGray));
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
+    inner.width = content_width;
     frame.render_widget(block, area);
     let visible = window
         .rows
@@ -1819,6 +2127,26 @@ pub(super) fn render_transcript(
     let visible_rows = visible.len();
     frame.render_widget(Paragraph::new(visible), inner);
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
+    let track = Rect::new(
+        inner.right(),
+        inner.y,
+        u16::from(area.width > 0),
+        inner.height,
+    );
+    if let Some(geometry) =
+        chat.update_transcript_scrollbar(track, content_width, viewport_height, top, chat.anchor)
+    {
+        for row in track.y..track.bottom() {
+            let is_thumb = row >= geometry.thumb.y && row < geometry.thumb.bottom();
+            frame.buffer_mut()[(track.x, row)]
+                .set_symbol(if is_thumb { "█" } else { "│" })
+                .set_style(Style::default().fg(if is_thumb {
+                    Color::Gray
+                } else {
+                    Color::DarkGray
+                }));
+        }
+    }
 }
 
 fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> String {

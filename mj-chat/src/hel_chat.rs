@@ -73,8 +73,8 @@ use rendering::voice_button_area;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
-    ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptSelectionSpace,
-    materialized_chat_entries_reusing,
+    ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptScrollbarState,
+    TranscriptSelectionSpace, materialized_chat_entries_reusing,
 };
 use turn_review::{TurnReview, TurnReviewIntent};
 
@@ -475,6 +475,7 @@ pub struct ChatState {
     last_viewport_height: usize,
     render_mode: TranscriptRenderMode,
     render_cache: TranscriptRenderCache,
+    transcript_scrollbar: TranscriptScrollbarState,
     notices: Notices,
     /// Whether Codex OAuth credentials and the voice helper are available. The runtime
     /// owns discovering this asynchronously; the chat starts disabled until
@@ -583,6 +584,7 @@ impl ChatState {
             last_viewport_height: 0,
             render_mode: TranscriptRenderMode::Rich,
             render_cache: TranscriptRenderCache::default(),
+            transcript_scrollbar: TranscriptScrollbarState::default(),
             notices: Notices::default(),
             voice_available: false,
             voice_active: false,
@@ -1277,6 +1279,7 @@ impl ChatState {
         self.reveal_latest_agent_on_draw = true;
         self.last_viewport_height = 0;
         self.render_mode = TranscriptRenderMode::Rich;
+        self.transcript_scrollbar.clear();
         self.notices.clear();
         self.voice_active = false;
         self.submitting_images.clear();
@@ -2168,6 +2171,9 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
+        if self.handle_transcript_scrollbar_mouse(mouse) {
+            return ChatAction::None;
+        }
         // Hover decides which transcript scrolls while the split is up, so a
         // reviewer answer never moves the reader's place in the primary.
         if self.second_opinion_split() || self.turn_review_split() {
@@ -2942,8 +2948,8 @@ mod tests {
         let prompt = Rect::new(4, 2, 30, 5);
         let button = voice_button_area(prompt).expect("button fits");
         assert_eq!(button.y, prompt.bottom() - 1);
-        assert_eq!(button.right(), prompt.right() - 1);
-        assert_eq!(usize::from(button.width), rendering::display_width(" 🎙︎ "));
+        assert_eq!(button.x, prompt.x + 1);
+        assert_eq!(button.width, 3);
     }
 
     #[test]

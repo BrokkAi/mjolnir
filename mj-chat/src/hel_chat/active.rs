@@ -2151,6 +2151,11 @@ impl ActiveChat {
         self.state.frame_surfaces()
     }
 
+    /// Keep a scrollbar gesture routed here even outside the chat pane.
+    pub fn transcript_scrollbar_dragging(&self) -> bool {
+        self.state.transcript_scrollbar_dragging()
+    }
+
     /// Rows the composer wants at `width`: the wrapped input, up to three
     /// queued-prompt previews, and the block's own border rows.
     pub fn desired_prompt_height(&self, width: u16) -> u16 {

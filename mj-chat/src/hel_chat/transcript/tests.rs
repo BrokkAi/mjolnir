@@ -2897,3 +2897,186 @@ fn a_transcript_endpoint_row_is_cut_on_the_cells_it_occupies() {
         Some("界 wi".into())
     );
 }
+
+fn scrollbar_chat() -> ChatState {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries = vec![ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        (0..200).map(|i| format!("line {i}\n")).collect::<String>(),
+    )];
+    drawn_transcript(&mut chat, 60, 24);
+    chat
+}
+
+fn scrollbar_mouse(chat: &mut ChatState, kind: MouseEventKind, column: u16, row: u16) {
+    chat.handle_mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+#[test]
+fn scrollbar_drag_reaches_both_ends_and_release_stops_capture() {
+    use crossterm::event::MouseButton::Left;
+    let mut chat = scrollbar_chat();
+    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    assert!(geometry.max_scroll > 0);
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Down(Left),
+        geometry.thumb.x,
+        geometry.thumb.y,
+    );
+    assert!(chat.transcript_scrollbar_dragging());
+    scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), 0, 0);
+    assert_eq!(chat.anchor, TranscriptAnchor::Row { entry: 0, row: 0 });
+    drawn_transcript(&mut chat, 60, 24);
+    scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), 0, u16::MAX);
+    assert_eq!(chat.anchor, TranscriptAnchor::Bottom);
+    scrollbar_mouse(&mut chat, MouseEventKind::Up(Left), 0, u16::MAX);
+    assert!(!chat.transcript_scrollbar_dragging());
+    scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), 0, 0);
+    assert_eq!(chat.anchor, TranscriptAnchor::Bottom);
+    chat.entries
+        .push(ChatEntry::plain(2, ChatRole::Agent, "new output"));
+    let rows = drawn_transcript(&mut chat, 60, 24);
+    assert!(rows.iter().any(|row| row.contains("new output")));
+}
+
+#[test]
+fn scrollbar_track_click_seeks_and_does_not_select_text() {
+    use crossterm::event::MouseButton::Left;
+    let mut chat = scrollbar_chat();
+    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    assert!(
+        chat.frame_surfaces()
+            .surface_at(geometry.track.x, geometry.track.y)
+            .is_none()
+    );
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Down(Left),
+        geometry.track.x,
+        geometry.track.y + geometry.track.height / 2,
+    );
+    assert!(matches!(chat.anchor, TranscriptAnchor::Row { entry: 0, row } if row > 0 && row < 200));
+    let before = chat.anchor;
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Up(Left),
+        geometry.track.x,
+        geometry.track.y,
+    );
+    assert_eq!(chat.anchor, before);
+}
+
+#[test]
+fn grabbing_scrollbar_thumb_does_not_jump_and_preserves_grab_offset() {
+    use crossterm::event::MouseButton::Left;
+    let mut chat = scrollbar_chat();
+    chat.entries[0] = ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        (0..40).map(|i| format!("line {i}\n")).collect::<String>(),
+    );
+    chat.invalidate_render_cache();
+    chat.anchor = TranscriptAnchor::Bottom;
+    drawn_transcript(&mut chat, 60, 24);
+    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    assert!(geometry.thumb.height > 1);
+    let grab_row = geometry.thumb.bottom() - 1;
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Down(Left),
+        geometry.track.x,
+        grab_row,
+    );
+    assert_eq!(chat.anchor, TranscriptAnchor::Bottom);
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Drag(Left),
+        geometry.track.x,
+        grab_row - 1,
+    );
+    assert!(matches!(chat.anchor, TranscriptAnchor::Row { .. }));
+    assert_eq!(
+        chat.transcript_scrollbar.grab_offset,
+        geometry.thumb.height - 1
+    );
+}
+
+#[test]
+fn scrollbar_keeps_unseen_history_lazy_and_cancels_drag_on_resize() {
+    use crossterm::event::MouseButton::Left;
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries = (0..1000)
+        .map(|i| ChatEntry::plain(i, ChatRole::User, "message"))
+        .collect();
+    drawn_transcript(&mut chat, 60, 24);
+    assert!(
+        chat.render_cache
+            .entries
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count()
+            < 30
+    );
+    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Down(Left),
+        geometry.thumb.x,
+        geometry.thumb.y,
+    );
+    drawn_transcript(&mut chat, 40, 20);
+    assert!(!chat.transcript_scrollbar_dragging());
+}
+
+#[test]
+fn empty_and_tiny_transcripts_ignore_scrollbar_drags() {
+    use crossterm::event::MouseButton::Left;
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    for (width, height) in [(60, 24), (1, 1), (0, 0)] {
+        drawn_transcript(&mut chat, width, height);
+        scrollbar_mouse(
+            &mut chat,
+            MouseEventKind::Down(Left),
+            width.saturating_sub(1),
+            0,
+        );
+        assert!(!chat.transcript_scrollbar_dragging());
+    }
+}
+
+#[test]
+fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
+    use crossterm::event::MouseButton::Left;
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries = (0..100)
+        .map(|i| ChatEntry::plain(i, ChatRole::User, "long message\n".repeat(20)))
+        .collect();
+    drawn_transcript(&mut chat, 60, 24);
+    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Down(Left),
+        geometry.thumb.x,
+        geometry.thumb.y,
+    );
+    let estimates = chat.transcript_scrollbar.estimates.clone();
+    let row = geometry.track.y + geometry.track.height / 2;
+    scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), geometry.track.x, row);
+    drawn_transcript(&mut chat, 60, 24);
+    chat.entries
+        .push(ChatEntry::plain(100, ChatRole::Agent, "new output"));
+    drawn_transcript(&mut chat, 60, 24);
+    assert!(chat.transcript_scrollbar_dragging());
+    assert_eq!(chat.transcript_scrollbar.estimates, estimates);
+    let anchor = chat.anchor;
+    scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), geometry.track.x, row);
+    drawn_transcript(&mut chat, 60, 24);
+    assert_eq!(chat.anchor, anchor);
+}

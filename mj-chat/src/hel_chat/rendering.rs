@@ -12,7 +12,7 @@ use unicode_segmentation::UnicodeSegmentation;
 /// than selecting an emoji presentation with a potentially different width.
 pub(super) const VOICE_BUTTON_GLYPH: &str = "🎙︎";
 
-/// The microphone button is a right-aligned chip on the prompt's bottom
+/// The microphone button is a left-aligned chip on the prompt's bottom
 /// border. Keep its geometry derived from the same Unicode width ratatui uses
 /// to lay out `Line`s, rather than assuming the glyph occupies one cell.
 pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
@@ -24,10 +24,7 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
     let title_width = prompt_area.width.saturating_sub(2);
     (button_width <= title_width).then(|| {
         Rect::new(
-            prompt_area
-                .right()
-                .saturating_sub(1)
-                .saturating_sub(button_width),
+            prompt_area.x.saturating_add(1),
             prompt_area.bottom().saturating_sub(1),
             button_width,
             1,
@@ -50,7 +47,7 @@ pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Li
     } else {
         Style::default().fg(Color::DarkGray).bg(Color::Black)
     };
-    Line::from(Span::styled(format!(" {VOICE_BUTTON_GLYPH} "), style)).right_aligned()
+    Line::from(Span::styled(format!(" {VOICE_BUTTON_GLYPH} "), style)).left_aligned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -963,7 +960,7 @@ mod tests {
                 .collect::<String>(),
             format!(" {VOICE_BUTTON_GLYPH} ")
         );
-        assert_eq!(line.width(), display_width(" 🎙︎ "));
+        assert_eq!(line.width(), 3);
         assert_eq!(display_width(VOICE_BUTTON_GLYPH), display_width("🎙︎"));
     }
 }
