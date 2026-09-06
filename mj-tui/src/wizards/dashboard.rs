@@ -270,12 +270,9 @@ impl DashboardState {
                 }
                 wizard.step = if is_bare_project_target(target) {
                     wizard.mounts = MountWizard::new(Vec::new());
-                    let history_host = match target {
-                        TargetTemplate::LocalBare => "local",
-                        TargetTemplate::SshBare { ssh, .. } => &ssh.host,
-                        _ => unreachable!(),
-                    };
-                    wizard.project_history = self.state.project_directories(history_host).to_vec();
+                    wizard.project_history = project_history_host(target)
+                        .map(|host| self.state.project_directories(host).to_vec())
+                        .unwrap_or_default();
                     wizard.project_history_index = 0;
                     if wizard.project_directory.is_empty()
                         && let Some(directory) = wizard.project_history.first()

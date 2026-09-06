@@ -444,6 +444,7 @@ fn spawn_tailscale_cert_renewer(
 }
 
 const MAX_CONCURRENT_PHONE_ACTIONS: usize = 4;
+const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
 
 struct PhoneActionStarted {
     action_id: u64,
@@ -523,6 +524,16 @@ struct ReadReceiptPersisted {
 
 struct ControllerReloaded {
     result: std::result::Result<Controller, String>,
+}
+
+struct BundleCreated {
+    result: std::result::Result<
+        mj_controller::hel_controller::QuickBundleCreation,
+        mj_controller::hel_controller::QuickBundleFailure,
+    >,
+    reply: tokio::sync::oneshot::Sender<
+        std::result::Result<String, mj_controller::hel_server::BundleFailure>,
+    >,
 }
 
 /// Loads durable controller state without occupying the phone control loop.
@@ -749,6 +760,7 @@ pub(crate) async fn run_server(
     ));
     let (conversation_tx, conversation_rx) = tokio::sync::watch::channel(conversations.clone());
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
+    let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
     let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::channel(32);
     let (preflight_tx, mut preflight_rx) = tokio::sync::mpsc::channel(32);
     let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
@@ -771,10 +783,13 @@ pub(crate) async fn run_server(
         bind,
         snapshot_rx,
         conversation_rx,
-        action_tx,
-        receipt_tx,
-        preflight_tx,
-        client_state_tx,
+        mj_controller::hel_server::ServerRequests {
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            client_state_tx,
+        },
     )?;
     options.shutdown = termination.clone();
     // Session cookies are stateless, so a per-process key would sign every
@@ -841,8 +856,12 @@ pub(crate) async fn run_server(
             tokio::sync::mpsc::unbounded_channel::<ReadReceiptPersisted>();
         let (controller_reload_tx, mut controller_reload_rx) =
             tokio::sync::mpsc::unbounded_channel::<ControllerReloaded>();
+        let (bundle_done_tx, mut bundle_done_rx) =
+            tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
+        let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut controller_reload_in_flight = false;
         let mut controller_reload_requested = false;
+        let mut controller_reload_invalidated = false;
         let mut pending_action_errors = std::collections::BTreeMap::<String, String>::new();
         let mut active_actions = std::collections::BTreeSet::new();
         let mut next_action_id = 0_u64;
@@ -1216,6 +1235,90 @@ pub(crate) async fn run_server(
                         }
                     }
                 }
+                bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
+                    let Some(mj_controller::hel_server::BundleRequest { source, reply }) = bundle else {
+                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
+                        break;
+                    };
+                    // Repository canonicalization and config persistence both
+                    // touch the filesystem. Keep them off this loop, and
+                    // report a panic as a failed request rather than dropping
+                    // the browser's reply.
+                    let done = bundle_done_tx.clone();
+                    let daemon_runtime = daemon_runtime.clone();
+                    bundle_jobs.spawn(async move {
+                        let result = daemon_runtime
+                            .create_quick_bundle(source)
+                            .await;
+                        if let Err(error) = done.send(BundleCreated { result, reply }) {
+                            tracing::debug!(%error, "bundle creation finished after the server stopped");
+                        }
+                    });
+                }
+                bundle_done = bundle_done_rx.recv() => {
+                    let Some(BundleCreated { result, reply }) = bundle_done else {
+                        failure = feed_stopped(termination.is_cancelled(), "the bundle creation pipeline stopped while the phone server was running");
+                        break;
+                    };
+                    match result {
+                        Ok(created) => {
+                            let bundle_id = created.bundle_id;
+                            // Other config sections may have changed while
+                            // this request was in flight. Publish only the
+                            // bundle this transaction created; a full fresh
+                            // config is requested below and must not make a
+                            // later completion hide another completed bundle.
+                            let Some(bundle) = created.config.bundles.get(&bundle_id) else {
+                                tracing::error!(%bundle_id, "bundle creation returned a config without its bundle");
+                                if reply.send(Err(mj_controller::hel_server::BundleFailure::Controller)).is_err() {
+                                    tracing::debug!("bundle creation failure reply dropped after client disconnect");
+                                }
+                                continue;
+                            };
+                            controller
+                                .config
+                                .bundles
+                                .insert(bundle_id.clone(), bundle.clone());
+                            // A reload started before this save may still be
+                            // queued. It must not hide a bundle after we have
+                            // acknowledged it as available to the browser.
+                            controller_reload_invalidated |= controller_reload_in_flight;
+                            revision = daemon_runtime.allocate_revision();
+                            publish_snapshot!(revision);
+                            request_daemon_controller_reload(
+                                daemon_runtime.clone(),
+                                "new bundle publication",
+                            );
+                            if reply.send(Ok(bundle_id)).is_err() {
+                                tracing::debug!("bundle creation reply dropped after client disconnect");
+                            }
+                        }
+                        Err(error) => {
+                            let failure = match error {
+                                mj_controller::hel_controller::QuickBundleFailure::InvalidSource(
+                                    detail,
+                                ) => {
+                                    tracing::debug!(error = %detail, "phone bundle source was invalid");
+                                    mj_controller::hel_server::BundleFailure::InvalidSource
+                                }
+                                mj_controller::hel_controller::QuickBundleFailure::Persistence(
+                                    detail,
+                                ) => {
+                                    tracing::warn!(error = %detail, "phone bundle creation failed");
+                                    mj_controller::hel_server::BundleFailure::Controller
+                                }
+                            };
+                            if reply.send(Err(failure)).is_err() {
+                                tracing::debug!("bundle creation failure reply dropped after client disconnect");
+                            }
+                        }
+                    }
+                }
+                bundle_job = bundle_jobs.join_next(), if !bundle_jobs.is_empty() => {
+                    if let Some(Err(error)) = bundle_job {
+                        tracing::warn!(%error, "bundle creation task panicked");
+                    }
+                }
                 preflight = preflight_rx.recv() => {
                     let Some(mj_controller::hel_server::PreflightRequest {
                         bundle_id,
@@ -1574,6 +1677,18 @@ pub(crate) async fn run_server(
                         break;
                     };
                     controller_reload_in_flight = false;
+                    if std::mem::take(&mut controller_reload_invalidated) {
+                        if let Err(error) = &result {
+                            tracing::warn!(%error, "superseded controller reload failed");
+                        }
+                        controller_reload_requested = false;
+                        request_controller_reload(
+                            &mut controller_reload_in_flight,
+                            &mut controller_reload_requested,
+                            &controller_reload_tx,
+                        );
+                        continue;
+                    }
                     match result {
                         Ok(mut reloaded) => {
                             for (session_id, error) in &pending_action_errors {
@@ -1646,6 +1761,9 @@ pub(crate) async fn run_server(
                 }
             }
         }
+        // Bundle jobs are supervised so shutdown never leaves a detached
+        // request task behind holding the config mutation lock.
+        bundle_jobs.shutdown().await;
         // Every exit stops in-flight work, whether it was asked for or forced.
         for control in action_cancellations.values() {
             control.request_cancel();

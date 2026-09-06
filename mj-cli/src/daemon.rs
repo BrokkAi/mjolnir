@@ -835,6 +835,29 @@ impl RuntimeState {
         )
     }
 
+    /// Create a bundle under the daemon's config-mutation coordinator. The
+    /// controller helper also takes the cross-process config lock, so a TUI
+    /// transaction cannot race this one while the daemon's other config
+    /// writers are excluded by this mutex.
+    pub(crate) async fn create_quick_bundle(
+        &self,
+        source: String,
+    ) -> std::result::Result<
+        mj_controller::hel_controller::QuickBundleCreation,
+        mj_controller::hel_controller::QuickBundleFailure,
+    > {
+        let _mutation = self.config_mutation.lock().await;
+        tokio::task::spawn_blocking(move || {
+            mj_controller::hel_controller::create_quick_bundle(&source)
+        })
+        .await
+        .map_err(|error| {
+            mj_controller::hel_controller::QuickBundleFailure::Persistence(anyhow!(
+                "bundle creation task panicked: {error}"
+            ))
+        })?
+    }
+
     fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
     }

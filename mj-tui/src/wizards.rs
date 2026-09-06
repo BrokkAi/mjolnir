@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use hel::hel_config::{
     HelConfig, TargetTemplate, container_size_host, is_bare_project_target, mount_history_host,
+    project_history_host,
 };
 use hel::hel_state::{
     HelState, SessionRecord, SessionResourceAllocation, SessionState, allocation_cpus,

@@ -423,6 +423,15 @@ pre.entry-body {
   border-color: var(--plan);
 }
 
+/* Full-row options can make a multi-question form taller than the phone.
+ * Scroll that form, not the entire conversation and its pinned composer. */
+#elicitations {
+  min-height: 0;
+  max-height: 60dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .elicitation-message {
   font: inherit;
   white-space: pre-wrap;
@@ -765,15 +774,37 @@ details.block-fold > pre {
   margin: 12px 0;
 }
 
+.recent-projects {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.recent-project {
+  text-align: left;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.project {
+  margin-top: 20px;
+}
+
+.project:first-child {
+  margin-top: 0;
+}
+
 .project-heading {
   display: flex;
   gap: 6px;
   align-items: baseline;
   font-size: 14px;
-  margin: 16px 0 4px;
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  margin: 0 0 8px;
+  padding: 0 0 5px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 
 .session-status {
@@ -1248,4 +1279,66 @@ body[data-connection='reconnecting'] .connection::before {
   display: block;
   width: 20px;
   height: 20px;
+}
+
+/* ---- full-row native choice controls ---- */
+
+/* The fieldset supplies the group semantics; each option label is the whole
+ * touch target so a phone user does not have to land on the tiny native mark. */
+.choice-control {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.choice-control legend {
+  color: var(--text);
+  font-weight: 700;
+  padding: 0;
+}
+
+.choice-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--touch);
+  box-sizing: border-box;
+  margin: 4px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  cursor: pointer;
+}
+
+.choice-option:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised));
+}
+
+.choice-option input {
+  flex: 0 0 var(--touch);
+  width: 24px;
+  height: 24px;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  margin: 0;
+  padding: 0;
+}
+
+.choice-option-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.choice-option-title {
+  color: var(--text);
+}
+
+.choice-option-description {
+  font-size: 14px;
+  overflow-wrap: anywhere;
 }

@@ -147,7 +147,8 @@ async function mockViewerApi(page, initialPending = []) {
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);
     if (!['viewer.html', 'viewer.js', 'viewer.css', 'markdown.js', 'tool-output.js', 'manifest.webmanifest', 'icon.svg'].includes(file))
       return route.fulfill({ status: 404, body: '' });
-    return route.fulfill({ path: path.join(webRoot, file) });
+    const asset = file === 'icon.svg' ? path.join(webRoot, '../icons/icon.svg') : path.join(webRoot, file);
+    return route.fulfill({ path: asset });
   });
   const state = {
     snapshot: fixtureSnapshot(),
@@ -315,12 +316,51 @@ test('plan command discovers, toggles, sends a request, and retries a rejected a
   await expect(page.locator('#conversation-state')).not.toContainText('plan');
 });
 
+test('long question forms scroll without pushing answer controls or the composer off the phone', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const long = question('long-question', 'Answer these three questions.');
+  long.fields = [0, 1, 2].map(index => ({
+    ...long.fields[0], id: `question_${index}`, title: `Question ${index + 1}`,
+    options: Array.from({ length: 5 }, (_, option) => ({
+      value: String(option), title: `Choice ${index + 1}.${option + 1}`,
+      description: 'An option with enough detail to wrap on a narrow phone.',
+    })),
+  }));
+  const state = await mockViewerApi(page, [long]);
+  const panel = page.locator('#elicitations');
+  expect(await panel.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  await panel.getByRole('radio', { name: /^Choice 3.5/ }).check();
+  await panel.getByRole('button', { name: 'Send answer', exact: true }).scrollIntoViewIfNeeded();
+  const send = await page.locator('#send-button').boundingBox();
+  expect(send.y + send.height).toBeLessThanOrEqual(569);
+  await panel.getByRole('button', { name: 'Send answer', exact: true }).click();
+  await waitForActionCount(state, 1);
+  expect(state.actions[0].response.content).toEqual({ question_0: '0', question_1: '0', question_2: '4' });
+});
+
+test('optional choices start unanswered and can be cleared after selection', async ({ page }) => {
+  const optional = question('optional-question', 'Choose an optional architecture.');
+  optional.fields[0].required = false;
+  const state = await mockViewerApi(page, [optional]);
+  const card = page.locator('#elicitations .elicitation');
+  await expect(card.locator('input[type="radio"]:checked')).toHaveCount(0);
+  await card.getByRole('radio', { name: /^Green/ }).check();
+  await card.getByRole('radio', { name: 'No answer', exact: true }).check();
+  await card.getByRole('button', { name: 'Send answer', exact: true }).click();
+  await waitForActionCount(state, 1);
+  expect(state.actions[0].response).toEqual({ action: 'accept', content: {} });
+});
+
 test('elicitation enum and custom answers submit exact content and survive snapshot refreshes', async ({ page }) => {
   const state = await mockViewerApi(page, [question('enum-question', 'Which deployment should be used?')]);
   const card = page.locator('#elicitations .elicitation');
   await expect(card).toContainText('Which deployment should be used?');
 
-  await card.locator('select').first().selectOption('green');
+  // The complete option row is the touch target, while the input remains a
+  // native radio for keyboard and assistive-technology semantics.
+  const green = card.locator('label.choice-option').filter({ hasText: /^Green/ });
+  await green.click();
+  await expect(green.locator('input')).toBeChecked();
   await card.getByRole('button', { name: 'Send answer' }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0]).toEqual({
@@ -373,4 +413,130 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   await page.reload();
   await expect(page.locator('#conversation-title')).toHaveText('Plan mode browser test');
   await expect(page.locator('#prompt-text')).toHaveText(draft);
+});
+
+function multiQuestion(id, message) {
+  return {
+    id,
+    title: 'Choose deployment regions',
+    description: 'Select the two regions that should receive this release.',
+    message,
+    fields: [
+      {
+        id: 'regions',
+        title: 'Regions',
+        description: 'Exactly two regions are required.',
+        required: true,
+        secret: false,
+        custom_answer_for: null,
+        custom_answer_option: null,
+        kind: 'multi_select',
+        default: [],
+        min_items: 2,
+        max_items: 2,
+        options: [
+          { value: 'us-east', title: 'US East', description: 'Virginia' },
+          { value: 'eu-west', title: 'EU West', description: 'Ireland' },
+          { value: 'ap-south', title: 'AP South', description: 'Mumbai' },
+        ],
+      },
+      {
+        id: 'regions_custom',
+        title: 'Other region set',
+        description: 'Use this when the offered regions do not fit.',
+        required: false,
+        secret: false,
+        custom_answer_for: 'regions',
+        custom_answer_option: null,
+        kind: 'text',
+        default: null,
+        min_length: null,
+        max_length: null,
+        pattern: null,
+        format: null,
+      },
+    ],
+  };
+}
+
+test('multi-select choices use full-row phone taps, survive refresh, and retry after rejection', async ({ page }) => {
+  const state = await mockViewerApi(page, [multiQuestion('regions-question', 'Where should it deploy?')]);
+  const card = page.locator('#elicitations .elicitation');
+  const options = card.locator('label.choice-option');
+  await expect(options).toHaveCount(3);
+
+  // Each row, including its description, is a reliable mobile-sized target.
+  for (let index = 0; index < 3; index += 1) {
+    const box = await options.nth(index).boundingBox();
+    expect(box.height, `choice row ${index} is too short`).toBeGreaterThanOrEqual(44);
+    expect(box.width, `choice row ${index} is too narrow`).toBeGreaterThanOrEqual(44);
+  }
+  await options.nth(0).click();
+  await expect(options.nth(0).locator('input')).toBeChecked();
+
+  // The minimum is enforced before any daemon action is sent.
+  await card.getByRole('button', { name: 'Send answer' }).click();
+  await expect.poll(() => state.actions.length).toBe(0);
+  await options.nth(1).click();
+  await expect(options.nth(1).locator('input')).toBeChecked();
+
+  // A snapshot refresh must not reconstruct a live card or lose either check.
+  const beforeRefresh = state.snapshotRequests;
+  state.snapshot.revision += 1;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(beforeRefresh);
+  await expect(options.nth(0).locator('input')).toBeChecked();
+  await expect(options.nth(1).locator('input')).toBeChecked();
+
+  state.rejectNextAnswer = true;
+  await card.getByRole('button', { name: 'Send answer' }).click();
+  await waitForActionCount(state, 1);
+  await expect(page.locator('#conversation-error')).toHaveText('answer temporarily rejected');
+  await expect(options.nth(0).locator('input')).toBeChecked();
+  await expect(options.nth(1).locator('input')).toBeChecked();
+  await expect(card.getByRole('button', { name: 'Send answer' })).toBeEnabled();
+
+  await card.getByRole('button', { name: 'Send answer' }).click();
+  await waitForActionCount(state, 2);
+  expect(state.actions[1]).toEqual({
+    action: 'respond-elicitation',
+    session_id: SESSION_ID,
+    elicitation_id: 'regions-question',
+    response: { action: 'accept', content: { regions: ['us-east', 'eu-west'] } },
+  });
+  await expect(page.locator('#elicitations .elicitation')).toHaveCount(0);
+});
+
+test('custom multi-select answers bypass owner constraints until cleared', async ({ page }) => {
+  const state = await mockViewerApi(page, [multiQuestion('custom-regions-question', 'Which regions should it cover?')]);
+  const card = page.locator('#elicitations .elicitation');
+  const ownerInput = card.locator('label.choice-option input').first();
+  const options = card.locator('label.choice-option');
+  const custom = card.locator('input[type="text"]');
+
+  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at least 2 option(s).');
+  await options.nth(0).click();
+  await options.nth(1).click();
+  await options.nth(2).click();
+  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at most 2 option(s).');
+  await custom.fill('Worldwide');
+  await expect(ownerInput).toHaveJSProperty('validationMessage', '');
+
+  // Clearing the replacement restores the required owner validation.
+  await custom.fill('');
+  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at most 2 option(s).');
+  for (let index = 0; index < 3; index += 1) await options.nth(index).click();
+  await expect(ownerInput).toHaveJSProperty('validationMessage', 'Select at least 2 option(s).');
+  await card.getByRole('button', { name: 'Send answer' }).click();
+  await expect.poll(() => state.actions.length).toBe(0);
+
+  await custom.fill('Worldwide');
+  await card.getByRole('button', { name: 'Send answer' }).click();
+  await waitForActionCount(state, 1);
+  expect(state.actions[0]).toEqual({
+    action: 'respond-elicitation',
+    session_id: SESSION_ID,
+    elicitation_id: 'custom-regions-question',
+    response: { action: 'accept', content: { regions_custom: 'Worldwide' } },
+  });
 });

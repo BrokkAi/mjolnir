@@ -6,13 +6,13 @@
 //! than being dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle, ProjectRepository};
+use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle};
 use hel::hel_state::{
     HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord, SessionState,
 };
@@ -23,9 +23,7 @@ use hel_tui::{
 };
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_controller::ResumeRepositorySourcePreflight;
-use mj_controller::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
 use mj_controller::hel_session_manager::SessionManagerControl;
-use mj_controller::hel_setup::github_repository_from_origin;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
@@ -850,10 +848,11 @@ pub(crate) fn spawn_create_bundle(
         move || {
             // Load fresh so a concurrent background save (e.g. an import
             // apply) is not clobbered by a stale UI-time config snapshot.
-            let mut config = Controller::load()?.config;
-            let bundle_id = create_quick_bundle(&mut config, &source)?;
-            config.save()?;
-            Ok(CreatedBundleUpdate { config, bundle_id })
+            let created = mj_controller::hel_controller::create_quick_bundle(&source)?;
+            Ok(CreatedBundleUpdate {
+                config: created.config,
+                bundle_id: created.bundle_id,
+            })
         },
         |result| DashboardIoUpdate::CreatedBundle {
             result: Box::new(result),
@@ -1729,79 +1728,11 @@ impl DashboardContext {
     }
 }
 
-fn create_quick_bundle(config: &mut HelConfig, source: &str) -> Result<String> {
-    let source = source.trim();
-    if source.is_empty() {
-        bail!("repository source cannot be empty");
-    }
-    let candidate = Path::new(source);
-    let (name, github, local) = if candidate.exists() {
-        let root = hel::hel_local_git::canonical_repository(candidate)?;
-        if let Some(existing) = configured_bundle_for_local(config, &root) {
-            return Ok(existing);
-        }
-        let name = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("local repository has no usable directory name")?
-            .to_owned();
-        (name, None, Some(root))
-    } else {
-        if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
-            bail!("local repository path {source:?} does not exist");
-        }
-        let repository = github_repository_from_origin(source)
-            .with_context(|| format!("{source:?} is not a GitHub owner/repository or URL"))?;
-        if let Some(existing) = configured_bundle_for_origin(config, &repository) {
-            return Ok(existing);
-        }
-        let name = repository.repository.clone();
-        let github = format!("{}/{}", repository.owner, repository.repository);
-        (name, Some(github), None)
-    };
-    let repository_id = quick_config_id(&name);
-    let mut bundle_id = repository_id.clone();
-    for suffix in 2_u32.. {
-        if !config.bundles.contains_key(&bundle_id) {
-            break;
-        }
-        bundle_id = format!("{repository_id}-{suffix}");
-    }
-    config.bundles.insert(
-        bundle_id.clone(),
-        ProjectBundle {
-            primary_repo: repository_id.clone(),
-            repositories: vec![ProjectRepository {
-                id: repository_id.clone(),
-                github,
-                local,
-                destination: PathBuf::from(repository_id),
-                git_ref: None,
-            }],
-        },
-    );
-    config.validate()?;
-    Ok(bundle_id)
-}
-
-fn quick_config_id(value: &str) -> String {
-    let id = value
-        .chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-        .take(64)
-        .collect::<String>();
-    if id.is_empty() || matches!(id.as_str(), "." | "..") {
-        "repository".into()
-    } else {
-        id
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hel::hel_config::ProjectRepository;
+    use mj_controller::hel_controller::create_quick_bundle_in_config as create_quick_bundle;
 
     #[test]
     fn quick_github_bundle_uses_collision_suffix_and_reuses_matching_source() {

@@ -9,7 +9,7 @@ module.exports = defineConfig({
   expect: { timeout: 15_000 },
   reporter: [['line']],
   use: {
-    browserName: 'chromium',
+    browserName: process.env.MJ_BROWSER_ENGINE || 'chromium',
     headless: true,
     ignoreHTTPSErrors: true,
     trace: 'off',
@@ -18,6 +18,6 @@ module.exports = defineConfig({
     // service worker script outside that path and refuses to register one over
     // a certificate it does not trust, so the launch flag is the only way to
     // exercise the offline shell against the lab's own certificate.
-    launchOptions: { args: ['--ignore-certificate-errors'] },
+    launchOptions: { args: process.env.MJ_BROWSER_ENGINE === 'firefox' ? [] : ['--ignore-certificate-errors'] },
   },
 });

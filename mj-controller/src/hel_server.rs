@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use hel::hel_config::{HelConfig, TargetTemplate, validate_id};
+use hel::hel_config::{HelConfig, TargetTemplate, project_history_host, validate_id};
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
 use hel::hel_state::{HelState, SessionState};
 
@@ -177,6 +177,7 @@ pub struct ServerOptions {
     pub snapshot_rx: watch::Receiver<ViewerSnapshot>,
     pub conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
     pub action_tx: mpsc::Sender<ControllerRequest>,
+    pub bundle_tx: mpsc::Sender<BundleRequest>,
     pub receipt_tx: mpsc::Sender<ReadReceiptRequest>,
     pub preflight_tx: mpsc::Sender<PreflightRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
@@ -191,24 +192,31 @@ pub struct ServerOptions {
     cookie_key: Vec<u8>,
 }
 
+/// Typed request channels served by the authenticated HTTP surface.
+pub struct ServerRequests {
+    pub action_tx: mpsc::Sender<ControllerRequest>,
+    pub bundle_tx: mpsc::Sender<BundleRequest>,
+    pub receipt_tx: mpsc::Sender<ReadReceiptRequest>,
+    pub preflight_tx: mpsc::Sender<PreflightRequest>,
+    pub client_state_tx: mpsc::Sender<ClientStateRequest>,
+}
+
 impl ServerOptions {
     pub fn new(
         bind: SocketAddr,
         snapshot_rx: watch::Receiver<ViewerSnapshot>,
         conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
-        action_tx: mpsc::Sender<ControllerRequest>,
-        receipt_tx: mpsc::Sender<ReadReceiptRequest>,
-        preflight_tx: mpsc::Sender<PreflightRequest>,
-        client_state_tx: mpsc::Sender<ClientStateRequest>,
+        requests: ServerRequests,
     ) -> AnyResult<Self> {
         Ok(Self {
             bind,
             snapshot_rx,
             conversation_rx,
-            action_tx,
-            receipt_tx,
-            preflight_tx,
-            client_state_tx,
+            action_tx: requests.action_tx,
+            bundle_tx: requests.bundle_tx,
+            receipt_tx: requests.receipt_tx,
+            preflight_tx: requests.preflight_tx,
+            client_state_tx: requests.client_state_tx,
             shutdown: CancellationToken::new(),
             session_ttl: DEFAULT_SESSION_TTL,
             secure_cookie: true,
@@ -416,6 +424,15 @@ impl ViewerSnapshot {
                     target,
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
                 ),
+                recent_project_directories: project_history_host(target)
+                    .map(|host| {
+                        state
+                            .project_directories(host)
+                            .iter()
+                            .map(|directory| directory.to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
             .collect();
         let bundles = config
@@ -797,6 +814,11 @@ pub struct ViewerTarget {
     pub id: String,
     pub kind: String,
     pub requires_project_directory: bool,
+    /// Recent raw project directories for this target's physical host. Managed
+    /// targets intentionally publish an empty list because they select a
+    /// configured bundle rather than a host checkout.
+    #[serde(default)]
+    pub recent_project_directories: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1136,6 +1158,25 @@ pub struct ControllerRequest {
     pub reply: tokio::sync::oneshot::Sender<ActionOutcome>,
 }
 
+/// A phone request to create or reuse a quick project bundle. This has its
+/// own channel because bundle creation returns a durable id and must publish a
+/// config snapshot before the HTTP request can succeed; [`ControllerAction`]
+/// intentionally carries only action admission outcomes.
+#[derive(Debug)]
+pub struct BundleRequest {
+    pub source: String,
+    pub reply: tokio::sync::oneshot::Sender<Result<String, BundleFailure>>,
+}
+
+/// Safe failure classes for bundle creation. Detailed controller errors stay
+/// in daemon logs; a browser only needs to know whether to fix its source or
+/// report a server-side failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleFailure {
+    InvalidSource,
+    Controller,
+}
+
 /// A phone acknowledging how far it has read a conversation.
 ///
 /// This deliberately is not a `ControllerAction`: the viewer posts it after
@@ -1242,6 +1283,7 @@ struct ServerState {
     snapshot_rx: watch::Receiver<ViewerSnapshot>,
     conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
     action_tx: mpsc::Sender<ControllerRequest>,
+    bundle_tx: mpsc::Sender<BundleRequest>,
     receipt_tx: mpsc::Sender<ReadReceiptRequest>,
     preflight_tx: mpsc::Sender<PreflightRequest>,
     client_state_tx: mpsc::Sender<ClientStateRequest>,
@@ -1309,6 +1351,7 @@ fn router(options: ServerOptions) -> Router {
         snapshot_rx: options.snapshot_rx,
         conversation_rx: options.conversation_rx,
         action_tx: options.action_tx,
+        bundle_tx: options.bundle_tx,
         receipt_tx: options.receipt_tx,
         preflight_tx: options.preflight_tx,
         client_state_tx: options.client_state_tx,
@@ -1327,6 +1370,7 @@ fn router(options: ServerOptions) -> Router {
             post(mark_conversation_read),
         )
         .route("/api/events", get(events))
+        .route("/api/bundles", post(create_bundle))
         .route("/api/preflight/new", post(preflight_new))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(
@@ -1500,6 +1544,59 @@ async fn action(
         Some(rejection) => Err(rejection),
         None => Ok(StatusCode::ACCEPTED),
     }
+}
+
+const MAX_BUNDLE_SOURCE_CHARS: usize = 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBundleRequest {
+    source: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateBundleResponse {
+    bundle_id: String,
+}
+
+/// Create a quick bundle through the controller's dedicated persistence path.
+/// The control loop publishes the resulting config before resolving `reply`,
+/// so a successful response can immediately use the returned bundle id in the
+/// next new-session request.
+async fn create_bundle(
+    State(state): State<ServerState>,
+    Json(request): Json<CreateBundleRequest>,
+) -> Result<Json<CreateBundleResponse>, ApiError> {
+    if request.source.trim().is_empty() {
+        return Err(ApiError::bad_request("repository source cannot be empty"));
+    }
+    if request.source.chars().count() > MAX_BUNDLE_SOURCE_CHARS {
+        return Err(ApiError::bad_request(
+            "repository source must contain 1024 characters or fewer",
+        ));
+    }
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .bundle_tx
+        .send(BundleRequest {
+            source: request.source,
+            reply,
+        })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    let bundle_id = result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map_err(|failure| match failure {
+            BundleFailure::InvalidSource => ApiError::bad_request(
+                "use a GitHub owner/repository or an existing Git checkout on the controller host",
+            ),
+            BundleFailure::Controller => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the controller could not create the bundle",
+            ),
+        })?;
+    Ok(Json(CreateBundleResponse { bundle_id }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2609,14 +2706,15 @@ async fn security_headers(request: Request, next: Next) -> Response<Body> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::path::Path;
 
     use axum::http::Request;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
 
     use hel::hel_config::{
-        CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle,
-        ProjectRepository,
+        CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode,
+        ProjectBundle, ProjectRepository, SshConnection,
     };
     use hel::hel_state::{STATE_VERSION, SessionRecord};
 
@@ -2759,6 +2857,7 @@ mod tests {
         let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
         let (_conversation_tx, conversation_rx) = watch::channel(conversations);
         let (action_tx, action_rx) = mpsc::channel(8);
+        let (bundle_tx, _bundle_rx) = mpsc::channel(8);
         let (receipt_tx, receipt_rx) = mpsc::channel(8);
         let (preflight_tx, preflight_rx) = mpsc::channel(8);
         let (client_state_tx, client_state_rx) = mpsc::channel(8);
@@ -2766,6 +2865,7 @@ mod tests {
             snapshot_rx,
             conversation_rx,
             action_tx,
+            bundle_tx,
             receipt_tx,
             preflight_tx,
             client_state_tx,
@@ -2780,10 +2880,34 @@ mod tests {
         )
     }
 
+    fn app_with_bundle_receiver() -> (Router, mpsc::Receiver<BundleRequest>) {
+        let (config, state) = sample_config_state();
+        let (_snapshot_tx, snapshot_rx) =
+            watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
+        let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+        let (action_tx, _action_rx) = mpsc::channel(8);
+        let (bundle_tx, bundle_rx) = mpsc::channel(8);
+        let (receipt_tx, _receipt_rx) = mpsc::channel(8);
+        let (preflight_tx, _preflight_rx) = mpsc::channel(8);
+        let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+        let options = test_options(
+            snapshot_rx,
+            conversation_rx,
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            client_state_tx,
+        )
+        .with_test_credentials("123456", b"01234567890123456789012345678901");
+        (router(options), bundle_rx)
+    }
+
     fn test_options(
         snapshot_rx: watch::Receiver<ViewerSnapshot>,
         conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
         action_tx: mpsc::Sender<ControllerRequest>,
+        bundle_tx: mpsc::Sender<BundleRequest>,
         receipt_tx: mpsc::Sender<ReadReceiptRequest>,
         preflight_tx: mpsc::Sender<PreflightRequest>,
         client_state_tx: mpsc::Sender<ClientStateRequest>,
@@ -2792,10 +2916,13 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             snapshot_rx,
             conversation_rx,
-            action_tx,
-            receipt_tx,
-            preflight_tx,
-            client_state_tx,
+            ServerRequests {
+                action_tx,
+                bundle_tx,
+                receipt_tx,
+                preflight_tx,
+                client_state_tx,
+            },
         )
         .unwrap()
     }
@@ -2806,6 +2933,7 @@ mod tests {
             watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
         let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
         let (action_tx, _action_rx) = mpsc::channel(1);
+        let (bundle_tx, _bundle_rx) = mpsc::channel(1);
         let (receipt_tx, _receipt_rx) = mpsc::channel(1);
         let (preflight_tx, _preflight_rx) = mpsc::channel(1);
         let (client_state_tx, _client_state_rx) = mpsc::channel(1);
@@ -2813,6 +2941,7 @@ mod tests {
             snapshot_rx,
             conversation_rx,
             action_tx,
+            bundle_tx,
             receipt_tx,
             preflight_tx,
             client_state_tx,
@@ -2857,6 +2986,98 @@ mod tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn bundle_endpoint_authenticates_and_forwards_the_source() {
+        let (app, mut bundles) = app_with_bundle_receiver();
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post("/api/bundles")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"source":"example/app"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert!(bundles.try_recv().is_err());
+
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn({
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/api/bundles")
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(COOKIE, cookie)
+                        .body(Body::from(r#"{"source":"example/app"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+        let request = bundles.recv().await.expect("bundle request forwarded");
+        assert_eq!(request.source, "example/app");
+        request.reply.send(Ok("app".into())).unwrap();
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), br#"{"bundle_id":"app"}"#);
+    }
+
+    #[tokio::test]
+    async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
+        for source in [String::new(), "x".repeat(MAX_BUNDLE_SOURCE_CHARS + 1)] {
+            let (app, mut bundles) = app_with_bundle_receiver();
+            let cookie = login_cookie(&app).await;
+            let response = app
+                .oneshot(
+                    Request::post("/api/bundles")
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(COOKIE, cookie)
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({"source": source})).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(bundles.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn bundle_endpoint_reports_invalid_source_as_a_client_error() {
+        let (app, mut bundles) = app_with_bundle_receiver();
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/api/bundles")
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(COOKIE, cookie)
+                        .body(Body::from(r#"{"source":"not a source"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+        let request = bundles.recv().await.expect("bundle request forwarded");
+        request
+            .reply
+            .send(Err(BundleFailure::InvalidSource))
+            .unwrap();
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("GitHub owner/repository"));
     }
 
     #[tokio::test]
@@ -2947,6 +3168,48 @@ mod tests {
         assert!(!json.contains("secret.registry"));
         assert!(!json.contains("native-secret-id"));
         assert!(json.contains("\"has_error\":true"));
+    }
+
+    #[test]
+    fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty() {
+        let (mut config, mut state) = sample_config_state();
+        config
+            .targets
+            .insert("raw-local".into(), TargetTemplate::LocalBare);
+        config.targets.insert(
+            "raw-builder".into(),
+            TargetTemplate::SshBare {
+                ssh: SshConnection {
+                    host: "builder-a".into(),
+                    user: None,
+                    identity_file: None,
+                    extra_args: Vec::new(),
+                },
+                permissions: PermissionMode::Guardian,
+                workspace_prefix: "workspaces".into(),
+            },
+        );
+        state.remember_project_directory("local", Path::new("/work/local"));
+        state.remember_project_directory("builder-a", Path::new("/srv/builder"));
+        state.remember_project_directory("other-host", Path::new("/not-published"));
+
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let target = |id: &str| {
+            snapshot
+                .targets
+                .iter()
+                .find(|target| target.id == id)
+                .unwrap()
+        };
+        assert_eq!(
+            target("raw-local").recent_project_directories,
+            vec!["/work/local"]
+        );
+        assert_eq!(
+            target("raw-builder").recent_project_directories,
+            vec!["/srv/builder"]
+        );
+        assert!(target("podman").recent_project_directories.is_empty());
     }
 
     #[test]
@@ -3188,9 +3451,10 @@ mod tests {
 
     #[test]
     fn embedded_viewer_lists_histories_from_every_workspace() {
-        let source = viewer_source("function renderResumable()", "function resumableCard");
+        let source = viewer_source("const resumableCards =", "function resumableCard");
         let setup = r#"
 const snapshot = {
+  profiles: [],
   sessions: [
     { id: "history-a", workspace_id: "workspace-a", capabilities: { resume: true } },
     { id: "history-b", workspace_id: "workspace-b", capabilities: { resume: true } },
@@ -3201,12 +3465,12 @@ const resumable = {
   children: [],
   replaceChildren(...children) { this.children = children; },
 };
-function resumableCard(session) { return session.id; }
+function resumableCard(session) { return { id: session.id, querySelector() { return null; } }; }
 function el(_tag, _className, text) { return text; }
 "#;
         let checks = r#"
 renderResumable();
-if (JSON.stringify(resumable.children) !== JSON.stringify(["history-a", "history-b"])) {
+if (JSON.stringify(resumable.children.map(card => card.id)) !== JSON.stringify(["history-a", "history-b"])) {
   throw new Error(`global histories were filtered: ${JSON.stringify(resumable.children)}`);
 }
 "#;
@@ -4065,13 +4329,6 @@ console.log('all tool-output checks passed');
         );
         let dom = r#"
 let replaceCalls = 0;
-class Option {
-  constructor(label, value) {
-    this.label = label;
-    this.value = value;
-    this.selected = false;
-  }
-}
 function makeEl(tag) {
   return {
     tagName: tag.toUpperCase(),
@@ -4096,6 +4353,18 @@ function makeEl(tag) {
       this.children = kids;
     },
     addEventListener() {},
+    querySelectorAll(selector) {
+      const found = [];
+      const visit = node => {
+        for (const child of node.children) {
+          if (child.tagName === "INPUT" && (selector === "input" || child.checked)) found.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return found;
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
     setCustomValidity() {},
     reportValidity() {
       return true;
@@ -4111,6 +4380,12 @@ const document = {
   },
 };
 const elicitations = makeEl("div");
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  node.className = className || "";
+  node.textContent = text || "";
+  return node;
+}
 async function submitElicitation() {}
 "#;
         let checks = r#"
@@ -4132,16 +4407,16 @@ const request = {
 const session = { id: "session-1", pending_elicitations: [request] };
 renderElicitations(session);
 const card = elicitations.children[0];
-const select = created.find((el) => el.tagName === "SELECT");
-const text = created.find((el) => el.tagName === "INPUT");
-select.value = "reusable";
+const radio = created.find((el) => el.tagName === "INPUT" && el.value === "reusable");
+const text = created.find((el) => el.tagName === "INPUT" && el.type === "text");
+radio.checked = true;
 text.value = "keep me";
 const attachments = replaceCalls;
 renderElicitations(session);
 if (elicitations.children[0] !== card) {
   throw new Error("a snapshot rebuilt the pending card");
 }
-if (select.value !== "reusable" || text.value !== "keep me") {
+if (!radio.checked || text.value !== "keep me") {
   throw new Error("a snapshot wiped the half-filled answer");
 }
 if (replaceCalls !== attachments) {
@@ -4152,10 +4427,10 @@ renderElicitations(session);
 if (elicitations.children[0] !== card) {
   throw new Error("a sent answer rebuilt the card");
 }
-if (!select.disabled || !text.disabled) {
+if (!radio.disabled || !text.disabled) {
   throw new Error("a sent answer left the controls live");
 }
-if (select.value !== "reusable") {
+if (!radio.checked) {
   throw new Error("a sent answer wiped the reply");
 }
 renderElicitations({ id: "session-1", pending_elicitations: [] });

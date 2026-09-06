@@ -852,6 +852,21 @@ pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {
     }
 }
 
+/// The host key whose project-directory history belongs to `template`.
+/// Unlike mount history, raw bare targets keep a recent project checkout list
+/// because their launch wizard selects a directory instead of an attachment.
+pub fn project_history_host(template: &TargetTemplate) -> Option<&str> {
+    match template {
+        TargetTemplate::LocalBare => Some("local"),
+        TargetTemplate::SshBare { ssh, .. } => Some(&ssh.host),
+        TargetTemplate::LocalPodman { .. }
+        | TargetTemplate::LocalDocker { .. }
+        | TargetTemplate::AppleContainer { .. }
+        | TargetTemplate::AwsEc2 { .. }
+        | TargetTemplate::SshPodman { .. } => None,
+    }
+}
+
 /// Stable physical-host key for reusable container CPU and memory defaults.
 pub fn container_size_host(template: &TargetTemplate) -> Option<&str> {
     match template {

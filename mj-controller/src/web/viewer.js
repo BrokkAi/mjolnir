@@ -321,15 +321,26 @@ function liveSessions() {
   );
 }
 
-/// Sessions grouped by project, in the order the projects first appear.
+/// Sessions grouped by the controller's projected project identity.
+///
+/// The controller publishes an opaque `project_key` and the same short
+/// `project_label` the TUI uses. Keep those fields separate: labels can be
+/// shared by different projects, while keys must never merge them. Groups are
+/// ordered by their visible label, as the TUI's project rows are.
 function byProject(list) {
   const groups = new Map();
   for (const session of list) {
-    const key = session.project_key || session.bundle_id;
-    if (!groups.has(key)) groups.set(key, { label: session.project_label || key, sessions: [] });
+    // `bundle_id` keeps older snapshots renderable; current snapshots always
+    // provide the opaque project key. The session id is only a last-resort
+    // boundary for malformed legacy data, never a project label.
+    const key = session.project_key || session.bundle_id || session.id;
+    if (!groups.has(key)) groups.set(key, { key, label: session.project_label || key, sessions: [] });
     groups.get(key).sessions.push(session);
   }
-  return [...groups.values()];
+  return [...groups.values()].sort((left, right) => {
+    const labelOrder = left.label.toLowerCase().localeCompare(right.label.toLowerCase());
+    return labelOrder || left.label.localeCompare(right.label) || left.key.localeCompare(right.key);
+  });
 }
 
 function renderSessions() {
@@ -479,17 +490,6 @@ function handleSessionCardKeydown(event) {
 // The other pages
 // ---------------------------------------------------------------------------
 
-function fillOptions(select, items, selected) {
-  select.replaceChildren(
-    ...items.map(item => {
-      const option = el('option', '', item.label ?? item.id);
-      option.value = item.id;
-      if (item.id === selected) option.selected = true;
-      return option;
-    }),
-  );
-}
-
 // ---------------------------------------------------------------------------
 // The New wizard
 // ---------------------------------------------------------------------------
@@ -512,9 +512,12 @@ const NEW_STEPS = [
 
 let newDraft = null;
 let pendingNewPreflight = null;
+let renderedNewDraft = null;
+let renderedNewSignature = null;
 
 function freshDraft() {
   return {
+    workspaceId: selectedWorkspaceId(),
     step: 0,
     profileId: snapshot?.profiles[0]?.id || '',
     targetId: snapshot?.targets[0]?.id || '',
@@ -524,6 +527,10 @@ function freshDraft() {
     dirty: [],
     acknowledged: false,
     preflighted: false,
+    bundleSource: '',
+    creatingBundle: false,
+    showBundleSource: false,
+    projectDirectories: {},
   };
 }
 
@@ -547,10 +554,32 @@ function derivedTitle() {
 }
 
 function renderNewForm() {
-  if (!newDraft) newDraft = freshDraft();
+  if (!newDraft || newDraft.workspaceId !== selectedWorkspaceId()) {
+    newDraft = freshDraft();
+    newError.textContent = '';
+  }
   const steps = visibleSteps();
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
+  // A snapshot often only changes another session. Keep the actual controls
+  // mounted so it cannot interrupt a touch gesture or dismiss a native picker.
+  const signature = JSON.stringify({
+    step: step.key,
+    profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
+    targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
+    project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, newDraft.showBundleSource] : null,
+    dirty: step.key === 'dirty' || step.key === 'review' ? newDraft.dirty : null,
+    checking: pendingNewPreflight === newDraft,
+    committing: Boolean(newDraft.committing),
+    creating: newDraft.creatingBundle,
+  });
+  if (renderedNewDraft === newDraft && renderedNewSignature === signature) return;
+  const focused = newStep.contains(document.activeElement) ? document.activeElement : null;
+  const caret = focused?.id && focused.type === 'text'
+    ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd }
+    : null;
+  renderedNewDraft = newDraft;
+  renderedNewSignature = signature;
   newProgress.textContent = `Step ${newDraft.step + 1} of ${steps.length} · ${step.title}`;
   newBackButton.disabled = newDraft.step === 0;
   newNextButton.textContent = step.key === 'review' ? 'Start' : 'Next';
@@ -568,19 +597,41 @@ function renderNewForm() {
     case 'target': {
       body.append(
         pickerField('Target', 'new-target', snapshot.targets, newDraft.targetId, value => {
+          newDraft.projectDirectories[newDraft.targetId] = newDraft.projectDirectory;
           newDraft.targetId = value;
+          newDraft.projectDirectory = newDraft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
           // Changing the target changes which project question is asked, and
           // invalidates anything the previous project answer was checked for.
           newDraft.preflighted = false;
           newDraft.dirty = [];
           newDraft.acknowledged = false;
-          renderNewForm();
         }),
       );
       break;
     }
     case 'project': {
       if (targetIsBare(newDraft.targetId)) {
+        body.append(el('p', 'dim', 'Raw hosts open an existing checkout directly. Bundles are used for container targets.'));
+        const recents = snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories || [];
+        if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
+          newDraft.projectDirectory = recents[0] || '';
+        }
+        if (recents.length) {
+          const recentList = el('div', 'recent-projects');
+          recentList.append(el('p', 'dim', 'Recent projects on this host'));
+          for (const directory of recents) {
+            const pick = el('button', 'secondary recent-project', directory);
+            pick.type = 'button';
+            pick.onclick = () => {
+              newDraft.projectDirectory = directory;
+              newDraft.projectDirectories[newDraft.targetId] = directory;
+              newDraft.preflighted = false;
+              document.querySelector('#new-project-directory').value = directory;
+            };
+            recentList.append(pick);
+          }
+          body.append(recentList);
+        }
         body.append(
           textField(
             'Project directory',
@@ -588,6 +639,7 @@ function renderNewForm() {
             newDraft.projectDirectory,
             value => {
               newDraft.projectDirectory = value;
+              newDraft.projectDirectories[newDraft.targetId] = value;
               newDraft.preflighted = false;
             },
           ),
@@ -601,6 +653,22 @@ function renderNewForm() {
             newDraft.acknowledged = false;
           }),
         );
+        const create = el('button', 'secondary', 'Create bundle');
+        create.type = 'button';
+        create.onclick = () => {
+          newDraft.showBundleSource = !newDraft.showBundleSource;
+          renderNewForm();
+          document.querySelector('#new-bundle-source')?.focus();
+        };
+        body.append(create);
+        if (newDraft.showBundleSource || !snapshot.bundles.length) {
+          body.append(textField('Repository source', 'new-bundle-source', newDraft.bundleSource, value => { newDraft.bundleSource = value; }));
+          body.append(el('p', 'dim', 'GitHub owner/repository or URL, or an existing repository path on the controller host. Creates a reusable bundle in your shared configuration.'));
+          const save = el('button', '', newDraft.creatingBundle ? 'Creating bundle…' : 'Save bundle');
+          save.type = 'button';
+          save.onclick = createNewBundle;
+          body.append(save);
+        }
       }
       body.append(
         textField('Title (optional)', 'new-title', newDraft.title, value => {
@@ -655,19 +723,56 @@ function renderNewForm() {
     newNextButton.textContent = 'Checking…';
     newBackButton.disabled = true;
   }
-  newNextButton.disabled = checking || newDraft.committing === true;
-  for (const input of newStep.querySelectorAll('input, select')) input.disabled = checking;
+  const busy = checking || newDraft.committing === true || newDraft.creatingBundle;
+  newNextButton.disabled = busy;
+  newBackButton.disabled ||= busy;
+  for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = busy;
+  if (caret && !busy) {
+    const input = document.getElementById(caret.id);
+    input?.focus({ preventScroll: true });
+    input?.setSelectionRange(caret.start, caret.end);
+  }
 }
 
 function pickerField(label, id, items, value, onChange) {
-  const field = el('label', 'field');
-  field.append(el('span', '', label));
-  const select = el('select');
-  select.id = id;
-  fillOptions(select, items, value);
-  select.onchange = () => onChange(select.value);
-  field.append(select);
+  const field = choiceControl({
+    label,
+    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: item.kind || item.harness_kind })),
+    values: [value],
+    onChange: () => onChange(field.querySelector('input:checked')?.value || ''),
+  });
+  field.id = id;
+  if (!items.length) field.append(el('p', 'dim', `No ${label.toLowerCase()}s configured.`));
   return field;
+}
+
+async function createNewBundle() {
+  const draft = newDraft;
+  if (!draft || draft.creatingBundle) return;
+  const source = draft.bundleSource.trim();
+  if (!source) {
+    newError.textContent = 'Enter a repository source for the bundle.';
+    return;
+  }
+  draft.creatingBundle = true;
+  newError.textContent = '';
+  renderNewForm();
+  try {
+    const result = await request('/api/bundles', { method: 'POST', body: JSON.stringify({ source }) });
+    if (newDraft !== draft) return;
+    draft.bundleId = result.bundle_id;
+    draft.showBundleSource = false;
+    draft.bundleSource = '';
+    draft.preflighted = false;
+    draft.dirty = [];
+    draft.acknowledged = false;
+    await refresh();
+  } catch (error) {
+    if (newDraft === draft) newError.textContent = error.message;
+  } finally {
+    draft.creatingBundle = false;
+    if (newDraft === draft) renderNewForm();
+  }
 }
 
 function textField(label, id, value, onInput) {
@@ -704,7 +809,7 @@ async function preflightNew() {
     draft.dirty = answer.dirty_repositories || [];
     draft.preflighted = true;
     // A set the person has not seen cannot already be acknowledged.
-    if (!draft.dirty.length) draft.acknowledged = false;
+    draft.acknowledged = false;
     return true;
   } catch (error) {
     if (newDraft !== draft) return false;
@@ -716,11 +821,24 @@ async function preflightNew() {
 }
 
 async function advanceNew() {
+  if (!newDraft || newDraft.creatingBundle || newDraft.committing || pendingNewPreflight === newDraft) return;
   const steps = visibleSteps();
   const step = steps[newDraft.step];
   newError.textContent = '';
+  if (step.key === 'profile' && !snapshot.profiles.some(p => p.id === newDraft.profileId)) {
+    newError.textContent = 'Choose an available profile before continuing.';
+    return;
+  }
+  if (step.key === 'target' && !snapshot.targets.some(t => t.id === newDraft.targetId)) {
+    newError.textContent = 'Choose an available target before continuing.';
+    return;
+  }
 
   if (step.key === 'project') {
+    if (!targetIsBare(newDraft.targetId) && !snapshot.bundles.some(b => b.id === newDraft.bundleId)) {
+      newError.textContent = 'Choose or create a bundle before continuing.';
+      return;
+    }
     if (targetIsBare(newDraft.targetId) && !newDraft.projectDirectory.trim()) {
       newError.textContent = 'Name the project directory to open.';
       return;
@@ -748,7 +866,7 @@ async function commitNew() {
   const bare = targetIsBare(newDraft.targetId);
   const body = {
     action: 'new',
-    workspace_id: selectedWorkspaceId(),
+    workspace_id: draft.workspaceId,
     profile_id: newDraft.profileId,
     bundle_id: newDraft.bundleId,
     target_id: newDraft.targetId,
@@ -757,17 +875,18 @@ async function commitNew() {
   };
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
   draft.committing = true;
-  newNextButton.disabled = true;
+  renderNewForm();
   try {
     await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
-    newDraft = null;
+    if (newDraft !== draft) return;
     await refresh();
-    navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
+    if (newDraft !== draft) return;
+    navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
   } catch (err) {
-    newError.textContent = err.message;
+    if (newDraft === draft) newError.textContent = err.message;
   } finally {
     draft.committing = false;
-    newNextButton.disabled = false;
+    if (newDraft === draft) renderNewForm();
   }
 }
 
@@ -776,13 +895,27 @@ async function commitNew() {
 /// A session that cannot resume anywhere is still listed, with one plain
 /// sentence saying why and where to finish it. Hiding it would leave a person
 /// looking for a session they know exists.
+const resumableCards = new Map();
 function renderResumable() {
   const list = (snapshot.sessions || []).filter(session => session.capabilities?.resume);
+  for (const id of resumableCards.keys()) if (!list.some(session => session.id === id)) resumableCards.delete(id);
   if (!list.length) {
     resumable.replaceChildren(el('p', 'dim', 'No sessions to resume.'));
     return;
   }
-  resumable.replaceChildren(...list.map(resumableCard));
+  const cards = list.map(session => {
+    const signature = JSON.stringify([session, snapshot.profiles.map(p => [p.id, p.harness_kind])]);
+    let cached = resumableCards.get(session.id);
+    if (!cached || cached.signature !== signature) {
+      cached = { signature, card: resumableCard(session) };
+      resumableCards.set(session.id, cached);
+    }
+    const resume = cached.card.querySelector('button[data-action="resume"]');
+    if (resume) resume.disabled = pendingActions.has(`resume:${session.id}`);
+    return cached.card;
+  });
+  if (cards.length !== resumable.children.length || cards.some((card, index) => resumable.children[index] !== card))
+    resumable.replaceChildren(...cards);
 }
 
 function resumableCard(session) {
@@ -802,42 +935,32 @@ function resumableCard(session) {
     return card;
   }
 
-  const profiles = el('label', 'field');
-  profiles.append(el('span', '', 'Profile'));
-  const profilePicker = el('select');
+  const profilePicker = pickerField('Profile', `resume-profile-${session.id}`, snapshot.profiles, session.profile_id, () => {});
   profilePicker.dataset.role = 'resume-profile';
-  fillOptions(profilePicker, snapshot.profiles, session.profile_id);
-  profiles.append(profilePicker);
-  card.append(profiles);
+  card.append(profilePicker);
 
-  const targets = el('label', 'field');
-  targets.append(el('span', '', 'Target'));
-  const targetPicker = el('select');
-  targetPicker.dataset.role = 'resume-target';
-  fillOptions(
-    targetPicker,
+  const targetPicker = pickerField(
+    'Target', `resume-target-${session.id}`,
     session.compatible_resume_targets.map(id => ({ id })),
-    session.compatible_resume_targets.includes(session.target_id) ? session.target_id : undefined,
+    session.compatible_resume_targets.includes(session.target_id) ? session.target_id : session.compatible_resume_targets[0],
+    () => {},
   );
-  targets.append(targetPicker);
-  card.append(targets);
+  targetPicker.dataset.role = 'resume-target';
+  card.append(targetPicker);
 
   const queued = (session.queued_prompts || []).length;
   if (queued) {
-    const choice = el('label', 'field');
-    choice.append(el('span', '', `${queued} queued prompt${queued === 1 ? '' : 's'}`));
-    const picker = el('select');
-    picker.dataset.role = 'resume-queue';
-    fillOptions(
-      picker,
+    const picker = pickerField(
+      `${queued} queued prompt${queued === 1 ? '' : 's'}`, `resume-queue-${session.id}`,
       [
         { id: 'start', label: 'Run them after resuming' },
         { id: 'discard', label: 'Discard them' },
       ],
       'start',
+      () => {},
     );
-    choice.append(picker);
-    card.append(choice);
+    picker.dataset.role = 'resume-queue';
+    card.append(picker);
   }
 
   const row = el('div', 'row');
@@ -1232,21 +1355,59 @@ const elicitationCards = new Map(),
 function elicitationKey(sessionId, id) {
   return `${sessionId}\u001f${id}`;
 }
+
+let choiceControlSequence = 0;
+
+/// A native radio/checkbox group whose complete rows are touch targets.
+///
+/// The inputs remain ordinary browser controls, so arrow keys, Tab, and
+/// assistive technology keep their platform semantics. The surrounding label
+/// makes the title and description part of the same target as the control.
+function choiceControl({
+  label,
+  options,
+  multiple = false,
+  values = [],
+  required = false,
+  onChange = () => {},
+}) {
+  const fieldset = el('fieldset', 'choice-control');
+  fieldset.append(el('legend', '', label));
+  const selected = new Set(
+    (Array.isArray(values) ? values : [values])
+      .filter(value => value != null)
+      .map(value => String(value)),
+  );
+  // A name is needed for native radio keyboard behaviour. It must not be
+  // shared by two independently-rendered groups on the same page.
+  const name = `choice-${++choiceControlSequence}`;
+  for (const option of options || []) {
+    const row = el('label', 'choice-option');
+    const input = el('input');
+    input.type = multiple ? 'checkbox' : 'radio';
+    input.name = name;
+    input.value = String(option.value ?? '');
+    input.checked = selected.has(input.value);
+    // `required` on every checkbox would require every option. Multi-select
+    // required/min/max rules are applied by the form's validator instead.
+    input.required = Boolean(required && !multiple);
+
+    const text = el('span', 'choice-option-text');
+    text.append(el('span', 'choice-option-title', String(option.title ?? option.value ?? '')));
+    if (option.description) {
+      text.append(el('span', 'choice-option-description dim', String(option.description)));
+    }
+    row.append(input, text);
+    fieldset.append(row);
+    input.addEventListener('change', event => onChange(event));
+  }
+  return fieldset;
+}
+
 function elicitationOptionLabel(option) {
-  return option.description ? `${option.title} \u2014 ${option.description}` : option.title;
+  return option.title ?? String(option.value ?? '');
 }
 function elicitationControl(field) {
-  if (field.kind === 'single_select' || field.kind === 'multi_select') {
-    const select = document.createElement('select');
-    select.multiple = field.kind === 'multi_select';
-    if (!select.multiple && !field.required) select.appendChild(new Option('', ''));
-    for (const option of field.options || [])
-      select.appendChild(new Option(elicitationOptionLabel(option), option.value));
-    if (field.kind === 'single_select' && field.default != null) select.value = field.default;
-    if (select.multiple && (field.default || []).length)
-      for (const option of select.options) option.selected = field.default.includes(option.value);
-    return select;
-  }
   const input = document.createElement('input');
   input.type =
     field.kind === 'boolean'
@@ -1269,8 +1430,12 @@ function elicitationControl(field) {
 }
 function elicitationFieldValue(field, control) {
   if (field.kind === 'multi_select') {
-    const values = [...control.selectedOptions].map(option => option.value);
+    const values = [...control.querySelectorAll('input:checked')].map(input => input.value);
     return values.length || field.required ? values : undefined;
+  }
+  if (field.kind === 'single_select') {
+    const value = control.querySelector('input:checked')?.value || '';
+    return value === '' && !field.required ? undefined : value;
   }
   if (field.kind === 'boolean') return control.checked;
   if (control.value === '')
@@ -1282,47 +1447,86 @@ function elicitationFieldValue(field, control) {
   return control.value;
 }
 // Builds the controls and returns collect(), which reads them back as ACP
-// content. A custom answer replaces the select it belongs to unless the
+// content. A custom answer replaces the choice group it belongs to unless the
 // request pairs it with one specific option, which is how Mjolnir's chat form
 // submits the same request.
 function buildElicitationForm(form, request, register) {
-  const entries = [];
+  const entries = [],
+    customByOwner = new Map();
   for (const field of request.fields || []) {
-    const wrapper = document.createElement('label');
+    const isChoice = field.kind === 'single_select' || field.kind === 'multi_select';
+    // A fieldset contains its own option labels. Keeping its outer wrapper a
+    // div avoids invalid nested labels and preserves one target per option.
+    const wrapper = document.createElement(isChoice ? 'div' : 'label');
     wrapper.className = 'elicitation-field';
-    const label = document.createElement('span');
-    label.textContent = `${field.title}${field.required ? ' *' : ''}`;
-    const control = elicitationControl(field);
-    control.required = Boolean(field.required) && field.kind !== 'boolean';
-    register(control);
-    wrapper.append(label, control);
+    let control,
+      validateChoices = () => {};
+    if (isChoice) {
+      control = choiceControl({
+        label: `${field.title}${field.required ? ' *' : ''}`,
+        options: (field.kind === 'single_select' && !field.required
+          ? [{ value: '', title: 'No answer' }, ...(field.options || [])]
+          : field.options || []).map(option => ({
+          value: option.value,
+          title: elicitationOptionLabel(option),
+          description: option.description,
+        })),
+        multiple: field.kind === 'multi_select',
+        values:
+          field.kind === 'multi_select'
+            ? field.default || []
+            : field.default == null
+              ? field.required
+                ? [field.options?.[0]?.value]
+                : []
+              : [field.default],
+        required: Boolean(field.required),
+        onChange: () => validateChoices(),
+      });
+      const validateTarget = control.querySelector('input');
+      validateChoices = () => {
+        if (field.kind !== 'multi_select' || !validateTarget) return;
+        const custom = customByOwner.get(field.id);
+        // An unpaired free-text answer replaces this choice field. Its value
+        // must be able to satisfy a required group without a phantom native
+        // selection, while a cleared value puts the constraints back.
+        if (custom && custom.control.value.trim() !== '' && custom.field.custom_answer_option == null) {
+          validateTarget.setCustomValidity('');
+          return;
+        }
+        const count = control.querySelectorAll('input:checked').length;
+        const minimum = field.required ? Math.max(1, field.min_items ?? 1) : field.min_items;
+        const few = minimum != null && (field.required || count > 0) && count < minimum;
+        const many = field.max_items != null && count > field.max_items;
+        validateTarget.setCustomValidity(
+          few
+            ? `Select at least ${minimum} option(s).`
+            : many
+              ? `Select at most ${field.max_items} option(s).`
+              : '',
+        );
+      };
+      for (const input of control.querySelectorAll('input')) register(input);
+      register(control);
+      validateChoices();
+      wrapper.append(control);
+    } else {
+      const label = document.createElement('span');
+      label.textContent = `${field.title}${field.required ? ' *' : ''}`;
+      control = elicitationControl(field);
+      control.required = Boolean(field.required) && field.kind !== 'boolean';
+      register(control);
+      wrapper.append(label, control);
+    }
     if (field.description) {
       const description = document.createElement('span');
       description.className = 'dim';
       description.textContent = field.description;
       wrapper.append(description);
     }
-    if (field.kind === 'multi_select') {
-      const check = () => {
-        const count = control.selectedOptions.length;
-        const few =
-          field.min_items != null && (count > 0 || field.required) && count < field.min_items;
-        const many = field.max_items != null && count > field.max_items;
-        control.setCustomValidity(
-          few
-            ? `Select at least ${field.min_items} option(s).`
-            : many
-              ? `Select at most ${field.max_items} option(s).`
-              : '',
-        );
-      };
-      control.addEventListener('change', check);
-      check();
-    }
     form.append(wrapper);
-    entries.push({ field, control });
+    entries.push({ field, control, validateChoices });
   }
-  const customByOwner = new Map();
   for (const entry of entries) {
     const owner = entry.field.custom_answer_for;
     if (!owner || entry.field.kind !== 'text' || customByOwner.has(owner)) continue;
@@ -1330,13 +1534,27 @@ function buildElicitationForm(form, request, register) {
     if (!target || !Array.isArray(target.field.options)) continue;
     customByOwner.set(owner, entry);
   }
+  // Custom text changes can make the owner group valid or invalid before the
+  // user submits it. Keep browser validity and the visible choices in sync.
+  for (const entry of entries) {
+    if (entry.field.kind === 'multi_select') entry.validateChoices();
+    const owner = entry.field.custom_answer_for;
+    if (!owner || entry.field.kind !== 'text') continue;
+    const target = entries.find(candidate => candidate.field.id === owner);
+    if (target?.field.kind === 'multi_select') {
+      entry.control.addEventListener('input', target.validateChoices);
+      entry.control.addEventListener('change', target.validateChoices);
+    }
+  }
   return () => {
     for (const entry of entries)
       if (entry.field.kind === 'text') entry.control.value = entry.control.value.trim();
-    if (!form.reportValidity()) return null;
+    for (const entry of entries)
+      if (entry.field.kind === 'multi_select') entry.validateChoices();
     const active = new Map();
     for (const [owner, entry] of customByOwner)
       if (entry.control.value !== '') active.set(owner, entry);
+    if (!form.reportValidity()) return null;
     const content = {};
     for (const entry of entries) {
       const { field, control } = entry;
@@ -2565,6 +2783,10 @@ newBackButton.onclick = () => {
 newForm.onsubmit = async event => {
   event.preventDefault();
   try {
+    if (document.activeElement?.id === 'new-bundle-source') {
+      await createNewBundle();
+      return;
+    }
     await advanceNew();
   } catch (err) {
     newError.textContent = err.message;
@@ -2634,7 +2856,7 @@ resumable.onclick = async e => {
   const target = e.target.closest('button[data-action]');
   if (!target) return;
   const card = target.closest('.session');
-  const pick = role => card?.querySelector(`select[data-role="${role}"]`)?.value;
+  const pick = role => card?.querySelector(`[data-role="${role}"] input:checked`)?.value;
   await runSessionAction(target.dataset, resumeError, {
     target_id: pick('resume-target'),
     profile_id: pick('resume-profile'),

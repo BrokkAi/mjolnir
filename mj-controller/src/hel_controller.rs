@@ -18,14 +18,18 @@ mod worktree;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 
 use hel::hel_config::{
-    HelConfig, SshConnection, TargetTemplate, atomic_write, config_path, container_size_host,
-    data_dir, is_bare_project_target, mount_history_host,
+    HelConfig, ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, atomic_write,
+    config_path, container_size_host, data_dir, is_bare_project_target, mount_history_host,
 };
+
+use crate::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
+use crate::hel_setup::github_repository_from_origin;
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
@@ -129,6 +133,183 @@ impl Drop for ControllerStoreGuard {
         // Make release explicit. `File` also unlocks on close, but an explicit
         // unlock keeps same-process handoff deterministic across platforms.
         let _ = self.file.unlock();
+    }
+}
+
+/// Serialize config-file read/modify/write transactions across the daemon and
+/// client processes. The controller store lock is held by the daemon for its
+/// whole lifetime, so it cannot be reacquired by a dashboard or by one of the
+/// daemon's own background tasks. This narrower lock protects only mutations
+/// that intentionally reload the latest config before saving it.
+#[derive(Debug)]
+struct ConfigMutationGuard {
+    _process: MutexGuard<'static, ()>,
+    file: File,
+}
+
+static CONFIG_MUTATION_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+impl ConfigMutationGuard {
+    fn acquire() -> Result<Self> {
+        let process = CONFIG_MUTATION_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = config_path().with_file_name(".config.toml.lock");
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create config lock directory {}", parent.display()))?;
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open config mutation lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("lock config mutation file {}", path.display()))?;
+        Ok(Self {
+            _process: process,
+            file,
+        })
+    }
+}
+
+impl Drop for ConfigMutationGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// The durable result of creating a quick bundle. The returned config is the
+/// same fresh config that was written, allowing a serving projection to publish
+/// the new bundle before acknowledging the request that created it.
+#[derive(Debug)]
+pub struct QuickBundleCreation {
+    pub config: HelConfig,
+    pub bundle_id: String,
+}
+
+/// Failure stages exposed to a viewer request without exposing the underlying
+/// filesystem/configuration error. The detailed error remains available to
+/// the caller for logs and terminal notices.
+#[derive(Debug)]
+pub enum QuickBundleFailure {
+    InvalidSource(anyhow::Error),
+    Persistence(anyhow::Error),
+}
+
+impl std::fmt::Display for QuickBundleFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSource(error) => write!(formatter, "invalid repository source: {error}"),
+            Self::Persistence(error) => write!(formatter, "persist quick bundle: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for QuickBundleFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidSource(error) | Self::Persistence(error) => Some(error.root_cause()),
+        }
+    }
+}
+
+/// Create a quick bundle from a local repository or GitHub source and persist
+/// it as one serialized fresh-config transaction. Identical sources reuse the
+/// existing configured bundle, matching the terminal's behavior. The returned
+/// config is the same fresh config that was written, allowing a serving
+/// projection to publish the new bundle before acknowledging the request.
+pub fn create_quick_bundle(
+    source: &str,
+) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
+    let _guard = ConfigMutationGuard::acquire().map_err(QuickBundleFailure::Persistence)?;
+    let mut config = HelConfig::load().map_err(QuickBundleFailure::Persistence)?;
+    let bundle_id = create_quick_bundle_in_config(&mut config, source)
+        .map_err(QuickBundleFailure::InvalidSource)?;
+    config.save().map_err(QuickBundleFailure::Persistence)?;
+    Ok(QuickBundleCreation { config, bundle_id })
+}
+
+/// Add a quick bundle to an already-loaded config. The helper still performs
+/// the local repository canonicalization/GitHub-source parsing, but callers
+/// that persist a config should use [`create_quick_bundle`] so concurrent saves
+/// cannot clobber one another.
+pub fn create_quick_bundle_in_config(config: &mut HelConfig, source: &str) -> Result<String> {
+    let source = source.trim();
+    if source.is_empty() {
+        bail!("repository source cannot be empty");
+    }
+    let candidate = Path::new(source);
+    let (name, github, local) = if candidate.exists() {
+        let root = hel::hel_local_git::canonical_repository(candidate)?;
+        if let Some(existing) = configured_bundle_for_local(config, &root) {
+            return Ok(existing);
+        }
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("local repository has no usable directory name")?
+            .to_owned();
+        (name, None, Some(root))
+    } else {
+        if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
+            bail!("local repository path {source:?} does not exist");
+        }
+        let repository = github_repository_from_origin(source).context(format!(
+            "{source:?} is not a GitHub owner/repository or URL"
+        ))?;
+        if let Some(existing) = configured_bundle_for_origin(config, &repository) {
+            return Ok(existing);
+        }
+        let name = repository.repository.clone();
+        let github = format!("{}/{}", repository.owner, repository.repository);
+        (name, Some(github), None)
+    };
+    let repository_id = quick_config_id(&name);
+    let mut bundle_id = repository_id.clone();
+    for suffix in 2_u32.. {
+        if !config.bundles.contains_key(&bundle_id) {
+            break;
+        }
+        bundle_id = format!("{repository_id}-{suffix}");
+    }
+    config.bundles.insert(
+        bundle_id.clone(),
+        ProjectBundle {
+            primary_repo: repository_id.clone(),
+            repositories: vec![ProjectRepository {
+                id: repository_id.clone(),
+                github,
+                local,
+                destination: PathBuf::from(repository_id),
+                git_ref: None,
+            }],
+        },
+    );
+    config.validate()?;
+    Ok(bundle_id)
+}
+
+fn quick_config_id(value: &str) -> String {
+    let id = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        .take(64)
+        .collect::<String>();
+    if id.is_empty() || matches!(id.as_str(), "." | "..") {
+        "repository".into()
+    } else {
+        id
     }
 }
 
