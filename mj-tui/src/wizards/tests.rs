@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crossterm::event::KeyCode;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Position;
 
 use hel::hel_config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
 use hel::hel_state::{HelState, HostContainerSize, STATE_VERSION, SessionResourceAllocation};
@@ -570,9 +571,14 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
     );
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(wizard_mounts(&dashboard).focus, MountFocus::ReadOnly);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
-    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected mount editor");
+    };
+    // The locked checkbox is disabled in the shared form, so traversal skips
+    // it and lands on Cancel. Space therefore belongs to the button rather
+    // than attempting to toggle the forced read-only state.
+    assert_eq!(wizard.form.borrow().focused(), Some(WizardControl::Cancel));
+    assert_eq!(wizard_mounts(&dashboard).focus, MountFocus::Cancel);
     assert!(
         wizard_mounts(&dashboard).read_only,
         "a forced source must stay read-only"
@@ -589,7 +595,12 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Read-only: [x] locked · nfs (network filesystem)"));
+    assert!(rendered.contains("[x] Read-only (locked)"));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -613,7 +624,20 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Source: ▏"));
+    assert!(rendered.contains("Source:"));
+    let lines = buffer_lines(terminal.backend().buffer());
+    let source_row = lines
+        .iter()
+        .position(|line| line.contains("Source:"))
+        .expect("source field");
+    let source_x = cell_column(&lines[source_row], "Source:");
+    assert_eq!(
+        terminal.get_cursor_position().expect("source cursor"),
+        Position {
+            x: source_x + 10,
+            y: source_row as u16,
+        }
+    );
     assert!(rendered.contains("Add directory"));
     for character in "/opt/cache".chars() {
         dashboard.handle_key(key(KeyCode::Char(character)));

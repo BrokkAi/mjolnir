@@ -288,9 +288,13 @@ fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u1
 pub fn render_combined(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
-    chat: Option<&mut ActiveChat>,
+    mut chat: Option<&mut ActiveChat>,
     transcript_selected: bool,
 ) {
+    dashboard.reset_component_geometry();
+    if let Some(chat) = chat.as_deref_mut() {
+        chat.reset_component_geometry();
+    }
     dashboard.pane_areas = None;
     dashboard.session_row_areas.clear();
     dashboard.project_heading_areas.clear();

@@ -11,19 +11,22 @@
 //! It replaces the old session edit dialog, which existed only because the
 //! footer had no room for three more hints.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::cell::RefCell;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use mj_chat::components::{ChoiceList, ControlKind, Form, Interaction, TextField};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, spec};
 use crate::widgets::centered_modal;
-use crate::{DashboardAction, DashboardState, Focus, Mode, move_index};
+use crate::{DashboardAction, DashboardState, Focus, Mode};
 
 /// One row of the palette: a command and whether it can be run.
 ///
@@ -46,6 +49,36 @@ pub(crate) struct CommandPalette {
     pub(crate) entries: Vec<PaletteEntry>,
     /// Index into `entries` of the highlighted row.
     pub(crate) selected: usize,
+    pub(crate) form: RefCell<Form<PaletteControl>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteControl {
+    Query,
+    Commands,
+}
+
+impl CommandPalette {
+    fn prepare(&self) {
+        let mut form = self.form.borrow_mut();
+        form.begin_frame();
+        form.register(
+            PaletteControl::Query,
+            ControlKind::TextField,
+            Rect::default(),
+            true,
+        );
+        form.register(
+            PaletteControl::Commands,
+            ControlKind::ChoiceList {
+                len: self.entries.len(),
+                selected: self.selected,
+            },
+            Rect::default(),
+            !self.entries.is_empty(),
+        );
+        form.end_frame(PaletteControl::Query);
+    }
 }
 
 /// The heading printed above the group `entry` opens, or `None` when the row
@@ -144,11 +177,14 @@ impl DashboardState {
     /// Opens the palette over the dashboard.
     pub(crate) fn begin_palette(&mut self) {
         let entries = palette_entries(self, "");
-        self.mode = Mode::Palette(CommandPalette {
+        let palette = CommandPalette {
             query: TextInput::new(),
             entries,
             selected: 0,
-        });
+            form: RefCell::new(Form::default()),
+        };
+        palette.prepare();
+        self.mode = Mode::Palette(palette);
     }
 
     /// Recomputes the list after the query changed, keeping the highlight
@@ -163,44 +199,52 @@ impl DashboardState {
         };
         palette.selected = palette.selected.min(entries.len().saturating_sub(1));
         palette.entries = entries;
+        palette.prepare();
     }
 
-    /// Handles one key for the open palette.
-    ///
-    /// The palette is a typing surface, so every printable character and
-    /// Backspace edit the query. Only the keys that cannot be typed —
-    /// Up/Down, `Ctrl-P`/`Ctrl-N`, Enter, and Escape — drive the list.
-    pub(crate) fn handle_palette_key(&mut self, key: KeyEvent) -> DashboardAction {
+    pub(crate) fn handle_palette_event(&mut self, event: Event) -> DashboardAction {
         let Mode::Palette(palette) = &mut self.mode else {
             return DashboardAction::None;
         };
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        let step = match key.code {
-            KeyCode::Up => Some(-1),
-            KeyCode::Down => Some(1),
-            KeyCode::Char('p') if control => Some(-1),
-            KeyCode::Char('n') if control => Some(1),
+        // Search palettes let arrows browse results while typing remains in the query.
+        let browse = match &event {
+            Event::Key(key)
+                if key.kind != KeyEventKind::Release
+                    && palette.form.borrow().is_focused(PaletteControl::Query) =>
+            {
+                match key.code {
+                    KeyCode::Up | KeyCode::Down => Some(key.code),
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                        Some(KeyCode::Up)
+                    }
+                    KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                        Some(KeyCode::Down)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         };
-        if let Some(step) = step {
-            let len = palette.entries.len();
-            let mut index = palette.selected;
-            move_index(&mut index, len, step);
-            palette.selected = index;
-            return DashboardAction::None;
-        }
-        match key.code {
-            KeyCode::Esc => {
-                self.cancel_modal();
-                return DashboardAction::None;
+        let interaction = if let Some(code) = browse {
+            let form = palette.form.get_mut();
+            form.focus(PaletteControl::Commands);
+            let result = form.handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            form.focus(PaletteControl::Query);
+            result.action
+        } else {
+            palette.form.get_mut().handle(&event).action
+        };
+        match interaction {
+            Some(Interaction::Cancel) => self.cancel_modal(),
+            Some(Interaction::Edit(PaletteControl::Query, edit)) => {
+                TextField::apply(&mut palette.query, edit);
+                self.rebuild_palette_entries();
             }
-            KeyCode::Enter => {
+            Some(Interaction::Select(PaletteControl::Commands, index)) => palette.selected = index,
+            Some(Interaction::Activate(PaletteControl::Query | PaletteControl::Commands)) => {
                 let Some(entry) = palette.entries.get(palette.selected).cloned() else {
                     return DashboardAction::None;
                 };
-                // A blocked command explains itself and leaves the palette
-                // open, so the user can pick something else without pressing
-                // F2 again.
                 if let Availability::Blocked(reason) = entry.availability {
                     self.notices.set(format!(
                         "{} is unavailable: {reason}.",
@@ -212,9 +256,6 @@ impl DashboardState {
                 return self.dispatch_command(entry.id);
             }
             _ => {}
-        }
-        if palette.query.handle_key(key).changed() {
-            self.rebuild_palette_entries();
         }
         DashboardAction::None
     }
@@ -274,31 +315,36 @@ pub(crate) fn render_palette(
         ])
         .split(inner);
 
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!("> {}", palette.query.with_cursor_marker("▏")),
-            Style::default().bg(Color::DarkGray).fg(Color::White),
-        )),
+    let mut form = palette.form.borrow_mut();
+    form.begin_frame();
+    TextField::render(
+        frame,
         rows[0],
+        &palette.query,
+        &mut form,
+        PaletteControl::Query,
     );
 
     let width = usize::from(rows[1].width).saturating_sub(2);
     let lines = palette_lines(dashboard, palette);
-    let mut highlighted = None;
+    let mut row_map = Vec::new();
+    let mut enabled = Vec::new();
     let items = lines
         .iter()
-        .enumerate()
-        .map(|(row, line)| match line {
-            PaletteLine::Heading(heading) => ListItem::new(Line::styled(
-                clip(heading, width),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
+        .map(|line| match line {
+            PaletteLine::Heading(heading) => {
+                row_map.push(None);
+                enabled.push(true);
+                Line::styled(
+                    clip(heading, width),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            }
             PaletteLine::Command(index) => {
-                if *index == palette.selected {
-                    highlighted = Some(row);
-                }
+                row_map.push(Some(*index));
+                enabled.push(palette.entries[*index].availability == Availability::Ready);
                 let entry = &palette.entries[*index];
                 let spec = spec(entry.id);
                 let keys = spec
@@ -320,28 +366,38 @@ pub(crate) fn render_palette(
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                ListItem::new(Line::from(vec![Span::styled(text, style)]))
+                Line::from(vec![Span::styled(text, style)])
             }
         })
         .collect::<Vec<_>>();
-    let empty = items.is_empty();
-    let items = if empty {
-        vec![ListItem::new("No matching command")]
+    if items.is_empty() {
+        frame.render_widget(Line::raw("No matching command"), rows[1]);
+        form.register(
+            PaletteControl::Commands,
+            ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
+            },
+            rows[1],
+            false,
+        );
     } else {
-        items
-    };
-    let mut state = ListState::default().with_selected(highlighted);
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("› ")
-            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White)),
-        rows[1],
-        &mut state,
-    );
+        ChoiceList::render_with_rows(
+            frame,
+            rows[1],
+            &items,
+            palette.selected,
+            &row_map,
+            &enabled,
+            &mut form,
+            PaletteControl::Commands,
+        );
+    }
+    form.end_frame(PaletteControl::Query);
 
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "type to filter · Up/Down · Enter runs · Esc closes",
+            "type to filter · Up/Down browse · Tab moves · Enter runs · Esc closes",
             Style::default().fg(Color::DarkGray),
         )),
         rows[2],

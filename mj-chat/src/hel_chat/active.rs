@@ -14,6 +14,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
+use crate::components::ControlKind;
 use crate::hel_selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
 use hel::hel_config::HelConfig;
 use hel::hel_database::{HistoryScope, PromptHistoryEntry};
@@ -35,8 +36,8 @@ use super::remote::{
 };
 use super::rendering::{display_width, truncate_to_width, voice_button_area, voice_button_line};
 use super::second_opinion::{
-    CapturedProposal, SecondOpinion, SecondOpinionIntent, render_reviewer, render_setup,
-    render_split_actions, review_role_session_id, reviewer_session_id,
+    CapturedProposal, ReviewerPane, SecondOpinion, SecondOpinionIntent, render_reviewer,
+    render_setup, render_split_actions, review_role_session_id, reviewer_session_id,
 };
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
 use super::{
@@ -432,12 +433,33 @@ pub struct ActiveChat {
     paste_in_flight: bool,
 }
 
+/// Sendable chat initialization data. Build this off the UI thread, then
+/// call `open` on the UI thread to create thread-local control identities.
+pub struct PreparedChat {
+    session: ManagedSessionHandle,
+    bundle_id: String,
+    context: Option<ChatSessionContext>,
+    control: SessionManagerControl,
+    header: SessionHeaderIdentity,
+    draft: String,
+    notices: Notices,
+    persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
+    stored_review: std::result::Result<Option<hel::hel_database::StoredReview>, String>,
+    reviewer: ReviewerPane,
+}
+
+impl PreparedChat {
+    /// Constructs the view without filesystem or database access.
+    pub fn open(self) -> ActiveChat {
+        ActiveChat::from_prepared(self)
+    }
+}
+
 impl ActiveChat {
     /// Builds the view from the session's current snapshot and starts its
-    /// background feeds. Cheap enough to call from the surface's loop: the
-    /// only work done here is converting the tail of the transcript, a bounded
-    /// number of items. Every other step, including converting the history in
-    /// front of that tail, is a spawned task.
+    /// background feeds. This convenience constructor reads stored review
+    /// state. Interactive hosts must prepare it off-thread with
+    /// `prepare_with_persistence`, then construct the view with `PreparedChat::open`.
     ///
     /// `draft` is the unsent input saved when this session was last detached.
     /// Only a fresh view takes it: a warm chat the surface kept alive already
@@ -474,6 +496,68 @@ impl ActiveChat {
         notices: Notices,
         persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
     ) -> Self {
+        Self::prepare_with_persistence(
+            session,
+            bundle_id,
+            context,
+            control,
+            header,
+            draft,
+            notices,
+            persistence,
+        )
+        .open()
+    }
+
+    /// Reads stored review state off the UI thread. The returned data can cross
+    /// a task channel; live focus flags are created only by `PreparedChat::open`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_persistence(
+        session: ManagedSessionHandle,
+        bundle_id: &str,
+        context: Option<ChatSessionContext>,
+        control: SessionManagerControl,
+        header: SessionHeaderIdentity,
+        draft: String,
+        notices: Notices,
+        persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
+    ) -> PreparedChat {
+        let mut stored_review = hel::hel_database::active_review(session.session_id())
+            .map_err(|error| format!("{error:#}"));
+        let mut reviewer = ReviewerPane::default();
+        if let Ok(Some(stored)) = &mut stored_review {
+            reviewer.restore(
+                &reviewer_session_id(session.session_id()),
+                std::mem::take(&mut stored.reviewer_transcript),
+            );
+        }
+        PreparedChat {
+            session,
+            bundle_id: bundle_id.to_owned(),
+            context,
+            control,
+            header,
+            draft,
+            notices,
+            persistence,
+            stored_review,
+            reviewer,
+        }
+    }
+
+    fn from_prepared(prepared: PreparedChat) -> Self {
+        let PreparedChat {
+            session,
+            bundle_id,
+            context,
+            control,
+            header,
+            draft,
+            notices,
+            persistence,
+            stored_review,
+            reviewer,
+        } = prepared;
         let view = session.view();
         let needs_initial_sync = view.snapshot.is_none();
         // The history a tail-first open leaves behind is converted off the
@@ -523,7 +607,7 @@ impl ActiveChat {
             let pending = PendingPrefix::of(materialized, state.unconverted_prefix());
             (state, pending)
         };
-        state.set_history_context(bundle_id);
+        state.set_history_context(&bundle_id);
         state.set_header_summary(header.target, header.profile);
         state.restore_draft(draft);
         state.notices = notices;
@@ -578,11 +662,10 @@ impl ActiveChat {
         // reviewer's own journal on the target holds its conversation, so the
         // split is restored by replaying it rather than by keeping a second
         // copy of the transcript here.
-        let stored =
-            hel::hel_database::active_review(session.session_id()).unwrap_or_else(|error| {
-                tracing::debug!(error = %format!("{error:#}"), "could not read the open review");
-                None
-            });
+        let stored = stored_review.unwrap_or_else(|error| {
+            state.set_notice(format!("Could not restore the open review: {error}"));
+            None
+        });
         let reviewer_generation = stored.as_ref().map_or(0, |review| review.generation);
         if let Some(stored) = stored.filter(|stored| !stored.workflow.finished()) {
             let captured = CapturedProposal {
@@ -605,16 +688,12 @@ impl ActiveChat {
             } else {
                 "reloading the review…"
             };
-            let reviewer_transcript = stored.reviewer_transcript;
             if let Some(view) = state.second_opinion_mut() {
                 view.begin_review(stored.workflow, status, stored.context_baseline);
                 // The reviewer's own journal is the source while the target
                 // lives; this copy is what keeps the conversation readable
                 // once it does not.
-                view.restore_reviewer(
-                    &reviewer_session_id(session.session_id()),
-                    reviewer_transcript,
-                );
+                view.restore_prepared_reviewer(reviewer);
             }
         }
         let mut chat = Self {
@@ -2195,6 +2274,27 @@ impl ActiveChat {
         self.state.frame_surfaces_exclusive()
     }
 
+    /// Clears the screen geometry retained by chat components before a host
+    /// redraw. Focus and an in-flight pointer gesture remain owned by chat.
+    pub fn reset_component_geometry(&mut self) {
+        self.state.reset_component_geometry();
+    }
+
+    /// Whether a chat component owns this pointer event before host selection.
+    pub fn component_handles_mouse(&self, mouse: crossterm::event::MouseEvent) -> bool {
+        self.state.component_handles_mouse(mouse)
+    }
+
+    /// Whether a chat modal currently owns the frame.
+    pub fn component_modal_open(&self) -> bool {
+        self.state.component_modal_open()
+    }
+
+    /// Releases any pointer gesture held by a chat component.
+    pub fn cancel_component_pointer(&mut self) {
+        self.state.cancel_component_pointer();
+    }
+
     /// The transcript text a finished selection covers.
     pub fn transcript_selection_text(&mut self, range: &SelectionRange) -> Option<String> {
         self.state.transcript_selection_text(range)
@@ -2320,6 +2420,10 @@ pub(super) fn render_in(
     prompt_focused: bool,
     transcript_selected: bool,
 ) {
+    chat.voice_form.begin_frame();
+    if chat.component_modal_open() || chat.second_opinion_split() || chat.turn_review_split() {
+        chat.voice_form.cancel_pointer();
+    }
     chat.frame_surfaces.clear();
     chat.frame_surfaces_exclusive = false;
     // Modals and the completion popup are centred in the whole frame, not
@@ -2390,7 +2494,7 @@ pub(super) fn render_in(
             .turn_review()
             .map(super::turn_review::TurnReview::status)
             .unwrap_or_default();
-        let buttons = match chat.turn_review() {
+        let buttons = match chat.turn_review_mut() {
             Some(review) => {
                 super::turn_review::render_turn_review_actions(frame, prompt_area, review, &status)
             }
@@ -2398,7 +2502,7 @@ pub(super) fn render_in(
         };
         chat.turn_review_action_areas = buttons;
         chat.split_action_areas.clear();
-    } else if let Some(SecondOpinion::Review(review)) = chat.second_opinion() {
+    } else if let Some(SecondOpinion::Review(review)) = chat.second_opinion_mut() {
         // The split has no composer: the revised plan is the planner's to
         // write, so the only input here is which of the three actions to take.
         let buttons = render_split_actions(
@@ -2407,6 +2511,7 @@ pub(super) fn render_in(
             &review.workflow,
             review.action,
             &review.status,
+            &mut review.form,
         );
         chat.split_action_areas = buttons;
         chat.turn_review_action_areas.clear();
@@ -2465,11 +2570,18 @@ pub(super) fn render_in(
             prompt_area,
         );
         if let Some(button_area) = chat.voice_button_area {
+            chat.voice_form.register(
+                super::VoiceControl::Microphone,
+                ControlKind::Button,
+                button_area,
+                chat.voice_available || chat.voice_active,
+            );
             frame.render_widget(
                 voice_button_line(chat.voice_available, chat.voice_active),
                 button_area,
             );
         }
+        chat.voice_form.end_frame(super::VoiceControl::Microphone);
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::PromptInput, prompt_inner));
         // The cursor belongs to whatever has focus, so the composer only shows one
@@ -2502,7 +2614,12 @@ pub(super) fn render_in(
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::ModalBody, body));
     }
-    if let Some(SecondOpinion::Setup { captured, setup }) = chat.second_opinion() {
+    if let Some(SecondOpinion::Setup {
+        captured,
+        setup,
+        form,
+    }) = chat.second_opinion_mut()
+    {
         // The waterfall owns the frame's interaction, so the chat behind it
         // stops being selectable while a reviewer is being chosen.
         let area = crate::hel_modal::centered_modal_rect_fixed(frame, 60, 16, inner);
@@ -2514,6 +2631,7 @@ pub(super) fn render_in(
                 captured.proposal.lines().count()
             ),
             setup,
+            form,
         );
         chat.frame_surfaces.clear();
         chat.frame_surfaces

@@ -81,6 +81,7 @@ impl DashboardState {
         if matches!(self.mode, Mode::Help(_)) {
             return;
         }
+        self.cancel_component_pointer();
         let previous = std::mem::replace(&mut self.mode, Mode::Dashboard);
         self.mode = Mode::Help(HelpOverlay {
             scroll: 0,
@@ -96,12 +97,11 @@ impl DashboardState {
         }
     }
 
-    pub(crate) fn handle_help_key(
-        &mut self,
-        key: KeyEvent,
-        mut overlay: HelpOverlay,
-    ) -> DashboardAction {
+    pub(crate) fn handle_help_key(&mut self, key: KeyEvent) -> DashboardAction {
         let last = help_lines(self).len().saturating_sub(1);
+        let Mode::Help(mut overlay) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+            unreachable!("help input requires the help overlay");
+        };
         match key.code {
             KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') => {
                 self.mode = *overlay.return_to;

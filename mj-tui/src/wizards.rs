@@ -1,13 +1,14 @@
 //! New-session and resume wizards, including their mount and review steps.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use sha2::{Digest, Sha256};
 
 use hel::hel_config::{
@@ -19,10 +20,14 @@ use hel::hel_state::{
     allocation_memory,
 };
 use hel::hel_targets::{AdditionalMount, default_mount_destination, path_completion};
+use mj_chat::components::{
+    ButtonRow, Checkbox, ChoiceList, ConsumedEvent, ControlKind, FieldEdit, Form, FormViewport,
+    Interaction, Outcome, TextField,
+};
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
-use crate::widgets::{action_buttons, centered_modal, format_resource_bytes};
+use crate::widgets::{centered_modal, format_resource_bytes};
 use crate::{DashboardAction, DashboardState, Mode, cycle_control, move_index, nth_key};
 
 const BASELINE_CPUS: u64 = 8;
@@ -49,7 +54,27 @@ pub(crate) enum WizardFocus {
     Next,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Stable control identities shared by the new-session and resume wizards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WizardControl {
+    ProfileList,
+    BundleList,
+    TargetList,
+    ProjectDirectory,
+    NewBundleSource,
+    MountSource,
+    MountDestination,
+    MountReadOnly,
+    ReviewAttachments,
+    DiscardQueue,
+    Cancel,
+    Back,
+    Next,
+    Add,
+    Submit,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct NewWizard {
     pub(crate) step: WizardStep,
     pub(crate) focus: WizardFocus,
@@ -66,7 +91,30 @@ pub(crate) struct NewWizard {
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
+    pub(crate) form: RefCell<Form<WizardControl>>,
 }
+
+impl PartialEq for NewWizard {
+    fn eq(&self, other: &Self) -> bool {
+        self.step == other.step
+            && self.focus == other.focus
+            && self.profile == other.profile
+            && self.bundle == other.bundle
+            && self.target == other.target
+            && self.mounts == other.mounts
+            && self.review_focus == other.review_focus
+            && self.new_bundle_source == other.new_bundle_source
+            && self.project_directory == other.project_directory
+            && self.project_directory_error == other.project_directory_error
+            && self.project_history == other.project_history
+            && self.project_history_index == other.project_history_index
+            && self.resource_allocation == other.resource_allocation
+            && self.aws_options == other.aws_options
+            && self.sizing_error == other.sizing_error
+    }
+}
+
+impl Eq for NewWizard {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountFocus {
@@ -179,6 +227,17 @@ impl MountWizard {
 
 impl NewWizard {
     pub(crate) fn text_input_focused(&self) -> bool {
+        if let Some(id) = self.form.borrow().focused() {
+            return match self.step {
+                WizardStep::ProjectDirectory => id == WizardControl::ProjectDirectory,
+                WizardStep::NewBundle => id == WizardControl::NewBundleSource,
+                WizardStep::Mounts => matches!(
+                    id,
+                    WizardControl::MountSource | WizardControl::MountDestination
+                ),
+                _ => false,
+            };
+        }
         matches!(
             self.step,
             WizardStep::ProjectDirectory | WizardStep::NewBundle
@@ -192,6 +251,13 @@ impl NewWizard {
 
 impl ResumeWizard {
     pub(crate) fn text_input_focused(&self) -> bool {
+        if let Some(id) = self.form.borrow().focused() {
+            return self.step == WizardStep::Mounts
+                && matches!(
+                    id,
+                    WizardControl::MountSource | WizardControl::MountDestination
+                );
+        }
         self.step == WizardStep::Mounts
             && matches!(
                 self.mounts.focus,
@@ -200,7 +266,7 @@ impl ResumeWizard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ResumeWizard {
     pub(crate) session_id: String,
     pub(crate) step: WizardStep,
@@ -213,7 +279,26 @@ pub(crate) struct ResumeWizard {
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) discard_queue: bool,
+    pub(crate) form: RefCell<Form<WizardControl>>,
 }
+
+impl PartialEq for ResumeWizard {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.step == other.step
+            && self.focus == other.focus
+            && self.profile == other.profile
+            && self.target == other.target
+            && self.mounts == other.mounts
+            && self.review_focus == other.review_focus
+            && self.resource_allocation == other.resource_allocation
+            && self.aws_options == other.aws_options
+            && self.sizing_error == other.sizing_error
+            && self.discard_queue == other.discard_queue
+    }
+}
+
+impl Eq for ResumeWizard {}
 
 fn cycle_wizard_focus(current: WizardFocus, has_back: bool, reverse: bool) -> WizardFocus {
     if has_back {
@@ -490,10 +575,11 @@ impl ResumeWizard {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PickerNavigation {
-    pub(crate) focus: WizardFocus,
     pub(crate) has_back: bool,
     /// Row the keyboard is on, highlighted while the content has focus.
     pub(crate) selected: usize,
+    pub(crate) control: WizardControl,
+    pub(crate) next_enabled: bool,
 }
 
 /// One picker row. A disabled row stays in the list so row numbers keep
@@ -513,6 +599,8 @@ impl From<String> for PickerChoice {
     }
 }
 
+// The form and surface registry are distinct rendering owners.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_picker(
     frame: &mut Frame,
     area: Rect,
@@ -520,6 +608,7 @@ pub(crate) fn render_picker(
     choices: Vec<PickerChoice>,
     help: &[&str],
     navigation: PickerNavigation,
+    form: &mut Form<WizardControl>,
     surfaces: &mut FrameSurfaces,
 ) {
     let width_percent = if area.width < 64 { 100 } else { 68 };
@@ -530,51 +619,117 @@ pub(crate) fn render_picker(
         (choices.len() as u16 + help.len() as u16 + 6).clamp(9, 19),
         area,
     );
-    let lines = choices
-        .into_iter()
-        .enumerate()
-        .map(|(index, choice)| {
-            let focused = index == navigation.selected && navigation.focus == WizardFocus::Content;
-            let marker = if focused { "› " } else { "  " };
-            let style = match (focused, choice.disabled) {
-                (true, _) => Style::default().bg(Color::DarkGray).fg(Color::White),
-                (false, true) => Style::default().fg(Color::DarkGray),
-                (false, false) => Style::default(),
-            };
-            Line::styled(format!("{marker}{}", choice.text), style)
-        })
-        .chain([Line::raw("")])
-        .chain(
-            help.iter()
-                .map(|line| Line::styled(*line, Style::default().fg(Color::DarkGray))),
-        )
-        .chain([
-            Line::raw(""),
-            wizard_buttons(navigation.focus, navigation.has_back, "Next"),
-        ])
+    let content = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let list_height = u16::try_from(choices.len())
+        .unwrap_or(u16::MAX)
+        .min(content.height.saturating_sub(help.len() as u16 + 2));
+    let list_area = Rect::new(content.x, content.y, content.width, list_height);
+    let rows = choices
+        .iter()
+        .map(|choice| Line::raw(choice.text.clone()))
         .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
-        popup,
+    let row_map = (0..rows.len()).map(Some).collect::<Vec<_>>();
+    let row_enabled = choices
+        .iter()
+        .map(|choice| !choice.disabled)
+        .collect::<Vec<_>>();
+    let help_y = list_area.y.saturating_add(list_area.height);
+    let help_height = (help.len() as u16).min(content.bottom().saturating_sub(help_y + 1));
+    let help_area = Rect::new(content.x, help_y, content.width, help_height);
+    let button_y = content.bottom().saturating_sub(1);
+    let button_area = Rect::new(content.x, button_y, content.width, 1.min(content.height));
+    frame.render_widget(Block::default().borders(Borders::ALL).title(title), popup);
+    ChoiceList::render_with_rows(
+        frame,
+        list_area,
+        &rows,
+        navigation.selected,
+        &row_map,
+        &row_enabled,
+        form,
+        navigation.control,
     );
+    frame.render_widget(
+        Paragraph::new(
+            help.iter()
+                .map(|line| Line::styled(*line, Style::default().fg(Color::DarkGray)))
+                .collect::<Vec<_>>(),
+        ),
+        help_area,
+    );
+    let mut buttons = vec![(WizardControl::Cancel, "Cancel", true)];
+    if navigation.has_back {
+        buttons.push((WizardControl::Back, "Back", true));
+    }
+    buttons.push((WizardControl::Next, "Next", navigation.next_enabled));
+    ButtonRow::render(frame, button_area, &buttons, form);
 }
 
-pub(crate) fn wizard_buttons(
+fn begin_form_frame(form: &mut Form<WizardControl>, initial: WizardControl) {
+    let previous = form.focused();
+    form.begin_frame();
+    if previous != Some(initial) && !form.captures_pointer() {
+        // A domain step transition may choose a control not registered yet.
+        // Its pending focus becomes visible as soon as that control renders.
+        form.focus(initial);
+    }
+}
+
+fn wizard_control(
+    step: WizardStep,
     focus: WizardFocus,
-    has_back: bool,
-    next_label: &str,
-) -> Line<'static> {
-    if has_back {
-        action_buttons(&[
-            ("Cancel", focus == WizardFocus::Cancel),
-            ("Back", focus == WizardFocus::Back),
-            (next_label, focus == WizardFocus::Next),
-        ])
-    } else {
-        action_buttons(&[
-            ("Cancel", focus == WizardFocus::Cancel),
-            (next_label, focus == WizardFocus::Next),
-        ])
+    review_focus: ReviewFocus,
+    mounts: &MountWizard,
+) -> WizardControl {
+    match step {
+        WizardStep::Profile => match focus {
+            WizardFocus::Content => WizardControl::ProfileList,
+            WizardFocus::Cancel => WizardControl::Cancel,
+            WizardFocus::Back => WizardControl::Back,
+            WizardFocus::Next => WizardControl::Next,
+        },
+        WizardStep::Bundle => match focus {
+            WizardFocus::Content => WizardControl::BundleList,
+            WizardFocus::Cancel => WizardControl::Cancel,
+            WizardFocus::Back => WizardControl::Back,
+            WizardFocus::Next => WizardControl::Next,
+        },
+        WizardStep::Target => match focus {
+            WizardFocus::Content => WizardControl::TargetList,
+            WizardFocus::Cancel => WizardControl::Cancel,
+            WizardFocus::Back => WizardControl::Back,
+            WizardFocus::Next => WizardControl::Next,
+        },
+        WizardStep::ProjectDirectory => match focus {
+            WizardFocus::Content => WizardControl::ProjectDirectory,
+            WizardFocus::Cancel => WizardControl::Cancel,
+            WizardFocus::Back => WizardControl::Back,
+            WizardFocus::Next => WizardControl::Next,
+        },
+        WizardStep::NewBundle => match focus {
+            WizardFocus::Content => WizardControl::NewBundleSource,
+            WizardFocus::Cancel => WizardControl::Cancel,
+            WizardFocus::Back => WizardControl::Back,
+            WizardFocus::Next => WizardControl::Next,
+        },
+        WizardStep::Mounts => match mounts.focus {
+            MountFocus::Source => WizardControl::MountSource,
+            MountFocus::Destination => WizardControl::MountDestination,
+            MountFocus::ReadOnly => WizardControl::MountReadOnly,
+            MountFocus::Cancel => WizardControl::Cancel,
+            MountFocus::Back => WizardControl::Back,
+            MountFocus::Add => WizardControl::Add,
+        },
+        WizardStep::Review => match review_focus {
+            ReviewFocus::Attachments => WizardControl::ReviewAttachments,
+            ReviewFocus::Cancel => WizardControl::Cancel,
+            ReviewFocus::Back => WizardControl::Back,
+            ReviewFocus::Add => WizardControl::Add,
+            ReviewFocus::Submit => WizardControl::Submit,
+        },
     }
 }
 
@@ -585,6 +740,14 @@ pub(crate) fn render_new_wizard(
     wizard: &NewWizard,
     surfaces: &mut FrameSurfaces,
 ) {
+    let mut form = wizard.form.borrow_mut();
+    let initial = wizard_control(
+        wizard.step,
+        wizard.focus,
+        wizard.review_focus,
+        &wizard.mounts,
+    );
+    begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&dashboard.config.targets[&target_id]);
@@ -610,13 +773,14 @@ pub(crate) fn render_new_wizard(
                 target_id: &target_id,
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
-                focus: wizard.review_focus,
                 title: " New session · 4/4 review ",
                 submit_label: "Create",
                 queue: None,
             },
+            &mut form,
             surfaces,
         );
+        form.end_frame(initial);
         return;
     }
     if wizard.step == WizardStep::ProjectDirectory {
@@ -632,11 +796,14 @@ pub(crate) fn render_new_wizard(
                 "Absolute project directory on the remote machine:"
             }),
             Line::raw(""),
-            Line::styled(
-                format!("> {}", wizard.project_directory.with_cursor_marker("▏")),
-                Style::default().bg(Color::DarkGray).fg(Color::White),
-            ),
         ];
+        if let Some(error) = &wizard.project_directory_error {
+            lines.push(Line::styled(
+                format!("Error: {error}"),
+                Style::default().fg(Color::Red),
+            ));
+            lines.push(Line::raw(""));
+        }
         if !wizard.project_history.is_empty() {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
@@ -664,13 +831,6 @@ pub(crate) fn render_new_wizard(
                 },
             ));
         }
-        if let Some(error) = &wizard.project_directory_error {
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                format!("Error: {error}"),
-                Style::default().fg(Color::Red),
-            ));
-        }
         lines.push(Line::styled(
             "Enter validates · Backspace on empty goes back · Esc cancels",
             Style::default().fg(Color::Gray),
@@ -682,14 +842,53 @@ pub(crate) fn render_new_wizard(
             (lines.len() as u16 + 2).clamp(9, 16),
             area,
         );
+        let content = popup.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
         frame.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(if local {
+            Block::default().borders(Borders::ALL).title(if local {
                 " New session · 3/4 local project "
             } else {
                 " New session · 3/4 remote project "
-            })),
+            }),
             popup,
         );
+        let intro = lines.iter().take(2).cloned().collect::<Vec<_>>();
+        let details = lines.iter().skip(2).cloned().collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(intro),
+            Rect::new(content.x, content.y, content.width, 2.min(content.height)),
+        );
+        let field_y = content.y.saturating_add(2);
+        let button_y = content.bottom().saturating_sub(1);
+        frame.render_widget(
+            Paragraph::new(details),
+            Rect::new(
+                content.x,
+                field_y.saturating_add(1),
+                content.width,
+                button_y.saturating_sub(field_y.saturating_add(1)),
+            ),
+        );
+        TextField::render(
+            frame,
+            Rect::new(content.x, field_y, content.width, 1.min(content.height)),
+            &wizard.project_directory,
+            &mut form,
+            WizardControl::ProjectDirectory,
+        );
+        ButtonRow::render(
+            frame,
+            Rect::new(content.x, button_y, content.width, 1.min(content.height)),
+            &[
+                (WizardControl::Cancel, "Cancel", true),
+                (WizardControl::Back, "Back", true),
+                (WizardControl::Next, "Next", true),
+            ],
+            &mut form,
+        );
+        form.end_frame(initial);
         return;
     }
     if wizard.step == WizardStep::Mounts {
@@ -699,45 +898,69 @@ pub(crate) fn render_new_wizard(
             dashboard,
             wizard.target,
             &wizard.mounts,
+            &mut form,
             " Add attached directory ",
             surfaces,
         );
+        form.end_frame(initial);
         return;
     }
     if wizard.step == WizardStep::NewBundle {
         let popup = centered_modal(frame, surfaces, 76, 9, area);
+        let content = popup.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" New repository bundle "),
+            popup,
+        );
         frame.render_widget(
             Paragraph::new(vec![
                 Line::raw("Local Git path or GitHub owner/repository:"),
                 Line::raw(""),
                 Line::styled(
-                    format!(
-                        "> {}",
-                        if wizard.focus == WizardFocus::Content {
-                            wizard.new_bundle_source.with_cursor_marker("▏")
-                        } else {
-                            wizard.new_bundle_source.to_string()
-                        }
-                    ),
-                    if wizard.focus == WizardFocus::Content {
-                        Style::default().bg(Color::DarkGray).fg(Color::White)
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Line::styled(
                     "Tab moves focus · Enter activates · Esc cancels",
                     Style::default().fg(Color::Gray),
                 ),
-                wizard_buttons(wizard.focus, true, "Create repository"),
-            ])
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" New repository bundle "),
+            ]),
+            Rect::new(
+                content.x,
+                content.y,
+                content.width,
+                content.height.saturating_sub(2),
             ),
-            popup,
         );
+        TextField::render(
+            frame,
+            Rect::new(
+                content.x,
+                content.y.saturating_add(2),
+                content.width,
+                1.min(content.height),
+            ),
+            &wizard.new_bundle_source,
+            &mut form,
+            WizardControl::NewBundleSource,
+        );
+        ButtonRow::render(
+            frame,
+            Rect::new(
+                content.x,
+                content.bottom().saturating_sub(1),
+                content.width,
+                1.min(content.height),
+            ),
+            &[
+                (WizardControl::Cancel, "Cancel", true),
+                (WizardControl::Back, "Back", true),
+                (WizardControl::Next, "Create repository", true),
+            ],
+            &mut form,
+        );
+        form.end_frame(initial);
         return;
     }
     let (title, choices, selected): (_, Vec<String>, _) = match wizard.step {
@@ -800,12 +1023,33 @@ pub(crate) fn render_new_wizard(
         choices.into_iter().map(PickerChoice::from).collect(),
         &[help],
         PickerNavigation {
-            focus: wizard.focus,
             has_back: wizard.step != WizardStep::Profile,
             selected,
+            control: match wizard.step {
+                WizardStep::Profile => WizardControl::ProfileList,
+                WizardStep::Bundle => WizardControl::BundleList,
+                WizardStep::Target => WizardControl::TargetList,
+                _ => unreachable!("picker step has a list control"),
+            },
+            next_enabled: wizard.step != WizardStep::Target
+                || wizard.resource_allocation.is_some()
+                || !matches!(
+                    dashboard
+                        .config
+                        .targets
+                        .get(&nth_key(&dashboard.config.targets, wizard.target)),
+                    Some(TargetTemplate::AwsEc2 { .. })
+                ),
         },
+        &mut form,
         surfaces,
     );
+    form.end_frame(match wizard.step {
+        WizardStep::Profile => WizardControl::ProfileList,
+        WizardStep::Bundle => WizardControl::BundleList,
+        WizardStep::Target => WizardControl::TargetList,
+        _ => unreachable!("picker step has a list control"),
+    });
 }
 
 struct ReviewWizardView<'a> {
@@ -816,7 +1060,6 @@ struct ReviewWizardView<'a> {
     pub(crate) target_id: &'a str,
     pub(crate) allocation: Option<&'a SessionResourceAllocation>,
     pub(crate) mounts: &'a MountWizard,
-    pub(crate) focus: ReviewFocus,
     pub(crate) title: &'a str,
     submit_label: &'a str,
     queue: Option<(usize, bool)>,
@@ -827,6 +1070,7 @@ fn render_review_wizard(
     area: Rect,
     dashboard: &DashboardState,
     view: ReviewWizardView<'_>,
+    form: &mut Form<WizardControl>,
     surfaces: &mut FrameSurfaces,
 ) {
     let ReviewWizardView {
@@ -837,7 +1081,6 @@ fn render_review_wizard(
         target_id,
         allocation,
         mounts,
-        focus,
         title,
         submit_label,
         queue,
@@ -853,15 +1096,9 @@ fn render_review_wizard(
             resource_allocation_label(allocation, None)
         )),
     ];
-    if let Some((count, discard)) = queue {
-        lines.push(Line::raw(format!(
-            "Queued prompts: {count} · {} (q toggles)",
-            if discard {
-                "discard on resume"
-            } else {
-                "start after resume"
-            }
-        )));
+    let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
+    if let Some(label) = &queue_label {
+        lines.push(Line::raw(label.clone()));
     }
     // Guardian targets rely on the harness's own approval mode rather than
     // Hel-managed isolation.
@@ -879,75 +1116,123 @@ fn render_review_wizard(
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ));
     }
+    lines.push(Line::raw(""));
     if can_attach {
-        lines.push(Line::raw(""));
         lines.push(Line::raw(format!(
             "Attached directories: {}",
             mounts.mounts.len()
         )));
     }
-    if can_attach && mounts.mounts.is_empty() {
-        lines.push(Line::styled(
-            "  None (optional)",
-            Style::default().fg(Color::DarkGray),
-        ));
-    } else if can_attach {
-        lines.extend(
-            mounts
-                .mounts
-                .iter()
-                .enumerate()
-                .take(6)
-                .map(|(index, mount)| {
-                    let selected =
-                        focus == ReviewFocus::Attachments && index == mounts.history_index;
-                    Line::styled(
-                        format!(
-                            "{}{} → {}{}",
-                            if selected { "› " } else { "  " },
-                            mount.source.display(),
-                            mount.destination.display(),
-                            read_only_marker(mount.read_only)
-                        ),
-                        if selected {
-                            Style::default().bg(Color::DarkGray).fg(Color::White)
-                        } else {
-                            Style::default()
-                        },
-                    )
-                }),
-        );
-    }
-    lines.push(Line::raw(""));
     lines.push(Line::styled(
         if can_attach {
-            "Tab moves focus · Enter edits selected directory · Del removes it"
+            "Tab moves focus · Enter edits selected directory · Delete removes it"
         } else {
             "Tab moves focus · Enter activates"
         },
         Style::default().fg(Color::DarkGray),
     ));
-    let mut buttons = vec![
-        ("Cancel", focus == ReviewFocus::Cancel),
-        ("Back", focus == ReviewFocus::Back),
-    ];
-    if can_attach {
-        buttons.push(("Add directory…", focus == ReviewFocus::Add));
-    }
-    buttons.push((submit_label, focus == ReviewFocus::Submit));
-    lines.push(action_buttons(&buttons));
+    let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let list_height = if can_attach {
+        u16::try_from(mounts.mounts.len()).unwrap_or(u16::MAX)
+    } else {
+        0
+    };
+    let queue_height = u16::from(queue.is_some());
+    let total_height = summary_height
+        .saturating_add(list_height)
+        .saturating_add(queue_height);
     let popup = centered_modal(
         frame,
         surfaces,
         84,
-        (lines.len() as u16 + 2).clamp(13, 24),
+        (total_height.min(16) + 3).clamp(13, 26),
         area,
     );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .wrap(Wrap { trim: false }),
-        popup,
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    frame.render_widget(Block::default().borders(Borders::ALL).title(title), popup);
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    let focused_row = match form.focused() {
+        Some(WizardControl::ReviewAttachments) => Some(
+            summary_height.saturating_add(
+                mounts
+                    .history_index
+                    .min(mounts.mounts.len().saturating_sub(1)) as u16,
+            ),
+        ),
+        Some(WizardControl::DiscardQueue) => Some(summary_height.saturating_add(list_height)),
+        _ => None,
+    };
+    let viewport = FormViewport::new(body, total_height, 0, focused_row);
+    for (index, line) in lines.iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(line.clone()),
+            viewport.row(u16::try_from(index).unwrap_or(u16::MAX), 1),
+        );
+    }
+    if can_attach && !mounts.mounts.is_empty() {
+        let list_area = viewport.row(summary_height, list_height);
+        let rows = mounts
+            .mounts
+            .iter()
+            .map(|mount| {
+                Line::raw(format!(
+                    "{} → {}{}",
+                    mount.source.display(),
+                    mount.destination.display(),
+                    read_only_marker(mount.read_only)
+                ))
+            })
+            .collect::<Vec<_>>();
+        ChoiceList::render(
+            frame,
+            list_area,
+            &rows,
+            mounts.history_index,
+            form,
+            WizardControl::ReviewAttachments,
+        );
+    }
+    if let Some((count, discard)) = queue {
+        let queue_area = viewport.row(summary_height.saturating_add(list_height), 1);
+        Checkbox::render(
+            frame,
+            queue_area,
+            &format!(
+                "Discard {count} queued prompt{} on resume",
+                if count == 1 { "" } else { "s" }
+            ),
+            discard,
+            true,
+            form,
+            WizardControl::DiscardQueue,
+        );
+    }
+    let button_y = inner.bottom().saturating_sub(1);
+    let mut buttons = vec![
+        (WizardControl::Cancel, "Cancel", true),
+        (WizardControl::Back, "Back", true),
+    ];
+    if can_attach {
+        buttons.push((WizardControl::Add, "Add directory…", true));
+    }
+    buttons.push((
+        WizardControl::Submit,
+        submit_label,
+        allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. }),
+    ));
+    ButtonRow::render(
+        frame,
+        Rect::new(inner.x, button_y, inner.width, 1.min(inner.height)),
+        &buttons,
+        form,
     );
 }
 
@@ -956,36 +1241,15 @@ pub(crate) fn read_only_marker(read_only: bool) -> &'static str {
     if read_only { " · ro" } else { "" }
 }
 
-/// The read-only checkbox, locked when the host's filesystem has settled it.
-fn read_only_line(mounts: &MountWizard) -> Line<'static> {
-    let marker = if mounts.focus == MountFocus::ReadOnly {
-        "› "
-    } else {
-        "  "
-    };
-    let box_text = if mounts.read_only { "[x]" } else { "[ ]" };
-    match mounts.forced_read_only() {
-        Some(reason) => Line::styled(
-            format!("{marker}Read-only: [x] locked · {reason}"),
-            Style::default().fg(Color::Yellow),
-        ),
-        None => Line::styled(
-            format!("{marker}Read-only: {box_text} (Space toggles)"),
-            if mounts.focus == MountFocus::ReadOnly {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            },
-        ),
-    }
-}
-
+// Domain mount data, navigation, and the shared form are separate inputs.
+#[allow(clippy::too_many_arguments)]
 fn render_mount_wizard(
     frame: &mut Frame,
     area: Rect,
     dashboard: &DashboardState,
     target_index: usize,
     mounts: &MountWizard,
+    form: &mut Form<WizardControl>,
     title: &str,
     surfaces: &mut FrameSurfaces,
 ) {
@@ -1012,47 +1276,9 @@ fn render_mount_wizard(
             unreachable!("bare targets do not attach resources")
         }
     };
-    let source_marker = if mounts.focus == MountFocus::Source {
-        "› "
-    } else {
-        "  "
-    };
-    let destination_marker = if mounts.focus == MountFocus::Destination {
-        "› "
-    } else {
-        "  "
-    };
-    let source = if mounts.focus == MountFocus::Source {
-        mounts.source.with_cursor_marker("▏")
-    } else {
-        mounts.source.to_string()
-    };
-    let destination = if mounts.focus == MountFocus::Destination {
-        mounts.destination.with_cursor_marker("▏")
-    } else {
-        mounts.destination.to_string()
-    };
     let mut lines = vec![
         Line::raw(format!("Target: {target_id} ({})", target_label(target))),
         Line::styled(protection, Style::default().fg(Color::Yellow)),
-        Line::raw(""),
-        Line::styled(
-            format!("{source_marker}Source: {source}"),
-            if mounts.focus == MountFocus::Source {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            },
-        ),
-        Line::styled(
-            format!("{destination_marker}Destination: {destination}"),
-            if mounts.focus == MountFocus::Destination {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            },
-        ),
-        read_only_line(mounts),
     ];
     if !mounts.mounts.is_empty() {
         lines.push(Line::raw(""));
@@ -1113,31 +1339,111 @@ fn render_mount_wizard(
         lines.push(Line::raw(""));
         lines.push(Line::styled(error, Style::default().fg(Color::Red)));
     }
-    lines.extend([
-        Line::raw(""),
-        Line::styled(
-            "Tab completes · Shift-Tab moves · Space toggles read-only · Enter continues/adds",
-            Style::default().fg(Color::DarkGray),
-        ),
-        action_buttons(&[
-            ("Cancel", mounts.focus == MountFocus::Cancel),
-            ("Back", mounts.focus == MountFocus::Back),
-            ("Add directory", mounts.focus == MountFocus::Add),
-        ]),
-    ]);
-    // One row taller than before the read-only checkbox joined the editor.
+    lines.push(Line::styled(
+        "Ctrl-Space completes · Tab moves focus · Space toggles read-only · Enter continues/adds",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let info_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let total_height = info_height.saturating_add(3);
     let popup = centered_modal(
         frame,
         surfaces,
         84,
-        (lines.len() as u16 + 2).clamp(13, 25),
+        (total_height.min(16) + 3).clamp(13, 25),
         area,
     );
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    frame.render_widget(Block::default().borders(Borders::ALL).title(title), popup);
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    let focused_row = match form.focused() {
+        Some(WizardControl::MountSource) => Some(info_height),
+        Some(WizardControl::MountDestination) => Some(info_height.saturating_add(1)),
+        Some(WizardControl::MountReadOnly) => Some(info_height.saturating_add(2)),
+        _ => None,
+    };
+    let viewport = FormViewport::new(body, total_height, 0, focused_row);
+    for (index, line) in lines.iter().enumerate() {
+        let row = viewport.row(u16::try_from(index).unwrap_or(u16::MAX), 1);
+        frame.render_widget(Paragraph::new(line.clone()), row);
+    }
+    let field_width = inner.width.saturating_sub(12);
+    let source_row = viewport.row(info_height, 1);
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .wrap(Wrap { trim: false }),
-        popup,
+        Paragraph::new("Source:"),
+        Rect::new(
+            source_row.x,
+            source_row.y,
+            10.min(source_row.width),
+            source_row.height,
+        ),
+    );
+    TextField::render(
+        frame,
+        Rect::new(
+            source_row.x.saturating_add(10),
+            source_row.y,
+            field_width,
+            source_row.height,
+        ),
+        &mounts.source,
+        form,
+        WizardControl::MountSource,
+    );
+    let destination_row = viewport.row(info_height.saturating_add(1), 1);
+    frame.render_widget(
+        Paragraph::new("Destination:"),
+        Rect::new(
+            destination_row.x,
+            destination_row.y,
+            10.min(destination_row.width),
+            destination_row.height,
+        ),
+    );
+    TextField::render(
+        frame,
+        Rect::new(
+            destination_row.x.saturating_add(10),
+            destination_row.y,
+            field_width,
+            destination_row.height,
+        ),
+        &mounts.destination,
+        form,
+        WizardControl::MountDestination,
+    );
+    let readonly_row = viewport.row(info_height.saturating_add(2), 1);
+    let readonly_label = if mounts.forced_read_only().is_some() {
+        "Read-only (locked)"
+    } else {
+        "Read-only"
+    };
+    Checkbox::render(
+        frame,
+        readonly_row,
+        readonly_label,
+        mounts.read_only,
+        mounts.forced_read_only().is_none(),
+        form,
+        WizardControl::MountReadOnly,
+    );
+    let button_y = inner.bottom().saturating_sub(1);
+    ButtonRow::render(
+        frame,
+        Rect::new(inner.x, button_y, inner.width, 1.min(inner.height)),
+        &[
+            (WizardControl::Cancel, "Cancel", true),
+            (WizardControl::Back, "Back", true),
+            (WizardControl::Add, "Add directory", true),
+        ],
+        form,
     );
 }
 
@@ -1148,6 +1454,14 @@ pub(crate) fn render_resume_wizard(
     wizard: &ResumeWizard,
     surfaces: &mut FrameSurfaces,
 ) {
+    let mut form = wizard.form.borrow_mut();
+    let initial = wizard_control(
+        wizard.step,
+        wizard.focus,
+        wizard.review_focus,
+        &wizard.mounts,
+    );
+    begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
         let profile_id = dashboard
             .compatible_profiles(&wizard.session_id)
@@ -1187,7 +1501,6 @@ pub(crate) fn render_resume_wizard(
                 target_id: &target_id,
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
-                focus: wizard.review_focus,
                 title: " Resume · 3/3 review ",
                 submit_label: "Resume",
                 queue: dashboard
@@ -1197,8 +1510,10 @@ pub(crate) fn render_resume_wizard(
                     .filter(|count| *count > 0)
                     .map(|count| (count, wizard.discard_queue)),
             },
+            &mut form,
             surfaces,
         );
+        form.end_frame(initial);
         return;
     }
     if wizard.step == WizardStep::Mounts {
@@ -1208,9 +1523,11 @@ pub(crate) fn render_resume_wizard(
             dashboard,
             wizard.target,
             &wizard.mounts,
+            &mut form,
             " Add attached directory ",
             surfaces,
         );
+        form.end_frame(initial);
         return;
     }
     let (title, choices, selected, help) = match wizard.step {
@@ -1278,12 +1595,30 @@ pub(crate) fn render_resume_wizard(
         choices,
         help,
         PickerNavigation {
-            focus: wizard.focus,
             has_back: wizard.step != WizardStep::Profile,
             selected,
+            control: match wizard.step {
+                WizardStep::Profile => WizardControl::ProfileList,
+                WizardStep::Target => WizardControl::TargetList,
+                _ => unreachable!("resume picker step has a list control"),
+            },
+            next_enabled: wizard.step != WizardStep::Target
+                || (wizard.resource_allocation.is_some()
+                    && dashboard
+                        .resume_target_rejection(
+                            &wizard.session_id,
+                            &nth_key(&dashboard.config.targets, wizard.target),
+                        )
+                        .is_none()),
         },
+        &mut form,
         surfaces,
     );
+    form.end_frame(match wizard.step {
+        WizardStep::Profile => WizardControl::ProfileList,
+        WizardStep::Target => WizardControl::TargetList,
+        _ => unreachable!("resume picker step has a list control"),
+    });
 }
 
 fn nth_bundle_key(config: &HelConfig, state: &HelState, index: usize) -> String {

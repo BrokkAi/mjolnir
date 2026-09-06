@@ -174,6 +174,19 @@ impl TextInput {
         self.cursor
     }
 
+    /// Places the caret at a grapheme boundary, clamping offsets from a drawn field.
+    pub fn set_cursor(&mut self, offset: usize) {
+        self.cursor = self
+            .value
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(self.value.len()))
+            .take_while(|index| *index <= offset)
+            .last()
+            .unwrap_or(0);
+        self.chain_kill = false;
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.value.is_empty()
@@ -521,6 +534,11 @@ pub fn next_grapheme(input: &str, cursor: usize) -> usize {
 fn word_class(character: char) -> bool {
     const SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
     SEPARATORS.contains(character)
+}
+
+/// Normalizes a terminal paste for a single-line field without collapsing spaces.
+pub fn single_line_paste(pasted: &str) -> String {
+    pasted.trim_matches(['\r', '\n']).replace(['\r', '\n'], " ")
 }
 
 #[cfg(test)]

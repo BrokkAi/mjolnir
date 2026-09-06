@@ -11,12 +11,15 @@
 
 use std::sync::Arc;
 
+use crossterm::event::{Event, KeyEvent, MouseEvent};
+use rat_event::ConsumedEvent;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction};
 use crate::hel_selection::{SelectionRange, SurfaceFrame, SurfaceId};
 use hel::hel_elicitation::ElicitationRequest;
 use hel::hel_projection::{apply_committed_projection_event, project_relay_event};
@@ -83,6 +86,52 @@ impl SplitAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SetupControl {
+    Options,
+    Confirm,
+    Back,
+    Retry,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SplitControl {
+    Transfer,
+    Implement,
+    Cancel,
+}
+
+enum SetupInteraction {
+    Select(usize),
+    Activate(SetupControl),
+}
+
+impl From<Interaction<SetupControl>> for SetupInteraction {
+    fn from(interaction: Interaction<SetupControl>) -> Self {
+        match interaction {
+            Interaction::Select(SetupControl::Options, selected) => Self::Select(selected),
+            Interaction::Activate(control) => Self::Activate(control),
+            Interaction::Cancel => Self::Activate(SetupControl::Cancel),
+            _ => Self::Activate(SetupControl::Options),
+        }
+    }
+}
+
+enum SplitInteraction {
+    Activate(SplitControl),
+}
+
+impl From<Interaction<SplitControl>> for SplitInteraction {
+    fn from(interaction: Interaction<SplitControl>) -> Self {
+        match interaction {
+            Interaction::Activate(control) => Self::Activate(control),
+            Interaction::Cancel => Self::Activate(SplitControl::Cancel),
+            _ => Self::Activate(SplitControl::Cancel),
+        }
+    }
+}
+
 /// Where the second-opinion view has got to.
 #[derive(Debug)]
 pub(super) enum SecondOpinion {
@@ -90,6 +139,7 @@ pub(super) enum SecondOpinion {
     Setup {
         captured: CapturedProposal,
         setup: Box<ReviewerSetup>,
+        form: Box<Form<SetupControl>>,
     },
     /// The reviewer is running; the split is up.
     Review(Box<ActiveReview>),
@@ -107,6 +157,7 @@ pub(super) struct ActiveReview {
     /// The primary's transcript frontier when the context request went out.
     /// Only an agent message after it can be the answer to it.
     pub(super) context_baseline: u64,
+    pub(super) form: Form<SplitControl>,
 }
 
 /// What the second-opinion view asked the session to do.
@@ -156,13 +207,9 @@ impl SecondOpinion {
     }
 
     /// Rebuilds the reviewer's pane from a stored transcript.
-    pub(super) fn restore_reviewer(
-        &mut self,
-        session_id: &str,
-        transcript: Vec<Arc<hel::hel_state::TranscriptItem>>,
-    ) {
+    pub(super) fn restore_prepared_reviewer(&mut self, reviewer: ReviewerPane) {
         if let Self::Review(review) = self {
-            review.reviewer.restore(session_id, transcript);
+            review.reviewer = reviewer;
         }
     }
 
@@ -183,6 +230,7 @@ impl SecondOpinion {
             action: SplitAction::Transfer,
             status: status.into(),
             context_baseline,
+            form: split_form(),
         }));
     }
 
@@ -353,6 +401,64 @@ impl ReviewerPane {
     }
 }
 
+fn setup_form(setup: &ReviewerSetup) -> Form<SetupControl> {
+    let mut form = Form::new();
+    prepare_setup_form(setup, &mut form);
+    form
+}
+
+fn prepare_setup_form(setup: &ReviewerSetup, form: &mut Form<SetupControl>) {
+    let options_were_available = form.is_enabled(SetupControl::Options);
+    form.begin_update();
+    if setup.failure().is_some() {
+        form.declare(SetupControl::Retry, ControlKind::Button);
+    } else if !setup.busy() {
+        form.declare(SetupControl::Options, setup_control_kind(setup));
+        form.declare_with_enabled(
+            SetupControl::Confirm,
+            ControlKind::Button,
+            setup.can_confirm(),
+        );
+        form.declare_with_enabled(
+            SetupControl::Back,
+            ControlKind::Button,
+            setup.stage() != SetupStage::Profile,
+        );
+    }
+    form.declare(SetupControl::Cancel, ControlKind::Button);
+    if !options_were_available && form.is_enabled(SetupControl::Options) && !form.captures_pointer()
+    {
+        form.focus(SetupControl::Options);
+    }
+    form.end_frame(SetupControl::Options);
+}
+
+fn setup_control_kind(setup: &ReviewerSetup) -> ControlKind {
+    let (len, selected) = match setup.stage() {
+        SetupStage::Profile => (setup.profiles().len(), setup.profile_index()),
+        SetupStage::Model => (setup.models().len(), setup.model_index()),
+        SetupStage::Effort => (setup.efforts().len(), setup.effort_index()),
+    };
+    ControlKind::ChoiceList { len, selected }
+}
+
+fn split_form() -> Form<SplitControl> {
+    let mut form = Form::new();
+    form.declare(SplitControl::Transfer, ControlKind::Button);
+    form.declare(SplitControl::Implement, ControlKind::Button);
+    form.declare(SplitControl::Cancel, ControlKind::Button);
+    form.end_frame(SplitControl::Transfer);
+    form
+}
+
+fn setup_current_index(setup: &ReviewerSetup) -> usize {
+    match setup.stage() {
+        SetupStage::Profile => setup.profile_index(),
+        SetupStage::Model => setup.model_index(),
+        SetupStage::Effort => setup.effort_index(),
+    }
+}
+
 fn row_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
@@ -394,6 +500,7 @@ impl super::ChatState {
         self.config_picker = None;
         self.second_opinion = Some(SecondOpinion::Setup {
             captured,
+            form: Box::new(setup_form(&setup)),
             setup: Box::new(setup),
         });
     }
@@ -406,29 +513,249 @@ impl super::ChatState {
         self.second_opinion.as_mut()
     }
 
-    /// Drives the second-opinion view from one key press.
-    pub(super) fn handle_second_opinion_key(
+    pub(super) fn second_opinion_handles_mouse(&self, column: u16, row: u16) -> bool {
+        match self.second_opinion.as_ref() {
+            Some(SecondOpinion::Setup { form, .. }) => {
+                form.captures_pointer() || form.contains(column, row)
+            }
+            Some(SecondOpinion::Review(review)) => {
+                review.form.captures_pointer() || review.form.contains(column, row)
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn cancel_second_opinion_pointer(&mut self) {
+        match self.second_opinion.as_mut() {
+            Some(SecondOpinion::Setup { form, .. }) => form.cancel_pointer(),
+            Some(SecondOpinion::Review(review)) => review.form.cancel_pointer(),
+            None => {}
+        }
+    }
+
+    pub(super) fn reset_second_opinion_geometry(&mut self) {
+        match self.second_opinion.as_mut() {
+            Some(SecondOpinion::Setup { form, .. }) => form.reset_geometry(),
+            Some(SecondOpinion::Review(review)) => review.form.reset_geometry(),
+            None => {}
+        }
+    }
+
+    /// Routes a mouse gesture through the active component form. The boolean
+    /// reports consumption even when the release only focused or armed a
+    /// control, keeping background selection from seeing the same gesture.
+    pub(super) fn handle_second_opinion_mouse(
         &mut self,
-        code: crossterm::event::KeyCode,
-        modifiers: crossterm::event::KeyModifiers,
-    ) -> super::ChatAction {
+        mouse: MouseEvent,
+    ) -> (bool, super::ChatAction) {
+        let event = Event::Mouse(mouse);
+        if matches!(self.second_opinion, Some(SecondOpinion::Setup { .. })) {
+            let result = match self.second_opinion.as_mut() {
+                Some(SecondOpinion::Setup { form, .. }) => form.handle(&event),
+                _ => unreachable!(),
+            };
+            let consumed = result.outcome.is_consumed();
+            if let Some(interaction) = result.action.map(SetupInteraction::from) {
+                return match interaction {
+                    SetupInteraction::Select(selected) => {
+                        if let Some(SecondOpinion::Setup { setup, form, .. }) =
+                            self.second_opinion.as_mut()
+                        {
+                            let current = setup_current_index(setup);
+                            let delta = if selected >= current { 1 } else { -1 };
+                            for _ in 0..selected.abs_diff(current) {
+                                setup.move_selection(delta);
+                            }
+                            form.set_selected(SetupControl::Options, selected);
+                        }
+                        (true, super::ChatAction::None)
+                    }
+                    SetupInteraction::Activate(control) => {
+                        let outcome = match self.second_opinion.as_mut() {
+                            Some(SecondOpinion::Setup { setup, .. }) => match control {
+                                SetupControl::Confirm | SetupControl::Options => setup.confirm(),
+                                SetupControl::Back => setup.back(),
+                                SetupControl::Retry => setup.retry(),
+                                SetupControl::Cancel => setup.cancel(),
+                            },
+                            _ => hel::hel_second_opinion::SetupOutcome::None,
+                        };
+                        (true, self.apply_setup_outcome(outcome))
+                    }
+                };
+            }
+            return (consumed, super::ChatAction::None);
+        }
+        if matches!(self.second_opinion, Some(SecondOpinion::Review(_))) {
+            let result = match self.second_opinion.as_mut() {
+                Some(SecondOpinion::Review(review)) => review.form.handle(&event),
+                _ => unreachable!(),
+            };
+            let consumed = result.outcome.is_consumed();
+            if let Some(SplitInteraction::Activate(control)) =
+                result.action.map(SplitInteraction::from)
+            {
+                if let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() {
+                    review.action = match control {
+                        SplitControl::Transfer => SplitAction::Transfer,
+                        SplitControl::Implement => SplitAction::Implement,
+                        SplitControl::Cancel => SplitAction::Cancel,
+                    };
+                }
+                return (true, self.activate_split_action());
+            }
+            return (consumed, super::ChatAction::None);
+        }
+        (false, super::ChatAction::None)
+    }
+
+    fn handle_setup_component_event(&mut self, key: KeyEvent) -> (bool, super::ChatAction) {
+        let (code, modifiers) = super::normalize_key(key.code, key.modifiers);
+        let event = Event::Key(KeyEvent::new_with_kind_and_state(
+            code, modifiers, key.kind, key.state,
+        ));
+        if let Some(SecondOpinion::Setup { setup, form, .. }) = self.second_opinion.as_mut() {
+            prepare_setup_form(setup, form);
+        }
+        let (consumed, interaction) = {
+            let Some(SecondOpinion::Setup { form, .. }) = self.second_opinion.as_mut() else {
+                return (false, super::ChatAction::None);
+            };
+            let result = form.handle(&event);
+            (result.outcome.is_consumed(), result.action)
+        };
+        let Some(interaction) = interaction else {
+            return (consumed, super::ChatAction::None);
+        };
+        let outcome = match interaction {
+            Interaction::Select(SetupControl::Options, selected) => {
+                if let Some(SecondOpinion::Setup { setup, form, .. }) = self.second_opinion.as_mut()
+                {
+                    let current = setup_current_index(setup);
+                    let delta = if selected >= current { 1 } else { -1 };
+                    let distance = selected.abs_diff(current);
+                    for _ in 0..distance {
+                        setup.move_selection(delta);
+                    }
+                    form.set_selected(SetupControl::Options, selected);
+                }
+                super::ChatAction::None
+            }
+            Interaction::Activate(SetupControl::Options | SetupControl::Confirm) => {
+                let outcome = match self.second_opinion.as_mut() {
+                    Some(SecondOpinion::Setup { setup, .. }) => setup.confirm(),
+                    _ => hel::hel_second_opinion::SetupOutcome::None,
+                };
+                self.apply_setup_outcome(outcome)
+            }
+            Interaction::Activate(SetupControl::Back) => {
+                let outcome = match self.second_opinion.as_mut() {
+                    Some(SecondOpinion::Setup { setup, .. }) => setup.back(),
+                    _ => hel::hel_second_opinion::SetupOutcome::None,
+                };
+                self.apply_setup_outcome(outcome)
+            }
+            Interaction::Activate(SetupControl::Retry) => {
+                let outcome = match self.second_opinion.as_mut() {
+                    Some(SecondOpinion::Setup { setup, .. }) => setup.retry(),
+                    _ => hel::hel_second_opinion::SetupOutcome::None,
+                };
+                self.apply_setup_outcome(outcome)
+            }
+            Interaction::Activate(SetupControl::Cancel) | Interaction::Cancel => {
+                let outcome = match self.second_opinion.as_mut() {
+                    Some(SecondOpinion::Setup { setup, .. }) => setup.cancel(),
+                    _ => hel::hel_second_opinion::SetupOutcome::None,
+                };
+                self.apply_setup_outcome(outcome)
+            }
+            _ => super::ChatAction::None,
+        };
+        (true, outcome)
+    }
+
+    fn handle_split_component_event(&mut self, key: KeyEvent) -> (bool, super::ChatAction) {
+        let (code, modifiers) = super::normalize_key(key.code, key.modifiers);
+        let event = Event::Key(KeyEvent::new_with_kind_and_state(
+            code, modifiers, key.kind, key.state,
+        ));
+        let (consumed, interaction, focused) = {
+            let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() else {
+                return (false, super::ChatAction::None);
+            };
+            let result = review.form.handle(&event);
+            (
+                result.outcome.is_consumed(),
+                result.action,
+                review.form.focused(),
+            )
+        };
+        if let Some(action) = interaction {
+            match action {
+                Interaction::Activate(SplitControl::Transfer) => {
+                    if let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() {
+                        review.action = SplitAction::Transfer;
+                    }
+                    return (true, self.activate_split_action());
+                }
+                Interaction::Activate(SplitControl::Implement) => {
+                    if let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() {
+                        review.action = SplitAction::Implement;
+                    }
+                    return (true, self.activate_split_action());
+                }
+                Interaction::Activate(SplitControl::Cancel) => {
+                    if let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() {
+                        review.action = SplitAction::Cancel;
+                    }
+                    return (true, self.activate_split_action());
+                }
+                Interaction::Cancel => {
+                    if let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() {
+                        review.action = SplitAction::Cancel;
+                    }
+                    return (true, self.activate_split_action());
+                }
+                _ => {}
+            }
+        }
+        if consumed {
+            if let Some(control) = focused
+                && let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut()
+            {
+                review.action = match control {
+                    SplitControl::Transfer => SplitAction::Transfer,
+                    SplitControl::Implement => SplitAction::Implement,
+                    SplitControl::Cancel => SplitAction::Cancel,
+                };
+            }
+            return (true, super::ChatAction::None);
+        }
+        (false, super::ChatAction::None)
+    }
+
+    pub(super) fn handle_second_opinion_event(&mut self, key: KeyEvent) -> super::ChatAction {
+        let (code, modifiers) = super::normalize_key(key.code, key.modifiers);
         use crossterm::event::{KeyCode, KeyModifiers};
 
+        if matches!(self.second_opinion, Some(SecondOpinion::Setup { .. })) {
+            let (handled, action) = self.handle_setup_component_event(key);
+            if handled {
+                return action;
+            }
+        }
+        if matches!(self.second_opinion, Some(SecondOpinion::Review(_))) {
+            let (handled, action) = self.handle_split_component_event(key);
+            if handled {
+                return action;
+            }
+        }
         let Some(view) = self.second_opinion.as_mut() else {
             return super::ChatAction::None;
         };
         match view {
             SecondOpinion::Setup { setup, .. } => {
                 let outcome = match code {
-                    KeyCode::Up => {
-                        setup.move_selection(-1);
-                        return super::ChatAction::None;
-                    }
-                    KeyCode::Down => {
-                        setup.move_selection(1);
-                        return super::ChatAction::None;
-                    }
-                    KeyCode::Enter => setup.confirm(),
                     KeyCode::Char('r') if setup.failure().is_some() => setup.retry(),
                     KeyCode::Left | KeyCode::Backspace => setup.back(),
                     KeyCode::Esc => setup.cancel(),
@@ -484,7 +811,9 @@ impl super::ChatState {
                 })
             }
             SetupOutcome::Cancelled { requests } => {
-                self.second_opinion = None;
+                if let Some(SecondOpinion::Setup { captured, .. }) = self.second_opinion.take() {
+                    self.restore_elicitation(captured.request);
+                }
                 if requests.is_empty() {
                     super::ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
                 } else {
@@ -592,7 +921,9 @@ pub(super) fn render_setup(
     area: Rect,
     headline: &str,
     setup: &ReviewerSetup,
+    form: &mut Form<SetupControl>,
 ) -> Rect {
+    prepare_setup_form(setup, form);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Choose a reviewer ")
@@ -600,13 +931,20 @@ pub(super) fn render_setup(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            headline.to_owned(),
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-    ];
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(headline).style(Style::default().fg(Color::DarkGray)),
+        chunks[0],
+    );
     let (heading, rows, selected) = match setup.stage() {
         SetupStage::Profile => (
             "Profile",
@@ -636,41 +974,83 @@ pub(super) fn render_setup(
             setup.effort_index(),
         ),
     };
-    lines.push(Line::from(Span::styled(
-        heading,
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
+    frame.render_widget(
+        Paragraph::new(heading).style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[1],
+    );
+    form.begin_frame();
     if let Some(failure) = setup.failure() {
-        lines.push(Line::from(Span::styled(
-            failure.to_owned(),
-            Style::default().fg(Color::Red),
-        )));
-        lines.push(Line::from(Span::styled(
-            "r retry · Esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )));
+        frame.render_widget(
+            Paragraph::new(failure).style(Style::default().fg(Color::Red)),
+            chunks[2],
+        );
+        ButtonRow::render(
+            frame,
+            chunks[3],
+            &[
+                (SetupControl::Retry, "Retry", true),
+                (SetupControl::Cancel, "Cancel", true),
+            ],
+            form,
+        );
+        frame.render_widget(
+            Paragraph::new("Enter retry · Esc cancel").style(Style::default().fg(Color::DarkGray)),
+            chunks[4],
+        );
+        form.end_frame(SetupControl::Retry);
+        return inner;
     } else if setup.busy() {
-        lines.push(Line::from(Span::styled(
-            "Starting the reviewer…",
-            Style::default().fg(Color::Yellow),
-        )));
+        frame.render_widget(
+            Paragraph::new("Starting the reviewer…").style(Style::default().fg(Color::Yellow)),
+            chunks[2],
+        );
+        ButtonRow::render(
+            frame,
+            chunks[3],
+            &[(SetupControl::Cancel, "Cancel", true)],
+            form,
+        );
+        frame.render_widget(
+            Paragraph::new("Waiting for reviewer discovery · Esc cancel")
+                .style(Style::default().fg(Color::DarkGray)),
+            chunks[4],
+        );
+        form.end_frame(SetupControl::Cancel);
+        return inner;
     } else {
-        for (index, row) in rows.iter().enumerate() {
-            let marker = if index == selected { "› " } else { "  " };
-            let style = if index == selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(format!("{marker}{row}"), style)));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "↑/↓ choose · Enter confirm · ← back · Esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )));
+        let row_lines = rows
+            .iter()
+            .map(|row| Line::from(row.clone()))
+            .collect::<Vec<_>>();
+        ChoiceList::render(
+            frame,
+            chunks[2],
+            &row_lines,
+            selected,
+            form,
+            SetupControl::Options,
+        );
+        ButtonRow::render(
+            frame,
+            chunks[3],
+            &[
+                (SetupControl::Confirm, "Confirm", setup.can_confirm()),
+                (
+                    SetupControl::Back,
+                    "Back",
+                    setup.stage() != SetupStage::Profile,
+                ),
+                (SetupControl::Cancel, "Cancel", true),
+            ],
+            form,
+        );
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose · Tab controls · Enter confirm · Esc cancel")
+                .style(Style::default().fg(Color::DarkGray)),
+            chunks[4],
+        );
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    form.end_frame(SetupControl::Options);
     inner
 }
 
@@ -743,33 +1123,35 @@ pub(super) fn render_split_actions(
     workflow: &ReviewWorkflow,
     action: SplitAction,
     status: &str,
+    form: &mut Form<SplitControl>,
 ) -> Vec<(SplitAction, Rect)> {
-    let mut spans = Vec::new();
+    form.begin_frame();
     let mut buttons = Vec::new();
     let mut column = area.x;
+    let mut button_specs = Vec::new();
     for candidate in SplitAction::ORDER {
         let available = match candidate {
             SplitAction::Transfer => workflow.can_transfer(),
             _ => true,
         };
-        let mut style = Style::default();
-        if !available {
-            style = style.fg(Color::DarkGray);
-        }
-        if candidate == action {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        let label = format!(" {} ", candidate.label());
-        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        let label = candidate.label();
+        let width = u16::try_from(label.chars().count() + 4).unwrap_or(u16::MAX);
         if column < area.right() {
             buttons.push((
                 candidate,
                 Rect::new(column, area.y, width.min(area.right() - column), 1),
             ));
         }
-        column = column.saturating_add(width).saturating_add(2);
-        spans.push(Span::styled(label, style));
-        spans.push(Span::raw("  "));
+        button_specs.push((
+            match candidate {
+                SplitAction::Transfer => SplitControl::Transfer,
+                SplitAction::Implement => SplitControl::Implement,
+                SplitAction::Cancel => SplitControl::Cancel,
+            },
+            candidate.label(),
+            available,
+        ));
+        column = column.saturating_add(width).saturating_add(1);
     }
     let waiting = match workflow.stage() {
         ReviewStage::GatheringContext { .. } => "asking the planner for context…",
@@ -777,11 +1159,33 @@ pub(super) fn render_split_actions(
         ReviewStage::Answered { .. } => status,
         _ => status,
     };
-    spans.push(Span::styled(
-        waiting.to_owned(),
-        Style::default().fg(Color::DarkGray),
-    ));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    form.focus(match action {
+        SplitAction::Transfer => SplitControl::Transfer,
+        SplitAction::Implement => SplitControl::Implement,
+        SplitAction::Cancel => SplitControl::Cancel,
+    });
+    ButtonRow::render(frame, area, &button_specs, form);
+    let status_column = area.x.saturating_add(
+        u16::try_from(
+            button_specs
+                .iter()
+                .map(|(_, label, _)| label.chars().count() + 6)
+                .sum::<usize>(),
+        )
+        .unwrap_or(u16::MAX),
+    );
+    if status_column < area.right() {
+        frame.render_widget(
+            Paragraph::new(waiting).style(Style::default().fg(Color::DarkGray)),
+            Rect::new(
+                status_column,
+                area.y,
+                area.right() - status_column,
+                area.height,
+            ),
+        );
+    }
+    form.end_frame(SplitControl::Transfer);
     buttons
 }
 
@@ -866,6 +1270,7 @@ mod tests {
     fn answer_plan_review(steps: usize) -> ChatAction {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.restore_elicitation(plan_review());
+        press(&mut chat, KeyCode::Home);
         for _ in 0..steps {
             press(&mut chat, KeyCode::Down);
         }
@@ -877,6 +1282,21 @@ mod tests {
             }
         }
         panic!("the decision dialog never produced an answer");
+    }
+
+    #[test]
+    fn cancelling_reviewer_setup_restores_the_unanswered_plan() {
+        let mut chat = chat_in_setup();
+        press(&mut chat, KeyCode::Enter);
+        press(&mut chat, KeyCode::Esc);
+        assert!(!chat.second_opinion_active());
+        assert_eq!(
+            chat.elicitation
+                .as_ref()
+                .expect("restored decision")
+                .request(),
+            &captured().request
+        );
     }
 
     #[test]
@@ -1144,8 +1564,15 @@ mod tests {
             .expect("the split draws its action buttons");
         assert_eq!(action, SplitAction::Implement);
 
-        let outcome = chat.handle_mouse(MouseEvent {
+        let press = chat.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(press, ChatAction::None);
+        let outcome = chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
             column: area.x + 1,
             row: area.y,
             modifiers: KeyModifiers::NONE,

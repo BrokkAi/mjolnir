@@ -4,19 +4,24 @@
 //! controller performs discovery and persistence off the event loop; replies
 //! carry a generation so a slow probe can never replace a newer choice.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::cell::{Cell, RefCell};
+
+use crossterm::event::Event;
 use hel::hel_acp::SessionConfigChoice;
 use hel::hel_config::{HelConfig, ReviewConfig};
 use hel::hel_review::lanes::ReviewTier;
+use mj_chat::components::{
+    ButtonRow, Checkbox, ControlKind, Form, FormViewport, Interaction, TabStrip,
+};
 use mj_chat::hel_selection::FrameSurfaces;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders};
 
-use crate::widgets::{centered_modal, focused_buttons, popup_height};
-use crate::{DashboardAction, DashboardState, Mode, cycle_control};
+use crate::widgets::centered_modal;
+use crate::{DashboardAction, DashboardState, Mode};
 
 /// A readiness observation for one actual review execution target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,17 +61,6 @@ enum ReviewProbeRefresh {
     Effort,
 }
 
-const REVIEW_SETTINGS_FOCUS: [ReviewSettingsFocus; 7] = [
-    ReviewSettingsFocus::Enabled,
-    ReviewSettingsFocus::Tier,
-    ReviewSettingsFocus::Profile,
-    ReviewSettingsFocus::Model,
-    ReviewSettingsFocus::Effort,
-    ReviewSettingsFocus::Cancel,
-    ReviewSettingsFocus::Save,
-];
-const REVIEW_SETTINGS_BUTTONS: &[&str] = &["Cancel", "Save"];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReviewReadiness {
     /// No probe has run for the current profile and selector draft.
@@ -101,7 +95,8 @@ impl ReviewReadiness {
 pub(crate) struct ReviewSettingsDialog {
     pub(crate) review: ReviewConfig,
     pub(crate) profiles: Vec<Option<String>>,
-    pub(crate) focus: ReviewSettingsFocus,
+    pub(crate) form: RefCell<Form<ReviewSettingsFocus>>,
+    scroll: Cell<u16>,
     pub(crate) model_choices: Vec<SessionConfigChoice>,
     pub(crate) effort_choices: Vec<SessionConfigChoice>,
     /// Whether a successful adapter probe supplied the choices currently
@@ -130,10 +125,11 @@ impl ReviewSettingsDialog {
         } else {
             ReviewReadiness::Unknown("checking the selected reviewer profile…".to_owned())
         };
-        Self {
+        let dialog = Self {
             review: config.review.clone(),
             profiles,
-            focus: ReviewSettingsFocus::Enabled,
+            form: RefCell::new(Form::default()),
+            scroll: Cell::new(0),
             model_choices: Vec::new(),
             effort_choices: Vec::new(),
             model_capabilities_discovered: false,
@@ -145,7 +141,9 @@ impl ReviewSettingsDialog {
             saving: false,
             save_error: None,
             read_only_reason: config.newer_build_notice(),
-        }
+        };
+        dialog.prepare();
+        dialog
     }
 
     fn profile_index(&self) -> usize {
@@ -153,13 +151,6 @@ impl ReviewSettingsDialog {
             .iter()
             .position(|profile| profile.as_deref() == self.review.profile.as_deref())
             .unwrap_or(0)
-    }
-
-    fn profile_label(&self) -> String {
-        self.review
-            .profile
-            .clone()
-            .unwrap_or_else(|| "No reviewer profile".to_owned())
     }
 
     fn value_label(
@@ -199,32 +190,80 @@ impl ReviewSettingsDialog {
         values
     }
 
-    fn select_value(
-        current: Option<&str>,
-        choices: &[SessionConfigChoice],
-        delta: isize,
-    ) -> Option<String> {
-        let values = Self::choice_values(current, choices);
-        let index = values
-            .iter()
-            .position(|candidate| candidate.as_deref() == current)
-            .unwrap_or(0);
-        values
-            .get(cycle_index(index, values.len(), delta))
-            .cloned()
-            .flatten()
+    fn focused(&self) -> ReviewSettingsFocus {
+        self.form
+            .borrow()
+            .focused()
+            .unwrap_or(ReviewSettingsFocus::Enabled)
     }
 
-    fn button_index(focus: ReviewSettingsFocus) -> usize {
-        match focus {
-            ReviewSettingsFocus::Cancel => 0,
-            ReviewSettingsFocus::Save
-            | ReviewSettingsFocus::Enabled
-            | ReviewSettingsFocus::Tier
-            | ReviewSettingsFocus::Profile
-            | ReviewSettingsFocus::Model
-            | ReviewSettingsFocus::Effort => 1,
+    fn selectors(&self) -> Vec<(ReviewSettingsFocus, &'static str, Vec<String>, usize)> {
+        use ReviewSettingsFocus::*;
+        let choices = |value: Option<&str>, choices: &[SessionConfigChoice], discovered| {
+            let values = Self::choice_values(value, choices);
+            let selected = values
+                .iter()
+                .position(|entry| entry.as_deref() == value)
+                .unwrap_or(0);
+            let labels = values
+                .iter()
+                .map(|entry| Self::value_label(entry.as_deref(), choices, discovered))
+                .collect();
+            (labels, selected)
+        };
+        let (models, model) = choices(
+            self.review.model.as_deref(),
+            &self.model_choices,
+            self.model_capabilities_discovered,
+        );
+        let (efforts, effort) = choices(
+            self.review.effort.as_deref(),
+            &self.effort_choices,
+            self.effort_capabilities_discovered,
+        );
+        vec![
+            (
+                Tier,
+                "Tier",
+                vec!["Quick".into(), "Extended".into()],
+                usize::from(self.review.tier == ReviewTier::Extended),
+            ),
+            (
+                Profile,
+                "Profile",
+                self.profiles
+                    .iter()
+                    .map(|value| {
+                        value
+                            .clone()
+                            .unwrap_or_else(|| "No reviewer profile".into())
+                    })
+                    .collect(),
+                self.profile_index(),
+            ),
+            (Model, "Model", models, model),
+            (Effort, "Effort", efforts, effort),
+        ]
+    }
+
+    fn prepare(&self) {
+        use ReviewSettingsFocus::*;
+        let mut form = self.form.borrow_mut();
+        form.begin_update();
+        form.declare_with_enabled(Enabled, ControlKind::Checkbox, !self.saving);
+        for (id, _, labels, selected) in self.selectors() {
+            form.declare_with_enabled(
+                id,
+                ControlKind::Tabs {
+                    len: labels.len(),
+                    selected,
+                },
+                !self.saving,
+            );
         }
+        form.declare_with_enabled(Cancel, ControlKind::Button, true);
+        form.declare_with_enabled(Save, ControlKind::Button, self.can_save());
+        form.end_frame(Enabled);
     }
 
     fn can_save(&self) -> bool {
@@ -351,139 +390,67 @@ impl ReviewSettingsDialog {
         self.save_error = result.err();
     }
 
-    fn handle_key(&mut self, dashboard: &mut DashboardState, key: KeyEvent) -> DashboardAction {
-        if key.code == KeyCode::Esc {
-            dashboard.cancel_modal();
-            return DashboardAction::CancelReviewSettingsProbe;
-        }
-        if self.saving {
-            return DashboardAction::None;
-        }
-        let reverse = key.modifiers.contains(KeyModifiers::SHIFT);
-        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-            let next = cycle_control(self.focus, &REVIEW_SETTINGS_FOCUS, reverse);
-            self.focus = next;
-            return DashboardAction::None;
-        }
-
-        let delta = match key.code {
-            KeyCode::Up | KeyCode::Left => Some(-1),
-            KeyCode::Down | KeyCode::Right => Some(1),
-            _ => None,
-        };
-        if let Some(delta) = delta {
-            match self.focus {
-                ReviewSettingsFocus::Enabled => self.review.enabled = !self.review.enabled,
-                ReviewSettingsFocus::Tier => {
-                    self.review.tier = cycle_control(
-                        self.review.tier,
-                        &[ReviewTier::Quick, ReviewTier::Extended],
-                        delta < 0,
-                    );
-                }
-                ReviewSettingsFocus::Profile => {
-                    let index = cycle_index(self.profile_index(), self.profiles.len(), delta);
-                    self.review.profile = self.profiles.get(index).cloned().flatten();
-                    return self.probe_action(dashboard, ReviewProbeRefresh::Profile);
-                }
-                ReviewSettingsFocus::Model => {
-                    self.review.model = Self::select_value(
-                        self.review.model.as_deref(),
-                        &self.model_choices,
-                        delta,
-                    );
-                    return self.probe_action(dashboard, ReviewProbeRefresh::Model);
-                }
-                ReviewSettingsFocus::Effort => {
-                    self.review.effort = Self::select_value(
-                        self.review.effort.as_deref(),
-                        &self.effort_choices,
-                        delta,
-                    );
-                    return self.probe_action(dashboard, ReviewProbeRefresh::Effort);
-                }
-                ReviewSettingsFocus::Cancel | ReviewSettingsFocus::Save => {}
-            }
-            return DashboardAction::None;
-        }
-
-        if key.code == KeyCode::Char(' ') && self.focus == ReviewSettingsFocus::Enabled {
-            self.review.enabled = !self.review.enabled;
-            return DashboardAction::None;
-        }
-
-        if key.code != KeyCode::Enter {
-            return DashboardAction::None;
-        }
-        match self.focus {
-            ReviewSettingsFocus::Cancel => {
-                dashboard.cancel_modal();
+    fn handle_event(&mut self, dashboard: &mut DashboardState, event: Event) -> DashboardAction {
+        use ReviewSettingsFocus::*;
+        let interaction = self.form.get_mut().handle(&event).action;
+        let changed = interaction.is_some();
+        let action = match interaction {
+            Some(Interaction::Cancel | Interaction::Activate(Cancel)) => {
                 DashboardAction::CancelReviewSettingsProbe
             }
-            ReviewSettingsFocus::Save => {
-                if !self.can_save() {
-                    if self.read_only_reason.is_some() {
-                        dashboard.set_notice(
-                            self.read_only_reason
-                                .clone()
-                                .unwrap_or_else(|| "Configuration is read-only.".to_owned()),
-                        );
-                    } else if self.review.enabled && self.review.profile.is_none() {
-                        dashboard.set_notice(
-                            "Choose a reviewer profile before enabling automatic review.",
-                        );
-                    } else if let ReviewReadiness::Invalid(message) = &self.readiness {
-                        dashboard.set_notice(format!("Review settings are not ready: {message}"));
-                    } else if let ReviewReadiness::Failed(message) = &self.readiness {
-                        dashboard.set_notice(format!(
-                            "Could not verify review readiness: {message}. Retry or disable automatic review."
-                        ));
-                    } else if self.probing {
-                        dashboard.set_notice(
-                            "Wait for review readiness to finish before enabling automatic review.",
-                        );
-                    }
-                    return DashboardAction::None;
-                }
+            Some(Interaction::Toggle(Enabled)) => {
+                self.review.enabled = !self.review.enabled;
+                DashboardAction::None
+            }
+            Some(Interaction::Select(Tier, index)) => {
+                self.review.tier = if index == 0 {
+                    ReviewTier::Quick
+                } else {
+                    ReviewTier::Extended
+                };
+                DashboardAction::None
+            }
+            Some(Interaction::Select(Profile, index)) => {
+                self.review.profile = self.profiles.get(index).cloned().flatten();
+                self.probe_action(dashboard, ReviewProbeRefresh::Profile)
+            }
+            Some(Interaction::Select(Model, index)) => {
+                self.review.model =
+                    Self::choice_values(self.review.model.as_deref(), &self.model_choices)
+                        .get(index)
+                        .cloned()
+                        .flatten();
+                self.probe_action(dashboard, ReviewProbeRefresh::Model)
+            }
+            Some(Interaction::Select(Effort, index)) => {
+                self.review.effort =
+                    Self::choice_values(self.review.effort.as_deref(), &self.effort_choices)
+                        .get(index)
+                        .cloned()
+                        .flatten();
+                self.probe_action(dashboard, ReviewProbeRefresh::Effort)
+            }
+            Some(Interaction::Activate(Profile | Model | Effort)) => {
+                let refresh = match self.focused() {
+                    Model => ReviewProbeRefresh::Model,
+                    Effort => ReviewProbeRefresh::Effort,
+                    _ => ReviewProbeRefresh::Profile,
+                };
+                self.probe_action(dashboard, refresh)
+            }
+            Some(Interaction::Activate(Save)) if self.can_save() => {
                 self.saving = true;
                 self.save_error = None;
                 DashboardAction::SaveReviewSettings {
                     review: self.review.clone(),
                 }
             }
-            ReviewSettingsFocus::Enabled => {
-                self.review.enabled = !self.review.enabled;
-                DashboardAction::None
-            }
-            ReviewSettingsFocus::Tier => {
-                self.review.tier = cycle_control(
-                    self.review.tier,
-                    &[ReviewTier::Quick, ReviewTier::Extended],
-                    false,
-                );
-                DashboardAction::None
-            }
-            ReviewSettingsFocus::Profile => {
-                self.probe_action(dashboard, ReviewProbeRefresh::Profile)
-            }
-            ReviewSettingsFocus::Model => self.probe_action(dashboard, ReviewProbeRefresh::Model),
-            ReviewSettingsFocus::Effort => {
-                self.review.effort =
-                    Self::select_value(self.review.effort.as_deref(), &self.effort_choices, 1);
-                self.probe_action(dashboard, ReviewProbeRefresh::Effort)
-            }
+            _ => DashboardAction::None,
+        };
+        if changed {
+            self.prepare();
         }
-    }
-}
-
-fn cycle_index(index: usize, len: usize, delta: isize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    if delta < 0 {
-        index.checked_sub(delta.unsigned_abs()).unwrap_or(len - 1)
-    } else {
-        index.saturating_add(delta as usize) % len
+        action
     }
 }
 
@@ -500,17 +467,20 @@ impl DashboardState {
         } else {
             DashboardAction::None
         };
+        dialog.prepare();
         self.mode = Mode::ReviewSettings(dialog);
         action
     }
 
-    pub(crate) fn handle_review_settings_key(
+    pub(crate) fn handle_review_settings_event(
         &mut self,
-        key: KeyEvent,
+        event: Event,
         mut dialog: ReviewSettingsDialog,
     ) -> DashboardAction {
-        let action = dialog.handle_key(self, key);
-        if !matches!(self.mode, Mode::Dashboard) {
+        let action = dialog.handle_event(self, event);
+        if matches!(action, DashboardAction::CancelReviewSettingsProbe) {
+            self.cancel_modal();
+        } else {
             self.mode = Mode::ReviewSettings(dialog);
         }
         action
@@ -527,7 +497,11 @@ impl DashboardState {
         let Mode::ReviewSettings(dialog) = &mut self.mode else {
             return false;
         };
-        dialog.apply_probe(generation, profile_id, model, effort, result)
+        let changed = dialog.apply_probe(generation, profile_id, model, effort, result);
+        if changed {
+            dialog.prepare();
+        }
+        changed
     }
 
     pub fn review_settings_save_failed(&mut self, error: String) {
@@ -535,6 +509,7 @@ impl DashboardState {
             return;
         };
         dialog.apply_save_result(Err(error));
+        dialog.prepare();
     }
 }
 
@@ -544,152 +519,139 @@ pub(crate) fn render_review_settings(
     dialog: &ReviewSettingsDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let field = |focused| {
-        if focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        }
-    };
-    let row = |label: &str, value: String, focused: bool| {
-        Line::from(vec![
-            Span::styled(format!("{label:<18}"), Style::default().fg(Color::DarkGray)),
-            Span::styled(value, field(focused)),
-        ])
-    };
-    let mut lines = vec![
-        Line::styled(
-            "Global settings; changes apply to subsequent reviews.",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Line::raw(""),
-        row(
-            "Automatic review",
-            if dialog.review.enabled { "On" } else { "Off" }.to_owned(),
-            dialog.focus == ReviewSettingsFocus::Enabled,
-        ),
-        row(
-            "Tier",
-            dialog.review.tier.label().to_owned(),
-            dialog.focus == ReviewSettingsFocus::Tier,
-        ),
-        row(
-            "Profile",
-            dialog.profile_label(),
-            dialog.focus == ReviewSettingsFocus::Profile,
-        ),
-        row(
-            "Model",
-            ReviewSettingsDialog::value_label(
-                dialog.review.model.as_deref(),
-                &dialog.model_choices,
-                dialog.model_capabilities_discovered,
-            ),
-            dialog.focus == ReviewSettingsFocus::Model,
-        ),
-        row(
-            "Effort",
-            ReviewSettingsDialog::value_label(
-                dialog.review.effort.as_deref(),
-                &dialog.effort_choices,
-                dialog.effort_capabilities_discovered,
-            ),
-            dialog.focus == ReviewSettingsFocus::Effort,
-        ),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("Readiness        ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                dialog.readiness.label(),
-                Style::default().fg(match dialog.readiness {
-                    ReviewReadiness::Verified(_) => Color::Green,
-                    ReviewReadiness::Invalid(_) | ReviewReadiness::Failed(_) => Color::Yellow,
-                    _ => Color::DarkGray,
-                }),
-            ),
-        ]),
+    use ReviewSettingsFocus::*;
+    let mut notes = vec![
+        Line::raw("Global settings; changes apply to subsequent reviews."),
+        Line::raw(format!("Readiness: {}", dialog.readiness.label())),
     ];
-    if !dialog.target_readiness.is_empty() {
-        let targets = &dialog.target_readiness;
-        for target in targets {
-            lines.push(Line::styled(
-                format!(
-                    "  {}: {}",
-                    target.target,
-                    if target.ready {
-                        "ready"
-                    } else {
-                        &target.message
-                    }
-                ),
-                Style::default().fg(if target.ready {
-                    Color::Green
-                } else {
-                    Color::Yellow
-                }),
-            ));
-        }
+    for target in &dialog.target_readiness {
+        notes.push(Line::raw(format!(
+            "{}: {}",
+            target.target,
+            if target.ready {
+                "ready"
+            } else {
+                &target.message
+            }
+        )));
     }
     if let Some(reason) = &dialog.read_only_reason {
-        lines.push(Line::styled(
+        notes.push(Line::styled(
             reason.clone(),
             Style::default().fg(Color::Yellow),
         ));
     }
     if let Some(error) = &dialog.save_error {
-        lines.push(Line::styled(
+        notes.push(Line::styled(
             format!("Save failed: {error}"),
             Style::default().fg(Color::Yellow),
         ));
     }
     if dialog.review.profile.is_none() && dialog.review.enabled {
-        lines.push(Line::styled(
+        notes.push(Line::raw(
             "Choose a profile before enabling automatic review.",
-            Style::default().fg(Color::Yellow),
         ));
     }
-    lines.push(Line::raw(""));
-    let save_focused = dialog.focus == ReviewSettingsFocus::Save;
-    let buttons = if dialog.saving {
-        Line::styled(
-            "Saving review settings…",
-            Style::default().fg(Color::Yellow),
-        )
-    } else {
-        let mut line = focused_buttons(
-            REVIEW_SETTINGS_BUTTONS,
-            ReviewSettingsDialog::button_index(dialog.focus),
-        );
-        if !dialog.can_save() && save_focused {
-            line = Line::from(vec![Span::styled(
-                " Save unavailable ",
-                Style::default().fg(Color::DarkGray),
-            )]);
-        }
-        line
-    };
-    lines.push(buttons);
-    lines.push(Line::styled(
-        "Tab moves · arrows change values · Profile default clears model/effort · Esc closes",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Review settings "),
-        )
-        .wrap(Wrap { trim: false });
     let popup = centered_modal(
         frame,
         surfaces,
         86,
-        popup_height(&paragraph, 86, 20, area),
+        (notes.len() as u16).saturating_add(10).max(20),
         area,
     );
-    frame.render_widget(paragraph, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Review settings ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let focus_row = match dialog.focused() {
+        Enabled => 0,
+        Tier => 1,
+        Profile => 2,
+        Model => 3,
+        Effort => 4,
+        _ => 0,
+    };
+    let viewport = FormViewport::new(
+        body,
+        (notes.len() as u16).saturating_add(6),
+        dialog.scroll.get(),
+        Some(focus_row),
+    );
+    dialog.scroll.set(viewport.offset());
+    let row = |index: u16| viewport.row(index, 1);
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    Checkbox::render(
+        frame,
+        row(0),
+        "Automatic review",
+        dialog.review.enabled,
+        !dialog.saving,
+        &mut form,
+        Enabled,
+    );
+    for (index, (id, label, values, selected)) in dialog.selectors().iter().enumerate() {
+        let area = row(index as u16 + 1);
+        let label_width = 10.min(area.width);
+        frame.render_widget(
+            Line::raw(*label),
+            Rect::new(area.x, area.y, label_width, area.height),
+        );
+        let field = Rect::new(
+            area.x + label_width,
+            area.y,
+            area.width - label_width,
+            area.height,
+        );
+        TabStrip::render_enabled(
+            frame,
+            field,
+            &values.iter().map(String::as_str).collect::<Vec<_>>(),
+            *selected,
+            !dialog.saving,
+            &mut form,
+            *id,
+        );
+    }
+    for (index, line) in notes.into_iter().enumerate() {
+        frame.render_widget(line, row(index as u16 + 6));
+    }
+    let footer = Rect::new(
+        inner.x,
+        inner.bottom().saturating_sub(1),
+        inner.width,
+        u16::from(inner.height > 0),
+    );
+    if inner.height > 1 {
+        frame.render_widget(
+            Line::styled(
+                "Tab moves · arrows select · Space toggles · Esc closes",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
+        );
+    }
+    ButtonRow::render(
+        frame,
+        footer,
+        &[
+            (Cancel, "Cancel", true),
+            (
+                Save,
+                if dialog.saving { "Saving…" } else { "Save" },
+                dialog.can_save(),
+            ),
+        ],
+        &mut form,
+    );
+    form.end_frame(Enabled);
 }
 
 #[cfg(test)]
@@ -697,6 +659,7 @@ mod tests {
     use super::*;
     use crate::actions::CommandId;
     use crate::test_support::{config, dashboard_with_session, key, running_session};
+    use crossterm::event::KeyCode;
 
     fn open(dashboard: &mut DashboardState) -> DashboardAction {
         dashboard.dispatch_command(CommandId::ReviewSettings)
@@ -748,11 +711,11 @@ mod tests {
         let probe = dashboard.handle_key(key(KeyCode::Right));
         assert!(matches!(probe, DashboardAction::ProbeReviewSettings { .. }));
 
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Tier {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Right));
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Save {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         let action = dashboard.handle_key(key(KeyCode::Enter));
@@ -794,7 +757,7 @@ mod tests {
                 targets: vec![],
             }),
         );
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Model {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Model {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         let model_action = dashboard.handle_key(key(KeyCode::Right));
@@ -873,7 +836,7 @@ mod tests {
                 }],
             }),
         );
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Effort {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Effort {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         let action = dashboard.handle_key(key(KeyCode::Right));
@@ -958,20 +921,17 @@ mod tests {
             Default::default(),
         );
         let _ = open(&mut dashboard);
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Save {
+        for _ in 0..8 {
             dashboard.handle_key(key(KeyCode::Tab));
+            assert_ne!(dialog(&dashboard).focused(), ReviewSettingsFocus::Save);
         }
-        assert!(matches!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        ));
         assert!(!dialog(&dashboard).saving);
         // Disable automatic review and save despite the failed/unverified probe.
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Enabled {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Enabled {
             dashboard.handle_key(key(KeyCode::BackTab));
         }
         dashboard.handle_key(key(KeyCode::Char(' ')));
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Save {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         assert!(matches!(

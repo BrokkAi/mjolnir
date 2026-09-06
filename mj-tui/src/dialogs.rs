@@ -1,8 +1,14 @@
 //! Modal dialogs: session import, confirmations, and the rename editor.
 
+mod container;
+#[cfg(test)]
+use container::ContainerEditFocus;
+pub(crate) use container::{ContainerEditor, render_container_editor};
+
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use qrcode::QrCode;
 use qrcode::types::{Color as QrColor, EcLevel};
 use ratatui::Frame;
@@ -15,22 +21,43 @@ use std::path::PathBuf;
 
 use hel::hel_config::{HarnessKind, mount_history_host};
 use hel::hel_targets::{AdditionalMount, default_mount_destination, validate_additional_mounts};
+use mj_chat::components::{
+    Button, ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, Outcome, TextField,
+};
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
 use crate::widgets::{
-    action_buttons, centered_modal, centered_modal_fixed, focused_buttons, modal_area,
-    popup_height, truncate_text,
+    centered_modal, centered_modal_fixed, modal_area, popup_height, truncate_text,
 };
 use crate::wizards::read_only_marker;
-use crate::{
-    ButtonKey, DashboardAction, DashboardState, Mode, WebViewerAccess, button_row_key,
-    cycle_button_focus, cycle_control, move_index,
-};
+use crate::{DashboardAction, DashboardState, Mode, WebViewerAccess};
 
 pub(crate) const FORCE_STOP_CONFIRMATION: &str = "STOP";
 
 const IMPORT_STALL_WARNING_AFTER: Duration = Duration::from_secs(10);
+
+/// Stable control identities used by the standard dashboard dialogs.
+///
+/// Each dialog owns its own [`Form`], so the shared identities can be reused
+/// across modes while retaining focus and pointer state during redraws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DialogControl {
+    Field,
+    TypedField,
+    Cancel,
+    Save,
+    Primary,
+    TargetList,
+    TargetRename,
+    TargetTest,
+    TargetClose,
+    ConfirmButton(usize),
+    ImportIgnore,
+    ImportCancel,
+    ImportContinue,
+    WebClose,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportSessionOption {
@@ -62,7 +89,7 @@ pub struct ImportProfileOption {
 pub(crate) struct RenameEditor {
     pub(crate) session_id: String,
     pub(crate) title: TextInput,
-    pub(crate) focus: RenameFocus,
+    pub(crate) form: RefCell<Form<DialogControl>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +112,7 @@ pub(crate) struct ConfigIdEditor {
     pub(crate) kind: ConfigEntryKind,
     pub(crate) old_id: String,
     pub(crate) value: TextInput,
-    pub(crate) focus: RenameFocus,
+    pub(crate) form: RefCell<Form<DialogControl>>,
     pub(crate) return_to_targets: bool,
 }
 
@@ -93,7 +120,7 @@ pub(crate) struct ConfigIdEditor {
 pub(crate) struct TargetActionsDialog {
     pub(crate) target_ids: Vec<String>,
     pub(crate) target_index: usize,
-    pub(crate) focus: usize,
+    pub(crate) form: RefCell<Form<DialogControl>>,
     pub(crate) testing: Option<String>,
     pub(crate) result: Option<(String, Result<(), String>)>,
 }
@@ -106,6 +133,7 @@ pub(crate) struct WebDialog {
     pub(crate) fallback_reason: Option<String>,
     pub(crate) message: Option<String>,
     pub(crate) qr: Option<String>,
+    pub(crate) form: RefCell<Form<DialogControl>>,
 }
 
 impl WebDialog {
@@ -117,11 +145,10 @@ impl WebDialog {
             fallback_reason: None,
             message: None,
             qr: None,
+            form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
         }
     }
 }
-
-const TARGET_ACTION_BUTTONS: &[&str] = &["Rename", "Test", "Close"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepositoryOriginDialog {
@@ -132,46 +159,8 @@ pub(crate) struct RepositoryOriginDialog {
     pub(crate) configured_origin: String,
     pub(crate) replacement: TextInput,
     pub(crate) error: Option<String>,
-    pub(crate) focus: RepositoryOriginFocus,
+    pub(crate) form: RefCell<Form<DialogControl>>,
     pub(crate) launch: Box<DashboardAction>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RepositoryOriginFocus {
-    Field,
-    Cancel,
-    Validate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RenameFocus {
-    Field,
-    Cancel,
-    Save,
-}
-
-const RENAME_BUTTONS: &[&str] = &["Cancel", "Save"];
-
-const RENAME_FOCUS_ORDER: [RenameFocus; 3] =
-    [RenameFocus::Field, RenameFocus::Cancel, RenameFocus::Save];
-
-impl RenameFocus {
-    /// The button Enter would press. Typing in the field also submits, so Save
-    /// stays highlighted there and exactly one button is ever highlighted.
-    fn button_index(self) -> usize {
-        match self {
-            RenameFocus::Cancel => 0,
-            RenameFocus::Field | RenameFocus::Save => 1,
-        }
-    }
-
-    fn from_button_index(index: usize) -> Self {
-        if index == 0 {
-            RenameFocus::Cancel
-        } else {
-            RenameFocus::Save
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,19 +213,18 @@ pub(crate) enum Confirmation {
     },
 }
 
-/// A confirmation dialog plus the index of its focused button.
+/// A confirmation dialog and its persistent standard-control state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfirmDialog {
     pub(crate) confirmation: Confirmation,
-    pub(crate) focus: usize,
+    pub(crate) form: RefCell<Form<DialogControl>>,
 }
 
 impl ConfirmDialog {
     pub(crate) fn new(confirmation: Confirmation) -> Self {
-        let focus = primary_button(confirmation_buttons(&confirmation));
         Self {
+            form: confirmation_form(&confirmation),
             confirmation,
-            focus,
         }
     }
 }
@@ -248,6 +236,7 @@ pub(crate) struct ImportProgress {
     total: Option<usize>,
     pub(crate) message: String,
     last_updated: Instant,
+    pub(crate) form: RefCell<Form<DialogControl>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,16 +246,123 @@ pub(crate) struct ImportBundleConfirmation {
     scratch_git_roots: Vec<String>,
     has_untracked_files: bool,
     ignore_untracked: bool,
-    pub(crate) focus: usize,
+    pub(crate) form: RefCell<Form<DialogControl>>,
 }
 
-const IMPORT_BUNDLE_BUTTONS: &[&str] = &["Cancel", "Continue"];
+fn dialog_form(controls: &[DialogControl], initial: DialogControl) -> RefCell<Form<DialogControl>> {
+    let mut form = Form::new();
+    for id in controls {
+        let kind = match id {
+            DialogControl::Field | DialogControl::TypedField => ControlKind::TextField,
+            DialogControl::TargetList => ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
+            },
+            DialogControl::ImportIgnore => ControlKind::Checkbox,
+            _ => ControlKind::Button,
+        };
+        form.declare(*id, kind);
+    }
+    form.end_frame(initial);
+    RefCell::new(form)
+}
 
-const IMPORT_PROGRESS_BUTTONS: &[&str] = &["Cancel"];
+fn confirmation_form(confirmation: &Confirmation) -> RefCell<Form<DialogControl>> {
+    let buttons = confirmation_buttons(confirmation);
+    let mut form = Form::new();
+    if confirmation_has_typed_field(confirmation) {
+        form.declare(DialogControl::TypedField, ControlKind::TextField);
+        form.declare(DialogControl::ConfirmButton(0), ControlKind::Button);
+        form.declare_with_enabled(DialogControl::ConfirmButton(1), ControlKind::Button, false);
+        form.end_frame(DialogControl::TypedField);
+    } else {
+        for index in 0..buttons.len() {
+            form.declare(DialogControl::ConfirmButton(index), ControlKind::Button);
+        }
+        form.end_frame(DialogControl::ConfirmButton(primary_button(buttons)));
+    }
+    RefCell::new(form)
+}
+
+fn typed_confirmation_valid(confirmation: &Confirmation) -> bool {
+    match confirmation {
+        Confirmation::ForceStop { typed, .. } => typed == FORCE_STOP_CONFIRMATION,
+        Confirmation::ForceDestroy {
+            expected, typed, ..
+        } => typed == expected.as_str(),
+        _ => false,
+    }
+}
+
+fn sync_typed_confirmation_form(dialog: &mut ConfirmDialog) {
+    let enabled = typed_confirmation_valid(&dialog.confirmation);
+    let form = dialog.form.get_mut();
+    form.declare(DialogControl::TypedField, ControlKind::TextField);
+    form.declare(DialogControl::ConfirmButton(0), ControlKind::Button);
+    form.declare_with_enabled(
+        DialogControl::ConfirmButton(1),
+        ControlKind::Button,
+        enabled,
+    );
+    form.end_frame(DialogControl::TypedField);
+}
+
+fn target_actions_form(
+    target_count: usize,
+    selected: usize,
+    initial: DialogControl,
+) -> RefCell<Form<DialogControl>> {
+    let mut form = Form::new();
+    form.declare(
+        DialogControl::TargetList,
+        ControlKind::ChoiceList {
+            len: target_count,
+            selected: selected.min(target_count.saturating_sub(1)),
+        },
+    );
+    form.declare(DialogControl::TargetRename, ControlKind::Button);
+    form.declare(DialogControl::TargetTest, ControlKind::Button);
+    form.declare(DialogControl::TargetClose, ControlKind::Button);
+    form.end_frame(initial);
+    RefCell::new(form)
+}
+
+fn sync_target_actions_form(dialog: &mut TargetActionsDialog) {
+    let form = dialog.form.get_mut();
+    form.declare(
+        DialogControl::TargetList,
+        ControlKind::ChoiceList {
+            len: dialog.target_ids.len(),
+            selected: dialog.target_index,
+        },
+    );
+    form.declare(DialogControl::TargetRename, ControlKind::Button);
+    form.declare_with_enabled(
+        DialogControl::TargetTest,
+        ControlKind::Button,
+        dialog.testing.is_none(),
+    );
+    form.declare(DialogControl::TargetClose, ControlKind::Button);
+    form.end_frame(DialogControl::TargetList);
+}
+
+fn clear_dialog_form_geometry(form: &mut Form<DialogControl>) {
+    // Keep declarations available for keyboard input while the modal is
+    // clipped, but discard hitboxes and any in-flight mouse gesture.
+    form.cancel_pointer();
+    form.reset_geometry();
+}
+
+fn confirmation_has_typed_field(confirmation: &Confirmation) -> bool {
+    matches!(
+        confirmation,
+        Confirmation::ForceStop { .. } | Confirmation::ForceDestroy { .. }
+    )
+}
 
 /// Button labels for a confirmation dialog, ordered Cancel first and the primary
-/// action last. Typed-confirmation dialogs have no buttons. This is the single
-/// declaration used by both key handling and rendering.
+/// action last. This is the single declaration used by both key handling and
+/// rendering.
 fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
         Confirmation::DirtyLocal { .. } => &["Cancel", "Continue"],
@@ -277,8 +373,8 @@ fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] 
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
         Confirmation::RecoverFailed { .. } => &["Cancel", "Open transcript"],
-        Confirmation::ForceStop { .. } => &[],
-        Confirmation::ForceDestroy { .. } => &[],
+        Confirmation::ForceStop { .. } => &["Cancel", "Force stop"],
+        Confirmation::ForceDestroy { .. } => &["Cancel", "Force destroy"],
     }
 }
 
@@ -320,22 +416,50 @@ pub(crate) fn render_import_progress(
         Line::raw(progress.message.clone()),
         status,
         Line::raw(""),
-        focused_buttons(IMPORT_PROGRESS_BUTTONS, 0),
     ])
-    .block(Block::default().borders(Borders::ALL).title(format!(
-        " Importing session · progress {}/{total} ",
-        progress.step
-    )))
-    // `trim: false` keeps the padding inside the leftmost button background.
     .wrap(Wrap { trim: false });
     let popup = centered_modal(
         frame,
         surfaces,
         76,
-        popup_height(&paragraph, 76, 10, area),
+        popup_height(&paragraph, 76, 11, area),
         area,
     );
-    frame.render_widget(paragraph, popup);
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).title(format!(
+            " Importing session · progress {}/{total} ",
+            progress.step
+        )),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut progress.form.borrow_mut());
+        return;
+    }
+    frame.render_widget(
+        paragraph,
+        Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(1),
+        ),
+    );
+    let mut form = progress.form.borrow_mut();
+    form.begin_frame();
+    Button::render(
+        frame,
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        "Cancel",
+        true,
+        &mut form,
+        DialogControl::Cancel,
+    );
+    form.end_frame(DialogControl::Cancel);
 }
 
 pub(crate) fn render_import_bundle_confirmation(
@@ -355,20 +479,6 @@ pub(crate) fn render_import_bundle_confirmation(
                 .iter()
                 .map(|root| Line::styled(root.clone(), Style::default().fg(Color::Yellow))),
         );
-        if confirmation.has_untracked_files {
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                format!(
-                    "{} Ignore untracked files",
-                    if confirmation.ignore_untracked {
-                        "[x]"
-                    } else {
-                        "[ ]"
-                    }
-                ),
-                Style::default().fg(Color::Cyan),
-            ));
-        }
     }
     if !confirmation.omitted_non_git_dirs.is_empty() {
         if !lines.is_empty() {
@@ -400,376 +510,108 @@ pub(crate) fn render_import_bundle_confirmation(
     lines.push(Line::raw(""));
     if confirmation.has_untracked_files {
         lines.push(Line::raw("Space toggles the checkbox."));
-        lines.push(Line::raw(""));
     }
-    lines.push(focused_buttons(IMPORT_BUNDLE_BUTTONS, confirmation.focus));
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Import safety warning "),
-        )
-        // `trim: false` keeps the padding inside the leftmost button background.
-        .wrap(Wrap { trim: false });
-    let popup = centered_modal(
-        frame,
-        surfaces,
+    let control_lines = usize::from(confirmation.has_untracked_files) + 2;
+    let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+    let height = popup_height(
+        &body_paragraph,
         76,
-        popup_height(&paragraph, 76, 12, area),
+        u16::try_from(control_lines)
+            .unwrap_or(u16::MAX)
+            .saturating_add(10),
         area,
     );
-    frame.render_widget(paragraph, popup);
+    let popup = centered_modal(frame, surfaces, 76, height, area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Import safety warning "),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut confirmation.form.borrow_mut());
+        return;
+    }
+    let body_height = inner
+        .height
+        .saturating_sub(u16::try_from(control_lines).unwrap_or(u16::MAX));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect::new(inner.x, inner.y, inner.width, body_height),
+    );
+    let mut form = confirmation.form.borrow_mut();
+    form.begin_frame();
+    let y = inner.y.saturating_add(body_height);
+    if confirmation.has_untracked_files {
+        Checkbox::render(
+            frame,
+            Rect::new(inner.x, y, inner.width, 1),
+            "Ignore untracked files",
+            confirmation.ignore_untracked,
+            true,
+            &mut form,
+            DialogControl::ImportIgnore,
+        );
+    }
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    ButtonRow::render(
+        frame,
+        footer,
+        &[
+            (DialogControl::ImportCancel, "Cancel", true),
+            (DialogControl::ImportContinue, "Continue", true),
+        ],
+        &mut form,
+    );
+    form.end_frame(DialogControl::ImportContinue);
 }
 
 /// Editable per-session container provisioning inputs: the size overrides and
 /// the attached host directories. Nothing here is written to config.toml.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContainerEditor {
-    pub(crate) session_id: String,
-    pub(crate) cpus: TextInput,
-    pub(crate) memory: TextInput,
-    pub(crate) mounts: Vec<AdditionalMount>,
-    /// Remembered mount sources for this session's host, offered as
-    /// suggestions and editable so a stale directory can be forgotten.
-    pub(crate) suggestions: Vec<PathBuf>,
-    pub(crate) source: TextInput,
-    pub(crate) destination: TextInput,
-    /// Read-only setting for the directory being typed, carried into the list
-    /// when it is attached.
-    pub(crate) read_only: bool,
-    pub(crate) focus: ContainerEditFocus,
-    pub(crate) mount_index: usize,
-    pub(crate) suggestion_index: usize,
-    pub(crate) error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContainerEditFocus {
-    Cpus,
-    Memory,
-    Source,
-    Destination,
-    ReadOnly,
-    Mounts,
-    Suggestions,
-    Cancel,
-    Save,
-}
-
-const CONTAINER_EDIT_BUTTONS: &[&str] = &["Cancel", "Save"];
-
-/// One line, so the dialog never implies a live resize.
-pub(crate) const CONTAINER_EDIT_SCOPE: &str = "Applies when the container is next recreated.";
-
-impl ContainerEditor {
-    /// Focus order, skipping the lists that have nothing to select.
-    fn focus_order(&self) -> Vec<ContainerEditFocus> {
-        let mut order = vec![
-            ContainerEditFocus::Cpus,
-            ContainerEditFocus::Memory,
-            ContainerEditFocus::Source,
-            ContainerEditFocus::Destination,
-            ContainerEditFocus::ReadOnly,
-        ];
-        if !self.mounts.is_empty() {
-            order.push(ContainerEditFocus::Mounts);
-        }
-        if !self.suggestions.is_empty() {
-            order.push(ContainerEditFocus::Suggestions);
-        }
-        order.extend([ContainerEditFocus::Cancel, ContainerEditFocus::Save]);
-        order
-    }
-
-    fn field_mut(&mut self) -> Option<&mut TextInput> {
-        match self.focus {
-            ContainerEditFocus::Cpus => Some(&mut self.cpus),
-            ContainerEditFocus::Memory => Some(&mut self.memory),
-            ContainerEditFocus::Source => Some(&mut self.source),
-            ContainerEditFocus::Destination => Some(&mut self.destination),
-            ContainerEditFocus::ReadOnly
-            | ContainerEditFocus::Mounts
-            | ContainerEditFocus::Suggestions
-            | ContainerEditFocus::Cancel
-            | ContainerEditFocus::Save => None,
-        }
-    }
-
-    pub(crate) fn field(&self) -> Option<&TextInput> {
-        match self.focus {
-            ContainerEditFocus::Cpus => Some(&self.cpus),
-            ContainerEditFocus::Memory => Some(&self.memory),
-            ContainerEditFocus::Source => Some(&self.source),
-            ContainerEditFocus::Destination => Some(&self.destination),
-            _ => None,
-        }
-    }
-
-    fn button_index(&self) -> usize {
-        match self.focus {
-            ContainerEditFocus::Cancel => 0,
-            _ => 1,
-        }
-    }
-
-    /// Add the typed mount, filling in a default destination. Returns the
-    /// reason it was rejected, if it was.
-    fn add_mount(&mut self) -> Option<String> {
-        let source = PathBuf::from(self.source.trim());
-        if source.as_os_str().is_empty() {
-            return Some("Enter a host directory to attach.".into());
-        }
-        let destination = if self.destination.trim().is_empty() {
-            default_mount_destination(&source, &self.mounts)
-        } else {
-            PathBuf::from(self.destination.trim())
-        };
-        let mount = AdditionalMount {
-            source,
-            destination,
-            read_only: self.read_only,
-        };
-        let mut mounts = self.mounts.clone();
-        mounts.push(mount);
-        if let Err(error) = validate_additional_mounts(&mounts) {
-            return Some(error.to_string());
-        }
-        self.mounts = mounts;
-        self.source.clear();
-        self.destination.clear();
-        self.read_only = false;
-        self.mount_index = self.mounts.len() - 1;
-        None
-    }
-
-    /// Toggle read-only for the entry being typed, or for the selected row.
-    fn toggle_read_only(&mut self) {
-        match self.focus {
-            ContainerEditFocus::ReadOnly => self.read_only = !self.read_only,
-            ContainerEditFocus::Mounts => {
-                if let Some(mount) = self.mounts.get_mut(self.mount_index) {
-                    mount.read_only = !mount.read_only;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn take_suggestion(&mut self) {
-        let Some(source) = self.suggestions.get(self.suggestion_index) else {
-            return;
-        };
-        self.source = source.to_string_lossy().into_owned().into();
-        self.destination = default_mount_destination(source, &self.mounts)
-            .to_string_lossy()
-            .into_owned()
-            .into();
-        self.focus = ContainerEditFocus::Source;
-    }
-
-    fn remove_selected(&mut self) {
-        match self.focus {
-            ContainerEditFocus::Mounts if !self.mounts.is_empty() => {
-                self.mounts.remove(self.mount_index);
-                self.mount_index = self.mount_index.min(self.mounts.len().saturating_sub(1));
-                if self.mounts.is_empty() {
-                    self.focus = ContainerEditFocus::Source;
-                }
-            }
-            ContainerEditFocus::Suggestions if !self.suggestions.is_empty() => {
-                self.suggestions.remove(self.suggestion_index);
-                self.suggestion_index = self
-                    .suggestion_index
-                    .min(self.suggestions.len().saturating_sub(1));
-                if self.suggestions.is_empty() {
-                    self.focus = ContainerEditFocus::Source;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn save(&self) -> Result<DashboardAction, String> {
-        validate_additional_mounts(&self.mounts).map_err(|error| error.to_string())?;
-        let value = |text: &str| {
-            let trimmed = text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_owned())
-        };
-        Ok(DashboardAction::SaveContainerSettings {
-            session_id: self.session_id.clone(),
-            cpus: value(&self.cpus),
-            memory: value(&self.memory),
-            additional_mounts: self.mounts.clone(),
-            mount_history: self.suggestions.clone(),
-        })
-    }
-}
-
-pub(crate) fn render_container_editor(
-    frame: &mut Frame,
-    area: Rect,
-    editor: &ContainerEditor,
-    surfaces: &mut FrameSurfaces,
-) {
-    let field = |label: &str, value: &TextInput, focused: bool| {
-        let style = if focused {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
-        Line::from(vec![
-            ratatui::text::Span::raw(format!("{label}: ")),
-            ratatui::text::Span::styled(
-                format!(
-                    "{} ",
-                    if focused {
-                        value.with_cursor_marker("▏")
-                    } else {
-                        value.to_string()
-                    }
-                ),
-                style,
-            ),
-        ])
-    };
-    let mut lines = vec![
-        Line::raw(format!("Session: {}", editor.session_id)),
-        Line::styled(CONTAINER_EDIT_SCOPE, Style::default().fg(Color::DarkGray)),
-        Line::raw(""),
-        field(
-            "CPUs",
-            &editor.cpus,
-            editor.focus == ContainerEditFocus::Cpus,
-        ),
-        field(
-            "Memory",
-            &editor.memory,
-            editor.focus == ContainerEditFocus::Memory,
-        ),
-        Line::styled(
-            "Empty keeps the target's value.",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Line::raw(""),
-        Line::raw("Attached directories"),
-    ];
-    if editor.mounts.is_empty() {
-        lines.push(Line::styled("  none", Style::default().fg(Color::DarkGray)));
-    }
-    for (index, mount) in editor.mounts.iter().enumerate() {
-        let selected = editor.focus == ContainerEditFocus::Mounts && index == editor.mount_index;
-        lines.push(Line::styled(
-            format!(
-                "{} {} -> {}{}",
-                if selected { "›" } else { " " },
-                mount.source.display(),
-                mount.destination.display(),
-                read_only_marker(mount.read_only)
-            ),
-            if selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
-            } else {
-                Style::default()
-            },
-        ));
-    }
-    lines.extend([
-        Line::raw(""),
-        field(
-            "Attach host directory",
-            &editor.source,
-            editor.focus == ContainerEditFocus::Source,
-        ),
-        field(
-            "Container destination",
-            &editor.destination,
-            editor.focus == ContainerEditFocus::Destination,
-        ),
-        field(
-            "Read-only",
-            &TextInput::from(if editor.read_only { "[x]" } else { "[ ]" }),
-            editor.focus == ContainerEditFocus::ReadOnly,
-        ),
-    ]);
-    if !editor.suggestions.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Remembered directories"));
-        for (index, source) in editor.suggestions.iter().enumerate() {
-            let selected =
-                editor.focus == ContainerEditFocus::Suggestions && index == editor.suggestion_index;
-            lines.push(Line::styled(
-                format!("{} {}", if selected { "›" } else { " " }, source.display()),
-                if selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else {
-                    Style::default()
-                },
-            ));
-        }
-    }
-    if let Some(error) = &editor.error {
-        lines.push(Line::styled(
-            error.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    lines.extend([
-        Line::raw(""),
-        Line::styled(
-            "Enter attaches or takes the selected row · Space toggles read-only · d forgets it · \
-             Tab moves",
-            Style::default().fg(Color::DarkGray),
-        ),
-        focused_buttons(CONTAINER_EDIT_BUTTONS, editor.button_index()),
-    ]);
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Edit container size and mounts "),
-    );
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        70,
-        popup_height(&paragraph, 70, 18, area),
-        area,
-    );
-    frame.render_widget(paragraph, popup);
-}
-
 pub(crate) fn render_rename_editor(
     frame: &mut Frame,
     area: Rect,
     editor: &RenameEditor,
     surfaces: &mut FrameSurfaces,
 ) {
-    let paragraph = Paragraph::new(vec![
-        Line::raw(format!("Session: {}", editor.session_id)),
-        Line::raw(""),
-        Line::styled(
-            if editor.focus == RenameFocus::Field {
-                editor.title.with_cursor_marker("▏")
-            } else {
-                editor.title.to_string()
-            },
-            Style::default().fg(Color::Cyan),
-        ),
-        Line::raw(""),
-        focused_buttons(RENAME_BUTTONS, editor.focus.button_index()),
-    ])
-    .block(
+    let popup = centered_modal(frame, surfaces, 60, 8, area);
+    frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
             .title(" Rename session "),
+        popup,
     );
-    let popup = centered_modal(
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(format!("Session: {}", editor.session_id)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let mut form = editor.form.borrow_mut();
+    form.begin_frame();
+    TextField::render(frame, field, &editor.title, &mut form, DialogControl::Field);
+    ButtonRow::render(
         frame,
-        surfaces,
-        60,
-        popup_height(&paragraph, 60, 8, area),
-        area,
+        footer,
+        &[
+            (DialogControl::Cancel, "Cancel", true),
+            (DialogControl::Save, "Save", true),
+        ],
+        &mut form,
     );
-    frame.render_widget(paragraph, popup);
+    form.end_frame(DialogControl::Field);
 }
 
 pub(crate) fn render_config_id_editor(
@@ -778,37 +620,44 @@ pub(crate) fn render_config_id_editor(
     editor: &ConfigIdEditor,
     surfaces: &mut FrameSurfaces,
 ) {
-    let paragraph = Paragraph::new(vec![
-        Line::raw(format!(
+    let popup = centered_modal(frame, surfaces, 60, 8, area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Rename {} ID ", editor.kind.label())),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(format!(
             "Current {} ID: {}",
             editor.kind.label(),
             editor.old_id
         )),
-        Line::raw(""),
-        Line::styled(
-            if editor.focus == RenameFocus::Field {
-                editor.value.with_cursor_marker("▏")
-            } else {
-                editor.value.to_string()
-            },
-            Style::default().fg(Color::Cyan),
-        ),
-        Line::raw(""),
-        focused_buttons(RENAME_BUTTONS, editor.focus.button_index()),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Rename {} ID ", editor.kind.label())),
+        Rect::new(inner.x, inner.y, inner.width, 1),
     );
-    let popup = centered_modal(
+    let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let mut form = editor.form.borrow_mut();
+    form.begin_frame();
+    TextField::render(frame, field, &editor.value, &mut form, DialogControl::Field);
+    ButtonRow::render(
         frame,
-        surfaces,
-        60,
-        popup_height(&paragraph, 60, 8, area),
-        area,
+        footer,
+        &[
+            (DialogControl::Cancel, "Cancel", true),
+            (DialogControl::Save, "Save", true),
+        ],
+        &mut form,
     );
-    frame.render_widget(paragraph, popup);
+    form.end_frame(DialogControl::Field);
 }
 
 pub(crate) fn render_target_actions(
@@ -818,77 +667,99 @@ pub(crate) fn render_target_actions(
     dialog: &TargetActionsDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let mut lines = dialog
+    let rows = dialog
         .target_ids
         .iter()
-        .enumerate()
-        .map(|(index, id)| {
+        .map(|id| {
             let kind = dashboard
                 .config
                 .targets
                 .get(id)
                 .map(target_kind_label)
                 .unwrap_or("missing");
-            Line::styled(
-                format!(
-                    "{} {id:<24} {kind}",
-                    if index == dialog.target_index {
-                        '›'
-                    } else {
-                        ' '
-                    }
-                ),
-                if index == dialog.target_index {
-                    Style::default().bg(Color::DarkGray).fg(Color::White)
-                } else {
-                    Style::default()
-                },
-            )
+            Line::styled(format!("{id:<24} {kind}"), Style::default())
         })
         .collect::<Vec<_>>();
-    if lines.is_empty() {
-        lines.push(Line::raw("No targets configured."));
+    let list_rows = if rows.is_empty() {
+        vec![Line::styled(
+            "No targets configured.",
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        rows
+    };
+    let height = u16::try_from(list_rows.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(8)
+        .max(12);
+    let popup = centered_modal(frame, surfaces, 72, height, area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Target actions "),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
     }
-    lines.push(Line::raw(""));
+    let list_height = u16::try_from(list_rows.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height.saturating_sub(4));
+    let list_area = Rect::new(inner.x, inner.y, inner.width, list_height.max(1));
+    let status_y = list_area.bottom().saturating_add(1);
     if let Some(target_id) = &dialog.testing {
-        lines.push(Line::styled(
-            format!("Testing {target_id}… Alt-X cancels test"),
-            Style::default().fg(Color::Yellow),
-        ));
+        frame.render_widget(
+            Paragraph::new(format!("Testing {target_id}… Alt-X cancels test"))
+                .style(Style::default().fg(Color::Yellow)),
+            Rect::new(inner.x, status_y, inner.width, 1),
+        );
     } else if let Some((target_id, result)) = &dialog.result {
-        lines.push(Line::styled(
-            match result {
+        frame.render_widget(
+            Paragraph::new(match result {
                 Ok(()) => format!("{target_id}: ready"),
                 Err(error) => format!("{target_id}: {error}"),
-            },
-            Style::default().fg(if result.is_ok() {
+            })
+            .style(Style::default().fg(if result.is_ok() {
                 Color::Green
             } else {
                 Color::Yellow
-            }),
-        ));
+            })),
+            Rect::new(inner.x, status_y, inner.width, 1),
+        );
     }
-    lines.push(Line::raw(""));
-    lines.push(focused_buttons(TARGET_ACTION_BUTTONS, dialog.focus));
-    lines.push(Line::styled(
-        "Up/Down selects target · Tab selects action · Esc closes",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Target actions "),
-        )
-        .wrap(Wrap { trim: false });
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        72,
-        popup_height(&paragraph, 72, 12, area),
-        area,
+    let hint = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
+    frame.render_widget(
+        Paragraph::new("Up/Down selects target · Tab selects action · Esc closes")
+            .style(Style::default().fg(Color::DarkGray)),
+        hint,
     );
-    frame.render_widget(paragraph, popup);
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    ChoiceList::render(
+        frame,
+        list_area,
+        &list_rows,
+        dialog.target_index,
+        &mut form,
+        DialogControl::TargetList,
+    );
+    ButtonRow::render(
+        frame,
+        footer,
+        &[
+            (DialogControl::TargetRename, "Rename", true),
+            (DialogControl::TargetTest, "Test", dialog.testing.is_none()),
+            (DialogControl::TargetClose, "Close", true),
+        ],
+        &mut form,
+    );
+    form.end_frame(DialogControl::TargetList);
 }
 
 fn target_kind_label(target: &hel::hel_config::TargetTemplate) -> &'static str {
@@ -909,10 +780,10 @@ pub(crate) fn render_web_dialog(
     dialog: &WebDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    const FOOTER: &str = "Enter or Esc closes";
+    const FOOTER: &str = "Close";
     // Text that names the natural body width. The box hugs the QR, and longer
     // URLs wrap beneath it rather than stretching the dialog across the screen.
-    const MIN_INNER_WIDTH: usize = FOOTER.len();
+    const MIN_INNER_WIDTH: usize = 40;
 
     // The QR is the widest single element, so it decides the box width and only
     // shows when the terminal can hold it plus a border and the footer rows.
@@ -984,18 +855,45 @@ pub(crate) fn render_web_dialog(
         }
     }
     lines.push(Line::raw(""));
-    lines.push(Line::styled(FOOTER, Style::default().fg(Color::DarkGray)).centered());
 
     let inner_width = inner_width.min(max_inner).max(1);
     let box_width = u16::try_from(inner_width + 2).unwrap_or(u16::MAX);
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Web viewer "))
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let wrapped =
         u16::try_from(paragraph.line_count(box_width.saturating_sub(2))).unwrap_or(u16::MAX);
-    let box_height = wrapped.saturating_add(2).min(inner_area.height);
+    let box_height = wrapped.saturating_add(3).min(inner_area.height);
     let popup = centered_modal_fixed(frame, surfaces, box_width, box_height, area);
-    frame.render_widget(paragraph, popup);
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).title(" Web viewer "),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    frame.render_widget(paragraph, body);
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    Button::render(
+        frame,
+        footer,
+        FOOTER,
+        true,
+        &mut form,
+        DialogControl::WebClose,
+    );
+    form.end_frame(DialogControl::WebClose);
 }
 
 fn render_qr(data: &str) -> Result<String, String> {
@@ -1033,12 +931,6 @@ pub(crate) fn render_repository_origin(
     dialog: &RepositoryOriginDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let field_focused = dialog.focus == RepositoryOriginFocus::Field;
-    let field_style = if field_focused {
-        Style::default().fg(Color::Black).bg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
     let mut lines = vec![
         Line::raw(format!("Repository: {}", dialog.repository_id)),
         Line::raw(""),
@@ -1053,20 +945,6 @@ pub(crate) fn render_repository_origin(
         )),
         Line::raw(""),
         Line::raw("Enter a GitHub origin or absolute local path that contains this history:"),
-        Line::from(vec![
-            Span::raw("Source: "),
-            Span::styled(
-                format!(
-                    " {} ",
-                    if field_focused {
-                        dialog.replacement.with_cursor_marker("▏")
-                    } else {
-                        dialog.replacement.to_string()
-                    }
-                ),
-                field_style,
-            ),
-        ]),
     ];
     if let Some(error) = &dialog.error {
         lines.push(Line::styled(
@@ -1074,35 +952,64 @@ pub(crate) fn render_repository_origin(
             Style::default().fg(Color::Yellow),
         ));
     }
-    lines.extend([
-        Line::raw(""),
-        Line::styled(
-            "Type or paste into Source · Tab moves · Enter checks",
-            Style::default().fg(Color::DarkGray),
-        ),
-        action_buttons(&[
-            ("Cancel", dialog.focus == RepositoryOriginFocus::Cancel),
-            (
-                "Check origin",
-                dialog.focus == RepositoryOriginFocus::Validate,
-            ),
-        ]),
-    ]);
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Repository history is missing "),
-        )
-        .wrap(Wrap { trim: false });
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        76,
-        popup_height(&paragraph, 76, 14, area),
-        area,
+    let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+    let popup_height = popup_height(&body_paragraph, 76, 14, area);
+    let popup = centered_modal(frame, surfaces, 76, popup_height, area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Repository history is missing "),
+        popup,
     );
-    frame.render_widget(paragraph, popup);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let controls_height = 5;
+    let text = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(controls_height),
+    );
+    frame.render_widget(body_paragraph, text);
+    let field_y = inner.y.saturating_add(text.height);
+    frame.render_widget(
+        Paragraph::new("Source:"),
+        Rect::new(inner.x, field_y, 8.min(inner.width), 1),
+    );
+    let field_x = inner.x.saturating_add(8.min(inner.width));
+    let field = Rect::new(field_x, field_y, inner.width.saturating_sub(8), 1);
+    let hint_y = inner.bottom().saturating_sub(3);
+    frame.render_widget(
+        Paragraph::new("Type or paste into Source · Tab moves · Enter checks")
+            .style(Style::default().fg(Color::DarkGray)),
+        Rect::new(inner.x, hint_y, inner.width, 1),
+    );
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    TextField::render(
+        frame,
+        field,
+        &dialog.replacement,
+        &mut form,
+        DialogControl::Field,
+    );
+    ButtonRow::render(
+        frame,
+        footer,
+        &[
+            (DialogControl::Cancel, "Cancel", true),
+            (DialogControl::Primary, "Check origin", true),
+        ],
+        &mut form,
+    );
+    form.end_frame(DialogControl::Field);
 }
 
 /// Title and body of one confirmation, without its buttons.
@@ -1216,7 +1123,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             }
             (" Session failed ", lines)
         }
-        Confirmation::ForceStop { session_id, typed } => (
+        Confirmation::ForceStop { session_id, .. } => (
             " FORCE STOP · RECENT WORK MAY BE LOST ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
@@ -1224,16 +1131,12 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw("The current target will be removed without a new checkpoint."),
                 Line::raw("You can resume from the latest verified recovery archive."),
                 Line::raw(format!("Type {FORCE_STOP_CONFIRMATION}, then press Enter:")),
-                Line::styled(
-                    typed.with_cursor_marker("▏"),
-                    Style::default().fg(Color::Red),
-                ),
             ],
         ),
         Confirmation::ForceDestroy {
             session_id,
             expected,
-            typed,
+            ..
         } => (
             " FORCE DESTROY · THE SESSION AND ITS RECOVERY ARCHIVE WILL BE LOST ",
             vec![
@@ -1244,10 +1147,6 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw(format!(
                     "Type {expected} (this session's short id), then press Enter:"
                 )),
-                Line::styled(
-                    typed.with_cursor_marker("▏"),
-                    Style::default().fg(Color::Red),
-                ),
             ],
         ),
     }
@@ -1261,7 +1160,7 @@ pub(crate) fn render_confirmation(
 ) {
     let confirmation = &dialog.confirmation;
     // Minimum height per dialog; `popup_height` grows it to fit wrapped content.
-    let nominal = match confirmation {
+    let nominal: u16 = match confirmation {
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::Close {
@@ -1275,27 +1174,69 @@ pub(crate) fn render_confirmation(
     };
     let (title, mut lines) = confirmation_body(confirmation);
     let buttons = confirmation_buttons(confirmation);
-    if !buttons.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(focused_buttons(buttons, dialog.focus));
-    }
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
-                .title(title),
-        )
-        // `trim: false` keeps the padding inside the leftmost button background.
-        .wrap(Wrap { trim: false });
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        72,
-        popup_height(&paragraph, 72, nominal, area),
-        area,
+    let has_typed_field = confirmation_has_typed_field(confirmation);
+    lines.push(Line::raw(""));
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let extra = if has_typed_field { 2 } else { 1 };
+    let height = popup_height(&paragraph, 72, nominal.saturating_add(extra), area);
+    let popup = centered_modal(frame, surfaces, 72, height, area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title(title),
+        popup,
     );
-    frame.render_widget(paragraph, popup);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height == 0 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let controls_height = if has_typed_field { 2 } else { 1 };
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(controls_height),
+    );
+    frame.render_widget(paragraph, body);
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    if has_typed_field {
+        let typed = match confirmation {
+            Confirmation::ForceStop { typed, .. } | Confirmation::ForceDestroy { typed, .. } => {
+                typed
+            }
+            _ => unreachable!("buttonless confirmation must have a typed field"),
+        };
+        let field = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
+        TextField::render(frame, field, typed, &mut form, DialogControl::TypedField);
+    }
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    ButtonRow::render(
+        frame,
+        footer,
+        &buttons
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                (
+                    DialogControl::ConfirmButton(index),
+                    *label,
+                    index == 0 || !has_typed_field || typed_confirmation_valid(confirmation),
+                )
+            })
+            .collect::<Vec<_>>(),
+        &mut form,
+    );
+    form.end_frame(if has_typed_field {
+        DialogControl::TypedField
+    } else {
+        DialogControl::ConfirmButton(primary_button(buttons))
+    });
 }
 
 impl DashboardState {
@@ -1321,6 +1262,7 @@ impl DashboardState {
                     fallback_reason,
                     message,
                     qr,
+                    form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
                 }
             }
             WebViewerAccess::Unavailable(message) => WebDialog {
@@ -1330,11 +1272,27 @@ impl DashboardState {
                 fallback_reason: None,
                 message: Some(message),
                 qr: None,
+                form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
             },
         };
         if matches!(self.mode, Mode::Web(_)) {
             self.mode = Mode::Web(dialog);
         }
+    }
+
+    pub(crate) fn handle_web_event(
+        &mut self,
+        event: Event,
+        mut dialog: WebDialog,
+    ) -> DashboardAction {
+        let interaction = dialog.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::WebClose)) => {
+                self.cancel_modal();
+            }
+            _ => self.mode = Mode::Web(dialog),
+        }
+        DashboardAction::None
     }
 
     pub(crate) fn begin_profile_rename(&mut self) {
@@ -1346,7 +1304,14 @@ impl DashboardState {
             kind: ConfigEntryKind::Profile,
             value: TextInput::from_value(old_id.clone()).with_max_chars(64),
             old_id,
-            focus: RenameFocus::Field,
+            form: dialog_form(
+                &[
+                    DialogControl::Field,
+                    DialogControl::Cancel,
+                    DialogControl::Save,
+                ],
+                DialogControl::Field,
+            ),
             return_to_targets: false,
         });
     }
@@ -1363,152 +1328,140 @@ impl DashboardState {
             .as_ref()
             .and_then(|id| target_ids.iter().position(|candidate| candidate == id))
             .unwrap_or(0);
+        let target_count = target_ids.len();
         self.mode = Mode::TargetActions(TargetActionsDialog {
             target_ids,
             target_index,
-            focus: 0,
+            form: target_actions_form(target_count, target_index, DialogControl::TargetList),
             testing: None,
             result: None,
         });
     }
 
-    pub(crate) fn handle_target_actions_key(
+    pub(crate) fn handle_target_actions_event(
         &mut self,
-        key: KeyEvent,
+        event: Event,
         mut dialog: TargetActionsDialog,
     ) -> DashboardAction {
         // Alt-X is the surface's one cancel chord. The controller's chord
         // pre-filter deliberately leaves it alone while a dialog is open, so
         // here it cancels the test this dialog is running.
-        if dialog.testing.is_some()
+        if let Event::Key(key) = &event
+            && dialog.testing.is_some()
             && key.modifiers.contains(KeyModifiers::ALT)
             && key.code == KeyCode::Char('x')
         {
             dialog.testing = None;
             dialog.result = Some(("Target test".into(), Err("cancelled".into())));
+            sync_target_actions_form(&mut dialog);
             self.mode = Mode::TargetActions(dialog);
             return DashboardAction::CancelTargetTest;
         }
-        match key.code {
-            KeyCode::Esc => {
+        // Preserve the convenient Up/Down target selection from the old
+        // surface while letting the form own the selection metadata.
+        if let Event::Key(key) = &event
+            && matches!(key.kind, KeyEventKind::Press)
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k')
+            )
+        {
+            dialog.form.get_mut().focus(DialogControl::TargetList);
+        }
+        let interaction = dialog.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel) => {
                 self.cancel_modal();
-                return DashboardAction::None;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                move_index(&mut dialog.target_index, dialog.target_ids.len(), -1);
+            Some(Interaction::Select(DialogControl::TargetList, index)) => {
+                dialog.target_index = index.min(dialog.target_ids.len().saturating_sub(1));
+                self.mode = Mode::TargetActions(dialog);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                move_index(&mut dialog.target_index, dialog.target_ids.len(), 1);
-            }
-            KeyCode::Tab | KeyCode::Right => {
-                dialog.focus = cycle_button_focus(dialog.focus, TARGET_ACTION_BUTTONS.len(), false);
-            }
-            KeyCode::BackTab | KeyCode::Left => {
-                dialog.focus = cycle_button_focus(dialog.focus, TARGET_ACTION_BUTTONS.len(), true);
-            }
-            KeyCode::Enter => {
+            Some(Interaction::Activate(control)) => {
                 let Some(target_id) = dialog.target_ids.get(dialog.target_index).cloned() else {
                     self.cancel_modal();
                     return DashboardAction::None;
                 };
-                match dialog.focus {
-                    0 => {
+                match control {
+                    DialogControl::TargetRename => {
                         self.mode = Mode::ConfigId(ConfigIdEditor {
                             kind: ConfigEntryKind::Target,
                             value: TextInput::from_value(target_id.clone()).with_max_chars(64),
                             old_id: target_id,
-                            focus: RenameFocus::Field,
+                            form: dialog_form(
+                                &[
+                                    DialogControl::Field,
+                                    DialogControl::Cancel,
+                                    DialogControl::Save,
+                                ],
+                                DialogControl::Field,
+                            ),
                             return_to_targets: true,
                         });
                         return DashboardAction::None;
                     }
-                    1 if dialog.testing.is_none() => {
+                    DialogControl::TargetTest if dialog.testing.is_none() => {
                         dialog.testing = Some(target_id.clone());
                         dialog.result = None;
+                        sync_target_actions_form(&mut dialog);
                         self.mode = Mode::TargetActions(dialog);
                         return DashboardAction::TestTarget { target_id };
                     }
-                    2 => {
+                    DialogControl::TargetClose => {
                         self.cancel_modal();
                         return DashboardAction::None;
                     }
                     _ => {}
                 }
             }
-            _ => {}
+            _ => self.mode = Mode::TargetActions(dialog),
         }
-        self.mode = Mode::TargetActions(dialog);
         DashboardAction::None
     }
 
-    pub(crate) fn handle_config_id_key(
+    pub(crate) fn handle_config_id_event(
         &mut self,
-        key: KeyEvent,
+        event: Event,
         mut editor: ConfigIdEditor,
     ) -> DashboardAction {
-        match key.code {
-            KeyCode::Esc => {
+        let interaction = editor.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 if editor.return_to_targets {
                     self.begin_target_actions();
                 } else {
                     self.cancel_modal();
                 }
-                DashboardAction::None
             }
-            KeyCode::Enter if editor.focus == RenameFocus::Cancel => {
-                if editor.return_to_targets {
-                    self.begin_target_actions();
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                TextField::apply(&mut editor.value, edit);
+                self.mode = Mode::ConfigId(editor);
+            }
+            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
+                if editor.value.trim().is_empty() {
+                    self.notices.set("Configuration ID cannot be empty.");
+                    self.mode = Mode::ConfigId(editor);
                 } else {
                     self.cancel_modal();
-                }
-                DashboardAction::None
-            }
-            KeyCode::Tab | KeyCode::BackTab => {
-                editor.focus = cycle_control(
-                    editor.focus,
-                    &RENAME_FOCUS_ORDER,
-                    key.code == KeyCode::BackTab,
-                );
-                self.mode = Mode::ConfigId(editor);
-                DashboardAction::None
-            }
-            KeyCode::Left | KeyCode::Right if editor.focus != RenameFocus::Field => {
-                editor.focus = RenameFocus::from_button_index(cycle_button_focus(
-                    editor.focus.button_index(),
-                    RENAME_BUTTONS.len(),
-                    key.code == KeyCode::Left,
-                ));
-                self.mode = Mode::ConfigId(editor);
-                DashboardAction::None
-            }
-            KeyCode::Enter if editor.value.trim().is_empty() => {
-                self.notices.set("Configuration ID cannot be empty.");
-                self.mode = Mode::ConfigId(editor);
-                DashboardAction::None
-            }
-            KeyCode::Enter => {
-                self.cancel_modal();
-                match editor.kind {
-                    ConfigEntryKind::Profile => DashboardAction::RenameProfile {
-                        old_id: editor.old_id,
-                        new_id: editor.value.into_value(),
-                    },
-                    ConfigEntryKind::Target => DashboardAction::RenameTarget {
-                        old_id: editor.old_id,
-                        new_id: editor.value.into_value(),
-                    },
+                    match editor.kind {
+                        ConfigEntryKind::Profile => {
+                            return DashboardAction::RenameProfile {
+                                old_id: editor.old_id,
+                                new_id: editor.value.into_value(),
+                            };
+                        }
+                        ConfigEntryKind::Target => {
+                            return DashboardAction::RenameTarget {
+                                old_id: editor.old_id,
+                                new_id: editor.value.into_value(),
+                            };
+                        }
+                    }
                 }
             }
-            _ if editor.focus == RenameFocus::Field => {
-                editor.value.handle_key(key);
-                self.mode = Mode::ConfigId(editor);
-                DashboardAction::None
-            }
-            _ => {
-                self.mode = Mode::ConfigId(editor);
-                DashboardAction::None
-            }
+            _ => self.mode = Mode::ConfigId(editor),
         }
+        DashboardAction::None
     }
 
     pub fn apply_target_test(&mut self, target_id: String, result: Result<(), String>) {
@@ -1517,6 +1470,7 @@ impl DashboardState {
         {
             dialog.testing = None;
             dialog.result = Some((target_id, result));
+            sync_target_actions_form(dialog);
         }
     }
 
@@ -1537,7 +1491,14 @@ impl DashboardState {
             replacement: TextInput::new(),
             configured_origin,
             error: None,
-            focus: RepositoryOriginFocus::Field,
+            form: dialog_form(
+                &[
+                    DialogControl::Field,
+                    DialogControl::Cancel,
+                    DialogControl::Primary,
+                ],
+                DialogControl::Field,
+            ),
             launch: Box::new(launch),
         });
     }
@@ -1547,7 +1508,7 @@ impl DashboardState {
             && dialog.repository_id == repository_id
         {
             dialog.error = Some(error);
-            dialog.focus = RepositoryOriginFocus::Field;
+            dialog.form.get_mut().focus(DialogControl::Field);
         }
     }
 
@@ -1555,41 +1516,27 @@ impl DashboardState {
         self.cancel_modal();
     }
 
-    pub(crate) fn handle_repository_origin_key(
+    pub(crate) fn handle_repository_origin_event(
         &mut self,
-        key: KeyEvent,
+        event: Event,
         mut dialog: RepositoryOriginDialog,
     ) -> DashboardAction {
-        let code = key.code;
-        match code {
-            KeyCode::Esc => {
+        let interaction = dialog.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 self.cancel_modal();
-                return DashboardAction::None;
             }
-            KeyCode::Tab | KeyCode::BackTab => {
-                dialog.focus = cycle_control(
-                    dialog.focus,
-                    &[
-                        RepositoryOriginFocus::Field,
-                        RepositoryOriginFocus::Cancel,
-                        RepositoryOriginFocus::Validate,
-                    ],
-                    code == KeyCode::BackTab,
-                );
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                if TextField::apply(&mut dialog.replacement, edit) == Outcome::Changed {
+                    dialog.error = None;
+                }
+                self.mode = Mode::RepositoryOrigin(dialog);
             }
-            KeyCode::Enter if dialog.focus == RepositoryOriginFocus::Cancel => {
-                self.cancel_modal();
-                return DashboardAction::None;
-            }
-            KeyCode::Enter
-                if matches!(
-                    dialog.focus,
-                    RepositoryOriginFocus::Field | RepositoryOriginFocus::Validate
-                ) =>
-            {
+            Some(Interaction::Activate(DialogControl::Field | DialogControl::Primary)) => {
                 if dialog.replacement.trim().is_empty() {
                     dialog.error = Some("Enter the repository's new origin.".into());
-                    dialog.focus = RepositoryOriginFocus::Field;
+                    dialog.form.get_mut().focus(DialogControl::Field);
+                    self.mode = Mode::RepositoryOrigin(dialog);
                 } else {
                     let action = DashboardAction::ReplaceResumeRepositoryOrigin {
                         session_id: dialog.session_id.clone(),
@@ -1601,165 +1548,9 @@ impl DashboardState {
                     return action;
                 }
             }
-            _ if dialog.focus == RepositoryOriginFocus::Field
-                && dialog.replacement.handle_key(key).changed() =>
-            {
-                dialog.error = None;
-            }
-            _ => {}
+            _ => self.mode = Mode::RepositoryOrigin(dialog),
         }
-        self.mode = Mode::RepositoryOrigin(dialog);
         DashboardAction::None
-    }
-
-    /// Open the container editor for the selected session, if that session
-    /// runs on a container-backed target.
-    pub(crate) fn begin_container_edit(&mut self) {
-        let Some(session) = self.selected_container_session() else {
-            self.notices
-                .set("Container size and mounts apply to container targets only.");
-            return;
-        };
-        let suggestions = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .and_then(mount_history_host)
-            .and_then(|host| self.state.mount_history.get(host))
-            .cloned()
-            .unwrap_or_default();
-        self.mode = Mode::EditContainer(ContainerEditor {
-            session_id: session.id.clone(),
-            cpus: session.container_cpus.clone().unwrap_or_default().into(),
-            memory: session.container_memory.clone().unwrap_or_default().into(),
-            mounts: session.additional_mounts.clone(),
-            suggestions,
-            source: TextInput::new(),
-            destination: TextInput::new(),
-            read_only: false,
-            focus: ContainerEditFocus::Cpus,
-            mount_index: 0,
-            suggestion_index: 0,
-            error: None,
-        });
-    }
-
-    pub(crate) fn handle_container_edit_key(
-        &mut self,
-        key: KeyEvent,
-        mut editor: ContainerEditor,
-    ) -> DashboardAction {
-        let code = key.code;
-        let action = match code {
-            KeyCode::Esc => {
-                self.cancel_modal();
-                return DashboardAction::None;
-            }
-            KeyCode::Tab | KeyCode::BackTab => {
-                editor.focus = cycle_control(
-                    editor.focus,
-                    &editor.focus_order(),
-                    code == KeyCode::BackTab,
-                );
-                DashboardAction::None
-            }
-            KeyCode::Up | KeyCode::Down => {
-                let reverse = code == KeyCode::Up;
-                match editor.focus {
-                    ContainerEditFocus::Mounts => move_index(
-                        &mut editor.mount_index,
-                        editor.mounts.len(),
-                        if reverse { -1 } else { 1 },
-                    ),
-                    ContainerEditFocus::Suggestions => move_index(
-                        &mut editor.suggestion_index,
-                        editor.suggestions.len(),
-                        if reverse { -1 } else { 1 },
-                    ),
-                    _ => {
-                        editor.focus = cycle_control(editor.focus, &editor.focus_order(), reverse);
-                    }
-                }
-                DashboardAction::None
-            }
-            KeyCode::Left | KeyCode::Right
-                if matches!(
-                    editor.focus,
-                    ContainerEditFocus::Cancel | ContainerEditFocus::Save
-                ) =>
-            {
-                editor.focus = if editor.focus == ContainerEditFocus::Cancel {
-                    ContainerEditFocus::Save
-                } else {
-                    ContainerEditFocus::Cancel
-                };
-                DashboardAction::None
-            }
-            KeyCode::Enter if editor.focus == ContainerEditFocus::Cancel => {
-                self.cancel_modal();
-                return DashboardAction::None;
-            }
-            KeyCode::Enter if editor.focus == ContainerEditFocus::Suggestions => {
-                editor.take_suggestion();
-                editor.error = None;
-                DashboardAction::None
-            }
-            // Enter belongs to Save everywhere else, so only the checkbox
-            // itself answers to it; Space also toggles the selected row.
-            KeyCode::Enter if editor.focus == ContainerEditFocus::ReadOnly => {
-                editor.toggle_read_only();
-                DashboardAction::None
-            }
-            KeyCode::Char(' ')
-                if matches!(
-                    editor.focus,
-                    ContainerEditFocus::ReadOnly | ContainerEditFocus::Mounts
-                ) =>
-            {
-                editor.toggle_read_only();
-                DashboardAction::None
-            }
-            KeyCode::Enter
-                if matches!(
-                    editor.focus,
-                    ContainerEditFocus::Source | ContainerEditFocus::Destination
-                ) =>
-            {
-                editor.error = editor.add_mount();
-                DashboardAction::None
-            }
-            KeyCode::Enter => match editor.save() {
-                Ok(action) => {
-                    self.cancel_modal();
-                    return action;
-                }
-                Err(error) => {
-                    editor.error = Some(error);
-                    DashboardAction::None
-                }
-            },
-            KeyCode::Delete | KeyCode::Char('d')
-                if matches!(
-                    editor.focus,
-                    ContainerEditFocus::Mounts | ContainerEditFocus::Suggestions
-                ) =>
-            {
-                editor.remove_selected();
-                DashboardAction::None
-            }
-            _ if editor.field().is_some() => {
-                if editor
-                    .field_mut()
-                    .is_some_and(|field| field.handle_key(key).changed())
-                {
-                    editor.error = None;
-                }
-                DashboardAction::None
-            }
-            _ => DashboardAction::None,
-        };
-        self.mode = Mode::EditContainer(editor);
-        action
     }
 
     /// Show the recovery choices after a checkpointed close could not finish.
@@ -1777,6 +1568,7 @@ impl DashboardState {
             total: None,
             message: "Locating native session…".into(),
             last_updated: Instant::now(),
+            form: dialog_form(&[DialogControl::Cancel], DialogControl::Cancel),
         });
     }
 
@@ -1797,13 +1589,28 @@ impl DashboardState {
         scratch_git_roots: Vec<String>,
         has_untracked_files: bool,
     ) {
+        let form = if has_untracked_files {
+            dialog_form(
+                &[
+                    DialogControl::ImportIgnore,
+                    DialogControl::ImportCancel,
+                    DialogControl::ImportContinue,
+                ],
+                DialogControl::ImportContinue,
+            )
+        } else {
+            dialog_form(
+                &[DialogControl::ImportCancel, DialogControl::ImportContinue],
+                DialogControl::ImportContinue,
+            )
+        };
         self.mode = Mode::ConfirmImportBundle(ImportBundleConfirmation {
             dirty_git_roots,
             omitted_non_git_dirs,
             scratch_git_roots,
             has_untracked_files,
             ignore_untracked: has_untracked_files,
-            focus: primary_button(IMPORT_BUNDLE_BUTTONS),
+            form,
         });
     }
 
@@ -1822,6 +1629,24 @@ impl DashboardState {
         self.cancel_modal();
     }
 
+    pub(crate) fn handle_import_progress_event(
+        &mut self,
+        event: Event,
+        mut progress: ImportProgress,
+    ) -> DashboardAction {
+        let interaction = progress.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
+                self.mode = Mode::Importing(progress);
+                DashboardAction::CancelImport
+            }
+            _ => {
+                self.mode = Mode::Importing(progress);
+                DashboardAction::None
+            }
+        }
+    }
+
     pub(crate) fn begin_rename(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
@@ -1837,128 +1662,149 @@ impl DashboardState {
                     .unwrap_or_default(),
             )
             .with_max_chars(64),
-            focus: RenameFocus::Field,
+            form: dialog_form(
+                &[
+                    DialogControl::Field,
+                    DialogControl::Cancel,
+                    DialogControl::Save,
+                ],
+                DialogControl::Field,
+            ),
         });
     }
 
-    pub(crate) fn handle_rename_key(
+    pub(crate) fn handle_rename_event(
         &mut self,
-        key: KeyEvent,
+        event: Event,
         mut editor: RenameEditor,
     ) -> DashboardAction {
-        let code = key.code;
-        match code {
-            KeyCode::Esc => {
+        let interaction = editor.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 self.cancel_modal();
-                DashboardAction::None
             }
-            KeyCode::Tab | KeyCode::BackTab => {
-                editor.focus =
-                    cycle_control(editor.focus, &RENAME_FOCUS_ORDER, code == KeyCode::BackTab);
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                TextField::apply(&mut editor.title, edit);
                 self.mode = Mode::Rename(editor);
-                DashboardAction::None
             }
-            KeyCode::Left | KeyCode::Right if editor.focus != RenameFocus::Field => {
-                editor.focus = RenameFocus::from_button_index(cycle_button_focus(
-                    editor.focus.button_index(),
-                    RENAME_BUTTONS.len(),
-                    code == KeyCode::Left,
-                ));
-                self.mode = Mode::Rename(editor);
-                DashboardAction::None
-            }
-            KeyCode::Enter if editor.focus == RenameFocus::Cancel => {
-                self.cancel_modal();
-                DashboardAction::None
-            }
-            KeyCode::Enter if editor.title.trim().is_empty() => {
-                self.notices.set("Session name cannot be empty.");
-                self.mode = Mode::Rename(editor);
-                DashboardAction::None
-            }
-            KeyCode::Enter => {
-                self.cancel_modal();
-                DashboardAction::RenameSession {
-                    session_id: editor.session_id,
-                    title: editor.title.into_value(),
-                }
-            }
-            _ if editor.focus == RenameFocus::Field => {
-                editor.title.handle_key(key);
-                self.mode = Mode::Rename(editor);
-                DashboardAction::None
-            }
-            _ => {
-                self.mode = Mode::Rename(editor);
-                DashboardAction::None
-            }
-        }
-    }
-
-    pub(crate) fn handle_import_bundle_key(
-        &mut self,
-        code: KeyCode,
-        mut confirmation: ImportBundleConfirmation,
-    ) -> DashboardAction {
-        // The checkbox toggle is independent of which button has focus.
-        if code == KeyCode::Char(' ') && confirmation.has_untracked_files {
-            confirmation.ignore_untracked = !confirmation.ignore_untracked;
-            self.mode = Mode::ConfirmImportBundle(confirmation);
-            return DashboardAction::None;
-        }
-        let cancelled = DashboardAction::ConfirmImportBundle {
-            accepted: false,
-            include_untracked: false,
-        };
-        confirmation.focus =
-            match button_row_key(code, confirmation.focus, IMPORT_BUNDLE_BUTTONS.len()) {
-                ButtonKey::Activate(index) if index == primary_button(IMPORT_BUNDLE_BUTTONS) => {
-                    return DashboardAction::ConfirmImportBundle {
-                        accepted: true,
-                        include_untracked: !confirmation.ignore_untracked,
+            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
+                if editor.title.trim().is_empty() {
+                    self.notices.set("Session name cannot be empty.");
+                    editor.form.get_mut().focus(DialogControl::Field);
+                    self.mode = Mode::Rename(editor);
+                } else {
+                    self.cancel_modal();
+                    return DashboardAction::RenameSession {
+                        session_id: editor.session_id,
+                        title: editor.title.into_value(),
                     };
                 }
-                ButtonKey::Activate(_) | ButtonKey::Cancel => return cancelled,
-                ButtonKey::Focus(focus) => focus,
-                ButtonKey::Ignored => confirmation.focus,
-            };
-        self.mode = Mode::ConfirmImportBundle(confirmation);
+            }
+            _ => self.mode = Mode::Rename(editor),
+        }
         DashboardAction::None
     }
 
-    pub(crate) fn handle_confirmation_key(
+    pub(crate) fn handle_import_bundle_event(
         &mut self,
-        key: KeyEvent,
-        dialog: ConfirmDialog,
+        event: Event,
+        mut confirmation: ImportBundleConfirmation,
     ) -> DashboardAction {
-        let code = key.code;
-        let ConfirmDialog {
-            confirmation,
-            focus,
-        } = dialog;
-        let buttons = confirmation_buttons(&confirmation);
-        if buttons.is_empty() {
-            return self.handle_typed_confirmation_key(key, confirmation);
-        }
-        let focus = match button_row_key(code, focus, buttons.len()) {
-            ButtonKey::Activate(index) => {
-                return self.activate_confirmation_button(confirmation, index);
+        let interaction = confirmation.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel)
+            | Some(Interaction::Activate(DialogControl::ImportCancel)) => {
+                return DashboardAction::ConfirmImportBundle {
+                    accepted: false,
+                    include_untracked: false,
+                };
             }
-            ButtonKey::Cancel => {
-                if let Confirmation::DestroyStopped { reopen, .. } = confirmation {
+            Some(Interaction::Toggle(DialogControl::ImportIgnore)) => {
+                confirmation.ignore_untracked = !confirmation.ignore_untracked;
+                self.mode = Mode::ConfirmImportBundle(confirmation);
+            }
+            Some(Interaction::Activate(DialogControl::ImportContinue)) => {
+                return DashboardAction::ConfirmImportBundle {
+                    accepted: true,
+                    include_untracked: !confirmation.ignore_untracked,
+                };
+            }
+            _ => self.mode = Mode::ConfirmImportBundle(confirmation),
+        }
+        DashboardAction::None
+    }
+
+    pub(crate) fn handle_confirmation_event(
+        &mut self,
+        event: Event,
+        mut dialog: ConfirmDialog,
+    ) -> DashboardAction {
+        let interaction = dialog.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel) => {
+                if let Confirmation::DestroyStopped { reopen, .. } = dialog.confirmation {
                     self.restore_after_confirmation(reopen);
                 } else {
                     self.cancel_modal();
                 }
-                return DashboardAction::None;
             }
-            ButtonKey::Focus(next) => next,
-            ButtonKey::Ignored => focus,
-        };
-        self.mode = Mode::Confirm(ConfirmDialog {
-            confirmation,
-            focus,
-        });
+            Some(Interaction::Edit(DialogControl::TypedField, edit)) => {
+                match &mut dialog.confirmation {
+                    Confirmation::ForceStop { typed, .. }
+                    | Confirmation::ForceDestroy { typed, .. } => {
+                        TextField::apply(typed, edit);
+                    }
+                    _ => {}
+                }
+                sync_typed_confirmation_form(&mut dialog);
+                self.mode = Mode::Confirm(dialog);
+            }
+            Some(Interaction::Activate(DialogControl::TypedField)) => {
+                let valid = typed_confirmation_valid(&dialog.confirmation);
+                if valid {
+                    match dialog.confirmation {
+                        Confirmation::ForceStop { session_id, .. } => {
+                            self.cancel_modal();
+                            return DashboardAction::ForceStop { session_id };
+                        }
+                        Confirmation::ForceDestroy { session_id, .. } => {
+                            self.cancel_modal();
+                            return DashboardAction::ForceDestroy { session_id };
+                        }
+                        _ => {}
+                    }
+                } else {
+                    self.mode = Mode::Confirm(dialog);
+                }
+            }
+            Some(Interaction::Activate(DialogControl::ConfirmButton(1)))
+                if typed_confirmation_valid(&dialog.confirmation) =>
+            {
+                match dialog.confirmation {
+                    Confirmation::ForceStop { session_id, .. } => {
+                        self.cancel_modal();
+                        return DashboardAction::ForceStop { session_id };
+                    }
+                    Confirmation::ForceDestroy { session_id, .. } => {
+                        self.cancel_modal();
+                        return DashboardAction::ForceDestroy { session_id };
+                    }
+                    _ => self.mode = Mode::Confirm(dialog),
+                }
+            }
+            Some(Interaction::Activate(DialogControl::ConfirmButton(1)))
+                if confirmation_has_typed_field(&dialog.confirmation) =>
+            {
+                // The form normally suppresses activation for a disabled
+                // primary button. Keep the state machine safe if an event is
+                // supplied directly before the next redraw.
+                self.mode = Mode::Confirm(dialog);
+            }
+            Some(Interaction::Activate(DialogControl::ConfirmButton(index))) => {
+                return self.activate_confirmation_button(dialog.confirmation, index);
+            }
+            _ => self.mode = Mode::Confirm(dialog),
+        }
         DashboardAction::None
     }
 
@@ -2033,74 +1879,17 @@ impl DashboardState {
             None => self.cancel_modal(),
         }
     }
-
-    fn handle_typed_confirmation_key(
-        &mut self,
-        key: KeyEvent,
-        confirmation: Confirmation,
-    ) -> DashboardAction {
-        let code = key.code;
-        match confirmation {
-            Confirmation::ForceStop {
-                session_id,
-                mut typed,
-            } => match code {
-                KeyCode::Esc => {
-                    self.cancel_modal();
-                    DashboardAction::None
-                }
-                KeyCode::Enter if typed == FORCE_STOP_CONFIRMATION => {
-                    self.cancel_modal();
-                    DashboardAction::ForceStop { session_id }
-                }
-                _ => {
-                    typed.handle_key(key);
-                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ForceStop {
-                        session_id,
-                        typed,
-                    }));
-                    DashboardAction::None
-                }
-            },
-            Confirmation::ForceDestroy {
-                session_id,
-                expected,
-                mut typed,
-            } => match code {
-                KeyCode::Esc => {
-                    self.cancel_modal();
-                    DashboardAction::None
-                }
-                KeyCode::Enter if typed == expected.as_str() => {
-                    self.cancel_modal();
-                    DashboardAction::ForceDestroy { session_id }
-                }
-                _ => {
-                    typed.handle_key(key);
-                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
-                        session_id,
-                        expected,
-                        typed,
-                    }));
-                    DashboardAction::None
-                }
-            },
-            // Button dialogs are handled by `handle_confirmation_key`.
-            other => {
-                self.mode = Mode::Confirm(ConfirmDialog::new(other));
-                DashboardAction::None
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyEvent;
     use std::time::Instant;
 
     use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
     use ratatui::style::Color;
 
     use hel::hel_state::SessionState;
@@ -2134,6 +1923,20 @@ mod tests {
     }
 
     #[test]
+    fn web_dialog_without_a_qr_keeps_access_details_and_close_readable() {
+        let mut dialog = WebDialog::loading();
+        dialog.loading = false;
+        dialog.viewer_url = Some("http://127.0.0.1:37650".to_owned());
+        dialog.viewer_code = Some("022160".to_owned());
+        dialog.fallback_reason = Some("automatic Tailscale detection is disabled".to_owned());
+        let rendered = draw_web_dialog(&dialog, 140, 40).join("\n");
+        assert!(rendered.contains("Web viewer"));
+        assert!(rendered.contains("http://127.0.0.1:37650"));
+        assert!(rendered.contains("Viewer code: 022160"));
+        assert!(rendered.contains("[ Close ]"));
+    }
+
+    #[test]
     fn web_dialog_wraps_a_long_url_without_truncating_it() {
         // A URL wider than the QR must wrap within the box, not get cut off.
         let url = "https://a-very-long-machine-name.some-tailnet.ts.net:37650/viewer";
@@ -2144,6 +1947,7 @@ mod tests {
             fallback_reason: None,
             message: None,
             qr: Some(render_qr(url).unwrap()),
+            form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
         };
 
         let rendered = draw_web_dialog(&dialog, 60, 40);
@@ -2268,12 +2072,12 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
         assert_eq!(
-            container_editor(&dashboard).focus,
+            container_editor(&dashboard).focused(),
             ContainerEditFocus::Memory
         );
 
         // Take the remembered directory as the next mount.
-        while container_editor(&dashboard).focus != ContainerEditFocus::Suggestions {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Suggestions {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Enter));
@@ -2296,19 +2100,19 @@ mod tests {
         );
 
         // Forget the remembered directory, then drop the original mount.
-        while container_editor(&dashboard).focus != ContainerEditFocus::Suggestions {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Suggestions {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Char('d')));
         assert!(container_editor(&dashboard).suggestions.is_empty());
-        while container_editor(&dashboard).focus != ContainerEditFocus::Mounts {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Mounts {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Up));
         assert_eq!(container_editor(&dashboard).mount_index, 0);
         dashboard.handle_key(key(KeyCode::Char('d')));
 
-        while container_editor(&dashboard).focus != ContainerEditFocus::Save {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         assert_eq!(
@@ -2334,7 +2138,7 @@ mod tests {
         open_container_editor(&mut dashboard);
 
         // Space on the checkbox attaches the next directory read-only.
-        while container_editor(&dashboard).focus != ContainerEditFocus::Source {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Source {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         for character in "/nfs/share".chars() {
@@ -2343,25 +2147,25 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Tab));
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(
-            container_editor(&dashboard).focus,
+            container_editor(&dashboard).focused(),
             ContainerEditFocus::ReadOnly
         );
         dashboard.handle_key(key(KeyCode::Char(' ')));
         assert!(container_editor(&dashboard).read_only);
-        while container_editor(&dashboard).focus != ContainerEditFocus::Source {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Source {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Enter));
 
         // Space on a listed row toggles that row, and the flag is saved.
-        while container_editor(&dashboard).focus != ContainerEditFocus::Mounts {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Mounts {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Up));
         assert_eq!(container_editor(&dashboard).mount_index, 0);
         dashboard.handle_key(key(KeyCode::Char(' ')));
 
-        while container_editor(&dashboard).focus != ContainerEditFocus::Save {
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         assert_eq!(
@@ -2407,7 +2211,7 @@ mod tests {
         let Mode::Rename(editor) = &dashboard.mode else {
             panic!("expected rename editor");
         };
-        assert_eq!(editor.focus, RenameFocus::Field);
+        assert_eq!(editor.form.borrow().focused(), Some(DialogControl::Field));
         for character in " v2".chars() {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -2453,21 +2257,26 @@ mod tests {
         dashboard
     }
 
-    fn rename_focus(dashboard: &DashboardState) -> RenameFocus {
+    fn rename_focus(dashboard: &DashboardState) -> DialogControl {
         let Mode::Rename(editor) = &dashboard.mode else {
             panic!("expected rename editor");
         };
-        editor.focus
+        match editor.form.borrow().focused() {
+            Some(DialogControl::Field) => DialogControl::Field,
+            Some(DialogControl::Cancel) => DialogControl::Cancel,
+            Some(DialogControl::Save) => DialogControl::Save,
+            focused => panic!("unexpected rename focus: {focused:?}"),
+        }
     }
 
     #[test]
     fn rename_editor_cycles_focus_from_the_field_through_both_buttons() {
         let mut dashboard = dashboard_with_rename_editor();
         for expected in [
-            RenameFocus::Cancel,
-            RenameFocus::Save,
-            RenameFocus::Field,
-            RenameFocus::Cancel,
+            DialogControl::Cancel,
+            DialogControl::Save,
+            DialogControl::Field,
+            DialogControl::Cancel,
         ] {
             assert_eq!(
                 dashboard.handle_key(key(KeyCode::Tab)),
@@ -2477,7 +2286,11 @@ mod tests {
         }
 
         let mut dashboard = dashboard_with_rename_editor();
-        for expected in [RenameFocus::Save, RenameFocus::Cancel, RenameFocus::Field] {
+        for expected in [
+            DialogControl::Save,
+            DialogControl::Cancel,
+            DialogControl::Field,
+        ] {
             assert_eq!(
                 dashboard.handle_key(key(KeyCode::BackTab)),
                 DashboardAction::None
@@ -2492,21 +2305,21 @@ mod tests {
         // The field has no cursor, so arrows there change nothing.
         for arrow in [KeyCode::Left, KeyCode::Right] {
             assert_eq!(dashboard.handle_key(key(arrow)), DashboardAction::None);
-            assert_eq!(rename_focus(&dashboard), RenameFocus::Field);
+            assert_eq!(rename_focus(&dashboard), DialogControl::Field);
         }
 
         dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(rename_focus(&dashboard), RenameFocus::Cancel);
+        assert_eq!(rename_focus(&dashboard), DialogControl::Cancel);
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Right)),
             DashboardAction::None
         );
-        assert_eq!(rename_focus(&dashboard), RenameFocus::Save);
+        assert_eq!(rename_focus(&dashboard), DialogControl::Save);
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Left)),
             DashboardAction::None
         );
-        assert_eq!(rename_focus(&dashboard), RenameFocus::Cancel);
+        assert_eq!(rename_focus(&dashboard), DialogControl::Cancel);
     }
 
     #[test]
@@ -2525,14 +2338,14 @@ mod tests {
             panic!("expected rename editor");
         };
         assert_eq!(editor.title, "ACP pretty name");
-        assert_eq!(editor.focus, RenameFocus::Cancel);
+        assert_eq!(editor.form.borrow().focused(), Some(DialogControl::Cancel));
     }
 
     #[test]
     fn rename_editor_cancel_button_closes_without_renaming() {
         let mut dashboard = dashboard_with_rename_editor();
         dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(rename_focus(&dashboard), RenameFocus::Cancel);
+        assert_eq!(rename_focus(&dashboard), DialogControl::Cancel);
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None
@@ -2546,7 +2359,7 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Char('!')));
         dashboard.handle_key(key(KeyCode::Tab));
         dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(rename_focus(&dashboard), RenameFocus::Save);
+        assert_eq!(rename_focus(&dashboard), DialogControl::Save);
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::RenameSession {
@@ -2619,23 +2432,16 @@ mod tests {
             )
         };
 
-        // The field submits, so Save stays lit while the field has focus.
-        assert_eq!(
-            button_styles(&mut dashboard),
-            (Color::DarkGray, Color::Cyan)
-        );
+        // The shared button row keeps both buttons in their normal style while
+        // the field has focus. Tab then moves the cyan focus style between the
+        // footer buttons.
+        assert_eq!(button_styles(&mut dashboard), (Color::Reset, Color::Reset));
 
         dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(
-            button_styles(&mut dashboard),
-            (Color::Cyan, Color::DarkGray)
-        );
+        assert_eq!(button_styles(&mut dashboard), (Color::Cyan, Color::Reset));
 
         dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(
-            button_styles(&mut dashboard),
-            (Color::DarkGray, Color::Cyan)
-        );
+        assert_eq!(button_styles(&mut dashboard), (Color::Reset, Color::Cyan));
     }
 
     #[test]
@@ -2701,10 +2507,12 @@ mod tests {
             Vec::new(),
             true,
         );
+        dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char(' '))),
             DashboardAction::None
         );
+        dashboard.handle_key(key(KeyCode::BackTab));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ConfirmImportBundle {
@@ -2749,7 +2557,8 @@ mod tests {
             true,
         );
 
-        // Focus starts on Continue; moving to Cancel does not disturb the checkbox.
+        // Focus starts on Continue; the checkbox is the next control in the
+        // shared form, and moving on to Cancel does not disturb its state.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Tab)),
             DashboardAction::None
@@ -2762,7 +2571,21 @@ mod tests {
             panic!("expected import safety confirmation");
         };
         assert!(!confirmation.ignore_untracked);
-        assert_eq!(confirmation.focus, 0);
+        assert_eq!(
+            confirmation.form.borrow().focused(),
+            Some(DialogControl::ImportIgnore)
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Tab)),
+            DashboardAction::None
+        );
+        let Mode::ConfirmImportBundle(confirmation) = &dashboard.mode else {
+            panic!("expected import safety confirmation");
+        };
+        assert_eq!(
+            confirmation.form.borrow().focused(),
+            Some(DialogControl::ImportCancel)
+        );
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ConfirmImportBundle {
@@ -2907,6 +2730,74 @@ mod tests {
     }
 
     #[test]
+    fn typed_confirmation_updates_submit_eligibility_before_redraw() {
+        let mut dashboard = running_dashboard_with_stop_dialog();
+        dashboard.show_close_failure("session-1".into(), "archive unavailable");
+        // The middle button opens the typed confirmation.
+        dashboard.handle_key(key(KeyCode::Tab));
+        dashboard.handle_key(key(KeyCode::Right));
+        dashboard.handle_key(key(KeyCode::Enter));
+        for character in FORCE_STOP_CONFIRMATION.chars() {
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char(character))),
+                DashboardAction::None
+            );
+        }
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("expected typed confirmation");
+        };
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::TypedField)
+        );
+        // Tab sees the newly enabled standard buttons without a render pass.
+        dashboard.handle_key(key(KeyCode::Tab));
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("expected typed confirmation");
+        };
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::ConfirmButton(0))
+        );
+        dashboard.handle_key(key(KeyCode::Tab));
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("expected typed confirmation");
+        };
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::ConfirmButton(1))
+        );
+        dashboard.handle_key(key(KeyCode::BackTab));
+        dashboard.handle_key(key(KeyCode::BackTab));
+        dashboard.handle_key(key(KeyCode::Backspace));
+        dashboard.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            match &dashboard.mode {
+                Mode::Confirm(dialog) => dialog.form.borrow().focused(),
+                _ => None,
+            },
+            Some(DialogControl::ConfirmButton(0)),
+            "the enabled cancel button remains reachable after invalidation"
+        );
+        dashboard.handle_key(key(KeyCode::Tab));
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("expected typed confirmation");
+        };
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::TypedField),
+            "invalidating the text disables the submit control immediately"
+        );
+        dashboard.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::ForceStop {
+                session_id: "session-1".into()
+            }
+        );
+    }
+
+    #[test]
     fn close_failure_cancel_button_closes_the_dialog_without_acting() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
@@ -2921,7 +2812,10 @@ mod tests {
         let Mode::Confirm(dialog) = &dashboard.mode else {
             panic!("expected close failure dialog");
         };
-        assert_eq!(dialog.focus, 0);
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::ConfirmButton(0))
+        );
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None
@@ -3020,7 +2914,10 @@ mod tests {
             confirmation_buttons(&dialog.confirmation),
             &["Cancel", "Stop"]
         );
-        assert_eq!(dialog.focus, 1);
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::ConfirmButton(1))
+        );
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::Close {
@@ -3045,7 +2942,11 @@ mod tests {
             let Mode::Confirm(dialog) = &dashboard.mode else {
                 panic!("expected stop confirmation to stay open for {cycle_keys:?}");
             };
-            assert_eq!(dialog.focus, 0, "{cycle_keys:?}");
+            assert_eq!(
+                dialog.form.borrow().focused(),
+                Some(DialogControl::ConfirmButton(0)),
+                "{cycle_keys:?}"
+            );
             assert_eq!(
                 dashboard.handle_key(key(KeyCode::Enter)),
                 DashboardAction::None,
@@ -3129,9 +3030,9 @@ mod tests {
         let cancel_x = buffer.area.x + cell_column(&lines[row], "Cancel");
         let stop_x = buffer.area.x + cell_column(&lines[row], "Stop");
         assert_eq!(buffer[(stop_x, button_y)].bg, Color::Cyan);
-        assert_eq!(buffer[(cancel_x, button_y)].bg, Color::DarkGray);
+        assert_eq!(buffer[(cancel_x, button_y)].bg, Color::Reset);
         // Each label keeps its one-cell padding inside the button background.
-        assert_eq!(buffer[(cancel_x - 1, button_y)].bg, Color::DarkGray);
+        assert_eq!(buffer[(cancel_x - 1, button_y)].bg, Color::Reset);
         assert_eq!(buffer[(stop_x - 1, button_y)].bg, Color::Cyan);
         assert!(!lines.iter().any(|line| line.contains("Press y/Enter")));
     }
@@ -3247,6 +3148,15 @@ mod tests {
                 action: DashboardAction::None,
                 repositories: vec!["/work/repo".into(), "/work/other".into()],
             },
+            Confirmation::ForceStop {
+                session_id: "session-1".into(),
+                typed: TextInput::new(),
+            },
+            Confirmation::ForceDestroy {
+                session_id: "session-1".into(),
+                expected: "session-1".into(),
+                typed: TextInput::new(),
+            },
         ];
         for confirmation in confirmations {
             for (width, height) in [(120, 30), (100, 24), (72, 22)] {
@@ -3340,15 +3250,24 @@ mod tests {
             .draw(|frame| render(frame, &mut dashboard))
             .expect("draw repository origin dialog");
 
+        let cursor_position = terminal.get_cursor_position().expect("source cursor");
         let buffer = terminal.backend().buffer();
         let lines = buffer_lines(buffer);
         let source_row = lines
             .iter()
-            .position(|line| line.contains("Source:") && line.contains('▏'))
+            .position(|line| line.contains("Source:"))
             .expect("focused source field");
         let source_y = buffer.area.y + source_row as u16;
-        let cursor_x = buffer.area.x + cell_column(&lines[source_row], "▏");
-        assert_eq!(buffer[(cursor_x, source_y)].bg, Color::Cyan);
+        let source_x = buffer.area.x + cell_column(&lines[source_row], "Source:");
+        let field_x = source_x + 8;
+        assert_eq!(buffer[(field_x, source_y)].bg, Color::Cyan);
+        assert_eq!(
+            cursor_position,
+            Position {
+                x: field_x,
+                y: source_y,
+            }
+        );
         assert!(
             lines
                 .iter()
@@ -3362,8 +3281,8 @@ mod tests {
         let button_y = buffer.area.y + button_row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
         let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
-        assert_eq!(buffer[(cancel_x, button_y)].bg, Color::DarkGray);
-        assert_eq!(buffer[(check_x, button_y)].bg, Color::DarkGray);
+        assert_eq!(buffer[(cancel_x, button_y)].bg, Color::Reset);
+        assert_eq!(buffer[(check_x, button_y)].bg, Color::Reset);
 
         dashboard.handle_key(key(KeyCode::Tab));
         terminal
@@ -3371,7 +3290,6 @@ mod tests {
             .expect("draw repository origin dialog with cancel focused");
         let buffer = terminal.backend().buffer();
         let lines = buffer_lines(buffer);
-        assert!(!lines.iter().any(|line| line.contains('▏')));
         let button_row = lines
             .iter()
             .position(|line| line.contains(" Cancel ") && line.contains(" Check origin "))
@@ -3379,6 +3297,7 @@ mod tests {
         let button_y = buffer.area.y + button_row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
         assert_eq!(buffer[(cancel_x, button_y)].bg, Color::Cyan);
+        assert_eq!(buffer[(field_x, source_y)].bg, Color::Reset);
     }
 
     #[test]
@@ -3423,7 +3342,7 @@ mod tests {
         let Mode::RepositoryOrigin(dialog) = &dashboard.mode else {
             panic!("expected repository origin dialog");
         };
-        assert_eq!(dialog.focus, RepositoryOriginFocus::Field);
+        assert_eq!(dialog.form.borrow().focused(), Some(DialogControl::Field));
         assert_eq!(
             dialog.error.as_deref(),
             Some("That origin does not contain checkpoint base b41dc78.")

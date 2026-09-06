@@ -10,16 +10,20 @@
 //! as [`ImportProfileOption`] updates, and the merge below is a pure function
 //! over what has already been received.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEventKind};
+use mj_chat::components::{
+    ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, TabStrip, TextField,
+};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use hel::hel_config::{HarnessKind, HelConfig};
 use hel::hel_state::{HelState, SessionRecord, SessionState};
@@ -29,28 +33,22 @@ use mj_chat::hel_text_input::TextInput;
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;
 use crate::widgets::{
-    action_buttons, centered_modal, centered_rect, focus_border, format_resource_bytes,
-    truncate_text,
+    centered_modal, centered_rect, focus_border, format_resource_bytes, truncate_text,
 };
-use crate::{DashboardAction, DashboardState, Mode, cycle_control, move_index};
+use crate::{DashboardAction, DashboardState, Mode};
 
 /// Origin shown for a native session that has never run under Hel.
 pub(crate) const LOCAL_ORIGIN: &str = "local";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumeFocus {
+    Tabs,
     Search,
+    Archived,
     Sessions,
     Cancel,
     Open,
 }
-
-const RESUME_FOCUS_ORDER: [ResumeFocus; 4] = [
-    ResumeFocus::Search,
-    ResumeFocus::Sessions,
-    ResumeFocus::Cancel,
-    ResumeFocus::Open,
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumeTab {
@@ -170,12 +168,52 @@ pub(crate) struct ResumeDialog {
     pub(crate) selected: Option<ResumeRowKey>,
     pub(crate) row_index: usize,
     pub(crate) search: TextInput,
-    pub(crate) focus: ResumeFocus,
+    pub(crate) form: RefCell<Form<ResumeFocus>>,
     pub(crate) show_archived: bool,
     pub(crate) opened_at: Instant,
 }
 
 impl ResumeDialog {
+    pub(crate) fn focused(&self) -> ResumeFocus {
+        self.form
+            .borrow()
+            .focused()
+            .unwrap_or(ResumeFocus::Sessions)
+    }
+
+    fn prepare(&self, rows: &[ResumeRow]) {
+        use ResumeFocus::*;
+        let mut form = self.form.borrow_mut();
+        form.begin_update();
+        form.declare_with_enabled(
+            Tabs,
+            ControlKind::Tabs {
+                len: 2,
+                selected: self.tab.index(),
+            },
+            true,
+        );
+        form.declare_with_enabled(Search, ControlKind::TextField, true);
+        form.declare_with_enabled(Archived, ControlKind::Checkbox, true);
+        form.declare_with_enabled(
+            Sessions,
+            ControlKind::ChoiceList {
+                len: rows.len(),
+                selected: self.row_index,
+            },
+            !rows.is_empty(),
+        );
+        form.declare_with_enabled(Cancel, ControlKind::Button, true);
+        form.declare_with_enabled(Open, ControlKind::Button, self.can_open(rows));
+        form.end_frame(Sessions);
+    }
+
+    fn can_open(&self, rows: &[ResumeRow]) -> bool {
+        rows.get(self.row_index).is_some_and(|row| {
+            row.status.explanation().is_none() && row.unavailable_reason.is_none()
+        })
+    }
+
     pub(crate) fn is_scanning(&self) -> bool {
         self.profiles.iter().any(|profile| {
             profile.error.is_none()
@@ -413,6 +451,7 @@ impl DashboardState {
             &self.checkpoint_archive_sizes,
             &chrono::Local::now(),
         );
+        dialog.prepare(&self.resume_rows);
     }
 
     /// The rows the open dialog shows; empty when no dialog is open.
@@ -439,7 +478,7 @@ impl DashboardState {
             selected: None,
             row_index: 0,
             search: TextInput::new(),
-            focus: ResumeFocus::Sessions,
+            form: RefCell::new(Form::default()),
             show_archived: false,
             opened_at: Instant::now(),
         });
@@ -520,16 +559,7 @@ impl DashboardState {
         };
         dialog.row_index = index;
         dialog.selected = key;
-    }
-
-    fn move_resume_selection(&mut self, delta: isize) {
-        let len = self.resume_rows().len();
-        let Mode::ResumeDialog(dialog) = &self.mode else {
-            return;
-        };
-        let mut index = dialog.row_index;
-        move_index(&mut index, len, delta);
-        self.select_resume_row(index);
+        dialog.prepare(&self.resume_rows);
     }
 
     fn switch_resume_tab(&mut self, tab: ResumeTab) {
@@ -553,6 +583,7 @@ impl DashboardState {
         };
         dialog.row_index = index;
         dialog.selected = key;
+        dialog.prepare(&self.resume_rows);
     }
 
     /// The row the open dialog points at.
@@ -565,116 +596,112 @@ impl DashboardState {
         rows.get(index).cloned()
     }
 
-    /// Handles one key for the open dialog. The dialog is edited where it
-    /// lives: a scan of a busy harness home fills it with thousands of rows,
-    /// which no key press should have to copy.
-    pub(crate) fn handle_resume_dialog_key(&mut self, key: KeyEvent) -> DashboardAction {
+    pub(crate) fn handle_resume_dialog_event(&mut self, event: Event) -> DashboardAction {
+        use ResumeFocus::*;
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
         };
-        let focus = dialog.focus;
-        let typing = focus == ResumeFocus::Search;
-        match key.code {
-            KeyCode::Esc => {
-                self.cancel_modal();
-                DashboardAction::None
+        let focused = dialog.focused();
+        if let Event::Key(key) = &event
+            && key.kind == KeyEventKind::Press
+            && key.modifiers.is_empty()
+        {
+            if focused == Search && key.code == KeyCode::Down {
+                dialog.form.get_mut().focus(Sessions);
+                return DashboardAction::None;
             }
-            KeyCode::Tab | KeyCode::BackTab => {
-                dialog.focus =
-                    cycle_control(focus, &RESUME_FOCUS_ORDER, key.code == KeyCode::BackTab);
-                DashboardAction::None
-            }
-            // Down leaves search for the list, so typing a query and walking
-            // its results needs no Tab in between.
-            KeyCode::Down if typing => {
-                dialog.focus = ResumeFocus::Sessions;
-                DashboardAction::None
-            }
-            // The tabs are advertised on the arrow keys, so they answer from
-            // every focus including the search field. A query short enough to
-            // type here does not need an in-field cursor.
-            KeyCode::Left => {
-                self.switch_resume_tab(ResumeTab::Hel);
-                DashboardAction::None
-            }
-            KeyCode::Right => {
-                self.switch_resume_tab(ResumeTab::Import);
-                DashboardAction::None
-            }
-            _ if typing => {
-                if dialog.search.handle_key(key).changed() {
-                    self.rebuild_resume_rows();
-                    self.select_resume_row(0);
+            if focused != Search {
+                match key.code {
+                    KeyCode::Char('/') => {
+                        dialog.form.get_mut().focus(Search);
+                        return DashboardAction::None;
+                    }
+                    KeyCode::Char('a') if focused == Sessions => {
+                        let row = self.selected_resume_row();
+                        return self.toggle_selected_resume_archive(row);
+                    }
+                    KeyCode::Char('d') | KeyCode::Delete if focused == Sessions => {
+                        let Some(row) = self.selected_resume_row() else {
+                            return DashboardAction::None;
+                        };
+                        let Some(session_id) = row.session_id().map(ToOwned::to_owned) else {
+                            self.notices.set("Mjolnir never destroys a harness's own session. Press a to archive this row.");
+                            return DashboardAction::None;
+                        };
+                        self.cancel_component_pointer();
+                        let Mode::ResumeDialog(dialog) =
+                            std::mem::replace(&mut self.mode, Mode::Dashboard)
+                        else {
+                            return DashboardAction::None;
+                        };
+                        self.mode =
+                            Mode::Confirm(ConfirmDialog::new(Confirmation::DestroyStopped {
+                                session_id,
+                                reopen: Some(Box::new(dialog)),
+                            }));
+                        self.rebuild_resume_rows();
+                        return DashboardAction::None;
+                    }
+                    KeyCode::Char('s') => {
+                        dialog.show_archived = !dialog.show_archived;
+                        self.rebuild_resume_rows();
+                        self.resync_resume_selection();
+                        if let Mode::ResumeDialog(dialog) = &mut self.mode {
+                            dialog.form.get_mut().focus(Sessions);
+                        }
+                        return DashboardAction::None;
+                    }
+                    // Keep list navigation shortcuts; arrows in fields belong to editing.
+                    KeyCode::Left | KeyCode::Right if focused == Sessions => {
+                        self.switch_resume_tab(if key.code == KeyCode::Left {
+                            ResumeTab::Hel
+                        } else {
+                            ResumeTab::Import
+                        });
+                        return DashboardAction::None;
+                    }
+                    _ => {}
                 }
-                DashboardAction::None
             }
-            KeyCode::Up | KeyCode::Char('k') if !typing => {
-                self.move_resume_selection(-1);
-                DashboardAction::None
+        }
+        let event = match event {
+            Event::Key(mut key) if focused == Sessions && key.modifiers.is_empty() => {
+                key.code = match key.code {
+                    KeyCode::Char('j') => KeyCode::Down,
+                    KeyCode::Char('k') => KeyCode::Up,
+                    code => code,
+                };
+                Event::Key(key)
             }
-            KeyCode::Down | KeyCode::Char('j') if !typing => {
-                self.move_resume_selection(1);
-                DashboardAction::None
+            event => event,
+        };
+        let interaction = dialog.form.get_mut().handle(&event).action;
+        match interaction {
+            Some(Interaction::Cancel | Interaction::Activate(Cancel)) => self.cancel_modal(),
+            Some(Interaction::Edit(Search, edit)) => {
+                TextField::apply(&mut dialog.search, edit);
+                self.rebuild_resume_rows();
+                self.select_resume_row(0);
             }
-            // `/` jumps to search from anywhere, so the list keeps its
-            // single-letter action keys.
-            KeyCode::Char('/') if !typing => {
-                dialog.focus = ResumeFocus::Search;
-                DashboardAction::None
-            }
-            KeyCode::Char('s') if !typing => {
+            Some(Interaction::Select(Tabs, index)) => self.switch_resume_tab(if index == 0 {
+                ResumeTab::Hel
+            } else {
+                ResumeTab::Import
+            }),
+            Some(Interaction::Select(Sessions, index)) => self.select_resume_row(index),
+            Some(Interaction::Toggle(Archived)) => {
                 dialog.show_archived = !dialog.show_archived;
-                let shown = dialog.show_archived;
                 self.rebuild_resume_rows();
                 self.resync_resume_selection();
-                self.notices.set(if shown {
-                    "Showing archived sessions."
-                } else {
-                    "Hiding archived sessions."
-                });
-                DashboardAction::None
             }
-            KeyCode::Char('a') if !typing => {
+            Some(Interaction::Activate(Search | Tabs)) => dialog.form.get_mut().focus(Sessions),
+            Some(Interaction::Activate(Sessions | Open)) => {
                 let row = self.selected_resume_row();
-                self.toggle_selected_resume_archive(row)
+                return self.activate_selected_resume_row(row);
             }
-            KeyCode::Char('d') | KeyCode::Delete if !typing => {
-                let Some(row) = self.selected_resume_row() else {
-                    return DashboardAction::None;
-                };
-                let Some(session_id) = row.session_id().map(ToOwned::to_owned) else {
-                    self.notices.set(
-                        "Mjolnir never destroys a harness's own session. Press a to archive this row.",
-                    );
-                    return DashboardAction::None;
-                };
-                // The confirmation carries the dialog so it can reopen on
-                // exactly the list the user was looking at.
-                let Mode::ResumeDialog(dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard)
-                else {
-                    return DashboardAction::None;
-                };
-                self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::DestroyStopped {
-                    session_id,
-                    reopen: Some(Box::new(dialog)),
-                }));
-                self.rebuild_resume_rows();
-                DashboardAction::None
-            }
-            KeyCode::Enter if focus == ResumeFocus::Cancel => {
-                self.cancel_modal();
-                DashboardAction::None
-            }
-            KeyCode::Enter if focus == ResumeFocus::Search => {
-                dialog.focus = ResumeFocus::Sessions;
-                DashboardAction::None
-            }
-            KeyCode::Enter => {
-                let row = self.selected_resume_row();
-                self.activate_selected_resume_row(row)
-            }
-            _ => DashboardAction::None,
+            _ => {}
         }
+        DashboardAction::None
     }
 
     fn toggle_selected_resume_archive(&mut self, row: Option<ResumeRow>) -> DashboardAction {
@@ -820,48 +847,57 @@ pub(crate) fn render_resume_dialog(
         ])
         .split(inner);
 
-    frame.render_widget(
-        Tabs::new(["Mjolnir", "Import"])
-            .select(dialog.tab.index())
-            .divider(" │ ")
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    TabStrip::render(
+        frame,
         rows[0],
+        &["Mjolnir", "Import"],
+        dialog.tab.index(),
+        &mut form,
+        ResumeFocus::Tabs,
     );
-
-    let search_focused = dialog.focus == ResumeFocus::Search;
-    let search = if search_focused {
-        dialog.search.with_cursor_marker("▏")
-    } else {
-        dialog.search.to_string()
-    };
+    let search_focused = form.is_focused(ResumeFocus::Search);
+    let search_area = Rect::new(rows[1].x, rows[1].y, rows[1].width, rows[1].height.min(1));
+    let label_width = 8.min(search_area.width);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(
-                format!("Search: {search}"),
-                if search_focused {
-                    Style::default().bg(Color::DarkGray).fg(Color::White)
-                } else {
-                    Style::default().fg(Color::Gray)
-                },
-            ),
-            Line::styled(
-                if dialog.show_archived {
-                    "Archived rows shown."
-                } else {
-                    "Archived rows hidden."
-                },
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        rows[1],
+        Line::raw("Search: "),
+        Rect::new(
+            search_area.x,
+            search_area.y,
+            label_width,
+            search_area.height,
+        ),
+    );
+    TextField::render(
+        frame,
+        Rect::new(
+            search_area.x + label_width,
+            search_area.y,
+            search_area.width - label_width,
+            search_area.height,
+        ),
+        &dialog.search,
+        &mut form,
+        ResumeFocus::Search,
+    );
+    Checkbox::render(
+        frame,
+        Rect::new(
+            rows[1].x,
+            rows[1].y.saturating_add(1),
+            rows[1].width,
+            u16::from(rows[1].height > 1),
+        ),
+        "Show archived rows",
+        dialog.show_archived,
+        true,
+        &mut form,
+        ResumeFocus::Archived,
     );
 
     let list_rows = dashboard.resume_rows();
-    let sessions_focused = dialog.focus == ResumeFocus::Sessions;
+    let sessions_focused = form.is_focused(ResumeFocus::Sessions);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(focus_border(sessions_focused || search_focused))
@@ -888,38 +924,42 @@ pub(crate) fn render_resume_dialog(
     let layout = row_layout(list_area.width.saturating_sub(2));
     frame.render_widget(Paragraph::new(resume_header_line(&layout)), header_area);
     let now = chrono::Local::now();
-    let items = if list_rows.is_empty() {
-        vec![ListItem::new(
-            match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
-                (ResumeTab::Import, true, _) => "Scanning native sessions…",
-                (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions",
-                (ResumeTab::Import, _, true) => "No importable sessions",
-                _ => "No matching sessions",
+    if list_rows.is_empty() {
+        let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
+            (ResumeTab::Import, true, _) => "Scanning native sessions…",
+            (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions",
+            (ResumeTab::Import, _, true) => "No importable sessions",
+            _ => "No matching sessions",
+        };
+        frame.render_widget(Line::raw(message), list_area);
+        form.register(
+            ResumeFocus::Sessions,
+            ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
             },
-        )]
+            list_area,
+            false,
+        );
     } else {
-        list_rows
+        let items = list_rows
             .iter()
-            .map(|row| ListItem::new(resume_row_line(row, &layout, &now)))
-            .collect()
-    };
-    let mut state = ListState::default().with_selected(selected_index(dialog, list_rows.len()));
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol(if sessions_focused { "› " } else { "  " })
-            .highlight_style(if sessions_focused {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            }),
-        list_area,
-        &mut state,
-    );
+            .map(|row| resume_row_line(row, &layout, &now))
+            .collect::<Vec<_>>();
+        ChoiceList::render(
+            frame,
+            list_area,
+            &items,
+            dialog.row_index,
+            &mut form,
+            ResumeFocus::Sessions,
+        );
+    }
     render_session_scrollbar(
         frame,
         rows[2],
         list_rows.len(),
-        state.offset(),
+        form.list_offset(ResumeFocus::Sessions),
         usize::from(list_area.height).max(1),
     );
 
@@ -954,22 +994,42 @@ pub(crate) fn render_resume_dialog(
         },
         Style::default().fg(Color::DarkGray),
     ));
-    footer.push(action_buttons(&[
-        ("Cancel", dialog.focus == ResumeFocus::Cancel),
-        (
-            match dialog.tab {
-                ResumeTab::Hel => "Resume",
-                ResumeTab::Import => "Import",
-            },
-            dialog.focus == ResumeFocus::Open,
-        ),
-    ]));
+    let note_area = Rect::new(
+        rows[3].x,
+        rows[3].y,
+        rows[3].width,
+        rows[3].height.saturating_sub(1),
+    );
     frame.render_widget(
         Paragraph::new(footer)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true }),
-        rows[3],
+        note_area,
     );
+    let button_area = Rect::new(
+        rows[3].x,
+        rows[3].bottom().saturating_sub(1),
+        rows[3].width,
+        u16::from(rows[3].height > 0),
+    );
+    ButtonRow::render(
+        frame,
+        button_area,
+        &[
+            (ResumeFocus::Cancel, "Cancel", true),
+            (
+                ResumeFocus::Open,
+                if dialog.tab == ResumeTab::Hel {
+                    "Resume"
+                } else {
+                    "Import"
+                },
+                dialog.can_open(list_rows),
+            ),
+        ],
+        &mut form,
+    );
+    form.end_frame(ResumeFocus::Sessions);
     if dialog.is_scanning() {
         const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
         let frame_index = (dialog.opened_at.elapsed().as_millis() / 125) as usize;
@@ -979,7 +1039,12 @@ pub(crate) fn render_resume_dialog(
                 SPINNER[frame_index % SPINNER.len()]
             ))
             .style(Style::default().fg(Color::Gray)),
-            Rect::new(rows[3].x, rows[3].bottom().saturating_sub(1), 14, 1),
+            Rect::new(
+                note_area.right().saturating_sub(14).max(note_area.x),
+                note_area.y,
+                note_area.width.min(14),
+                note_area.height.min(1),
+            ),
         );
     }
 }
@@ -1150,6 +1215,9 @@ mod tests {
     }
 
     fn switch_to_import(dashboard: &mut DashboardState) {
+        if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+            dialog.form.get_mut().focus(ResumeFocus::Tabs);
+        }
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Right)),
             DashboardAction::None
@@ -1158,6 +1226,9 @@ mod tests {
             panic!("expected the resume dialog");
         };
         assert_eq!(dialog.tab, ResumeTab::Import);
+        if dialog.focused() == ResumeFocus::Tabs {
+            dashboard.handle_key(key(KeyCode::Enter));
+        }
     }
 
     #[test]
@@ -1612,11 +1683,8 @@ mod tests {
         assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
     }
 
-    /// The dialog's own footer advertises the arrows as the tab switch, so
-    /// they have to answer from the search field too: typing a query is the
-    /// most likely thing to be doing when the wrong tab is in front of you.
     #[test]
-    fn arrow_keys_switch_tabs_even_while_the_search_field_has_focus() {
+    fn search_arrows_edit_the_cursor_and_tabs_have_their_own_focus() {
         let mut dashboard = DashboardState::new(
             config(),
             state_with(vec![stopped_session()]),
@@ -1630,29 +1698,23 @@ mod tests {
                 NEWER_THAN_THE_CHECKPOINT,
             )])],
         );
-
         dashboard.handle_key(key(KeyCode::Char('/')));
-        for character in "nat".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-            panic!("expected the resume dialog");
-        };
-        assert_eq!(dialog.focus, ResumeFocus::Search);
-        assert_eq!(dialog.search.value(), "nat");
-
-        dashboard.handle_key(key(KeyCode::Right));
-        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-            panic!("expected the resume dialog");
-        };
-        assert_eq!(dialog.tab, ResumeTab::Import);
-        assert_eq!(dialog.focus, ResumeFocus::Search, "the query is still open");
-
+        dashboard.handle_paste("nat");
         dashboard.handle_key(key(KeyCode::Left));
+        dashboard.handle_key(key(KeyCode::Char('X')));
         let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-            panic!("expected the resume dialog");
+            panic!("resume")
         };
         assert_eq!(dialog.tab, ResumeTab::Hel);
+        assert_eq!(dialog.search.value(), "naXt");
+        assert_eq!(dialog.focused(), ResumeFocus::Search);
+        dashboard.handle_key(key(KeyCode::BackTab));
+        dashboard.handle_key(key(KeyCode::Right));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("resume")
+        };
+        assert_eq!(dialog.tab, ResumeTab::Import);
+        assert_eq!(dialog.focused(), ResumeFocus::Tabs);
     }
 
     /// Selecting a row dispatches to the flow that suits its source: the
