@@ -311,7 +311,6 @@ impl ChatState {
             (Some(index), false) if index + 1 < history.len() => Some(index + 1),
             (Some(_), false) => None,
         };
-        self.history_index = next;
         if let Some(input) = next.and_then(|index| history.get(index).cloned()) {
             // Stored history is text-only. Clear any tracked image ranges so
             // attachments from the temporary draft cannot follow unrelated
@@ -323,6 +322,7 @@ impl ChatState {
                 images: self.history_draft_images.clone(),
             });
         }
+        self.history_index = next;
         self.input_cursor = self.input.len();
         self.preferred_column = None;
         self.update_autocomplete();
@@ -659,15 +659,15 @@ mod tests {
         let draft = chat.input.clone();
         chat.prompt_history = vec!["unrelated history prompt".into()];
 
-        chat.handle_key(key(KeyCode::Up));
+        chat.move_history(-1);
         assert_eq!(chat.input, "unrelated history prompt");
         assert!(chat.input_images.is_empty());
 
-        chat.handle_key(key(KeyCode::Down));
+        chat.move_history(1);
         assert_eq!(chat.input, draft);
         assert_eq!(chat.input_images, images);
 
-        chat.handle_key(key(KeyCode::Up));
+        chat.move_history(-1);
         assert_eq!(chat.input, "unrelated history prompt");
         assert!(chat.input_images.is_empty());
     }

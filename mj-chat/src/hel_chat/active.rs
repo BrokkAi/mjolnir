@@ -1290,9 +1290,9 @@ impl ActiveChat {
         match action {
             ChatAction::None => return ChatEventOutcome::None,
             ChatAction::Prompt(text) => {
-                let image = self.state.take_submitting_image();
+                let images = self.state.take_submitting_images();
                 let Some(command_id) = self.command_id("prompt") else {
-                    restore_unsent_prompt(&mut self.state, text, image);
+                    restore_unsent_prompt(&mut self.state, text, images);
                     return ChatEventOutcome::Handled;
                 };
                 self.state.set_notice("Prompt queued for delivery…");
@@ -1301,7 +1301,7 @@ impl ActiveChat {
                     ChatRemoteOperation::Prompt {
                         command_id,
                         text,
-                        image,
+                        images,
                     },
                     &mut self.state,
                 );
@@ -1779,7 +1779,7 @@ impl ActiveChat {
                     ChatRemoteOperation::Prompt {
                         command_id,
                         text: prompt,
-                        image: None,
+                        images: Vec::new(),
                     },
                     &mut self.state,
                 );
@@ -2555,12 +2555,10 @@ pub(super) fn render_chat_footer(
         "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
         "Listening… Alt-V stop · PgUp/PgDn transcript"
-    } else if chat.attached_image().is_some() {
-        "Ctrl-X remove image · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     } else if !chat.queued_prompts.is_empty() {
         "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · Esc cancel"
     } else {
-        "Tab pane · Ctrl-Alt-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
+        "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     };
     let default_footer = fit_footer(composer_keys, CHORDS, FUNCTION_KEYS, footer_area.width);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
@@ -2672,9 +2670,6 @@ fn prompt_title(chat: &ChatState, queued: usize) -> String {
     }
     if queued > 0 {
         parts.push(format!("{queued} queued"));
-    }
-    if chat.attached_image().is_some() {
-        parts.push("Image attached".into());
     }
     // Esc cancels a prompt of ours. It cannot stop a turn the harness started
     // on its own, so the hint follows the prompt rather than the phase.

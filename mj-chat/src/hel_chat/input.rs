@@ -7,16 +7,36 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::ChatState;
 use super::rendering::{display_width, sanitize_terminal_text};
+use super::{ChatState, PromptPayload, attachments};
 
 impl ChatState {
-    pub(super) fn insert_character(&mut self, character: char) {
-        self.input.insert(self.input_cursor, character);
-        self.input_cursor += character.len_utf8();
+    pub(super) fn replace_input_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        inserted: &PromptPayload,
+    ) -> PromptPayload {
+        let (cursor, removed) =
+            attachments::replace_range(&mut self.input, &mut self.input_images, range, inserted);
+        self.input_cursor = cursor;
+        self.next_image_number = self.next_image_number.max(
+            self.input_images
+                .iter()
+                .map(|image| image.number.saturating_add(1))
+                .max()
+                .unwrap_or(1),
+        );
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
+        removed
+    }
+
+    pub(super) fn insert_character(&mut self, character: char) {
+        self.replace_input_range(
+            self.input_cursor..self.input_cursor,
+            &PromptPayload::text(character.to_string()),
+        );
     }
 
     pub(super) fn handle_paste(&mut self, pasted: &str) {
@@ -33,11 +53,10 @@ impl ChatState {
             self.refresh_history_search();
             return;
         }
-        self.input.insert_str(self.input_cursor, &pasted);
-        self.input_cursor += pasted.len();
-        self.history_index = None;
-        self.preferred_column = None;
-        self.update_autocomplete();
+        self.replace_input_range(
+            self.input_cursor..self.input_cursor,
+            &PromptPayload::text(pasted),
+        );
     }
 
     pub(super) fn backspace(&mut self) {
@@ -45,11 +64,7 @@ impl ChatState {
             return;
         }
         let start = previous_grapheme_boundary(&self.input, self.input_cursor);
-        self.input.replace_range(start..self.input_cursor, "");
-        self.input_cursor = start;
-        self.history_index = None;
-        self.preferred_column = None;
-        self.update_autocomplete();
+        self.replace_input_range(start..self.input_cursor, &PromptPayload::text(""));
     }
 
     pub(super) fn delete(&mut self) {
@@ -57,10 +72,7 @@ impl ChatState {
             return;
         }
         let end = next_grapheme_boundary(&self.input, self.input_cursor);
-        self.input.replace_range(self.input_cursor..end, "");
-        self.history_index = None;
-        self.preferred_column = None;
-        self.update_autocomplete();
+        self.replace_input_range(self.input_cursor..end, &PromptPayload::text(""));
     }
 
     pub(super) fn move_input_cursor(&mut self, delta: isize) {
@@ -69,6 +81,7 @@ impl ChatState {
         } else {
             next_grapheme_boundary(&self.input, self.input_cursor)
         };
+        self.input_cursor = attachments::snap_cursor(&self.input_images, self.input_cursor, delta);
         self.preferred_column = None;
         self.update_autocomplete();
     }
@@ -145,6 +158,8 @@ impl ChatState {
             .grapheme_indices(true)
             .nth(column)
             .map_or(target_end, |(offset, _)| target_start + offset);
+        self.input_cursor =
+            attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
         self.preferred_column = Some(column);
         self.update_autocomplete();
     }
@@ -202,6 +217,8 @@ impl ChatState {
         } else {
             self.next_word_end()
         };
+        self.input_cursor =
+            attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
         self.preferred_column = None;
         self.update_autocomplete();
     }
@@ -210,12 +227,9 @@ impl ChatState {
         if range.is_empty() {
             return;
         }
-        self.kill_buffer = self.input[range.clone()].to_owned();
-        self.input.replace_range(range.clone(), "");
-        self.input_cursor = range.start;
-        self.history_index = None;
-        self.preferred_column = None;
-        self.update_autocomplete();
+        let removed = self.replace_input_range(range, &PromptPayload::text(""));
+        self.kill_buffer = removed.text;
+        self.kill_images = removed.images;
     }
 
     pub(super) fn kill_to_line_start(&mut self) {
@@ -241,13 +255,21 @@ impl ChatState {
             return;
         }
         let previous = if chained {
-            std::mem::take(&mut self.kill_buffer)
+            PromptPayload {
+                text: std::mem::take(&mut self.kill_buffer),
+                images: std::mem::take(&mut self.kill_images),
+            }
         } else {
-            String::new()
+            PromptPayload::text("")
         };
         self.kill_range(range);
-        if !previous.is_empty() {
-            self.kill_buffer.insert_str(0, &previous);
+        if !previous.text.is_empty() {
+            attachments::replace_range(
+                &mut self.kill_buffer,
+                &mut self.kill_images,
+                0..0,
+                &previous,
+            );
         }
     }
 
@@ -255,11 +277,11 @@ impl ChatState {
         if self.kill_buffer.is_empty() {
             return;
         }
-        let text = self.kill_buffer.clone();
-        self.input.insert_str(self.input_cursor, &text);
-        self.input_cursor += text.len();
-        self.history_index = None;
-        self.update_autocomplete();
+        let payload = PromptPayload {
+            text: self.kill_buffer.clone(),
+            images: self.kill_images.clone(),
+        };
+        self.replace_input_range(self.input_cursor..self.input_cursor, &payload);
     }
 }
 

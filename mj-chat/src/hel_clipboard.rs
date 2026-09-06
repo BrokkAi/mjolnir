@@ -6,7 +6,7 @@
 
 #[cfg(target_os = "linux")]
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 #[cfg(any(target_os = "linux", all(test, unix)))]
 use std::time::Duration;
 
@@ -91,13 +91,13 @@ for ($attempt = 0; $attempt -lt 3; $attempt++) {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardImage {
     /// Base64-encoded PNG bytes.
-    pub data_base64: String,
+    pub data_base64: Arc<str>,
     pub mime_type: String,
 }
 
 impl ClipboardImage {
     /// Construct and validate an image from encoded PNG bytes.
-    pub fn from_png_base64(data_base64: String) -> Result<Self> {
+    pub fn from_png_base64(data_base64: impl Into<Arc<str>>) -> Result<Self> {
         Self::from_base64(data_base64, "image/png".to_owned())
     }
 
@@ -105,7 +105,8 @@ impl ClipboardImage {
     /// headers are bounded; other image media types are retained when their base64
     /// bytes are valid so queued prompts from the web surface are not silently
     /// downgraded to text during terminal editing.
-    pub fn from_base64(data_base64: String, mime_type: String) -> Result<Self> {
+    pub fn from_base64(data_base64: impl Into<Arc<str>>, mime_type: String) -> Result<Self> {
+        let data_base64 = data_base64.into();
         let bytes = decode_base64(&data_base64)?;
         if mime_type.eq_ignore_ascii_case("image/png") {
             validate_png(&bytes)?;
@@ -234,7 +235,7 @@ fn encode_native_image(image: arboard::ImageData<'_>) -> Result<ClipboardImage> 
         bail!("clipboard image is too large (maximum {MAX_IMAGE_BYTES} bytes)");
     }
     Ok(ClipboardImage {
-        data_base64: base64::engine::general_purpose::STANDARD.encode(png),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(png).into(),
         mime_type: "image/png".to_owned(),
     })
 }
@@ -388,7 +389,7 @@ mod tests {
         };
         assert_eq!(
             base64::engine::general_purpose::STANDARD
-                .decode(image.data_base64)
+                .decode(image.data_base64.as_bytes())
                 .unwrap(),
             png,
         );
