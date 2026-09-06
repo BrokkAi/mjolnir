@@ -2948,8 +2948,10 @@ mod tests {
         let prompt = Rect::new(4, 2, 30, 5);
         let button = voice_button_area(prompt).expect("button fits");
         assert_eq!(button.y, prompt.bottom() - 1);
-        assert_eq!(button.x, prompt.x + 1);
+        assert_eq!(button.x, prompt.x + 2);
         assert_eq!(button.width, 3);
+        assert!(voice_button_area(Rect::new(0, 0, 5, 3)).is_none());
+        assert!(voice_button_area(Rect::new(0, 0, 6, 3)).is_some());
     }
 
     #[test]
@@ -2963,6 +2965,12 @@ mod tests {
             "microphone button missing from prompt border: {rows:?}"
         );
         let button = chat.voice_button_area.expect("button hitbox");
+        let border = &rows[usize::from(button.y)];
+        let mic_offset = border.find("🎙︎").expect("microphone on bottom border");
+        assert_eq!(
+            rendering::display_width(&border[..mic_offset]),
+            usize::from(button.x + 1)
+        );
         assert_eq!(
             button.y,
             chat.frame_surfaces()
