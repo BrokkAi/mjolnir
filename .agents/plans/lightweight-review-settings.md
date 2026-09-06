@@ -65,3 +65,12 @@ Implementation and validation are complete. Live seed 519 passed 79 checks, incl
 Initial plan recorded for the approved implementation; prior readiness work remains documented in palette-review-discovery.md.
 
 Updated after implementation and live acceptance to record test evidence and the remaining validation steps.
+
+Publication integration: upstream advanced to d71601b4 before the initial push.
+The sole conflict added idle_since_ms to the discovery test's operational-state
+fixture; both changes were preserved. Full Cargo tests and clippy passed on
+that combined tree, and live seed 520 passed all 79 checks at
+`target/reliability-artifacts/tui-components-seed-520-3510340/` (CLI SHA-256
+`9b93b9bb230e2fa64071fe4305dc55df76d910bc508cc3d7d6086f07b7c81553`).
+Upstream subsequently added ac14410e, changing web project grouping without
+overlapping discovery code; integrate it with focused checks before pushing.

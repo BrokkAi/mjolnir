@@ -316,6 +316,7 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
     chat.render_mode = TranscriptRenderMode::Rich;
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(crate::usage_format::SessionActivity {
+        idle_since_ms: None,
         execution: None,
         harness_turn_started_at_ms: None,
         foreground_tool_started_at_ms: None,

@@ -181,6 +181,7 @@ function selectedWorkspaceId() {
 }
 
 function applyRoute() {
+  cancelSessionPress();
   route = parseRoute(location.hash);
   if (!snapshot) return;
 
@@ -237,6 +238,7 @@ function applyRoute() {
 
 function renderRoute() {
   if (!snapshot) return;
+  if (route.name !== 'dashboard') closeSessionMenu(false);
   renderWorkspaces();
   renderLaunchFailures();
   switch (route.name) {
@@ -302,15 +304,120 @@ function renderWorkspaces() {
 // The session list
 // ---------------------------------------------------------------------------
 
-/// The state word and its icon. Colour alone never says what a session is
-/// doing, because colour is the one channel a reader may not have.
-const LIFECYCLE_ICON = {
-  live: '●',
-  starting: '◐',
-  stopping: '◑',
-  stopped: '○',
-  failed: '×',
-};
+// Dashboard order is deliberately a view concern.  A live snapshot may
+// report a newer activity watermark for an existing session, but moving that
+// row under a reader's finger makes the dashboard feel broken.  Each
+// workspace gets one seed order per document; ranks are retained after a row
+// disappears so a reconnect cannot make it jump when it returns.
+const dashboardOrders = new Map();
+const sessionCards = new Map();
+const sessionItems = new Map();
+const sessionGroups = new Map();
+let openSessionMenuId = null;
+let openSessionMenuTrigger = null;
+let suppressedSessionClickId = null;
+let activeSessionPress = null;
+let snapshotReceivedAtMs = 0;
+let dashboardOrderSeeded = false;
+
+function reconcileChildren(parent, desired) {
+  // Remove departed siblings before inserting arrivals, so removing an earlier
+  // row never detaches and reinserts the focused row. Ordinary refreshes do
+  // no structural DOM work at all.
+  const desiredSet = new Set(desired);
+  for (const child of [...parent.children]) {
+    if (!desiredSet.has(child)) parent.removeChild(child);
+  }
+  for (let index = 0; index < desired.length; index += 1) {
+    if (parent.children[index] !== desired[index]) {
+      parent.insertBefore(desired[index], parent.children[index] || null);
+    }
+  }
+}
+
+function epochMs(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function epochSecondsMs(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value * 1000;
+  return epochMs(value);
+}
+
+function sessionActivityMs(session) {
+  return epochMs(session.last_activity_at_ms) ?? epochMs(session.created_at) ?? 0;
+}
+
+function projectKeyFor(session) {
+  return session.project_key || session.bundle_id || session.id;
+}
+
+function orderState(workspaceId, live) {
+  let state = dashboardOrders.get(workspaceId);
+  if (!state) {
+    state = { sessions: new Map(), groups: new Map(), nextSession: 0, nextGroup: 0 };
+    dashboardOrders.set(workspaceId, state);
+    const initial = [...live].sort((left, right) =>
+      sessionActivityMs(right) - sessionActivityMs(left) || left.id.localeCompare(right.id),
+    );
+    for (const session of initial) {
+      if (!state.sessions.has(session.id)) state.sessions.set(session.id, state.nextSession++);
+    }
+    const maxima = new Map();
+    for (const session of initial) {
+      const key = projectKeyFor(session);
+      maxima.set(key, Math.max(maxima.get(key) ?? 0, sessionActivityMs(session)));
+    }
+    [...maxima.entries()]
+      .sort((left, right) =>
+        right[1] - left[1] ||
+        left[0].localeCompare(right[0]),
+      )
+      .forEach(([key]) => state.groups.set(key, state.nextGroup++));
+  }
+  // New ids append to the remembered order.  Deliberately never delete a
+  // rank: a stopped session can return after a reconnect without reordering
+  // every row below it.
+  for (const session of live) {
+    if (!state.sessions.has(session.id)) state.sessions.set(session.id, state.nextSession++);
+    const key = projectKeyFor(session);
+    if (!state.groups.has(key)) state.groups.set(key, state.nextGroup++);
+  }
+  return state;
+}
+
+function seedDashboardOrders(data) {
+  if (dashboardOrderSeeded) return;
+  dashboardOrderSeeded = true;
+  const workspaceIds = new Set((data.workspaces || []).map(workspace => workspace.id));
+  for (const session of data.sessions || []) {
+    if (session.workspace_id) workspaceIds.add(session.workspace_id);
+  }
+  for (const workspaceId of workspaceIds) {
+    const workspaceLive = (data.sessions || []).filter(session =>
+      session.workspace_id === workspaceId && ['live', 'starting', 'stopping'].includes(session.lifecycle),
+    );
+    orderState(workspaceId, workspaceLive);
+  }
+  // Snapshots predating workspaces still have a single implicit workspace.
+  if (!(data.workspaces || []).length) {
+    orderState('', (data.sessions || []).filter(session =>
+      ['live', 'starting', 'stopping'].includes(session.lifecycle),
+    ));
+  }
+}
+
+function orderedSessions(live) {
+  const workspaceId = selectedWorkspaceId();
+  const state = orderState(workspaceId || '', live);
+  return [...live].sort((left, right) =>
+    state.sessions.get(left.id) - state.sessions.get(right.id) || left.id.localeCompare(right.id),
+  );
+}
 
 function liveSessions() {
   const workspaceId = selectedWorkspaceId();
@@ -325,49 +432,73 @@ function liveSessions() {
 ///
 /// The controller publishes an opaque `project_key` and the same short
 /// `project_label` the TUI uses. Keep those fields separate: labels can be
-/// shared by different projects, while keys must never merge them. Groups are
-/// ordered by their visible label, as the TUI's project rows are.
+/// shared by different projects, while keys must never merge them. Group and
+/// session ranks are seeded from activity, then frozen for this document.
 function byProject(list) {
   const groups = new Map();
   for (const session of list) {
     // `bundle_id` keeps older snapshots renderable; current snapshots always
     // provide the opaque project key. The session id is only a last-resort
     // boundary for malformed legacy data, never a project label.
-    const key = session.project_key || session.bundle_id || session.id;
+    const key = projectKeyFor(session);
     if (!groups.has(key)) groups.set(key, { key, label: session.project_label || key, sessions: [] });
     groups.get(key).sessions.push(session);
   }
-  return [...groups.values()].sort((left, right) => {
-    const labelOrder = left.label.toLowerCase().localeCompare(right.label.toLowerCase());
-    return labelOrder || left.label.localeCompare(right.label) || left.key.localeCompare(right.key);
-  });
+  const state = orderState(selectedWorkspaceId() || '', list);
+  return [...groups.values()].sort((left, right) =>
+    state.groups.get(left.key) - state.groups.get(right.key) || left.key.localeCompare(right.key),
+  );
 }
 
 function renderSessions() {
-  const groups = byProject(liveSessions());
+  const groups = byProject(orderedSessions(liveSessions()));
+  if (openSessionMenuId && !groups.some(group => group.sessions.some(session => session.id === openSessionMenuId))) {
+    closeSessionMenu();
+  }
   if (!groups.length) {
     sessions.replaceChildren(el('p', 'dim', 'No live sessions in this workspace.'));
     return;
   }
-  sessions.replaceChildren(
-    ...groups.map(group => {
-      const section = el('section', 'project');
+  const renderedGroups = groups.map(group => {
+    const groupId = `${selectedWorkspaceId() || ''}\u001f${group.key}`;
+    let section = sessionGroups.get(groupId);
+    if (!section) {
+      section = el('section', 'project');
       const heading = el('h2', 'project-heading');
-      heading.append(el('span', '', group.label), el('span', 'dim', ` ${group.sessions.length}`));
-      section.append(heading);
+      const label = el('span');
+      const count = el('span', 'dim');
+      heading.append(label, count);
       const list = el('div', 'project-sessions');
       list.setAttribute('role', 'list');
-      for (const session of group.sessions) {
-        const row = sessionCard(session);
-        const item = el('div');
-        item.setAttribute('role', 'listitem');
-        item.append(row);
-        list.append(item);
+      section.append(heading, list);
+      section._headingLabel = label;
+      section._headingCount = count;
+      section._sessionList = list;
+      sessionGroups.set(groupId, section);
+    }
+    section._headingLabel.textContent = group.label;
+    section._headingCount.textContent = ` ${group.sessions.length}`;
+    const items = group.sessions.map(session => {
+      let card = sessionCards.get(session.id);
+      if (!card) {
+        card = sessionCard(session);
+        sessionCards.set(session.id, card);
+      } else {
+        updateSessionCard(card, session);
       }
-      section.append(list);
-      return section;
-    }),
-  );
+      let item = sessionItems.get(session.id);
+      if (!item) {
+        item = el('div');
+        item.setAttribute('role', 'listitem');
+        sessionItems.set(session.id, item);
+      }
+      if (item.firstChild !== card) item.replaceChildren(card);
+      return item;
+    });
+    reconcileChildren(section._sessionList, items);
+    return section;
+  });
+  reconcileChildren(sessions, renderedGroups);
 }
 
 /// One session row.
@@ -377,84 +508,336 @@ function renderSessions() {
 function sessionCard(session) {
   const card = el('article', 'card session');
   card.dataset.sessionId = session.id;
+  const titleRow = el('div', 'session-title-row');
+  const heading = el('h3');
+  const attention = el('span', 'session-attention');
+  const menuTrigger = button('⋯', 'session-menu-trigger', { sessionMenu: session.id });
+  menuTrigger.type = 'button';
+  menuTrigger.setAttribute('aria-haspopup', 'menu');
+  menuTrigger.setAttribute('aria-expanded', 'false');
+  const menu = el('div', 'session-menu hidden');
+  menu.setAttribute('role', 'menu');
+  menu.dataset.sessionId = session.id;
+  titleRow.append(heading, attention, menuTrigger, menu);
+
+  const meta = el('div', 'session-meta');
+  const location = el('span', 'session-location');
+  const profile = el('span', 'session-profile');
+  meta.append(location, profile);
+  const activity = el('p', 'session-activity');
+  card.append(titleRow, meta, activity);
+  card._heading = heading;
+  card._attention = attention;
+  card._menuTrigger = menuTrigger;
+  card._menu = menu;
+  card._location = location;
+  card._profile = profile;
+  card._activity = activity;
+  card._sessionMenuSignature = '';
+  updateSessionCard(card, session);
+  return card;
+}
+
+function attentionParts(session) {
+  const parts = [];
+  if (session.has_error) parts.push(['!', 'Error']);
+  if (session.pending_elicitations?.length) parts.push(['?', 'Input needed']);
+  const queued = (session.queued_prompts || []).length;
+  if (queued) parts.push([String(queued), `${queued} queued prompt${queued === 1 ? '' : 's'}`]);
+  return parts;
+}
+
+function sessionMenuActions(session) {
   const can = session.capabilities || {};
-  if (can.open) {
-    card.dataset.openable = 'true';
+  const actions = [];
+  if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
+  if (can.cancel_operation) actions.push(['Cancel operation', 'danger', 'cancel']);
+  if (can.stop) actions.push(['Stop session', 'danger', 'close']);
+  if (can.resume) actions.push(['Resume', '', 'resume']);
+  return actions;
+}
+
+function updateSessionCard(card, session) {
+  card._session = session;
+  const can = session.capabilities || {};
+  const openable = can.open === true;
+  card.dataset.openable = String(openable);
+  if (openable) {
     card.setAttribute('role', 'link');
     card.setAttribute('tabindex', '0');
-    card.setAttribute('aria-label', `Open session ${session.title || session.id}`);
+  } else {
+    card.removeAttribute('role');
+    card.removeAttribute('tabindex');
   }
-
-  const heading = el('h3');
-  renderSessionTitle(heading, session);
-  card.append(heading);
-
-  const status = el('p', 'session-status');
-  const state = el('span', `pill state-${session.lifecycle}`);
-  state.append(
-    withHiddenGlyph(LIFECYCLE_ICON[session.lifecycle] || '○'),
-    el('span', '', sessionLifecycleLabel(session)),
+  const attention = attentionParts(session);
+  const attentionText = attention.map(([, label]) => label.toLowerCase()).join(', ');
+  card.setAttribute(
+    'aria-label',
+    `${openable ? 'Open session' : 'Session'} ${session.title || session.id}${attentionText ? `; needs attention: ${attentionText}` : ''}`,
   );
-  status.append(state);
-  if (session.has_error) status.append(el('span', 'pill alert', 'needs attention'));
-  if (session.pending_elicitations?.length) {
-    status.append(el('span', 'pill alert', 'input needed'));
-  }
-  const queued = (session.queued_prompts || []).length;
-  if (queued) status.append(el('span', 'pill', `${queued} queued`));
-  if (session.activity) status.append(el('span', 'pill', session.activity));
-  card.append(status);
+  renderSessionTitle(card._heading, session);
+  card._attention.replaceChildren(
+    ...attention.map(([glyph, label]) => {
+      const node = el('span', `session-attention-item ${label === 'Error' || label === 'Input needed' ? 'alert' : ''}`, glyph);
+      node.setAttribute('aria-label', label);
+      node.setAttribute('role', 'img');
+      node.title = label;
+      return node;
+    }),
+  );
+  card._location.textContent = session.display_location || session.target_id || '';
+  card._location.title = card._location.textContent;
+  card._profile.textContent = session.profile_id || '';
+  card._profile.title = card._profile.textContent;
+  updateSessionActivity(card, session);
+  updateSessionMenu(card, session);
+}
 
-  if (session.operation) {
-    const stage = session.operation.stages.map(entry => entry.label).join(' · ');
-    card.append(
-      el(
-        'p',
-        'session-operation',
-        stage ? `${session.operation.kind} — ${stage}` : session.operation.kind,
-      ),
-    );
-  }
-
-  card.append(el('p', 'dim', `${session.target_id} · ${session.profile_id}`));
-
-  if (session.preview?.length) {
-    card.append(el('p', 'preview', session.preview.join('\n')));
-  }
-
-  const actions = el('div', 'row');
-  if (can.rename)
-    actions.append(action('Rename', 'secondary', { action: 'rename', id: session.id }));
-  if (can.cancel_operation) {
-    actions.append(action('Cancel', 'danger', { action: 'cancel', id: session.id }));
-  }
-  if (can.stop) actions.append(action('Stop', 'danger', { action: 'close', id: session.id }));
-  if (can.resume) {
-    actions.append(
-      action('Resume', '', {
-        action: 'resume',
-        id: session.id,
-        profile: session.profile_id,
-        target: session.target_id,
+function updateSessionMenu(card, session) {
+  const actions = sessionMenuActions(session);
+  const signature = actions.map(action => action[2]).join('|');
+  const menuChanged = card._sessionMenuSignature !== signature;
+  if (menuChanged) {
+    const activeAction = card._menu?.ownerDocument?.activeElement?.dataset?.action;
+    card._menu.replaceChildren(
+      ...actions.map(([label, className, actionName]) => {
+        const control = action(label, className, {
+          action: actionName,
+          id: session.id,
+          profile: session.profile_id,
+          target: session.target_id,
+        });
+        control.setAttribute('role', 'menuitem');
+        return control;
       }),
     );
+    card._sessionMenuSignature = signature;
+    if (activeAction && card._menu.classList && !card._menu.classList.contains('hidden')) {
+      const next = card._menu.querySelector(`button[data-action="${activeAction}"]:not(:disabled)`)
+        || card._menu.querySelector('button:not(:disabled)');
+      next?.focus({ preventScroll: true });
+    }
+  } else {
+    for (const control of card._menu.querySelectorAll?.('button[data-action]') || []) {
+      control.dataset.profile = session.profile_id || '';
+      control.dataset.target = session.target_id || '';
+      control.disabled = pendingActions.has(`${control.dataset.action}:${session.id}`);
+    }
   }
-  card.append(actions);
-  return card;
+  card._menuTrigger.disabled = actions.length === 0;
+  card._menuTrigger.setAttribute('aria-label', `Actions for ${session.title || session.id}`);
+  card._menuTrigger.setAttribute('aria-expanded', String(openSessionMenuId === session.id));
+  if (openSessionMenuId === session.id && !actions.length) closeSessionMenu(false);
+}
+
+function serverClockMs() {
+  const server = epochMs(snapshot?.server_time_ms);
+  if (server == null || !snapshotReceivedAtMs) return Date.now();
+  return server + (Date.now() - snapshotReceivedAtMs);
+}
+
+function formatClock(milliseconds) {
+  const seconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m${String(remainingSeconds).padStart(2, '0')}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return `${hours}h${String(remainingMinutes).padStart(2, '0')}m`;
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return `${days}d${String(remainingHours).padStart(2, '0')}h`;
+}
+
+function localClock(milliseconds) {
+  const date = new Date(milliseconds);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function idleSinceLabel(startedAt, now) {
+  const date = new Date(startedAt);
+  const today = new Date(now);
+  const startDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const todayDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const days = Math.round((todayDay - startDay) / 86400000);
+  if (days === 0) return `Idle since ${localClock(startedAt)}`;
+  if (days === 1) return `Idle since yesterday ${localClock(startedAt)}`;
+  const dateLabel = date.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+    ...(date.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
+  });
+  return `Idle since ${dateLabel} ${localClock(startedAt)}`;
+}
+
+function operationLabel(operation, now) {
+  if (!operation) return '';
+  const started = epochSecondsMs(operation.started_at_epoch_seconds);
+  const clock = started == null ? '' : ` ${formatClock(now - started)}`;
+  const stage = operation.stages?.at(-1)?.label;
+  const kind = String(operation.kind || 'Operation').replace(/-/g, ' ');
+  return `${stage || kind}${clock}`;
+}
+
+function sessionActivityLabel(session, now = serverClockMs()) {
+  if (session.operation) return operationLabel(session.operation, now);
+  if (['starting', 'stopping', 'failed'].includes(session.lifecycle)) {
+    return sessionLifecycleLabel(session);
+  }
+  const details = session.activity_details || {};
+  const kind = details.kind;
+  const turnStarted = epochMs(details.turn_started_at_ms);
+  const stepStarted = epochMs(details.step_started_at_ms);
+  const backgroundStarted = epochMs(details.background_started_at_ms);
+  const idleStarted = epochMs(details.idle_since_ms);
+  if (kind === 'step') {
+    return `Step${stepStarted == null ? '' : ` ${formatClock(now - stepStarted)}`}`;
+  }
+  if (kind === 'turn') {
+    const turn = turnStarted == null ? null : formatClock(now - turnStarted);
+    const stepElapsed = stepStarted == null ? null : Math.max(0, now - stepStarted);
+    const stepBaseElapsed = stepStarted == null && turnStarted != null
+      ? Math.max(0, now - turnStarted)
+      : stepElapsed;
+    const clampedStep = stepBaseElapsed == null || turnStarted == null
+      ? stepBaseElapsed
+      : Math.min(stepBaseElapsed, Math.max(0, now - turnStarted));
+    const step = clampedStep == null ? null : formatClock(clampedStep);
+    return `Turn${turn ? ` ${turn}` : ''} · Step${step ? ` ${step}` : ''}`;
+  }
+  if (kind === 'background') {
+    return `${details.label || 'Background'}${backgroundStarted == null ? '' : ` ${formatClock(now - backgroundStarted)}`}`;
+  }
+  if (kind === 'idle') return idleStarted == null ? 'Idle' : idleSinceLabel(idleStarted, now);
+  if (kind === 'lifecycle') return details.label || sessionLifecycleLabel(session);
+  if (kind) return details.label || kind;
+  if (session.activity) return session.activity;
+  if (session.is_idle && idleStarted != null) return idleSinceLabel(idleStarted, now);
+  return sessionLifecycleLabel(session);
+}
+
+function updateSessionActivity(card, session) {
+  card._activity.textContent = sessionActivityLabel(session);
+  card._activity.title = card._activity.textContent;
+}
+
+function updateSessionClocks() {
+  for (const card of sessionCards.values()) {
+    if (card.isConnected === false || !card._session) continue;
+    // This is intentionally the only per-tick mutation: card identity and
+    // all controls stay put while a clock advances.
+    card._activity.textContent = sessionActivityLabel(card._session);
+  }
+}
+
+function closeSessionMenu(restoreFocus = true) {
+  if (!openSessionMenuId) return;
+  const card = sessionCards.get(openSessionMenuId);
+  const trigger = openSessionMenuTrigger || card?._menuTrigger;
+  if (card?._menu) {
+    card._menu.classList?.add('hidden');
+    card._menuTrigger?.setAttribute('aria-expanded', 'false');
+  }
+  openSessionMenuId = null;
+  openSessionMenuTrigger = null;
+  if (restoreFocus && trigger?.isConnected !== false) trigger.focus?.({ preventScroll: true });
+}
+
+function openSessionMenu(sessionId, trigger, toggle = false) {
+  const card = sessionCards.get(sessionId) || trigger?.closest?.('.session');
+  if (!card || !card._menu || !card._menu.children.length) return false;
+  if (openSessionMenuId === sessionId) {
+    if (toggle) {
+      closeSessionMenu();
+      return false;
+    }
+    return true;
+  }
+  closeSessionMenu(false);
+  card._menu.classList.remove('hidden');
+  card._menuTrigger.setAttribute('aria-expanded', 'true');
+  openSessionMenuId = sessionId;
+  openSessionMenuTrigger = trigger || card._menuTrigger;
+  card._menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+  return true;
+}
+
+function sessionCardFromTarget(target) {
+  return target?.closest?.('.session[data-session-id]');
+}
+
+function cancelSessionPress() {
+  if (!activeSessionPress) return;
+  clearTimeout(activeSessionPress.timer);
+  activeSessionPress = null;
+}
+
+function beginSessionPress(event) {
+  // A completed long press may not produce the synthetic click on every
+  // touch browser. A new pointer gesture is unambiguously a fresh action.
+  suppressedSessionClickId = null;
+  if (event.isPrimary === false) {
+    cancelSessionPress();
+    return;
+  }
+  if (event.button !== undefined && event.button !== 0) return;
+  if (event.target?.closest?.('button, a, input, select, textarea')) return;
+  const card = sessionCardFromTarget(event.target);
+  if (!card || !card._session || !sessionMenuActions(card._session).length) return;
+  if (activeSessionPress && activeSessionPress.pointerId !== event.pointerId) {
+    cancelSessionPress();
+    return;
+  }
+  cancelSessionPress();
+  activeSessionPress = {
+    id: card.dataset.sessionId,
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    timer: setTimeout(() => {
+      const current = sessionCards.get(card.dataset.sessionId);
+      if (
+        !activeSessionPress ||
+        activeSessionPress.id !== card.dataset.sessionId ||
+        current !== card ||
+        card.isConnected === false ||
+        !snapshot?.sessions.some(session => session.id === card.dataset.sessionId && session.workspace_id === selectedWorkspaceId()) ||
+        !sessionMenuActions(card._session).length
+      ) {
+        cancelSessionPress();
+        return;
+      }
+      suppressedSessionClickId = card.dataset.sessionId;
+      activeSessionPress = null;
+      openSessionMenu(card.dataset.sessionId, card._menuTrigger);
+    }, 500),
+  };
+}
+
+function moveSessionPress(event) {
+  if (!activeSessionPress) return;
+  if (activeSessionPress.pointerId !== event.pointerId) {
+    cancelSessionPress();
+    return;
+  }
+  const dx = event.clientX - activeSessionPress.x;
+  const dy = event.clientY - activeSessionPress.y;
+  if (Math.hypot(dx, dy) > 10) cancelSessionPress();
 }
 
 // Durable "running" means the session is alive, not that a turn or background
 // command is running. Leave activity to the separate turn/BG/idle indicator.
 function sessionLifecycleLabel(session) {
-  return session.state === 'running' ? 'live' : session.state;
-}
-
-/// A glyph that repeats what an adjacent word already says, so it is
-/// decoration to a screen reader rather than a second reading of the same fact.
-function withHiddenGlyph(glyph) {
-  const node = el('span', 'state-glyph', glyph);
-  node.setAttribute('aria-hidden', 'true');
-  return node;
+  const labels = {
+    live: 'Live',
+    starting: 'Starting',
+    stopping: 'Stopping',
+    stopped: 'Stopped',
+    failed: 'Failed',
+  };
+  if (session.lifecycle && labels[session.lifecycle]) return labels[session.lifecycle];
+  return session.state === 'running' ? 'Live' : session.state || 'Unknown';
 }
 
 function action(label, className, data) {
@@ -476,14 +859,61 @@ function sessionCardFromEvent(event) {
 function openSessionCard(event) {
   const card = sessionCardFromEvent(event);
   if (!card) return false;
+  if (event.type && event.type !== 'click') suppressedSessionClickId = null;
+  if (suppressedSessionClickId === card.dataset.sessionId) {
+    suppressedSessionClickId = null;
+    return false;
+  }
+  closeSessionMenu(false);
   navigate({ name: 'conversation', sessionId: card.dataset.sessionId });
   return true;
 }
 
 function handleSessionCardKeydown(event) {
+  const trigger = event.target?.closest?.('button[data-session-menu]');
+  if (trigger && ((event.key === 'F10' && event.shiftKey) || event.key === 'ContextMenu')) {
+    event.preventDefault();
+    openSessionMenu(trigger.dataset.sessionMenu, trigger);
+    return;
+  }
+  if ((event.key === 'F10' && event.shiftKey) || event.key === 'ContextMenu') {
+    const card = sessionCardFromTarget(event.target);
+    if (!card || !card._session || !sessionMenuActions(card._session).length) return;
+    event.preventDefault();
+    openSessionMenu(card.dataset.sessionId, card._menuTrigger);
+    return;
+  }
   if (event.key !== 'Enter' && event.key !== ' ') return;
   if (!openSessionCard(event)) return;
   event.preventDefault();
+}
+
+function handleSessionMenuKeydown(event) {
+  const menu = event.target?.closest?.('.session-menu');
+  if (!menu) return;
+  const controls = [...menu.querySelectorAll('button:not(:disabled)')];
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeSessionMenu();
+    return;
+  }
+  if (event.key === 'Tab') {
+    // Let the browser's normal tab order continue from the menu item. The
+    // trigger is restored only for Escape and pointer dismissal.
+    closeSessionMenu(false);
+    return;
+  }
+  if (!controls.length) return;
+  const index = controls.indexOf(event.target);
+  let next = null;
+  if (event.key === 'ArrowDown') next = controls[(index + 1) % controls.length];
+  if (event.key === 'ArrowUp') next = controls[(index - 1 + controls.length) % controls.length];
+  if (event.key === 'Home') next = controls[0];
+  if (event.key === 'End') next = controls.at(-1);
+  if (next) {
+    event.preventDefault();
+    next.focus({ preventScroll: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1267,6 +1697,8 @@ function showLogin() {
 async function refresh() {
   try {
     snapshot = await request('/api/snapshot');
+    snapshotReceivedAtMs = Date.now();
+    seedDashboardOrders(snapshot);
     login.classList.add('hidden');
     app.classList.remove('hidden');
     menuButton.classList.remove('hidden');
@@ -2722,12 +3154,20 @@ menuButton.onclick = () => {
 // A tap outside the menu closes it, and so does Escape. Both are capture-phase
 // so a control inside the menu still receives its own click first.
 document.addEventListener('pointerdown', event => {
-  if (menu.classList.contains('hidden')) return;
-  if (menu.contains(event.target) || menuButton.contains(event.target)) return;
-  closeMenu();
+  if (activeSessionPress && activeSessionPress.pointerId !== event.pointerId) cancelSessionPress();
+  if (!menu.classList.contains('hidden') && !menu.contains(event.target) && !menuButton.contains(event.target)) {
+    closeMenu();
+  }
+  if (openSessionMenuId) {
+    const card = sessionCards.get(openSessionMenuId);
+    if (!card?.contains(event.target)) closeSessionMenu();
+  }
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') closeMenu();
+  if (event.key === 'Escape') {
+    closeMenu();
+    closeSessionMenu();
+  }
 });
 
 menu.onclick = event => {
@@ -2842,8 +3282,16 @@ async function runSessionAction(dataset, errorNode, extra) {
 }
 
 sessions.onclick = async e => {
+  const menuTrigger = e.target.closest('button[data-session-menu]');
+  if (menuTrigger) {
+    e.preventDefault();
+    e.stopPropagation?.();
+    openSessionMenu(menuTrigger.dataset.sessionMenu, menuTrigger, true);
+    return;
+  }
   const target = e.target.closest('button[data-action]');
   if (target) {
+    closeSessionMenu();
     await runSessionAction(target.dataset, actionError);
     return;
   }
@@ -2851,6 +3299,21 @@ sessions.onclick = async e => {
 };
 
 sessions.onkeydown = handleSessionCardKeydown;
+sessions.addEventListener('keydown', handleSessionMenuKeydown);
+sessions.addEventListener('pointerdown', beginSessionPress);
+sessions.addEventListener('pointerup', cancelSessionPress);
+sessions.addEventListener('pointercancel', cancelSessionPress);
+sessions.addEventListener('scroll', cancelSessionPress, { passive: true });
+document.addEventListener('scroll', cancelSessionPress, { capture: true, passive: true });
+document.addEventListener('pointermove', moveSessionPress, { capture: true });
+document.addEventListener('pointerup', cancelSessionPress, { capture: true });
+document.addEventListener('pointercancel', cancelSessionPress, { capture: true });
+sessions.addEventListener('contextmenu', event => {
+  const card = sessionCardFromTarget(event.target);
+  if (!card || !card._session || !sessionMenuActions(card._session).length) return;
+  event.preventDefault();
+  openSessionMenu(card.dataset.sessionId, card._menuTrigger);
+});
 
 resumable.onclick = async e => {
   const target = e.target.closest('button[data-action]');
@@ -3110,6 +3573,10 @@ window.addEventListener('offline', () => setConnection('offline'));
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && navigator.onLine) reconnect();
 });
+// Clocks are presentation-only updates.  The keyed card nodes remain mounted
+// so focus, an open menu, and an in-progress pointer gesture survive each
+// tick.
+window.setInterval(updateSessionClocks, 1000);
 if ('serviceWorker' in navigator) {
   // A registration that fails means the application is not installable, and
   // nothing more. Left uncaught it is an unhandled rejection, which is exactly

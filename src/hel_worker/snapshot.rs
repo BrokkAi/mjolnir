@@ -351,6 +351,9 @@ pub struct RelayCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
     pub session_id: String,
+    /// Start of the current observed idle period; older workers leave it unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since_ms: Option<i64>,
     pub execution: RelayExecutionState,
     pub latest_ordinal: u64,
     pub latest_digest: String,
@@ -670,6 +673,10 @@ pub(crate) struct HandledRelayCommand {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RelaySnapshot {
     pub(crate) format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) idle_since_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activity_was_idle: Option<bool>,
     pub(crate) session_id: String,
     pub(crate) execution: RelayExecutionState,
     pub(crate) latest_ordinal: u64,
@@ -709,6 +716,8 @@ impl RelaySnapshot {
     pub(crate) fn new(session_id: String) -> Self {
         Self {
             format_version: RELAY_STATE_VERSION,
+            idle_since_ms: None,
+            activity_was_idle: None,
             session_id,
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
@@ -742,6 +751,7 @@ impl RelaySnapshot {
     pub(crate) fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
             session_id: self.session_id.clone(),
+            idle_since_ms: self.idle_since_ms,
             execution: self.execution,
             latest_ordinal: self.latest_ordinal,
             latest_digest: self.latest_digest.clone(),

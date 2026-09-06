@@ -17,8 +17,8 @@ use mj_controller::hel_controller::{Controller, SessionLaunchOptions};
 use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_server::{
     ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, PreflightFailure,
-    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerQueuedPrompt, ViewerQuota,
-    ViewerSnapshot, ViewerUserShell,
+    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerActivityDetails,
+    ViewerActivityKind, ViewerQueuedPrompt, ViewerQuota, ViewerSnapshot, ViewerUserShell,
 };
 use mj_controller::hel_session_manager::{
     SessionManagerChannels, SessionManagerControl, new_command_id,
@@ -731,6 +731,7 @@ pub(crate) async fn run_server(
     let mut pending_elicitations = std::collections::BTreeMap::new();
     let mut prompt_images = std::collections::BTreeSet::new();
     let mut operational = std::collections::BTreeMap::new();
+    let mut materialized_activity = load_materialized_activity(&controller).await?;
     let mut operations = std::collections::BTreeMap::new();
     let mut launch_failures = Vec::new();
     // What the capacity poller last said, per probe target. The projection is
@@ -751,6 +752,7 @@ pub(crate) async fn run_server(
             pending_elicitations: &pending_elicitations,
             prompt_images: &prompt_images,
             operational: &operational,
+            materialized_activity: &materialized_activity,
             operations: &operations,
             capacity: &viewer_capacity(&capacity_state),
             launch_failures: &launch_failures,
@@ -893,6 +895,7 @@ pub(crate) async fn run_server(
                         pending_elicitations: &pending_elicitations,
                         prompt_images: &prompt_images,
                         operational: &operational,
+                        materialized_activity: &materialized_activity,
                         operations: &operations,
                         capacity: &viewer_capacity(&capacity_state),
                         launch_failures: &launch_failures,
@@ -1048,6 +1051,10 @@ pub(crate) async fn run_server(
                     if let Some(snapshot) = update.view.snapshot {
                         let materialized = snapshot.materialized;
                         let operational_state = snapshot.operational;
+                        materialized_activity.insert(
+                            update.session_id.clone(),
+                            materialized.last_activity_at_ms,
+                        );
                         let queued = queued_prompt_projection(&materialized);
                         let pending = materialized.pending_elicitations.clone();
                         let active_shells = operational_state.active_user_shells.clone();
@@ -1599,6 +1606,7 @@ pub(crate) async fn run_server(
                                 pending_elicitations: &pending_elicitations,
                                 prompt_images: &prompt_images,
                                 operational: &operational,
+                                materialized_activity: &materialized_activity,
                                 operations: &operations,
                                 capacity: &viewer_capacity(&capacity_state),
                                 launch_failures: &launch_failures,
@@ -1729,6 +1737,9 @@ pub(crate) async fn run_server(
                                 controller.state.sessions.contains_key(session_id)
                             });
                             operational.retain(|session_id, _| {
+                                controller.state.sessions.contains_key(session_id)
+                            });
+                            materialized_activity.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)
                             });
                             // A reload is the moment the controller's own view
@@ -2331,6 +2342,10 @@ struct PhoneSessionViews<'a> {
     /// projection learns what the agent can do, rather than guessing from the
     /// durable record, which knows only what was configured.
     operational: &'a std::collections::BTreeMap<String, hel::hel_worker::RelayOperationalState>,
+    /// Durable activity watermarks delivered with the materialized worker
+    /// snapshots. Keeping this in the control-loop cache avoids a database
+    /// read while rendering each viewer snapshot.
+    materialized_activity: &'a std::collections::BTreeMap<String, Option<i64>>,
     /// Lifecycle operations running now, keyed by session.
     operations: &'a std::collections::BTreeMap<String, mj_controller::hel_server::ViewerOperation>,
     /// The most recent capacity reading per probe target.
@@ -2685,6 +2700,7 @@ fn viewer_snapshot(
         pending_elicitations,
         prompt_images,
         operational,
+        materialized_activity,
         operations,
         capacity,
         launch_failures,
@@ -2737,6 +2753,7 @@ fn viewer_snapshot(
         });
     }
     for session in &mut snapshot.sessions {
+        session.last_activity_at_ms = materialized_activity.get(&session.id).copied().flatten();
         session.queued_prompts = queued_prompts
             .get(&session.id)
             .into_iter()
@@ -2797,13 +2814,18 @@ fn viewer_snapshot(
             session.config_options = viewer_config_options(state);
             // The same three states the terminal's expanded row shows, from
             // the same helper, so the phone never disagrees with it.
-            let turn_started_at = state
+            let turn_started_at_ms = state
                 .active_prompt
                 .as_ref()
                 .map(|prompt| prompt.started_at_ms)
-                .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms))
-                .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok());
+                .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms));
+            let turn_started_at = turn_started_at_ms
+                .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
+                .map(|started_at_ms| started_at_ms / 1_000);
             let activity = mj_chat::usage_format::SessionActivity::of(state);
+            let activity_details =
+                activity.details(turn_started_at_ms, state.current_step_started_at_ms);
+            session.activity_details = Some(viewer_activity_details(&activity_details));
             session.is_idle = controller
                 .state
                 .sessions
@@ -2863,6 +2885,56 @@ fn viewer_snapshot(
     }
     snapshot.capacity = capacity.to_vec();
     snapshot
+}
+
+fn viewer_activity_details(
+    details: &mj_chat::usage_format::SessionActivityDetails,
+) -> ViewerActivityDetails {
+    ViewerActivityDetails {
+        kind: match details.kind {
+            mj_chat::usage_format::SessionActivityKind::Turn => ViewerActivityKind::Turn,
+            mj_chat::usage_format::SessionActivityKind::Step => ViewerActivityKind::Step,
+            mj_chat::usage_format::SessionActivityKind::Background => {
+                ViewerActivityKind::Background
+            }
+            mj_chat::usage_format::SessionActivityKind::Idle => ViewerActivityKind::Idle,
+            mj_chat::usage_format::SessionActivityKind::Lifecycle => ViewerActivityKind::Lifecycle,
+        },
+        turn_started_at_ms: details.turn_started_at_ms,
+        step_started_at_ms: details.step_started_at_ms,
+        background_started_at_ms: details.background_started_at_ms,
+        idle_since_ms: details.idle_since_ms,
+        label: details.label.clone(),
+    }
+}
+
+/// Seed the viewer's in-memory activity cache from the durable projection
+/// before publishing its first snapshot. Later worker snapshots update this
+/// cache without adding a database read to the render path.
+async fn load_materialized_activity(
+    controller: &Controller,
+) -> Result<std::collections::BTreeMap<String, Option<i64>>> {
+    let session_ids = controller
+        .state
+        .sessions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        session_ids
+            .into_iter()
+            .map(|session_id| {
+                hel::hel_database::load_materialized_session_summary(&session_id).map(|summary| {
+                    (
+                        session_id,
+                        summary.and_then(|summary| summary.last_activity_at_ms),
+                    )
+                })
+            })
+            .collect()
+    })
+    .await
+    .context("materialized activity startup task failed")?
 }
 
 #[cfg(test)]
@@ -3040,6 +3112,7 @@ mod tests {
 
         let operational = |agent_capabilities| RelayOperationalState {
             session_id: "session-1".into(),
+            idle_since_ms: None,
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
             latest_digest: String::new(),
@@ -3098,6 +3171,7 @@ mod tests {
         controller.state.sessions.insert(record.id.clone(), record);
         let operational = RelayOperationalState {
             session_id: "session-1".into(),
+            idle_since_ms: None,
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
             latest_digest: String::new(),
@@ -3138,6 +3212,8 @@ mod tests {
             background_commands: Vec::new(),
         };
         let mut operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
+        let materialized_activity =
+            std::collections::BTreeMap::from([("session-1".into(), Some(7_777_i64))]);
         let project = |operational: &std::collections::BTreeMap<String, RelayOperationalState>| {
             viewer_snapshot(
                 &controller,
@@ -3150,6 +3226,7 @@ mod tests {
                     pending_elicitations: &std::collections::BTreeMap::new(),
                     prompt_images: &std::collections::BTreeSet::new(),
                     operational,
+                    materialized_activity: &materialized_activity,
                     operations: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
@@ -3160,6 +3237,20 @@ mod tests {
         };
         let snapshot = project(&operational);
         let session = &snapshot.sessions[0];
+
+        assert_eq!(session.display_location, "podman");
+        assert_eq!(session.last_activity_at_ms, Some(7_777));
+        assert_eq!(
+            session.activity_details,
+            Some(mj_controller::hel_server::ViewerActivityDetails {
+                kind: ViewerActivityKind::Idle,
+                turn_started_at_ms: None,
+                step_started_at_ms: None,
+                background_started_at_ms: None,
+                idle_since_ms: None,
+                label: None,
+            })
+        );
 
         assert!(session.capabilities.prompt);
         assert!(session.capabilities.set_plan_mode);
@@ -3208,6 +3299,7 @@ mod tests {
         let unknown = project(&std::collections::BTreeMap::new());
         assert!(!unknown.sessions[0].is_idle);
         assert!(unknown.sessions[0].activity.is_empty());
+        assert!(unknown.sessions[0].activity_details.is_none());
     }
 
     #[test]
@@ -3602,6 +3694,7 @@ mod tests {
                     pending_elicitations: &std::collections::BTreeMap::new(),
                     prompt_images: &std::collections::BTreeSet::new(),
                     operational: &std::collections::BTreeMap::new(),
+                    materialized_activity: &std::collections::BTreeMap::new(),
                     operations: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
@@ -3677,6 +3770,7 @@ mod tests {
                 pending_elicitations: &std::collections::BTreeMap::new(),
                 prompt_images: &std::collections::BTreeSet::new(),
                 operational: &std::collections::BTreeMap::new(),
+                materialized_activity: &std::collections::BTreeMap::new(),
                 operations: &std::collections::BTreeMap::new(),
                 capacity: &[],
                 launch_failures: &failures,

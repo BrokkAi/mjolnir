@@ -103,3 +103,8 @@ start for a model cache miss or Refresh. Choices arrived through Help, Save
 closed during Refresh, and offline Refresh retained choices while Save worked.
 The CLI SHA-256 is
 `6fddeb49a422b9f1d13b518c46c48f301d4761765c8e7729696ac91e00f0853f`.
+
+After merging upstream clipboard and session-card changes through d71601b4,
+seed 520 passed all 79 checks at
+`target/reliability-artifacts/tui-components-seed-520-3510340/`. Its CLI SHA-256
+is `9b93b9bb230e2fa64071fe4305dc55df76d910bc508cc3d7d6086f07b7c81553`.

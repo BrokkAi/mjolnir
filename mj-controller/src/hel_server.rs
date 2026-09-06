@@ -305,6 +305,10 @@ pub async fn run_server(options: ServerOptions) -> AnyResult<()> {
 pub struct ViewerSnapshot {
     pub revision: u64,
     pub generated_at: String,
+    /// Unix time in milliseconds, refreshed when serving the projection.
+    /// Clients use this as the clock for live activity cards.
+    #[serde(default)]
+    pub server_time_ms: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<ViewerWorkspace>,
     pub sessions: Vec<ViewerSession>,
@@ -377,8 +381,11 @@ impl ViewerSnapshot {
                         .collect(),
                     project_label: session.project_name(config),
                     project_key: project_key(&session.project_source(config).key),
+                    display_location: session.project_target(config, &session.target_template_id),
                     lifecycle,
                     latest_event_ordinal: 0,
+                    last_activity_at_ms: None,
+                    activity_details: None,
                     activity: String::new(),
                     operation: None,
                     chat_phase: ViewerChatPhase::default(),
@@ -455,6 +462,7 @@ impl ViewerSnapshot {
         Self {
             revision,
             generated_at: now_unix().to_string(),
+            server_time_ms: hel::clock::epoch_millis(),
             workspaces: Vec::new(),
             sessions,
             profiles,
@@ -539,12 +547,25 @@ pub struct ViewerSession {
     /// digest of it: enough to group by, and nothing to read.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project_key: String,
+    /// The configured target's human-facing project location. This is the
+    /// same target projection the terminal uses while a session is running.
+    #[serde(default)]
+    pub display_location: String,
     pub lifecycle: ViewerLifecycleCategory,
     /// How far the controller's projection of this session has advanced. A
     /// phone compares it against its own read frontier to know what is unread,
     /// without fetching a transcript to find out.
     #[serde(default)]
     pub latest_event_ordinal: u64,
+    /// Durable relay receipt watermark from the materialized projection.
+    /// It remains absent when the background snapshot pipeline has not yet
+    /// delivered a projection for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_ms: Option<i64>,
+    /// Structured live activity, absent when no operational relay snapshot is
+    /// available for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_details: Option<ViewerActivityDetails>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<ViewerOperation>,
     #[serde(default)]
@@ -573,6 +594,35 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_commands: Vec<ViewerMjCommand>,
     pub capabilities: ViewerSessionCapabilities,
+}
+
+/// Structured live activity for a session card. The timestamps are epoch
+/// milliseconds and are deliberately optional: old workers can identify a
+/// state without carrying the corresponding clock data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerActivityDetails {
+    pub kind: ViewerActivityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewerActivityKind {
+    Turn,
+    Step,
+    Background,
+    Idle,
+    Lifecycle,
 }
 
 /// One Mjolnir command a phone may offer for this session.
@@ -1513,7 +1563,11 @@ async fn clear_session(State(state): State<ServerState>) -> Response<Body> {
 }
 
 async fn snapshot(State(state): State<ServerState>) -> Response<Body> {
-    let mut response = Json(state.snapshot_rx.borrow().clone()).into_response();
+    let mut projection = state.snapshot_rx.borrow().clone();
+    // A quiet session can keep the same projection for hours. Clock anchors
+    // describe response time, not the last time that projection changed.
+    projection.server_time_ms = hel::clock::epoch_millis();
+    let mut response = Json(projection).into_response();
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -5127,6 +5181,29 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         assert_eq!(repository["github"], "owner/hel");
         assert_eq!(repository["destination"], "hel");
         assert!(repository.get("local").is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed() {
+        let (app, _, _, _, _) = app_with_snapshot(|snapshot| snapshot.server_time_ms = 1);
+        let cookie = login_cookie(&app).await;
+        for _ in 0..2 {
+            let before = hel::clock::epoch_millis();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/api/snapshot")
+                        .header(COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let snapshot: ViewerSnapshot = serde_json::from_slice(&body).unwrap();
+            assert!(snapshot.server_time_ms >= before);
+            assert!(snapshot.server_time_ms <= hel::clock::epoch_millis());
+        }
     }
 
     #[tokio::test]

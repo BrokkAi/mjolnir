@@ -4179,6 +4179,47 @@ mod tests {
     }
 
     #[test]
+    fn empty_terminal_paste_requests_clipboard_and_accepts_an_image() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("describe ".into());
+        assert_eq!(
+            chat.handle_terminal_paste(""),
+            ChatAction::PasteFromClipboard
+        );
+        assert_eq!(chat.input, "describe ");
+
+        let image = test_image();
+        chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
+        assert_eq!(chat.input, "describe [image 1]");
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Prompt("describe [image 1]".into())
+        );
+        assert_eq!(chat.take_submitting_images()[0].image, image);
+    }
+
+    #[test]
+    fn terminal_text_paste_does_not_request_the_clipboard() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        for text in ["hello", " \t\n", "world"] {
+            assert_eq!(chat.handle_terminal_paste(text), ChatAction::None);
+        }
+        assert_eq!(chat.input, "hello \t\nworld");
+        chat.handle_clipboard_content(ClipboardContent::Text(String::new()));
+        assert_eq!(chat.input, "hello \t\nworld");
+    }
+
+    #[test]
+    fn empty_terminal_paste_respects_the_config_picker() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[select_config_option("model", "small", &["small", "large"])]);
+        assert!(chat.open_config_picker("model"));
+        assert_eq!(chat.handle_terminal_paste(""), ChatAction::None);
+        assert!(chat.input.is_empty());
+        assert!(chat.config_picker_active());
+    }
+
+    #[test]
     fn ctrl_v_returns_paste_request_action() {
         let mut chat = ChatState::new(&snapshot(), &[]);
 

@@ -211,16 +211,141 @@ button:disabled {
   color: var(--failed);
 }
 
-.session p {
-  margin: 6px 0;
+.session {
+  position: relative;
+  padding: 10px 12px;
 }
 
-.preview {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  border-left: 2px solid var(--border-strong);
-  padding-left: 10px;
+.session[data-openable='true'] {
+  cursor: pointer;
+}
+
+.session-title-row,
+.session-meta,
+.session-activity {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.session-title-row {
+  gap: 6px;
+  min-height: 36px;
+}
+
+.session-title-row h3 {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+}
+
+.session-attention {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: var(--failed);
+}
+
+.session-attention-item {
+  display: inline-grid;
+  place-items: center;
+  width: 1.25em;
+  height: 1.25em;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--running);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.session-attention-item.alert {
+  border-color: var(--failed);
+  color: var(--failed);
+}
+
+.session-menu-trigger {
+  flex: 0 0 36px;
+  width: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  height: 36px;
+  padding: 0;
+  background: transparent;
   color: var(--dim);
+  border-color: transparent;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.session-menu-trigger:hover,
+.session-menu-trigger:focus-visible {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+.session-menu {
+  position: absolute;
+  z-index: 5;
+  top: 52px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 190px;
+  padding: 6px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+
+.session-menu button {
+  width: 100%;
+  text-align: left;
+}
+
+.session-meta {
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.session-location,
+.session-profile {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-location {
+  flex: 1 1 auto;
+}
+
+.session-profile {
+  flex: 0 1 42%;
+  text-align: right;
+}
+
+.session-activity {
+  gap: 8px;
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: var(--dim);
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-activity::before {
+  content: '•';
+  color: var(--border-strong);
 }
 
 /* ---- transcript ---- */
@@ -807,35 +932,6 @@ details.block-fold > pre {
   letter-spacing: 0.04em;
 }
 
-.session-status {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-.state-glyph {
-  margin-right: 4px;
-}
-
-.pill.state-live {
-  color: var(--done);
-  border-color: var(--done);
-}
-.pill.state-starting,
-.pill.state-stopping {
-  color: var(--running);
-  border-color: var(--running);
-}
-.pill.state-failed {
-  color: var(--failed);
-  border-color: var(--failed);
-}
-
-.session-operation {
-  color: var(--running);
-}
-
 .field {
   display: flex;
   flex-direction: column;
@@ -1009,19 +1105,6 @@ article > h3 {
   gap: 8px;
   align-items: baseline;
   justify-content: space-between;
-}
-
-/* Session titles are currently text nodes, so making their heading a flex
- * container creates an anonymous flex item whose min-content width is the
- * entire (possibly unbroken) title. Keep the full text in the DOM for
- * assistive technology, while bounding its visual representation to three
- * lines. Other article headings use flex for their status pills. */
-.session > h3 {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-  overflow-wrap: anywhere;
 }
 
 /* ---- the conversation screen ----
@@ -1229,24 +1312,10 @@ body[data-connection='reconnecting'] .connection::before {
 
 /* ---- interactive session cards, compact queue, and paperclip control ---- */
 
-/* A persistent chevron makes navigation discoverable on touch screens too. */
 .session[data-openable='true'] {
   position: relative;
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
-}
-
-.session[data-openable='true']::after {
-  content: '›';
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  color: var(--dim);
-  pointer-events: none;
-}
-
-.session[data-openable='true'] > h3 {
-  padding-right: 20px;
 }
 
 .session[data-openable='true']:hover {

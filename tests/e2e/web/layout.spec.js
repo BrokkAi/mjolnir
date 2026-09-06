@@ -55,13 +55,16 @@ test('a very long unbroken dashboard title stays bounded and remains readable', 
     `<style>${VIEWER_CSS}</style><main id="app"><div id="sessions"></div></main>`,
   );
   const metrics = await page.evaluate(longTitle => {
-    // Use the same article > h3 structure as sessionCard, but keep this
+    // Use the same title-row structure as sessionCard, but keep this
     // synthetic title local to the browser so no live session can remove it.
     const card = document.createElement('article');
     card.className = 'card session';
+    const titleRow = document.createElement('div');
+    titleRow.className = 'session-title-row';
     const heading = document.createElement('h3');
     heading.textContent = longTitle;
-    card.append(heading);
+    titleRow.append(heading);
+    card.append(titleRow);
     document.querySelector('#sessions').append(card);
 
     const style = getComputedStyle(heading);
@@ -69,7 +72,6 @@ test('a very long unbroken dashboard title stays bounded and remains readable', 
       documentWidth: document.documentElement.scrollWidth,
       viewportWidth: document.documentElement.clientWidth,
       headingWidth: heading.getBoundingClientRect().width,
-      headingScrollWidth: heading.scrollWidth,
       headingHeight: heading.getBoundingClientRect().height,
       lineHeight: Number.parseFloat(style.lineHeight),
       text: heading.textContent,
@@ -77,8 +79,7 @@ test('a very long unbroken dashboard title stays bounded and remains readable', 
   }, title);
 
   expect(metrics.documentWidth).toBeLessThanOrEqual(metrics.viewportWidth + 1);
-  expect(metrics.headingScrollWidth).toBeLessThanOrEqual(metrics.headingWidth + 1);
-  expect(metrics.headingHeight).toBeLessThanOrEqual(metrics.lineHeight * 3 + 1);
+  expect(metrics.headingHeight).toBeLessThanOrEqual(metrics.lineHeight + 1);
   expect(metrics.text).toBe(title);
   await expect(page.getByRole('heading', { name: title, exact: true })).toHaveCount(1);
 });

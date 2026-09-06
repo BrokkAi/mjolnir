@@ -1339,10 +1339,7 @@ impl ActiveChat {
     pub fn handle_event(&mut self, event: Event) -> ChatEventOutcome {
         let action = match event {
             Event::Key(key) => self.state.handle_key(key),
-            Event::Paste(pasted) => {
-                self.state.handle_paste(&pasted);
-                ChatAction::None
-            }
+            Event::Paste(pasted) => self.state.handle_terminal_paste(&pasted),
             Event::Mouse(mouse) => self.state.handle_mouse(mouse),
             // Resize and focus changes only need the redraw.
             _ => ChatAction::None,
@@ -2890,6 +2887,7 @@ mod tests {
                 latest_credential_sync_signal: None,
                 worker_build: None,
                 operational: hel::hel_worker::RelayOperationalState {
+                    idle_since_ms: None,
                     session_id,
                     execution: hel::hel_worker::RelayExecutionState::Idle,
                     latest_ordinal,
@@ -3958,6 +3956,7 @@ mod tests {
         assert!(prompt_title(&chat, 0).contains("Prompt"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            idle_since_ms: None,
             execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
@@ -3974,6 +3973,7 @@ mod tests {
         );
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            idle_since_ms: None,
             execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
