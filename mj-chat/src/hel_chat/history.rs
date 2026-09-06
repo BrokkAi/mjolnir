@@ -8,12 +8,13 @@ use ratatui::text::{Line, Span};
 use crate::hel_text_input::TextInput;
 use hel::hel_database::{HistoryScope, PromptHistoryEntry};
 
-use super::ChatState;
+use super::{ChatState, PromptPayload};
 
 #[derive(Debug, Clone)]
 pub(super) struct HistorySearch {
     original_input: String,
     original_cursor: usize,
+    original_images: Vec<super::PromptImage>,
     generation: u64,
     pub(super) query: TextInput,
     pub(super) scope: HistoryScope,
@@ -47,6 +48,7 @@ impl ChatState {
         {
             self.history_index = None;
             self.history_draft.clear();
+            self.history_draft_images.clear();
         }
     }
 
@@ -59,6 +61,7 @@ impl ChatState {
         self.history_search = Some(HistorySearch {
             original_input: self.input.clone(),
             original_cursor: self.input_cursor,
+            original_images: self.input_images.clone(),
             generation: self.next_history_search_generation,
             query: TextInput::new(),
             scope: HistoryScope::Project,
@@ -110,7 +113,11 @@ impl ChatState {
         if search.generation != generation {
             return;
         }
-        let original = (search.original_input.clone(), search.original_cursor);
+        let original = PromptPayload {
+            text: search.original_input.clone(),
+            images: search.original_images.clone(),
+        };
+        let original_cursor = search.original_cursor;
         match result {
             Ok(matches) => {
                 if let Some(search) = self.history_search.as_mut() {
@@ -124,16 +131,15 @@ impl ChatState {
                     .and_then(|search| search.matches.first())
                     .map(|entry| entry.text.clone())
                 {
-                    self.input_cursor = text.len();
-                    self.input = text;
+                    self.set_input(text);
                 } else {
-                    self.input = original.0;
-                    self.input_cursor = original.1;
+                    self.set_input_payload(original);
+                    self.input_cursor = original_cursor;
                 }
             }
             Err(error) => {
-                self.input = original.0;
-                self.input_cursor = original.1;
+                self.set_input_payload(original);
+                self.input_cursor = original_cursor;
                 self.history_search = None;
                 self.notices.set(format!("History unavailable: {error}"));
                 self.update_autocomplete();
@@ -186,8 +192,8 @@ impl ChatState {
             (current + 1).min(search.matches.len() - 1)
         };
         search.selected = Some(next);
-        self.input = search.matches[next].text.clone();
-        self.input_cursor = self.input.len();
+        let text = search.matches[next].text.clone();
+        self.set_input(text);
     }
 
     fn cycle_history_scope(&mut self) {
@@ -206,7 +212,10 @@ impl ChatState {
         let Some(search) = self.history_search.take() else {
             return;
         };
-        self.input = search.original_input;
+        self.set_input_payload(PromptPayload {
+            text: search.original_input,
+            images: search.original_images,
+        });
         self.input_cursor = search.original_cursor;
         self.update_autocomplete();
     }
@@ -269,6 +278,7 @@ impl ChatState {
         }
         self.history_index = None;
         self.history_draft.clear();
+        self.history_draft_images.clear();
     }
 
     fn navigation_history(&self) -> Vec<String> {
@@ -293,6 +303,7 @@ impl ChatState {
         let next = match (self.history_index, delta.is_negative()) {
             (None, true) => {
                 self.history_draft.clone_from(&self.input);
+                self.history_draft_images.clone_from(&self.input_images);
                 Some(history.len() - 1)
             }
             (None, false) => None,
@@ -301,10 +312,17 @@ impl ChatState {
             (Some(_), false) => None,
         };
         self.history_index = next;
-        let input = next
-            .and_then(|index| history.get(index).cloned())
-            .unwrap_or_else(|| self.history_draft.clone());
-        self.input = input;
+        if let Some(input) = next.and_then(|index| history.get(index).cloned()) {
+            // Stored history is text-only. Clear any tracked image ranges so
+            // attachments from the temporary draft cannot follow unrelated
+            // text into a submission.
+            self.set_input(input);
+        } else {
+            self.set_input_payload(PromptPayload {
+                text: self.history_draft.clone(),
+                images: self.history_draft_images.clone(),
+            });
+        }
         self.input_cursor = self.input.len();
         self.preferred_column = None;
         self.update_autocomplete();
@@ -423,6 +441,7 @@ mod tests {
     use super::*;
     use crate::hel_chat::ChatAction;
     use crate::hel_chat::test_support::{alt, ctrl, key, snapshot};
+    use crate::hel_clipboard::{ClipboardContent, ClipboardImage};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn apply_pending_history_search(chat: &mut ChatState) {
@@ -432,6 +451,16 @@ mod tests {
         let generation = request.generation;
         let result = ChatState::resolve_history_search_request(request);
         chat.apply_history_search_results(generation, result);
+    }
+
+    fn image_draft(chat: &mut ChatState) -> Vec<super::super::PromptImage> {
+        chat.set_input("unfinished".into());
+        chat.handle_clipboard_content(ClipboardContent::Image(ClipboardImage {
+            data_base64: "synthetic-png".into(),
+            mime_type: "image/png".into(),
+        }));
+        assert!(!chat.input_images.is_empty());
+        chat.input_images.clone()
     }
 
     #[test]
@@ -604,5 +633,42 @@ mod tests {
         );
         chat.handle_key(ctrl('c'));
         assert!(chat.history_search.is_none());
+    }
+
+    #[test]
+    fn cancelling_reverse_search_restores_inline_image_ranges() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let images = image_draft(&mut chat);
+        let draft = chat.input.clone();
+        chat.prompt_history = vec!["old history prompt".into()];
+
+        chat.handle_key(ctrl('r'));
+        chat.handle_key(key(KeyCode::Char('h')));
+        apply_pending_history_search(&mut chat);
+        assert!(chat.input_images.is_empty());
+
+        chat.handle_key(key(KeyCode::Esc));
+        assert_eq!(chat.input, draft);
+        assert_eq!(chat.input_images, images);
+    }
+
+    #[test]
+    fn history_navigation_restores_unsent_image_draft_and_clears_it_for_history() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let images = image_draft(&mut chat);
+        let draft = chat.input.clone();
+        chat.prompt_history = vec!["unrelated history prompt".into()];
+
+        chat.handle_key(key(KeyCode::Up));
+        assert_eq!(chat.input, "unrelated history prompt");
+        assert!(chat.input_images.is_empty());
+
+        chat.handle_key(key(KeyCode::Down));
+        assert_eq!(chat.input, draft);
+        assert_eq!(chat.input_images, images);
+
+        chat.handle_key(key(KeyCode::Up));
+        assert_eq!(chat.input, "unrelated history prompt");
+        assert!(chat.input_images.is_empty());
     }
 }
