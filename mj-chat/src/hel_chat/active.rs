@@ -2644,7 +2644,7 @@ fn background_work_label(chat: &ChatState) -> Option<String> {
             super::transcript::compact_terminal_command(&oldest.command)
         )
     } else {
-        format!("Background: {} commands, oldest {elapsed}", commands.len())
+        format!("Background: {} tasks, oldest {elapsed}", commands.len())
     })
 }
 
@@ -3866,7 +3866,7 @@ mod tests {
             active_user_shells: Vec::new(),
         });
         assert!(
-            prompt_title(&chat, 0).contains("Background: 2 commands, oldest 43m36s"),
+            prompt_title(&chat, 0).contains("Background: 2 tasks, oldest 43m36s"),
             "{}",
             prompt_title(&chat, 0)
         );
