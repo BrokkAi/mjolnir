@@ -3014,6 +3014,7 @@ fn hex(bytes: &[u8]) -> String {
 pub struct ReplacementSessionTestFixture {
     pub stopped: ManagedSessionHandle,
     pub control: SessionManagerControl,
+    pub submitted: mpsc::UnboundedReceiver<RelayCommand>,
 }
 
 /// A stopped actor and a manager that resolves its live replacement. Chat
@@ -3047,11 +3048,15 @@ pub fn replacement_session_test_fixture(
         view,
     };
     let actor_session_id = session_id.to_owned();
+    let (submitted_tx, submitted) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         let _view_tx = view_tx;
         while let Some(command) = commands_rx.recv().await {
             match command {
-                ActorCommand::Submit { reply, .. } => {
+                ActorCommand::Submit { command, reply, .. } => {
+                    // Tests can drop the optional observer when they only
+                    // care about acceptance/reconnection.
+                    let _ = submitted_tx.send(command);
                     let _ = reply.send(Ok(accepted_ordinal));
                 }
                 ActorCommand::Sync { reply } => {
@@ -3077,6 +3082,7 @@ pub fn replacement_session_test_fixture(
     });
     ReplacementSessionTestFixture {
         stopped,
+        submitted,
         control: SessionManagerControl {
             commands: manager_commands,
         },

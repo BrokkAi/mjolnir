@@ -8,6 +8,7 @@
 //! to all of them.
 
 mod active;
+mod attachments;
 mod autocomplete;
 mod config_picker;
 mod elicitation;
@@ -26,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, SessionConfigOption, SessionModeState, SessionUpdate,
+    AvailableCommand, ContentBlock, SessionConfigOption, SessionModeState, SessionUpdate,
 };
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
@@ -35,6 +36,7 @@ use crossterm::event::{
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 
+use crate::hel_clipboard::{ClipboardContent, ClipboardImage};
 use crate::hel_selection::{FrameSurfaces, SelectionRange};
 use hel::clock::epoch_seconds;
 pub use hel::hel_acp::PlanControl;
@@ -80,12 +82,13 @@ const MOUSE_SCROLL_ROWS: usize = 3;
 
 pub use active::{ActiveChat, ChatDaemonRequest};
 pub use second_opinion::SecondOpinionIntent as SecondOpinionRequest;
-use transcript::materialized_content_text;
 pub use transcript::{
     TAIL_SEED_ITEMS, TranscriptSnapshot, format_event_time, render_agent_message_head,
     render_agent_message_tail,
 };
 pub use turn_review::TurnReviewIntent as TurnReviewRequest;
+
+pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 
 /// What `/review status` reports, on every surface.
 ///
@@ -245,6 +248,11 @@ struct QueuedPrompt {
     id: String,
     text: String,
     kind: QueuedCommandKind,
+    images: Vec<PromptImage>,
+    /// The durable queue contained an image we cannot safely materialize for
+    /// terminal editing. Keep the entry visible and refuse an edit instead of
+    /// silently dropping that content.
+    attachments_unsupported: bool,
 }
 
 /// A submit the relay refused. The relay never saw it, so it is never
@@ -252,19 +260,26 @@ struct QueuedPrompt {
 /// draws it at the end of the transcript. The notice that reports the same
 /// failure is transient, and a user who was away would otherwise believe the
 /// prompt had been sent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct UnsentPrompt {
     kind: UnsentKind,
-    /// Exactly what was submitted, so accepting the same text later clears
-    /// this record.
-    text: String,
+    #[serde(flatten)]
+    payload: PromptPayload,
     error: String,
     recorded_at_ms: i64,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedChatDraft {
+    #[serde(flatten)]
+    composer: PromptPayload,
+    #[serde(default)]
+    unsent: Vec<UnsentPrompt>,
+}
+
 /// Which submit an [`UnsentPrompt`] stands for. A prompt and a shell command
 /// can carry the same text and are cleared independently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum UnsentKind {
     Prompt,
     Shell,
@@ -283,14 +298,20 @@ impl UnsentKind {
 impl UnsentPrompt {
     /// The transcript row for this record.
     fn entry(&self, seq: u64) -> ChatEntry {
+        let attachment = if self.payload.images.is_empty() {
+            ""
+        } else {
+            "\nEmpty the composer, then Ctrl-Alt-R to restore the latest unsent prompt"
+        };
         let mut entry = ChatEntry::plain(
             seq,
             ChatRole::System,
             format!(
-                "{}: {}\n{}",
+                "{}: {}\n{}{}",
                 self.kind.headline(),
                 self.error,
-                queued_prompt_preview(&self.text)
+                queued_prompt_preview(&self.payload.text),
+                attachment,
             ),
         );
         entry.recorded_at_ms = Some(self.recorded_at_ms);
@@ -309,7 +330,11 @@ impl QueuedPrompt {
     /// The label shown above the composer. A queued configuration change is
     /// marked so it is never mistaken for a prompt waiting to be sent.
     fn queue_label(&self) -> &'static str {
-        if self.kind.is_prompt() {
+        if self.kind.is_prompt() && self.attachments_unsupported {
+            "queued attachments"
+        } else if self.kind.is_prompt() && !self.images.is_empty() {
+            "queued image"
+        } else if self.kind.is_prompt() {
             "queued"
         } else {
             "queued config"
@@ -366,6 +391,12 @@ pub struct ChatState {
     transcript_loading: bool,
     input: String,
     input_cursor: usize,
+    /// Image bytes belong to tracked marker ranges in the composer text.
+    input_images: Vec<PromptImage>,
+    next_image_number: u64,
+    /// Moved out of `input_images` while the remote submit is in flight, so a
+    /// failed submission can restore the images alongside their text.
+    submitting_images: Vec<PromptImage>,
     /// Stored prompts from other sessions in this project, oldest-first.
     project_history: Vec<String>,
     /// Stored prompts from this session, oldest-first.
@@ -374,7 +405,9 @@ pub struct ChatState {
     prompt_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
+    history_draft_images: Vec<PromptImage>,
     kill_buffer: String,
+    kill_images: Vec<PromptImage>,
     /// Set by Ctrl-K so the next Ctrl-K appends instead of replacing.
     chain_kill: bool,
     preferred_column: Option<usize>,
@@ -389,6 +422,9 @@ pub struct ChatState {
     /// snapshot can still contain one until its removal command is projected,
     /// so keep its identity hidden across those stale snapshots.
     pending_queue_removals: BTreeSet<String>,
+    /// Images peeled back from queued prompts while their removal command is
+    /// still in flight. Keeping them by queue id makes a failed removal exact.
+    pending_queue_images: BTreeMap<String, Vec<PromptImage>>,
     active_user_shells: Vec<String>,
     active_agent_terminals: Vec<ActiveAgentTerminal>,
     claimed_agent_terminals: BTreeMap<String, i64>,
@@ -496,13 +532,18 @@ impl ChatState {
             transcript_loading: false,
             input: String::new(),
             input_cursor: 0,
+            input_images: Vec::new(),
+            next_image_number: 1,
+            submitting_images: Vec::new(),
             project_history: Vec::new(),
             session_history: Vec::new(),
             project_history_error: None,
             prompt_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
+            history_draft_images: Vec::new(),
             kill_buffer: String::new(),
+            kill_images: Vec::new(),
             chain_kill: false,
             preferred_column: None,
             history_search: None,
@@ -511,6 +552,7 @@ impl ChatState {
             queued_prompts: VecDeque::new(),
             unsent_prompts: Vec::new(),
             pending_queue_removals: BTreeSet::new(),
+            pending_queue_images: BTreeMap::new(),
             active_user_shells: Vec::new(),
             active_agent_terminals: Vec::new(),
             claimed_agent_terminals: BTreeMap::new(),
@@ -567,6 +609,8 @@ impl ChatState {
                 id: prompt.id.clone(),
                 text: prompt.text.clone(),
                 kind: QueuedCommandKind::Prompt,
+                images: Vec::new(),
+                attachments_unsupported: false,
             })
             .collect();
         state.latest_seq = state.latest_seq.max(snapshot.latest_seq);
@@ -696,14 +740,22 @@ impl ChatState {
             .collect::<BTreeSet<_>>();
         self.pending_queue_removals
             .retain(|id| projected_queue_ids.contains(id.as_str()));
+        self.pending_queue_images
+            .retain(|id, _| projected_queue_ids.contains(id.as_str()));
         self.queued_prompts = session
             .queued_prompts
             .iter()
             .filter(|prompt| !self.pending_queue_removals.contains(&prompt.command_id))
-            .map(|prompt| QueuedPrompt {
-                id: prompt.command_id.clone(),
-                text: materialized_content_text(&prompt.content),
-                kind: prompt.kind.clone(),
+            .map(|prompt| {
+                let (payload, attachments_unsupported) =
+                    materialized_content_prompt(&prompt.content);
+                QueuedPrompt {
+                    id: prompt.command_id.clone(),
+                    text: payload.text,
+                    kind: prompt.kind.clone(),
+                    images: payload.images,
+                    attachments_unsupported,
+                }
             })
             .collect();
         self.set_config_options(config_options);
@@ -1159,10 +1211,7 @@ impl ChatState {
                 .map(|prompt| MaterializedQueuedPrompt {
                     command_id: prompt.id.clone(),
                     kind: prompt.kind.clone(),
-                    content: vec![serde_json::json!({
-                        "type": "text",
-                        "text": prompt.text,
-                    })],
+                    content: prompt_content_blocks(&prompt.text, &prompt.images),
                     queued_at_ms: 0,
                 })
                 .collect(),
@@ -1219,6 +1268,7 @@ impl ChatState {
         self.prompt_history.clear();
         self.history_index = None;
         self.history_draft.clear();
+        self.history_draft_images.clear();
         self.preferred_column = None;
         self.history_search = None;
         self.queued_prompts.clear();
@@ -1229,10 +1279,24 @@ impl ChatState {
         self.render_mode = TranscriptRenderMode::Rich;
         self.notices.clear();
         self.voice_active = false;
+        self.submitting_images.clear();
     }
 
     fn set_input(&mut self, input: String) {
-        self.input = input;
+        self.set_input_payload(PromptPayload::text(input));
+    }
+
+    fn set_input_payload(&mut self, payload: PromptPayload) {
+        self.next_image_number = self.next_image_number.max(
+            payload
+                .images
+                .iter()
+                .map(|image| image.number.saturating_add(1))
+                .max()
+                .unwrap_or(1),
+        );
+        self.input = payload.text;
+        self.input_images = payload.images;
         self.input_cursor = self.input.len();
         self.history_index = None;
         self.preferred_column = None;
@@ -1249,15 +1313,145 @@ impl ChatState {
         if draft.is_empty() {
             return;
         }
-        self.set_input(draft);
+        match PromptPayload::decode_draft(&draft) {
+            Ok(payload) => {
+                self.set_input_payload(payload);
+                if let Some(body) = draft.strip_prefix(CHAT_DRAFT_PREFIX) {
+                    match serde_json::from_str::<SavedChatDraft>(body) {
+                        Ok(saved) => self.unsent_prompts = saved.unsent,
+                        Err(error) => {
+                            self.set_notice(format!("Could not restore unsent drafts: {error}"))
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "saved chat draft could not be decoded");
+                let fallback = draft
+                    .strip_prefix(CHAT_DRAFT_PREFIX)
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+                    .and_then(|value| {
+                        value
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default();
+                self.set_input(fallback);
+                self.set_notice(format!("Saved image draft was discarded: {error}"));
+            }
+        }
+    }
+
+    pub(super) fn handle_clipboard_content(&mut self, content: ClipboardContent) {
+        if self.elicitation.is_some() {
+            match content {
+                ClipboardContent::Text(text) => self.handle_paste(&text),
+                ClipboardContent::Image(_) => {
+                    self.set_notice("Image paste is unavailable in a text answer field")
+                }
+            }
+            return;
+        }
+        if self.history_search.is_some() {
+            match content {
+                ClipboardContent::Text(text) => self.handle_paste(&text),
+                ClipboardContent::Image(_) => {
+                    self.set_notice("Image paste is unavailable while searching history")
+                }
+            }
+            return;
+        }
+        match content {
+            ClipboardContent::Text(text) => self.handle_paste(&text),
+            ClipboardContent::Image(image) => {
+                self.input_cursor = attachments::insert_image(
+                    &mut self.input,
+                    &mut self.input_images,
+                    self.input_cursor,
+                    self.next_image_number,
+                    image,
+                );
+                self.next_image_number += 1;
+                self.history_index = None;
+                self.preferred_column = None;
+                self.update_autocomplete();
+                self.set_notice("Image pasted · Backspace removes its marker");
+            }
+        }
+    }
+
+    pub(super) fn clipboard_is_text_only(&self) -> bool {
+        self.elicitation.is_some() || self.history_search.is_some()
+    }
+
+    pub(super) fn take_submitting_images(&mut self) -> Vec<PromptImage> {
+        std::mem::take(&mut self.submitting_images)
+    }
+
+    pub(super) fn draft_payload(&self) -> PromptPayload {
+        PromptPayload {
+            text: self.input.clone(),
+            images: self.input_images.clone(),
+        }
+    }
+
+    fn encoded_draft(&self) -> String {
+        if self.unsent_prompts.is_empty() {
+            return self.draft_payload().encode_draft();
+        }
+        let saved = SavedChatDraft {
+            composer: self.draft_payload(),
+            unsent: self.unsent_prompts.clone(),
+        };
+        format!(
+            "{CHAT_DRAFT_PREFIX}{}",
+            serde_json::to_string(&saved).expect("chat draft serialization cannot fail")
+        )
+    }
+
+    fn restore_latest_unsent_prompt(&mut self) {
+        if !self.input.is_empty() {
+            self.set_notice("Empty the composer before restoring an unsent prompt");
+            return;
+        }
+        let Some(unsent) = self.unsent_prompts.last().cloned() else {
+            self.set_notice("There are no unsent prompts to restore");
+            return;
+        };
+        let mut payload = unsent.payload;
+        if unsent.kind == UnsentKind::Shell {
+            attachments::replace_range(
+                &mut payload.text,
+                &mut payload.images,
+                0..0,
+                &PromptPayload::text("!"),
+            );
+        }
+        self.set_input_payload(payload);
+        self.set_notice("Unsent prompt restored · Enter to retry");
     }
 
     fn edit_latest_queued_prompt(&mut self) -> ChatAction {
+        if self
+            .queued_prompts
+            .back()
+            .map(|queued| queued.attachments_unsupported)
+            .unwrap_or(false)
+        {
+            self.set_notice("Queued prompt has unsupported attachments and cannot be edited");
+            return ChatAction::None;
+        }
         let Some(queued) = self.queued_prompts.pop_back() else {
             return ChatAction::None;
         };
         self.pending_queue_removals.insert(queued.id.clone());
-        self.set_input(queued.text.clone());
+        self.pending_queue_images
+            .insert(queued.id.clone(), queued.images.clone());
+        self.set_input_payload(PromptPayload {
+            text: queued.text.clone(),
+            images: queued.images,
+        });
         self.set_notice(if queued.kind.is_prompt() {
             "Editing the most recently queued prompt"
         } else {
@@ -1273,12 +1467,19 @@ impl ChatState {
     /// Keep a submit the relay refused, so the transcript still shows what was
     /// lost once the notice has gone. Repeating the same failure replaces the
     /// earlier record instead of stacking a second copy of it.
-    fn record_unsent_prompt(&mut self, kind: UnsentKind, text: String, error: String) {
-        self.unsent_prompts
-            .retain(|unsent| unsent.kind != kind || unsent.text != text);
+    fn record_unsent_prompt(
+        &mut self,
+        kind: UnsentKind,
+        text: String,
+        images: Vec<PromptImage>,
+        error: String,
+    ) {
+        self.unsent_prompts.retain(|unsent| {
+            unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
+        });
         self.unsent_prompts.push(UnsentPrompt {
             kind,
-            text,
+            payload: PromptPayload { text, images },
             error,
             recorded_at_ms: hel::clock::epoch_millis(),
         });
@@ -1287,26 +1488,41 @@ impl ChatState {
     /// Drop the record for a submit the relay has now accepted. Nothing else
     /// clears one: a snapshot cannot, because the relay never saw the prompt,
     /// and an unrelated prompt says nothing about this one.
-    fn clear_unsent_prompt(&mut self, kind: UnsentKind, text: &str) {
-        self.unsent_prompts
-            .retain(|unsent| unsent.kind != kind || unsent.text != text);
+    fn clear_unsent_prompt(&mut self, kind: UnsentKind, text: &str, images: &[PromptImage]) {
+        self.unsent_prompts.retain(|unsent| {
+            unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
+        });
     }
 
     fn fail_queued_prompt_removal(&mut self, id: String, text: String, kind: QueuedCommandKind) {
         self.pending_queue_removals.remove(&id);
+        let images = self.pending_queue_images.remove(&id).unwrap_or_default();
         if !self.queued_prompts.iter().any(|prompt| prompt.id == id) {
-            self.queued_prompts
-                .push_back(QueuedPrompt { id, text, kind });
+            self.queued_prompts.push_back(QueuedPrompt {
+                id,
+                text,
+                kind,
+                images,
+                attachments_unsupported: false,
+            });
         }
     }
 
     fn submit_input(&mut self) -> ChatAction {
         let prompt = self.input.trim().to_owned();
-        if prompt.is_empty() {
+        if prompt.is_empty() && self.input_images.is_empty() {
             return ChatAction::None;
         }
         if self.plan_command_pending {
             self.set_notice("A plan-mode transition is still in progress");
+            return ChatAction::None;
+        }
+        if !self.input_images.is_empty()
+            && (prompt.starts_with('!') || parse_local_command(&prompt).is_some())
+        {
+            self.set_notice(
+                "Send the image with a message, or delete its marker before using a command",
+            );
             return ChatAction::None;
         }
         if let Some(command) = prompt.strip_prefix('!') {
@@ -1526,9 +1742,17 @@ impl ChatState {
             self.set_notice("A review of the last turn is open; answer it first");
             return ChatAction::None;
         }
-        self.record_prompt_history(&history);
+        if !history.is_empty() {
+            self.record_prompt_history(&history);
+        }
+        let payload = if self.input_images.is_empty() {
+            PromptPayload::text(prompt)
+        } else {
+            self.draft_payload().trimmed()
+        };
+        self.submitting_images = payload.images;
         self.clear_input();
-        ChatAction::Prompt(prompt)
+        ChatAction::Prompt(payload.text)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
@@ -1615,6 +1839,13 @@ impl ChatState {
         // after the elicitation dialog because the dialog draws on top of it.
         if self.config_picker_active() {
             return self.handle_config_picker_key(code, modifiers);
+        }
+
+        if code == KeyCode::Char('r')
+            && modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.restore_latest_unsent_prompt();
+            return ChatAction::None;
         }
 
         if code == KeyCode::Char('v')
@@ -2047,16 +2278,20 @@ impl ChatState {
                         id: prompt.id.clone(),
                         text: prompt.text.clone(),
                         kind: QueuedCommandKind::Prompt,
+                        images: Vec::new(),
+                        attachments_unsupported: false,
                     });
                 }
             }
             WorkerEvent::QueuedPromptRemoved { queue_id } => {
                 self.queued_prompts.retain(|prompt| prompt.id != *queue_id);
                 self.pending_queue_removals.remove(queue_id);
+                self.pending_queue_images.remove(queue_id);
             }
             WorkerEvent::QueuedPromptPromoted { prompt, .. } => {
                 self.queued_prompts.retain(|queued| queued.id != prompt.id);
                 self.pending_queue_removals.remove(&prompt.id);
+                self.pending_queue_images.remove(&prompt.id);
                 self.phase = WorkerPhase::Running;
                 self.prompt_in_flight = true;
                 self.start_turn_clock(event.recorded_at_ms);
@@ -2207,6 +2442,46 @@ fn queued_prompt_preview(prompt: &str) -> String {
     let mut preview = collapsed.chars().take(WIDTH - 1).collect::<String>();
     preview.push('…');
     preview
+}
+
+fn materialized_content_prompt(content: &[serde_json::Value]) -> (PromptPayload, bool) {
+    let mut payload = PromptPayload::text("");
+    let mut unsupported = false;
+    for value in content {
+        match serde_json::from_value::<ContentBlock>(value.clone()) {
+            Ok(ContentBlock::Image(content)) => {
+                match ClipboardImage::from_base64(content.data, content.mime_type) {
+                    Ok(image) => {
+                        let number = payload.images.len() as u64 + 1;
+                        let end = payload.text.len();
+                        attachments::insert_image(
+                            &mut payload.text,
+                            &mut payload.images,
+                            end,
+                            number,
+                            image,
+                        );
+                    }
+                    Err(_) => unsupported = true,
+                }
+            }
+            Ok(ContentBlock::Text(content)) => payload.text.push_str(&content.text),
+            _ if value.is_string() => payload.text.push_str(value.as_str().unwrap()),
+            _ => unsupported = true,
+        }
+    }
+    (payload, unsupported)
+}
+
+fn prompt_content_blocks(text: &str, images: &[PromptImage]) -> Vec<serde_json::Value> {
+    PromptPayload {
+        text: text.to_owned(),
+        images: images.to_vec(),
+    }
+    .content_blocks()
+    .into_iter()
+    .map(|block| serde_json::to_value(block).expect("ACP content serializes"))
+    .collect()
 }
 
 /// How long a notice is guaranteed on screen before an unrelated key press
@@ -2379,6 +2654,7 @@ mod tests {
         mode_config_option, queued, select_config_option, snapshot,
     };
     use crate::hel_selection::SurfaceId;
+    use base64::Engine;
     use hel::hel_worker::ActivePrompt;
 
     /// Mirrors what `ActiveChat::open` does for a session with no warm view:
@@ -2389,6 +2665,202 @@ mod tests {
         chat.set_history_context("bundle-1");
         chat.restore_draft(saved_draft.to_owned());
         chat
+    }
+
+    fn test_image() -> ClipboardImage {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&[
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                ])
+                .unwrap();
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        ClipboardImage::from_png_base64(encoded).unwrap()
+    }
+
+    #[test]
+    fn image_paste_submits_markers_as_images_at_the_cursor() {
+        let image = test_image();
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
+        assert_eq!(chat.input, "[image 1]");
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Prompt("[image 1]".into())
+        );
+        assert_eq!(chat.take_submitting_images()[0].image, image);
+        assert!(chat.input_images.is_empty());
+
+        chat.set_input("compare  and this".into());
+        chat.input_cursor = "compare ".len();
+        chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
+        chat.handle_key(key(KeyCode::End));
+        chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
+        let payload = chat.draft_payload();
+        assert_eq!(payload.text, "compare [image 2] and this[image 3]");
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Prompt(payload.text.clone())
+        );
+        assert_eq!(chat.take_submitting_images(), payload.images);
+        assert!(matches!(
+            payload.content_blocks().as_slice(),
+            [
+                ContentBlock::Text(_),
+                ContentBlock::Image(_),
+                ContentBlock::Text(_),
+                ContentBlock::Image(_)
+            ]
+        ));
+    }
+
+    #[test]
+    fn image_markers_move_and_delete_as_one_item() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("keep ".into());
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        let end = chat.input_cursor;
+        chat.handle_key(key(KeyCode::Left));
+        assert_eq!(chat.input_cursor, 5);
+        chat.handle_key(key(KeyCode::Right));
+        assert_eq!(chat.input_cursor, end);
+        chat.handle_key(key(KeyCode::Backspace));
+        assert_eq!(chat.input, "keep ");
+        assert!(chat.input_images.is_empty());
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        chat.handle_key(key(KeyCode::Left));
+        chat.handle_key(key(KeyCode::Delete));
+        assert_eq!(chat.input, "keep ");
+        assert!(chat.input_images.is_empty());
+    }
+
+    #[test]
+    fn kill_and_yank_preserve_images_and_renumber_copies() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        chat.handle_key(ctrl('u'));
+        assert!(chat.input.is_empty());
+        assert!(chat.input_images.is_empty());
+        chat.handle_key(ctrl('y'));
+        chat.handle_key(ctrl('y'));
+        assert_eq!(chat.input, "[image 1][image 2]");
+        assert_eq!(chat.input_images.len(), 2);
+        assert_eq!(chat.input_images[0].image, chat.input_images[1].image);
+    }
+
+    #[test]
+    fn composer_renders_numbered_images_and_advertises_control_v() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        chat.notices.clear();
+        let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
+        assert!(screen.contains("[image 1]"));
+        assert!(screen.contains("Ctrl-V paste"));
+        chat.handle_key(key(KeyCode::Backspace));
+        let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
+        assert!(!screen.contains("[image 1]"));
+    }
+
+    #[test]
+    fn legacy_failed_image_submission_remains_recoverable() {
+        let image = test_image();
+        let saved = serde_json::json!({
+            "text": "", "image": null,
+            "unsent": [{"kind": "Prompt", "text": "inspect ", "image": image,
+                "error": "offline", "recorded_at_ms": 42}]
+        });
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.restore_draft(format!("{CHAT_DRAFT_PREFIX}{saved}"));
+        chat.restore_latest_unsent_prompt();
+        assert_eq!(
+            chat.draft_payload(),
+            PromptPayload::with_image("inspect ", image)
+        );
+    }
+
+    #[test]
+    fn image_draft_round_trips_and_plain_text_drafts_stay_compatible() {
+        let payload = PromptPayload::with_image("describe this", test_image());
+        let encoded = payload.encode_draft();
+        assert!(encoded.starts_with(CHAT_DRAFT_PREFIX));
+        assert_eq!(PromptPayload::decode_draft(&encoded).unwrap(), payload);
+        assert_eq!(
+            PromptPayload::decode_draft("plain draft").unwrap(),
+            PromptPayload::text("plain draft")
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.restore_draft(encoded);
+        assert_eq!(chat.draft_payload(), payload);
+    }
+
+    #[test]
+    fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
+        let original = PromptPayload::with_image("inspect old image ", test_image());
+        let mut newer = test_image();
+        newer.mime_type = "image/jpeg".into();
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.handle_clipboard_content(ClipboardContent::Image(newer.clone()));
+        remote::apply_chat_remote_result(
+            &mut chat,
+            remote::ChatRemoteResult::Prompt {
+                text: original.text.clone(),
+                images: original.images.clone(),
+                result: Err("offline".into()),
+            },
+        );
+        assert_eq!(chat.input, "inspect old image [image 2]\n\n[image 1]");
+        assert_eq!(chat.input_images[0].image, original.images[0].image);
+        assert_eq!(chat.input_images[1].image, newer);
+        let saved = chat.draft_payload();
+        let mut reopened = ChatState::new(&snapshot(), &[]);
+        reopened.restore_draft(chat.encoded_draft());
+        assert_eq!(reopened.draft_payload(), saved);
+        let retry = KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        reopened.handle_key(retry);
+        assert_eq!(
+            reopened.draft_payload(),
+            saved,
+            "retry must not overwrite a newer draft"
+        );
+        reopened.clear_input();
+        reopened.handle_key(retry);
+        assert_eq!(reopened.draft_payload(), original);
+        assert_eq!(
+            reopened.handle_key(key(KeyCode::Enter)),
+            ChatAction::Prompt(original.text)
+        );
+        assert_eq!(reopened.take_submitting_images(), original.images);
+    }
+
+    #[test]
+    fn local_commands_cannot_silently_discard_an_attached_image() {
+        for input in ["!pwd ", "/help ", "/model ", "/plan inspect "] {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_input(input.into());
+            chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+            let before = chat.draft_payload();
+            assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+            assert_eq!(chat.draft_payload(), before);
+        }
+    }
+
+    #[test]
+    fn a_literal_draft_envelope_prefix_round_trips_as_text() {
+        let payload = PromptPayload::text(format!(r#"{CHAT_DRAFT_PREFIX}{{"text":"literal"}}"#));
+        assert_eq!(
+            PromptPayload::decode_draft(&payload.encode_draft()).unwrap(),
+            payload
+        );
     }
 
     #[test]
@@ -3129,6 +3601,42 @@ mod tests {
     }
 
     #[test]
+    fn editing_queued_images_preserves_payload_and_recovers_failed_removal() {
+        let mut source = ChatState::new(&snapshot(), &[]);
+        source.set_input("compare ".into());
+        source.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        source.handle_paste(" with ");
+        source.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        let payload = source.draft_payload();
+        let mut session = MaterializedSession::empty("image-queue");
+        session.queued_prompts.push(MaterializedQueuedPrompt {
+            command_id: "queued-image".into(),
+            kind: QueuedCommandKind::Prompt,
+            content: prompt_content_blocks(&payload.text, &payload.images),
+            queued_at_ms: 10,
+        });
+        let mut chat = ChatState::from_materialized(&session, &[], &[]);
+        assert!(matches!(
+            chat.handle_key(key(KeyCode::Up)),
+            ChatAction::RemoveQueuedPrompt { .. }
+        ));
+        assert_eq!(chat.draft_payload(), payload);
+        remote::apply_chat_remote_result(
+            &mut chat,
+            remote::ChatRemoteResult::RemoveQueuedPrompt {
+                id: "queued-image".into(),
+                text: payload.text.clone(),
+                kind: QueuedCommandKind::Prompt,
+                result: Err("offline".into()),
+            },
+        );
+        assert_eq!(chat.queued_prompts.back().unwrap().images, payload.images);
+        chat.handle_key(key(KeyCode::Backspace));
+        assert_eq!(chat.input_images.len(), 1);
+        assert_eq!(chat.input, "compare [image 1] with ");
+    }
+
+    #[test]
     fn stale_projection_does_not_restore_a_queue_entry_being_edited() {
         let mut session = MaterializedSession::empty("session-queue-edit");
         session.applied_event_ordinal = 5;
@@ -3540,6 +4048,13 @@ mod tests {
         let mut chat = ChatState::new(&snapshot(), &[]);
 
         assert_eq!(chat.handle_key(ctrl('v')), ChatAction::PasteFromClipboard);
+        assert_eq!(
+            chat.handle_key(KeyEvent::new(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            ChatAction::PasteFromClipboard
+        );
         assert!(chat.input.is_empty());
     }
 

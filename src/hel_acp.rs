@@ -7,6 +7,8 @@
 mod dialect;
 #[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod session_config_tests;
 pub mod step_clock;
 pub mod surface;
 mod terminal_compat;
@@ -188,12 +190,97 @@ pub struct LaunchSpec {
     /// session gets none.
     pub extra_mcp_servers: Vec<crate::hel_worker_launch::ReviewMcpServer>,
     pub resume_session: Option<String>,
+    /// Accepted selectors for this logical session, shared across native
+    /// bridge replacements. Workers seed this from their durable relay.
+    pub accepted_config: Arc<Mutex<AcceptedSessionConfig>>,
     pub harness: HarnessKind,
     pub execution_policy: ExecutionPolicy,
     pub acp_activity: AcpActivityClock,
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.
     pub step_clock: StepClock,
+}
+
+/// Only model and reasoning effort survive a bridge replacement. Restoring
+/// plan/permission modes here could override the current execution policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcceptedSessionConfig {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl AcceptedSessionConfig {
+    pub fn from_configuration(
+        values: &BTreeMap<String, String>,
+        options: &[SessionConfigOption],
+    ) -> Self {
+        let accepted = |key: &str| {
+            let option = find_session_config_option(options, key);
+            let recorded = values
+                .get(key)
+                .or_else(|| option.and_then(|option| values.get(&option.id.to_string())))?;
+            Some(recorded.clone())
+        };
+        Self {
+            model: accepted("model"),
+            effort: accepted("effort"),
+        }
+    }
+
+    fn remember(&mut self, key: &str, value: &str, options: &[SessionConfigOption]) -> bool {
+        let is_selector = |canonical: &str| {
+            key == canonical
+                || find_session_config_option(options, canonical)
+                    .is_some_and(|option| option.id.to_string() == key)
+        };
+        let current = |canonical| {
+            let option = find_session_config_option(options, canonical)?;
+            let SessionConfigKind::Select(select) = &option.kind else {
+                return None;
+            };
+            Some(select.current_value.to_string())
+        };
+        if is_selector("model") {
+            self.model = Some(value.to_owned());
+            // A model change can reset effort or remove that selector.
+            self.effort = current("effort");
+        } else if is_selector("effort") {
+            self.effort = Some(value.to_owned());
+            if let Some(model) = current("model") {
+                self.model = Some(model);
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Fold a completed selector command into the durable configuration using
+    /// the same accepted pair as the live bridge. Startup advertisements alone
+    /// must never replace it with the provider's defaults.
+    pub(crate) fn record_completed(
+        values: &mut BTreeMap<String, String>,
+        key: &str,
+        value: &str,
+        options: &[SessionConfigOption],
+    ) {
+        let mut accepted = Self::from_configuration(values, options);
+        if !accepted.remember(key, value, options) {
+            return;
+        }
+        for canonical in ["model", "effort"] {
+            values.remove(canonical);
+            if let Some(option) = find_session_config_option(options, canonical) {
+                values.remove(&option.id.to_string());
+            }
+        }
+        if let Some(model) = accepted.model {
+            values.insert("model".into(), model);
+        }
+        if let Some(effort) = accepted.effort {
+            values.insert("effort".into(), effort);
+        }
+    }
 }
 
 fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
@@ -2069,10 +2156,6 @@ async fn serve_session(
                 false,
             )
         };
-    *opened.lock().expect("opened session lock poisoned") = Some(OpenedSession {
-        native_session_id: session_id.to_string(),
-        started_at: tokio::time::Instant::now(),
-    });
 
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
@@ -2095,6 +2178,32 @@ async fn serve_session(
     if let Some(state) = &grok_models {
         grok::merge_config_options(&mut config_options, state);
     }
+    let accepted = spec
+        .accepted_config
+        .lock()
+        .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?
+        .clone();
+    // Model selection can replace the effort catalogue. Both must be
+    // restored before SessionConfigured releases queued prompts.
+    for (key, value) in [("model", accepted.model), ("effort", accepted.effort)] {
+        let Some(value) = value else { continue };
+        apply_session_selector(
+            connection,
+            &session_id,
+            &mut config_options,
+            &mut grok_models,
+            key,
+            &value,
+        )
+        .await
+        .with_context(|| format!("restore this session's accepted {key} {value:?}"))?;
+    }
+    // Startup failures must retain their cause rather than being classified
+    // as a dead running bridge and retried with the same invalid settings.
+    *opened.lock().expect("opened session lock poisoned") = Some(OpenedSession {
+        native_session_id: session_id.to_string(),
+        started_at: tokio::time::Instant::now(),
+    });
     // Drop anything the worker queued for the bridge this one replaced. The
     // worker dispatches only while it believes the session is configured; it
     // clears that flag on `HarnessRestarting` and sets it again only after this
@@ -2514,25 +2623,23 @@ async fn serve_session(
                 value,
             } => {
                 let grok_model_change = grok_models.is_some() && grok::handles_config_key(&key);
-                let applied = match grok_models.as_mut() {
-                    Some(state) if grok::handles_config_key(&key) => {
-                        grok::apply_model_change(connection, &session_id, state, &key, &value)
-                            .await
-                            .inspect(|()| grok::merge_config_options(&mut config_options, state))
-                    }
-                    _ => {
-                        set_session_config(
-                            connection,
-                            &session_id,
-                            &mut config_options,
-                            &key,
-                            &value,
-                        )
-                        .await
-                    }
-                };
+                let applied = apply_session_selector(
+                    connection,
+                    &session_id,
+                    &mut config_options,
+                    &mut grok_models,
+                    &key,
+                    &value,
+                )
+                .await;
                 match applied {
                     Ok(()) => {
+                        spec.accepted_config
+                            .lock()
+                            .map_err(|_| {
+                                anyhow!("accepted session configuration lock was poisoned")
+                            })?
+                            .remember(&key, &value, &config_options);
                         emit_runtime_event(
                             events,
                             RuntimeEvent::ConfigApplied {
@@ -2683,6 +2790,24 @@ fn resolve_pending_elicitation(
     answer
         .send(response)
         .map_err(|_| format!("elicitation {elicitation_id:?} was cancelled before it was answered"))
+}
+
+async fn apply_session_selector(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    options: &mut Vec<SessionConfigOption>,
+    grok_models: &mut Option<grok::GrokModelState>,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    match grok_models.as_mut() {
+        Some(state) if grok::handles_config_key(key) => {
+            grok::apply_model_change(connection, session_id, state, key, value)
+                .await
+                .inspect(|()| grok::merge_config_options(options, state))
+        }
+        _ => set_session_config(connection, session_id, options, key, value).await,
+    }
 }
 
 async fn set_session_config(

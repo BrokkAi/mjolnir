@@ -4,7 +4,8 @@
 //! migrates the legacy `mj` configuration tree.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -1052,6 +1053,33 @@ impl HelConfig {
         self.save_to(&config_path())
     }
 
+    /// Load the latest config, apply one edit, validate it, and save it while
+    /// holding the config lock for the complete transaction.
+    ///
+    /// The returned config is the version that was written, and the second
+    /// value is whatever the edit returned. Keeping the load and edit under
+    /// the same lock is what lets independent processes update disjoint
+    /// sections without one stale full-config save erasing the other.
+    pub fn update<T, F>(edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        Self::update_to(&config_path(), edit)
+    }
+
+    /// As [`Self::update`], using an explicit config path.
+    pub fn update_to<T, F>(path: &Path, edit: F) -> Result<(Self, T)>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        let _lock = ConfigLock::acquire(path)?;
+        let mut config = Self::load_from(path)?;
+        config.ensure_writable(path)?;
+        let value = edit(&mut config)?;
+        config.save_to_locked(path)?;
+        Ok((config, value))
+    }
+
     /// Loads the current file, replaces only its global review section, and
     /// writes it atomically. Callers use this for the dashboard editor so a
     /// stale dashboard snapshot cannot overwrite profiles, bundles, targets,
@@ -1062,9 +1090,10 @@ impl HelConfig {
 
     /// As [`Self::save_review`], using an explicit path for tests and tools.
     pub fn save_review_to(path: &Path, review: ReviewConfig) -> Result<Self> {
-        let mut config = Self::load_from(path)?;
-        config.review = review;
-        config.save_to(path)?;
+        let (config, ()) = Self::update_to(path, |config| {
+            config.review = review;
+            Ok(())
+        })?;
         Ok(config)
     }
 
@@ -1073,16 +1102,15 @@ impl HelConfig {
     /// build may have written it since. Overwriting would silently drop
     /// settings this build cannot represent.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(found) = self
-            .newer_config_version
-            .or_else(|| newer_version_on_disk(path))
-        {
-            bail!(
-                "{} was written by a newer Mjolnir (config version {found}; this build writes \
-                 {CONFIG_VERSION}). Update Mjolnir, or change settings with the newer build",
-                path.display()
-            );
-        }
+        let _lock = ConfigLock::acquire(path)?;
+        self.save_to_locked(path)
+    }
+
+    /// Save while the caller already owns [`ConfigLock`]. This is separate
+    /// from [`Self::save_to`] so a transaction does not try to lock the same
+    /// sibling file recursively.
+    fn save_to_locked(&self, path: &Path) -> Result<()> {
+        self.ensure_writable(path)?;
         self.validate()?;
         let body = toml::to_string_pretty(self).context("serialize Mjolnir config")?;
         atomic_write(path, body.as_bytes())
@@ -1097,6 +1125,7 @@ impl HelConfig {
     }
 
     fn migrate_legacy_localhost_target_at(path: &Path) -> Result<bool> {
+        let _lock = ConfigLock::acquire(path)?;
         if !path.exists() {
             return Ok(false);
         }
@@ -1121,9 +1150,65 @@ impl HelConfig {
         }
         config.targets.remove("raw-localhost");
         config.targets.entry("localhost".into()).or_insert(legacy);
-        config.save_to(path)?;
+        config.save_to_locked(path)?;
         Ok(true)
     }
+
+    fn ensure_writable(&self, path: &Path) -> Result<()> {
+        if let Some(found) = self
+            .newer_config_version
+            .or_else(|| newer_version_on_disk(path))
+        {
+            bail!(
+                "{} was written by a newer Mjolnir (config version {found}; this build writes \
+                 {CONFIG_VERSION}). Update Mjolnir, or change settings with the newer build",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Cross-process lock for one config path. The lock has a stable inode beside
+/// the config because the config itself is replaced atomically after the lock
+/// is acquired.
+struct ConfigLock {
+    _file: File,
+}
+
+impl ConfigLock {
+    fn acquire(config_path: &Path) -> Result<Self> {
+        let lock_path = config_lock_path(config_path);
+        let parent = lock_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create config lock directory {}", parent.display()))?;
+
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&lock_path)
+            .with_context(|| format!("open config lock {}", lock_path.display()))?;
+        file.lock()
+            .with_context(|| format!("lock config {}", config_path.display()))?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn config_lock_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.with_extension("lock");
+    };
+    let mut lock_name = OsString::from(file_name);
+    lock_name.push(".lock");
+    path.with_file_name(lock_name)
 }
 
 impl PhoneConfig {
@@ -1812,6 +1897,173 @@ mod tests {
             Some(&"kept".to_owned())
         );
         assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn update_to_serializes_disjoint_process_edits() {
+        const CHILD: &str = "HEL_CONFIG_UPDATE_CHILD";
+        const PATH: &str = "HEL_CONFIG_UPDATE_PATH";
+        const READY: &str = "HEL_CONFIG_UPDATE_READY";
+        const SECOND_STARTED: &str = "HEL_CONFIG_UPDATE_SECOND_STARTED";
+        const RELEASE: &str = "HEL_CONFIG_UPDATE_RELEASE";
+        let Some(role) = std::env::var_os(CHILD) else {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.toml");
+            sample_config().save_to(&path).unwrap();
+            let ready = directory.path().join("ready");
+            let second_started = directory.path().join("second-started");
+            let release = directory.path().join("release");
+
+            let executable = std::env::current_exe().unwrap();
+            let mut first = std::process::Command::new(&executable)
+                .args([
+                    "--exact",
+                    "hel_config::tests::update_to_serializes_disjoint_process_edits",
+                    "--nocapture",
+                ])
+                .env(CHILD, "phone")
+                .env(PATH, &path)
+                .env(READY, &ready)
+                .env(SECOND_STARTED, &second_started)
+                .env(RELEASE, &release)
+                .spawn()
+                .unwrap();
+            // The first child writes this only after it has acquired the
+            // sibling lock and entered its edit closure.
+            let first_entered = (0..1000).any(|_| {
+                if ready.exists() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }) || ready.exists();
+
+            let mut second = std::process::Command::new(&executable)
+                .args([
+                    "--exact",
+                    "hel_config::tests::update_to_serializes_disjoint_process_edits",
+                    "--nocapture",
+                ])
+                .env(CHILD, "profile")
+                .env(PATH, &path)
+                .env(READY, &ready)
+                .env(SECOND_STARTED, &second_started)
+                .env(RELEASE, &release)
+                .spawn()
+                .unwrap();
+            let second_reached_update = (0..1000).any(|_| {
+                if second_started.exists() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }) || second_started.exists();
+            let second_blocked = second.try_wait().unwrap().is_none();
+            // Always release the first child before asserting, so a failed
+            // observation cannot leave a child waiting after this test exits.
+            fs::write(&release, b"release").unwrap();
+            let first_status = first.wait().unwrap();
+            let second_status = second.wait().unwrap();
+            assert!(first_entered, "first config update child never entered");
+            assert!(
+                second_reached_update,
+                "second config update child never reached its update"
+            );
+            assert!(second_blocked, "second config update child was not blocked");
+            assert!(
+                first_status.success(),
+                "first config update child failed: {first_status}"
+            );
+            assert!(
+                second_status.success(),
+                "second config update child failed: {second_status}"
+            );
+
+            let config = HelConfig::load_from(&path).unwrap();
+            assert!(!config.phone.enabled);
+            assert_eq!(
+                config.profiles["codex-1"].environment.get("CONCURRENT"),
+                Some(&"kept".to_owned())
+            );
+            return;
+        };
+
+        let path = PathBuf::from(std::env::var_os(PATH).unwrap());
+        let role = role.to_string_lossy();
+        let ready = PathBuf::from(std::env::var_os(READY).unwrap());
+        let second_started = PathBuf::from(std::env::var_os(SECOND_STARTED).unwrap());
+        let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
+        if role == "profile" {
+            // Confirm the first process owns the stable lock before telling
+            // the parent it can release it. This cannot pass merely because
+            // the second process was slow to reach update_to.
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(config_lock_path(&path))
+                .unwrap();
+            assert!(matches!(
+                lock.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            fs::write(&second_started, b"started").unwrap();
+        }
+        HelConfig::update_to(&path, |config| {
+            match role.as_ref() {
+                "phone" => {
+                    fs::write(&ready, b"entered").unwrap();
+                    while !release.exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    config.phone.enabled = false;
+                }
+                "profile" => {
+                    config
+                        .profiles
+                        .get_mut("codex-1")
+                        .unwrap()
+                        .environment
+                        .insert("CONCURRENT".into(), "kept".into());
+                }
+                other => panic!("unknown config update child role {other:?}"),
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn update_to_failure_leaves_the_previous_file_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        sample_config().save_to(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let error = HelConfig::update_to(&path, |config| {
+            config.phone.bind = "not-an-address".into();
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("parse phone bind"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn update_to_refuses_a_newer_config_before_editing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let body = format!("version = {}\nfuture = true\n", CONFIG_VERSION + 1);
+        fs::write(&path, &body).unwrap();
+
+        let error = HelConfig::update_to(&path, |config| {
+            config.phone.enabled = false;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("newer Mjolnir"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), body);
     }
 
     #[test]

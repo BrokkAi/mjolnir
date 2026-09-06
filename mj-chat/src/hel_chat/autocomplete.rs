@@ -106,6 +106,10 @@ impl ChatState {
     }
 
     pub(super) fn update_autocomplete(&mut self) {
+        if !self.input_images.is_empty() {
+            self.autocomplete = None;
+            return;
+        }
         if self.history_search.is_some() || self.input_cursor != self.input.len() {
             self.autocomplete = None;
             return;
@@ -253,7 +257,7 @@ impl ChatState {
         self.entries.push(ChatEntry::plain(
             self.latest_seq,
             ChatRole::System,
-            format!("Available commands:\n!<command> — run a Bash command in this session [mj]\n{commands}"),
+            format!("Clipboard: Ctrl-V paste text/image (Ctrl-Alt-V if intercepted by your terminal) · Backspace/Delete remove image markers · Ctrl-Alt-R restore a failed submission (empty composer)\n\nAvailable commands:\n!<command> — run a Bash command in this session [mj]\n{commands}"),
         ));
     }
 }

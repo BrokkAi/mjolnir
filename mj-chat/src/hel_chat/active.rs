@@ -31,7 +31,7 @@ use super::history::{highlighted_input_lines, history_scope_name, history_search
 use super::input::{input_cursor_visual_position, input_visual_rows, set_input_cursor};
 use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
-    queue_chat_remote_operation, restore_unsent_input,
+    queue_chat_remote_operation, restore_unsent_input, restore_unsent_prompt,
 };
 use super::rendering::{display_width, truncate_to_width, voice_button_area, voice_button_line};
 use super::second_opinion::{
@@ -43,6 +43,7 @@ use super::{
     ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatRegions, ChatSessionContext, ChatState,
     MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity, queued_prompt_preview,
 };
+use crate::hel_clipboard::ClipboardContent;
 
 /// Durable chat-side state that a host process must ask the daemon to store.
 #[derive(Debug, Clone)]
@@ -93,7 +94,7 @@ enum ChatIoUpdate {
         generation: u64,
         result: std::result::Result<Vec<PromptHistoryEntry>, String>,
     },
-    ClipboardText(std::result::Result<String, String>),
+    Clipboard(std::result::Result<ClipboardContent, String>),
     /// The history a large session did not convert when it opened, built off
     /// the event loop. `attempt` counts the tries so far, so a transcript that
     /// keeps changing under the conversion cannot retry for ever.
@@ -276,8 +277,8 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         ChatIoUpdate::HistorySearchResults { generation, result } => {
             chat.apply_history_search_results(generation, result);
         }
-        ChatIoUpdate::ClipboardText(Ok(text)) => chat.handle_paste(&text),
-        ChatIoUpdate::ClipboardText(Err(error)) => {
+        ChatIoUpdate::Clipboard(Ok(content)) => chat.handle_clipboard_content(content),
+        ChatIoUpdate::Clipboard(Err(error)) => {
             tracing::warn!(%error, "clipboard read failed and was shown in the UI");
             chat.set_notice(format!("Paste failed: {error}"));
         }
@@ -426,6 +427,9 @@ pub struct ActiveChat {
     /// ticks after the chat itself opens. Keep it here until that exact source
     /// form surfaces, instead of dropping it or applying it to the primary.
     deferred_elicitation_draft: Option<ChatElicitationDraft>,
+    /// At most one native clipboard operation may run for this chat. A second
+    /// paste is reported instead of starting an unbounded burst of readers.
+    paste_in_flight: bool,
 }
 
 impl ActiveChat {
@@ -641,6 +645,7 @@ impl ActiveChat {
             reviewed_roles: BTreeSet::new(),
             persistence,
             deferred_elicitation_draft: None,
+            paste_in_flight: false,
         };
         chat.refresh_voice_availability();
         if chat.state.second_opinion_split() {
@@ -779,10 +784,10 @@ impl ActiveChat {
         self.refresh_voice_availability();
     }
 
-    /// The composer's current text. The surface saves this on detach so
-    /// unsent input survives a quit or a crash while the view is off screen.
-    pub fn draft(&self) -> &str {
-        &self.state.input
+    /// The composer's current draft. Image-bearing drafts use a versioned
+    /// envelope so detach and session switching preserve the embedded bytes.
+    pub fn draft(&self) -> String {
+        self.state.encoded_draft()
     }
 
     pub fn latest_event_ordinal(&self) -> u64 {
@@ -1041,6 +1046,9 @@ impl ActiveChat {
             }
             update => update,
         };
+        if matches!(&update, ChatIoUpdate::Clipboard(_)) {
+            self.paste_in_flight = false;
+        }
         if matches!(&update, ChatIoUpdate::ToolDiffstats { .. }) {
             self.diffstats_in_flight = self.diffstats_in_flight.saturating_sub(1);
         }
@@ -1282,14 +1290,19 @@ impl ActiveChat {
         match action {
             ChatAction::None => return ChatEventOutcome::None,
             ChatAction::Prompt(text) => {
+                let images = self.state.take_submitting_images();
                 let Some(command_id) = self.command_id("prompt") else {
-                    restore_unsent_input(&mut self.state, &text);
+                    restore_unsent_prompt(&mut self.state, text, images);
                     return ChatEventOutcome::Handled;
                 };
                 self.state.set_notice("Prompt queued for delivery…");
                 queue_chat_remote_operation(
                     self.remote.operations(),
-                    ChatRemoteOperation::Prompt { command_id, text },
+                    ChatRemoteOperation::Prompt {
+                        command_id,
+                        text,
+                        images,
+                    },
                     &mut self.state,
                 );
             }
@@ -1407,17 +1420,30 @@ impl ActiveChat {
                 );
             }
             ChatAction::PasteFromClipboard => {
+                if self.paste_in_flight {
+                    self.state.set_notice("Clipboard read already in progress…");
+                    return ChatEventOutcome::Handled;
+                }
+                self.paste_in_flight = true;
+                self.state.set_notice("Reading clipboard…");
                 let updates = self.chat_io_tx.clone();
+                let text_only = self.state.clipboard_is_text_only();
                 tokio::spawn(async move {
-                    let result = match tokio::task::spawn_blocking(|| {
-                        crate::hel_clipboard::read_text().map_err(|error| format!("{error:#}"))
+                    let result = match tokio::task::spawn_blocking(move || {
+                        if text_only {
+                            crate::hel_clipboard::read_text()
+                                .map(ClipboardContent::Text)
+                                .map_err(|error| format!("{error:#}"))
+                        } else {
+                            crate::hel_clipboard::read().map_err(|error| format!("{error:#}"))
+                        }
                     })
                     .await
                     {
                         Ok(result) => result,
                         Err(error) => Err(format!("clipboard task failed: {error}")),
                     };
-                    if let Err(error) = updates.send(ChatIoUpdate::ClipboardText(result)) {
+                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard(result)) {
                         tracing::debug!(%error, "clipboard result dropped because the chat closed");
                     }
                 });
@@ -1753,6 +1779,7 @@ impl ActiveChat {
                     ChatRemoteOperation::Prompt {
                         command_id,
                         text: prompt,
+                        images: Vec::new(),
                     },
                     &mut self.state,
                 );
@@ -2529,9 +2556,9 @@ pub(super) fn render_chat_footer(
     } else if chat.voice_active {
         "Listening… Alt-V stop · PgUp/PgDn transcript"
     } else if !chat.queued_prompts.is_empty() {
-        "Up/Ctrl-P edit last queued · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Esc cancel"
+        "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · Esc cancel"
     } else {
-        "Tab pane · PgUp/PgDn transcript · Enter send/queue · Shift-Enter newline · Ctrl-R history · Alt-T rendering · Esc cancel"
+        "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     };
     let default_footer = fit_footer(composer_keys, CHORDS, FUNCTION_KEYS, footer_area.width);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);

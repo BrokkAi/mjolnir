@@ -884,11 +884,20 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            let mut config = Controller::load()?.config;
-            config
-                .bundles
-                .insert(session.bundle_id.clone(), bundle.clone());
-            config.save()?;
+            HelConfig::update(|config| {
+                if let Some(existing) = config.bundles.get(&session.bundle_id) {
+                    anyhow::ensure!(
+                        existing == &bundle,
+                        "bundle {:?} changed during import; retry the import",
+                        session.bundle_id
+                    );
+                } else {
+                    config
+                        .bundles
+                        .insert(session.bundle_id.clone(), bundle.clone());
+                }
+                Ok(())
+            })?;
             persist_imported_session(&session)?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,

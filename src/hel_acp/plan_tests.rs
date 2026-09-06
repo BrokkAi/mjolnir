@@ -157,6 +157,7 @@ impl PlanProbe {
             extra_mcp_servers: vec![],
             project_memory: None,
             resume_session: None,
+            accepted_config: Default::default(),
             harness: HarnessKind::Claude,
             execution_policy: policy,
             acp_activity: AcpActivityClock::default(),

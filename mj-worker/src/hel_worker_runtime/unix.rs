@@ -265,9 +265,19 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // keeps a harness from outliving the session it was reviewing for.
     // One acquisition: a guard taken inside the struct literal below would
     // live until the literal ends and deadlock the next one.
-    let (acp_activity, step_clock) = {
+    let (acp_activity, step_clock, accepted_config) = {
         let relay = relay.lock().expect("relay lock poisoned");
-        (relay.acp_activity_clock(), relay.step_clock())
+        let state = relay.operational_state();
+        (
+            relay.acp_activity_clock(),
+            relay.step_clock(),
+            Arc::new(Mutex::new(
+                hel_acp::AcceptedSessionConfig::from_configuration(
+                    &state.config,
+                    &state.config_options,
+                ),
+            )),
+        )
     };
     let outcome = async {
         let acp_spec = LaunchSpec {
@@ -284,6 +294,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             extra_mcp_servers: Vec::new(),
             project_memory: config.project_memory,
             resume_session,
+            accepted_config,
             harness: config.harness,
             execution_policy: config.execution_policy,
             acp_activity,

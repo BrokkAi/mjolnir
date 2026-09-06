@@ -293,24 +293,26 @@ impl Controller {
                 },
             ));
         }
-        let bundle = self
-            .config
-            .bundles
-            .get_mut(&bundle_id)
-            .with_context(|| format!("session bundle {bundle_id:?} is missing"))?;
-        let repository = bundle
-            .repositories
-            .iter_mut()
-            .find(|repository| repository.id == repository_id)
-            .with_context(|| {
-                format!(
-                    "session bundle {:?} no longer contains repository {repository_id:?}",
-                    bundle_id
-                )
-            })?;
-        repository.github = replacement.github;
-        repository.local = replacement.local;
-        self.config.save()?;
+        let (config, ()) = HelConfig::update(|config| {
+            let bundle = config
+                .bundles
+                .get_mut(&bundle_id)
+                .with_context(|| format!("session bundle {bundle_id:?} is missing"))?;
+            let repository = bundle
+                .repositories
+                .iter_mut()
+                .find(|repository| repository.id == repository_id)
+                .with_context(|| {
+                    format!(
+                        "session bundle {:?} no longer contains repository {repository_id:?}",
+                        bundle_id
+                    )
+                })?;
+            repository.github = replacement.github.clone();
+            repository.local = replacement.local.clone();
+            Ok(())
+        })?;
+        self.config = config;
         self.preflight_verified_repository_sources(
             session_id,
             verified,
@@ -644,7 +646,8 @@ impl Controller {
             .config
             .targets
             .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?;
+            .with_context(|| format!("unknown target template {target_id:?}"))?
+            .clone();
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
         let plan = resume_compatibility(&previous, &self.config, target_id)
@@ -671,14 +674,14 @@ impl Controller {
             resource_allocation.or_else(|| previous.resource_allocation.clone());
         let additional_mounts =
             additional_mounts.unwrap_or_else(|| previous.additional_mounts.clone());
-        validate_resource_allocation(target_template, resource_allocation.as_ref())?;
+        validate_resource_allocation(&target_template, resource_allocation.as_ref())?;
         let selected_container_size =
-            selected_host_container_size(target_template, resource_allocation.as_ref());
-        if !additional_mounts.is_empty() && mount_history_host(target_template).is_none() {
+            selected_host_container_size(&target_template, resource_allocation.as_ref());
+        if !additional_mounts.is_empty() && mount_history_host(&target_template).is_none() {
             bail!("attached resources are unsupported for this target");
         }
         hel_targets::validate_additional_mounts(&additional_mounts)?;
-        let history_host = mount_history_host(target_template);
+        let history_host = mount_history_host(&target_template);
         let history_mounts = additional_mounts.clone();
         if previous.state == SessionState::Error
             && let Some(locator) = &previous.target
@@ -754,7 +757,7 @@ impl Controller {
         // the compaction below costs minutes and paid model requests. A resume
         // that could never install a worker fails here rather than after all
         // that work has been thrown away.
-        super::worker_binary::preflight_worker_binary(target_template)?;
+        super::worker_binary::preflight_worker_binary(&target_template)?;
         let same_harness = profile.kind == archive_manifest.session.harness_kind;
         let context_bytes = profile
             .context_window_bytes
@@ -819,12 +822,22 @@ impl Controller {
             .and_then(ResumeConversion::raw_to_workspace)
             && let Some(bundle) = &conversion.new_bundle
         {
-            self.config
-                .bundles
-                .insert(conversion.bundle_id.clone(), bundle.clone());
-            self.config
-                .save()
-                .context("save the bundle for a converted raw session")?;
+            let (config, ()) = HelConfig::update(|config| {
+                if let Some(existing) = config.bundles.get(&conversion.bundle_id) {
+                    ensure!(
+                        existing == bundle,
+                        "bundle {:?} was configured concurrently with a different definition; retry the resume",
+                        conversion.bundle_id
+                    );
+                } else {
+                    config
+                        .bundles
+                        .insert(conversion.bundle_id.clone(), bundle.clone());
+                }
+                Ok(())
+            })
+            .context("save the bundle for a converted raw session")?;
+            self.config = config;
         }
 
         let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -2629,6 +2642,9 @@ mod tests {
                 context_window_bytes: None,
             },
         );
+        // Production controllers read this configuration from disk; bundle
+        // updates now deliberately reload it under the transaction lock.
+        config.save().unwrap();
         let mut controller = Controller {
             config,
             state: HelState {
