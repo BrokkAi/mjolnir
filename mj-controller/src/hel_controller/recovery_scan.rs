@@ -359,6 +359,23 @@ fn scan_target_workers(
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
         }
+        TargetTemplate::SshDocker { ssh, .. } => {
+            let remote = hel_targets::join_remote_command(&[
+                "docker".into(),
+                "ps".into(),
+                "--all".into(),
+                "--filter".into(),
+                format!("label={}=true", hel_targets::MANAGED_LABEL),
+                "--format".into(),
+                "json".into(),
+            ]);
+            let output = execute_scan(
+                executor,
+                ssh_spec(ssh, [remote]),
+                "scan remote Docker workers",
+            )?;
+            candidates_from_container_json(target_id, template, &output.stdout)?
+        }
         TargetTemplate::AwsEc2 {
             aws_profile,
             region,
@@ -511,6 +528,10 @@ fn candidates_from_container_json(
                     host: ssh.host.clone(),
                     container_id: generated,
                     workspace_storage: Default::default(),
+                },
+                TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+                    host: ssh.host.clone(),
+                    container_id: generated,
                 },
                 _ => return None,
             };
@@ -793,6 +814,18 @@ fn recovery_backend_locator(
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
                 workspace_storage: Default::default(),
+            }
+        }
+        (
+            TargetTemplate::SshDocker { ssh, .. },
+            TargetLocator::SshDocker { host, container_id },
+        ) => {
+            if host != &ssh.host {
+                bail!("recovery SSH Docker host does not match target template")
+            }
+            hel_targets::TargetLocator::SshDocker {
+                ssh: backend_ssh(ssh),
+                container_id: container_id.clone(),
             }
         }
         (TargetTemplate::SshBare { ssh, .. }, TargetLocator::SshBare { workspace, .. }) => {

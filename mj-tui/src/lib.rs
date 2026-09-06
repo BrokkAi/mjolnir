@@ -1452,6 +1452,7 @@ impl DashboardState {
                 | HelTargetTemplate::LocalDocker { .. }
                 | HelTargetTemplate::AppleContainer { .. }
                 | HelTargetTemplate::SshPodman { .. }
+                | HelTargetTemplate::SshDocker { .. }
         )
         .then_some(session)
     }

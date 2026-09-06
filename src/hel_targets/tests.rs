@@ -1,5 +1,7 @@
 use super::*;
 use std::cell::RefCell;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Barrier, Mutex};
 
 const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
@@ -2504,6 +2506,277 @@ fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
     assert!(script.contains("refusing to remove a Docker container Mjolnir does not own"));
 }
 
+#[cfg(unix)]
+fn fake_docker_environment() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    let home = root.path().join("home");
+    let state = home.join("fake-docker");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let docker = bin.join("docker");
+    std::fs::write(
+        &docker,
+        r#"#!/bin/sh
+set -eu
+state="$HOME/fake-docker"
+mkdir -p "$state"
+printf '%s\n' "$*" >>"$state/invocations"
+case "${1-}" in
+container)
+    [ "${2-}" = inspect ] || exit 2
+    [ -f "$state/container-labels" ] || exit 1
+    cat "$state/container-labels"
+    ;;
+info)
+    exit 0
+    ;;
+rm)
+    [ "${FAKE_DOCKER_FAIL_RM:-0}" = 1 ] && exit 42
+    rm -f "$state/container-labels"
+    ;;
+run)
+    name=
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = --name ]; then
+            name=$2
+            shift 2
+        else
+            shift
+        fi
+    done
+    printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" >"$state/container-labels"
+    [ "${FAKE_DOCKER_FAIL_RUN:-0}" = 1 ] && exit 125
+    ;;
+volume)
+    case "${2-}" in
+    ls)
+        [ -f "$state/volumes" ] && cat "$state/volumes" || true
+        ;;
+    inspect)
+        volume=
+        formatted=false
+        shift 2
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = --format ]; then
+                formatted=true
+                shift 2
+            else
+                volume=$1
+                shift
+            fi
+        done
+        [ -n "$volume" ]
+        [ -f "$state/volumes" ]
+        grep -Fx "$volume" "$state/volumes" >/dev/null
+        if [ "$formatted" = true ]; then
+            printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}"
+        fi
+        ;;
+    create)
+        volume=
+        for argument do volume=$argument; done
+        [ -n "$volume" ]
+        touch "$state/volumes"
+        if ! grep -Fx "$volume" "$state/volumes" >/dev/null 2>&1; then
+            printf '%s\n' "$volume" >>"$state/volumes"
+        fi
+        printf '%s\n' "$volume"
+        ;;
+    rm)
+        [ "${FAKE_DOCKER_FAIL_VOLUME_RM:-0}" = 1 ] && exit 43
+        : >"$state/volumes"
+        ;;
+    *)
+        exit 2
+        ;;
+    esac
+    ;;
+*)
+    exit 2
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&docker, permissions).unwrap();
+    root
+}
+
+#[cfg(unix)]
+fn execute_with_fake_docker(
+    environment: &tempfile::TempDir,
+    command: &CommandSpec,
+    extra_env: &[(&str, &str)],
+) -> CommandOutput {
+    let mut command = command.clone();
+    let home = environment.path().join("home");
+    let bin = environment.path().join("bin");
+    let path = std::env::var("PATH").unwrap_or_default();
+    command
+        .env
+        .insert("HOME".to_owned(), home.to_string_lossy().into_owned());
+    command.env.insert(
+        "PATH".to_owned(),
+        format!("{}:{path}", bin.to_string_lossy()),
+    );
+    for &(key, value) in extra_env {
+        command.env.insert(key.to_owned(), value.to_owned());
+    }
+    ProcessExecutor.execute(&command).unwrap()
+}
+
+#[cfg(unix)]
+fn seed_docker_cleanup_state(environment: &tempfile::TempDir, name: &str) {
+    let home = environment.path().join("home");
+    let state = home.join("fake-docker");
+    let overlay = home.join(".cache/mjolnir/docker-overlays").join(name);
+    let clone_cache = home.join(".cache/mjolnir/git/sessions").join(SESSION);
+    std::fs::create_dir_all(&overlay).unwrap();
+    std::fs::create_dir_all(&clone_cache).unwrap();
+    std::fs::write(overlay.join(".hel-session"), format!("{SESSION}\n")).unwrap();
+    std::fs::write(state.join("container-labels"), format!("true|{SESSION}\n")).unwrap();
+    std::fs::write(state.join("volumes"), "mj-volume-one\nmj-volume-two\n").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(overlay.join(".hel-session")).unwrap(),
+        format!("{SESSION}\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("container-labels")).unwrap(),
+        format!("true|{SESSION}\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_cleanup_removes_owned_state_with_fake_docker() {
+    let environment = fake_docker_environment();
+    let name = resource_name(SESSION).unwrap();
+    seed_docker_cleanup_state(&environment, &name);
+    let home = environment.path().join("home");
+    let state = home.join("fake-docker");
+    let overlay = home.join(".cache/mjolnir/docker-overlays").join(&name);
+    let clone_cache = home.join(".cache/mjolnir/git/sessions").join(SESSION);
+    let close = close_plan(
+        &TargetLocator::LocalDocker {
+            container_id: name.clone(),
+        },
+        SESSION,
+    )
+    .unwrap();
+
+    let output = execute_with_fake_docker(&environment, &close.commands[0], &[]);
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !overlay.exists(),
+        "owned Docker overlay backing directory remains"
+    );
+    assert!(!clone_cache.exists(), "owned Git clone cache remains");
+    assert!(!state.join("container-labels").exists());
+    assert_eq!(std::fs::read_to_string(state.join("volumes")).unwrap(), "");
+
+    let invocations = std::fs::read_to_string(state.join("invocations")).unwrap();
+    assert!(invocations.contains("container inspect"));
+    assert!(invocations.contains(&name));
+    assert!(invocations.contains(
+        "volume ls --quiet --filter label=dev.mj.managed=true --filter label=dev.mj.session="
+    ));
+    assert!(invocations.contains("volume rm --force mj-volume-one"));
+    assert!(invocations.contains("volume rm --force mj-volume-two"));
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_cleanup_preserves_owned_state_when_container_removal_fails() {
+    let environment = fake_docker_environment();
+    let name = resource_name(SESSION).unwrap();
+    seed_docker_cleanup_state(&environment, &name);
+    let home = environment.path().join("home");
+    let state = home.join("fake-docker");
+    let overlay = home.join(".cache/mjolnir/docker-overlays").join(&name);
+    let clone_cache = home.join(".cache/mjolnir/git/sessions").join(SESSION);
+    let close = close_plan(&TargetLocator::LocalDocker { container_id: name }, SESSION).unwrap();
+
+    let output = execute_with_fake_docker(
+        &environment,
+        &close.commands[0],
+        &[("FAKE_DOCKER_FAIL_RM", "1")],
+    );
+    assert_ne!(output.status, 0);
+    assert!(
+        overlay.exists(),
+        "overlay was removed after container removal failed"
+    );
+    assert!(
+        clone_cache.exists(),
+        "clone cache was removed after container removal failed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("container-labels")).unwrap(),
+        format!("true|{SESSION}\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("volumes")).unwrap(),
+        "mj-volume-one\nmj-volume-two\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_overlay_run_rollback_removes_owned_mj_directory_after_run_failure() {
+    let environment = fake_docker_environment();
+    let name = resource_name(SESSION).unwrap();
+    let home = environment.path().join("home");
+    let state = home.join("fake-docker");
+    let lower = tempfile::tempdir().unwrap();
+    std::fs::write(lower.path().join("original.txt"), b"lower\n").unwrap();
+    let command = docker_container_run(
+        &ContainerTemplate {
+            image: "fake:image".to_owned(),
+            pull_policy: ImagePullPolicy::Never,
+            extra_run_args: vec![],
+            workspace_storage: Default::default(),
+        },
+        &name,
+        SESSION,
+        &[AdditionalMount {
+            source: lower.path().to_path_buf(),
+            destination: PathBuf::from("/mnt/cache"),
+            read_only: false,
+        }],
+    )
+    .unwrap();
+
+    let output = execute_with_fake_docker(
+        &environment,
+        &command,
+        &[
+            ("FAKE_DOCKER_FAIL_RUN", "1"),
+            ("FAKE_DOCKER_SESSION", SESSION),
+        ],
+    );
+    assert_eq!(output.status, 125);
+    assert!(
+        !home
+            .join(".cache/mjolnir/docker-overlays")
+            .join(&name)
+            .exists(),
+        "failed Docker run left its owned overlay backing directory"
+    );
+    assert!(!state.join("container-labels").exists());
+    assert_eq!(std::fs::read_to_string(state.join("volumes")).unwrap(), "");
+    let invocations = std::fs::read_to_string(state.join("invocations")).unwrap();
+    assert!(invocations.contains(&format!("--label dev.mj.session={SESSION}")));
+    assert!(invocations.contains("--label dev.mj.managed=true"));
+}
+
 #[test]
 fn close_rejects_broad_or_mismatched_targets() {
     let broad = TargetLocator::SshBare {
@@ -2856,7 +3129,8 @@ fn cancellable_executor_interrupts_a_blocked_stdin_pipe() {
 #[test]
 fn bootstrap_probes_at_remote_container_boundary() {
     let plan = bootstrap_probe_plan(
-        ExecutionBoundary::SshPodman {
+        ExecutionBoundary::SshContainer {
+            engine: "podman",
             ssh: &ssh(),
             container_id: "abcdef012345",
         },
@@ -2875,4 +3149,174 @@ fn bootstrap_probes_at_remote_container_boundary() {
             .unwrap()
             .contains("'podman' 'exec' '-i' 'abcdef012345' 'codex' '--version'")
     );
+}
+
+fn ssh_docker_template() -> TargetTemplate {
+    TargetTemplate::SshDocker {
+        ssh: ssh(),
+        container: ContainerTemplate {
+            image: "ubuntu:24.04".into(),
+            pull_policy: ImagePullPolicy::Auto,
+            extra_run_args: vec![],
+            workspace_storage: Default::default(),
+        },
+    }
+}
+
+#[test]
+fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker() {
+    let template = ssh_docker_template();
+    let mount = AdditionalMount {
+        source: PathBuf::from("/srv/source with 'quotes'"),
+        destination: PathBuf::from("/mnt/source"),
+        read_only: false,
+    };
+    let mut plan = provision_plan(&template, SESSION, &bundle(), &[mount]).unwrap();
+    assert!(plan.commands.iter().all(|command| command.program == "ssh"));
+    let create = &plan.commands[0];
+    assert!(create.creates_target);
+    let remote = create.args.last().unwrap();
+    assert!(remote.contains("docker volume create"));
+    assert!(remote.contains("--pull=missing"));
+    assert!(remote.contains(&posix_quote("/srv/source with 'quotes'")));
+    assert!(!remote.contains("podman"));
+    plan.provide_target_environment_secret(&template, "MJ_TEST_SECRET", "secret-value")
+        .unwrap();
+    let create = &plan.commands[0];
+    assert!(!create.args.iter().any(|arg| arg.contains("secret-value")));
+    assert!(create.sensitive_stdin.is_some());
+    assert!(
+        create
+            .args
+            .last()
+            .unwrap()
+            .contains("read -r MJ_TEST_SECRET")
+    );
+}
+
+#[test]
+fn ssh_docker_reconnect_recovery_and_metrics_use_remote_docker() {
+    let locator = TargetLocator::SshDocker {
+        ssh: ssh(),
+        container_id: resource_name(SESSION).unwrap(),
+    };
+    let reconnect = reconnect_plan(&locator, SESSION).unwrap();
+    let recovery = target_recovery_plan(&locator, SESSION).unwrap().unwrap();
+    let resource = resource_probe(&locator, SESSION).unwrap();
+    for command in reconnect.commands.iter().chain([
+        &recovery.exists,
+        &recovery.inspect,
+        &recovery.start,
+        &resource.memory,
+        resource.disk.as_ref().unwrap(),
+    ]) {
+        assert_eq!(command.program, "ssh");
+        assert!(command.args.last().unwrap().contains("docker"));
+        assert!(!command.args.last().unwrap().contains("podman"));
+    }
+    assert!(
+        reconnect.commands[0]
+            .args
+            .last()
+            .unwrap()
+            .contains("'exec' '-i'")
+    );
+}
+
+#[test]
+fn ssh_docker_smoke_creates_checks_and_removes_remote_source() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output("/tmp/mj-docker-overlay-smoke.test123\n"),
+        podman_output(""),
+        podman_output(""),
+        podman_output(""),
+        podman_output(""),
+        podman_output(""),
+    ]);
+    run_setup_smoke_test(&ssh_docker_template(), SESSION, &executor).unwrap();
+    let seen = executor.seen.borrow();
+    assert!(seen.iter().all(|command| command.program == "ssh"));
+    assert!(seen[0].args.last().unwrap().contains("mktemp"));
+    assert!(
+        seen[1]
+            .args
+            .last()
+            .unwrap()
+            .contains("docker volume create")
+    );
+    assert!(
+        seen[2]
+            .args
+            .last()
+            .unwrap()
+            .contains("container-created.txt")
+    );
+    assert!(seen[3].args.last().unwrap().contains("test ! -e"));
+    assert!(seen[4].args.last().unwrap().contains("docker rm --force"));
+    assert!(
+        seen[5]
+            .args
+            .last()
+            .unwrap()
+            .contains("'/tmp/mj-docker-overlay-smoke.test123'")
+    );
+}
+
+#[test]
+fn ssh_docker_smoke_attempts_cleanup_after_probe_failure_and_preserves_lower_on_cleanup_failure() {
+    let fail = || CommandOutput {
+        status: 1,
+        stdout: vec![],
+        stderr: b"injected failure".to_vec(),
+    };
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output("/tmp/mj-docker-overlay-smoke.test123\n"),
+        podman_output(""),
+        fail(),
+        fail(),
+    ]);
+    let error = run_setup_smoke_test(&ssh_docker_template(), SESSION, &executor).unwrap_err();
+    assert!(format!("{error:#}").contains("cleanup also failed"));
+    let seen = executor.seen.borrow();
+    assert_eq!(seen.len(), 4);
+    assert!(seen[3].args.last().unwrap().contains("docker rm --force"));
+    assert!(
+        !seen
+            .iter()
+            .any(|command| command.args.last().unwrap().starts_with("'rm'"))
+    );
+}
+
+#[test]
+fn ssh_docker_absence_does_not_hide_unavailable_daemon() {
+    let locator = TargetLocator::SshDocker {
+        ssh: ssh(),
+        container_id: resource_name(SESSION).unwrap(),
+    };
+    for (status, expected) in [(0, Some(true)), (1, Some(false)), (2, None)] {
+        let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+            status,
+            stdout: vec![],
+            stderr: vec![],
+        }]);
+        let result = cleanup_target_is_confirmed_absent(&locator, SESSION, &executor);
+        assert_eq!(result.ok(), expected);
+        assert_eq!(executor.seen.borrow()[0].program, "ssh");
+    }
+}
+
+#[test]
+fn ssh_docker_preflight_reports_the_remote_destination() {
+    let ready = PodmanPreflightExecutor::with_outputs([podman_output("29.7.2 linux\n")]);
+    assert_eq!(verify_ssh_docker(&ssh(), &ready).unwrap().version, "29.7.2");
+    assert_eq!(ready.seen.borrow()[0].program, "ssh");
+    let failed = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 255,
+        stdout: vec![],
+        stderr: b"connection refused".to_vec(),
+    }]);
+    let error = verify_ssh_docker(&ssh(), &failed).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains(&ssh().destination));
+    assert!(text.contains("connection refused"));
 }

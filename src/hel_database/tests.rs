@@ -3965,3 +3965,65 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         "a pending handoff remains recoverable until its command is accepted"
     );
 }
+
+#[test]
+fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut old = session("session-1", "project-1");
+    old.target = Some(TargetLocator::SshPodman {
+        host: "builder".into(),
+        container_id: "hel-session-1".into(),
+        workspace_storage: crate::hel_state::PodmanWorkspaceLocator::Volume {
+            name: "workspace-volume".into(),
+        },
+    });
+    save_session_to(&database, &old).unwrap();
+    let connection = open(&database).unwrap();
+    // Rebuild the preceding constrained schema so this tests the actual migration.
+    connection.execute_batch("PRAGMA writable_schema = ON;
+        UPDATE sqlite_master SET sql = replace(replace(sql, ',''ssh-docker''', ''), '''ssh-podman'',''ssh-docker''', '''ssh-podman''') WHERE name = 'session_targets';
+        PRAGMA writable_schema = OFF;
+        DELETE FROM schema_migrations WHERE version = 24;
+        PRAGMA user_version = 23;").unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"],
+        old
+    );
+    let mut docker = session("session-2", "project-1");
+    docker.target_template_id = "ssh-docker".into();
+    docker.target = Some(TargetLocator::SshDocker {
+        host: "docker-builder".into(),
+        container_id: "hel-session-2".into(),
+    });
+    save_session_to(&database, &docker).unwrap();
+    let state = load_state_from(&database).unwrap();
+    assert_eq!(state.sessions["session-1"], old);
+    assert_eq!(state.sessions["session-2"], docker);
+    let connection = open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT kind FROM session_targets WHERE session_id='session-2'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "ssh-docker"
+    );
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        24
+    );
+    assert!(
+        connection
+            .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+            .optional()
+            .unwrap()
+            .is_none()
+    );
+}

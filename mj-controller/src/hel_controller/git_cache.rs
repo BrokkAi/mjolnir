@@ -21,6 +21,7 @@ enum CacheHost {
     LocalDocker,
     Apple,
     SshPodman(SshTarget),
+    SshDocker(SshTarget),
 }
 
 impl CacheHost {
@@ -31,6 +32,9 @@ impl CacheHost {
             hel_targets::TargetTemplate::AppleContainer(_) => Some(Self::Apple),
             hel_targets::TargetTemplate::SshPodman { ssh, .. } => {
                 Some(Self::SshPodman(ssh.clone()))
+            }
+            hel_targets::TargetTemplate::SshDocker { ssh, .. } => {
+                Some(Self::SshDocker(ssh.clone()))
             }
             hel_targets::TargetTemplate::LocalBare
             | hel_targets::TargetTemplate::AwsEc2(_)
@@ -43,7 +47,7 @@ impl CacheHost {
             Self::LocalPodman | Self::LocalDocker | Self::Apple => {
                 CommandSpec::new(remote[0].clone(), remote[1..].iter().cloned())
             }
-            Self::SshPodman(ssh) => {
+            Self::SshPodman(ssh) | Self::SshDocker(ssh) => {
                 let mut args = ssh.ssh_args.clone();
                 args.push(ssh.destination.clone());
                 args.push(hel_targets::join_remote_command(&remote));
@@ -81,6 +85,15 @@ impl CacheHost {
                 "json".to_owned(),
             ],
             Self::LocalDocker => vec![
+                "docker".to_owned(),
+                "ps".to_owned(),
+                "--all".to_owned(),
+                "--filter".to_owned(),
+                format!("label={}=true", hel_targets::MANAGED_LABEL),
+                "--format".to_owned(),
+                "json".to_owned(),
+            ],
+            Self::SshDocker(_) => vec![
                 "docker".to_owned(),
                 "ps".to_owned(),
                 "--all".to_owned(),

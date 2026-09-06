@@ -1,12 +1,14 @@
 # Docker for Mjolnir
 
-This is the operational contract for a host that runs Mjolnir `local-docker`
-targets. Mjolnir drives the local `docker` CLI and requires it to reach a Linux
-Docker daemon on the same filesystem host as the attached directories and
-Mjolnir's cache. It does not require Compose or a Docker API library, and this
-target does not use Docker over SSH. The `--smoke` check below is authoritative
-for environments, such as desktop virtual machines, where the CLI endpoint and
-host filesystem may not be the same machine.
+This is the operational contract for hosts that run Mjolnir Docker targets.
+Mjolnir drives the Docker CLI and requires it to reach a Linux Docker daemon.
+For `local-docker`, the daemon shares a filesystem host with the attached
+directories and Mjolnir's cache. For `ssh-docker`, the CLI, daemon, overlay
+backing directories, and attached source paths are all on the configured SSH
+host; the controller does not install Docker locally or use a Docker API
+library. The `--smoke` check below is authoritative for environments, such as
+desktop virtual machines, where the CLI endpoint and host filesystem may not be
+the same machine.
 
 ## Configure a target
 
@@ -15,6 +17,23 @@ host filesystem may not be the same machine.
 kind = "local-docker"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
+
+An SSH Docker target uses the existing OpenSSH configuration and runs Docker
+filesystem operations on the remote host:
+
+```toml
+[targets.builder-docker]
+kind = "ssh-docker"
+host = "builder"
+image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+```
+
+The `host` value is an SSH destination (usually an alias from
+`~/.ssh/config`). It must support noninteractive `ssh builder true`; configure
+keys and host verification before running `mj doctor`. The remote user must be
+able to run Docker, and Docker Engine must be installed and running there.
+Mjolnir does not forward a Docker socket, create a Docker context, or install
+Docker on the controller machine.
 
 Before launch, Mjolnir runs:
 
@@ -59,9 +78,11 @@ docker volume create --driver local \
 
 Docker's built-in local volume driver passes these options to the Linux mount
 operation. The upper and work directories live below
-`~/.cache/mjolnir/docker-overlays/<container-name>`. Mjolnir records an ownership
-marker there, verifies labels before reusing a volume, and refuses a colliding
-foreign volume or backing directory.
+`~/.cache/mjolnir/docker-overlays/<container-name>` on the Docker filesystem
+host. For `ssh-docker`, that means the remote user's cache directory, not the
+controller's cache. Mjolnir records an ownership marker there, verifies labels
+before reusing a volume, and refuses a colliding foreign volume or backing
+directory.
 
 On a failed launch, Mjolnir removes only resources carrying the expected session
 identity. On normal close it removes the container first, then its labeled
@@ -76,11 +97,18 @@ or another OverlayFS, to read-only and reports that change during launch.
 
 ## Verify Docker and the image
 
-First make sure the CLI can reach the daemon:
+For a local target, first make sure the CLI can reach the daemon:
 
 ```console
 docker info
 docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
+```
+
+For an SSH target, run the equivalent checks on the configured host:
+
+```console
+ssh builder docker info
+ssh builder docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
 ```
 
 Then run Mjolnir's checks:
@@ -91,20 +119,22 @@ mj doctor --json --smoke
 ```
 
 The regular check verifies the daemon and each configured image. The smoke
-check also attaches a temporary lower directory through the managed OverlayFS
-path, writes through the container view, confirms that the lower directory did
-not change, and removes the container, volume, and backing directory. Resolve
-every `fixable` result before launching a session.
+check also creates its temporary lower directory on the Docker filesystem host,
+attaches it through the managed OverlayFS path, writes through the container
+view, confirms that the lower directory did not change, and removes the
+container, volume, and backing directory. Resolve every `fixable` result before
+launching a session.
 
 ## Git clone cache and recovery
 
-Docker targets use the same host Git clone cache as local Podman targets. Mjolnir
-mounts a session snapshot read-only, lets the in-container clone borrow its
-objects, and falls back to a normal network clone if cache preparation fails.
-Session snapshots are removed after their owning container.
+Docker targets use the same host Git clone cache as local Podman targets. For
+`ssh-docker`, this cache is on the SSH host. Mjolnir mounts a session snapshot
+read-only, lets the in-container clone borrow its objects, and falls back to a
+normal network clone if cache preparation fails. Session snapshots are removed
+after their owning container.
 
 If Mjolnir exits while a container survives, `mj recover scan` finds Docker
-containers carrying both Mjolnir ownership labels. Adoption verifies those labels,
-starts a stopped container when safe, and reconnects its worker. A normal
-checkpoint/resume instead provisions a fresh Docker container from the
-verified recovery archive.
+containers carrying both Mjolnir ownership labels, including on an SSH Docker
+host. Adoption verifies those labels, starts a stopped container when safe, and
+reconnects its worker. A normal checkpoint/resume instead provisions a fresh
+Docker container from the verified recovery archive on the same host.

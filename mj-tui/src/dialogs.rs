@@ -900,6 +900,7 @@ fn target_kind_label(target: &hel::hel_config::TargetTemplate) -> &'static str {
         hel::hel_config::TargetTemplate::AwsEc2 { .. } => "AWS EC2",
         hel::hel_config::TargetTemplate::SshBare { .. } => "SSH bare",
         hel::hel_config::TargetTemplate::SshPodman { .. } => "SSH Podman",
+        hel::hel_config::TargetTemplate::SshDocker { .. } => "SSH Docker",
     }
 }
 

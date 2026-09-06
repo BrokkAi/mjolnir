@@ -729,7 +729,8 @@ impl DashboardState {
             TargetTemplate::LocalPodman { .. }
             | TargetTemplate::LocalDocker { .. }
             | TargetTemplate::AppleContainer { .. }
-            | TargetTemplate::SshPodman { .. } => {
+            | TargetTemplate::SshPodman { .. }
+            | TargetTemplate::SshDocker { .. } => {
                 let limits = self.host_limits(&target_id);
                 if limits.is_none() {
                     *sizing_error = Some("host totals unavailable; + disabled".into());

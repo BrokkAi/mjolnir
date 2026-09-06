@@ -593,7 +593,8 @@ impl Controller {
             hel_targets::TargetLocator::LocalPodman { .. }
             | hel_targets::TargetLocator::LocalDocker { .. }
             | hel_targets::TargetLocator::AppleContainer { .. }
-            | hel_targets::TargetLocator::SshPodman { .. } => "/workspace".to_owned(),
+            | hel_targets::TargetLocator::SshPodman { .. }
+            | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_owned(),
             hel_targets::TargetLocator::AwsEc2 { workspace, .. }
             | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
             hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
@@ -1062,6 +1063,12 @@ fn provisioned_locator(
                 container_id: container_id()?,
                 workspace_storage: hel_targets::podman_workspace_locator(container, session_id)
                     .ok()?,
+            }
+        }
+        hel_targets::TargetTemplate::SshDocker { ssh, .. } => {
+            hel_targets::TargetLocator::SshDocker {
+                ssh: ssh.clone(),
+                container_id: container_id()?,
             }
         }
         hel_targets::TargetTemplate::SshBare { ssh, .. } => hel_targets::TargetLocator::SshBare {
@@ -1579,7 +1586,8 @@ pub(super) fn enforce_overlay_capable_mounts(
     let ssh = match target {
         hel_targets::TargetTemplate::LocalPodman(_)
         | hel_targets::TargetTemplate::LocalDocker(_) => None,
-        hel_targets::TargetTemplate::SshPodman { ssh, .. } => Some(ssh),
+        hel_targets::TargetTemplate::SshPodman { ssh, .. }
+        | hel_targets::TargetTemplate::SshDocker { ssh, .. } => Some(ssh),
         _ => return Vec::new(),
     };
     let overlaid = mounts

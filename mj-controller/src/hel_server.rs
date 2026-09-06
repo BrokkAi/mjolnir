@@ -2548,6 +2548,7 @@ const fn target_kind_name(target: &TargetTemplate) -> &'static str {
         TargetTemplate::AwsEc2 { .. } => "aws-ec2",
         TargetTemplate::SshBare { .. } => "ssh-bare",
         TargetTemplate::SshPodman { .. } => "ssh-podman",
+        TargetTemplate::SshDocker { .. } => "ssh-docker",
     }
 }
 
