@@ -452,6 +452,10 @@ impl DashboardState {
             &chrono::Local::now(),
         );
         dialog.prepare(&self.resume_rows);
+        // Background state and archive updates can remove the selected row.
+        // Repair the key and index together so the form never points outside
+        // the freshly rebuilt list.
+        self.resync_resume_selection();
     }
 
     /// The rows the open dialog shows; empty when no dialog is open.
@@ -1853,6 +1857,57 @@ mod tests {
         // A late update for another discovery is ignored.
         dashboard.apply_resume_profile(99, codex_profile(Vec::new()));
         assert_eq!(rows(&dashboard).len(), 2);
+    }
+
+    #[test]
+    fn background_hiding_repairs_selection_when_the_selected_row_disappears() {
+        let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+        dashboard.show_resume_dialog(
+            1,
+            vec![codex_profile(vec![
+                native("native-new", "Newer", NEWER_THAN_THE_CHECKPOINT),
+                native("native-old", "Older", 1),
+            ])],
+        );
+        switch_to_import(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Down));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.row_index, 1);
+        assert_eq!(
+            dialog.selected,
+            Some(ResumeRowKey::Native(
+                HarnessKind::Codex,
+                "native-old".into()
+            ))
+        );
+
+        dashboard.set_hidden_native_sessions(BTreeSet::from([(
+            HarnessKind::Codex,
+            "native-old".to_owned(),
+        )]));
+
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.row_index, 0);
+        assert_eq!(
+            dialog.selected,
+            Some(ResumeRowKey::Native(
+                HarnessKind::Codex,
+                "native-new".into()
+            ))
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::ImportSession {
+                profile_id: "codex-1".into(),
+                native_session_id: "native-new".into(),
+                display_title: "Newer".into(),
+            }
+        );
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
     /// A scan that failed is reported rather than dropped.

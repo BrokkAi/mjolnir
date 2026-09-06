@@ -538,6 +538,7 @@ pub struct DashboardState {
     /// the dashboard prevents a late result from an older dialog instance
     /// matching a newly opened dialog with the same values.
     pub(crate) review_settings_generation: u64,
+    session_preflight_generation: u64,
     pub(crate) notices: Notices,
     /// The workspace name, shown at the right of the Sessions title bar.
     pub(crate) workspace_name: String,
@@ -584,6 +585,7 @@ impl DashboardState {
             last_row_click: None,
             mode: Mode::Dashboard,
             review_settings_generation: 0,
+            session_preflight_generation: 0,
             notices: Notices::default(),
             workspace_name: String::new(),
         };
@@ -1364,7 +1366,13 @@ impl DashboardState {
         self.config.profiles.is_empty() || self.config.targets.is_empty()
     }
 
+    /// Identity for supervised launch checks; cancellation invalidates late replies.
+    pub fn session_preflight_generation(&self) -> u64 {
+        self.session_preflight_generation
+    }
+
     pub fn cancel_modal(&mut self) {
+        self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
         self.mode = Mode::Dashboard;
         self.rebuild_resume_rows();
     }

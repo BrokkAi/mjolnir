@@ -250,6 +250,18 @@ impl NewWizard {
 }
 
 impl ResumeWizard {
+    fn can_advance_target(&self, dashboard: &DashboardState) -> bool {
+        let target_id = nth_key(&dashboard.config.targets, self.target);
+        dashboard
+            .resume_target_rejection(&self.session_id, &target_id)
+            .is_none()
+            && (self.resource_allocation.is_some()
+                || !matches!(
+                    dashboard.config.targets.get(&target_id),
+                    Some(TargetTemplate::AwsEc2 { .. })
+                ))
+    }
+
     pub(crate) fn text_input_focused(&self) -> bool {
         if let Some(id) = self.form.borrow().focused() {
             return self.step == WizardStep::Mounts
@@ -1602,14 +1614,7 @@ pub(crate) fn render_resume_wizard(
                 WizardStep::Target => WizardControl::TargetList,
                 _ => unreachable!("resume picker step has a list control"),
             },
-            next_enabled: wizard.step != WizardStep::Target
-                || (wizard.resource_allocation.is_some()
-                    && dashboard
-                        .resume_target_rejection(
-                            &wizard.session_id,
-                            &nth_key(&dashboard.config.targets, wizard.target),
-                        )
-                        .is_none()),
+            next_enabled: wizard.step != WizardStep::Target || wizard.can_advance_target(dashboard),
         },
         &mut form,
         surfaces,

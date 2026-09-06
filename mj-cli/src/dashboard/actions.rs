@@ -390,6 +390,7 @@ pub(crate) async fn apply_dashboard_action(
             context
                 .dashboard
                 .set_notice("Checking attached directories…");
+            let generation = context.dashboard.session_preflight_generation();
             let config = context.controller.config.clone();
             spawn_cancellable_io(
                 context.critical_operations.clone(),
@@ -412,7 +413,11 @@ pub(crate) async fn apply_dashboard_action(
                     }
                     Ok(None)
                 },
-                move |result| DashboardIoUpdate::SessionMountValidation { launch, result },
+                move |result| DashboardIoUpdate::SessionMountValidation {
+                    generation,
+                    launch,
+                    result,
+                },
             );
         }
         DashboardAction::PreflightResumeRepositories { launch } => {
@@ -426,6 +431,7 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             context.dashboard.set_notice("Checking replacement origin…");
             let submitted_repository_id = repository_id.clone();
+            let generation = context.dashboard.session_preflight_generation();
             spawn_cancellable_io(
                 context.critical_operations.clone(),
                 format!("updating repository for {}", short_id(&session_id)),
@@ -445,6 +451,7 @@ pub(crate) async fn apply_dashboard_action(
                     })
                 },
                 move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
+                    generation,
                     launch,
                     submitted_repository_id: Some(submitted_repository_id),
                     result: Box::new(result),
@@ -614,6 +621,7 @@ pub(crate) fn start_resume_repository_preflight(
     context: &mut DashboardContext,
     launch: Box<DashboardAction>,
 ) -> Result<()> {
+    let generation = context.dashboard.session_preflight_generation();
     let (session_id, target_id) = resume_launch_destination(&launch)?;
     let session_id = session_id.to_owned();
     let target_id = target_id.to_owned();
@@ -637,6 +645,7 @@ pub(crate) fn start_resume_repository_preflight(
             })
         },
         move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
+            generation,
             launch,
             submitted_repository_id: None,
             result: Box::new(result),

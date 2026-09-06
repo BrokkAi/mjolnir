@@ -358,15 +358,6 @@ def overlay_container_target(lab: Lab) -> None:
     _write_text(path, changed)
 
 
-def next_session_id(snapshot: dict[str, object], title: str) -> str:
-    sessions = snapshot.get("sessions", [])
-    if isinstance(sessions, list):
-        for item in sessions:
-            if isinstance(item, dict) and item.get("title") == title:
-                return str(item["id"])
-    raise ScenarioFailure(f"could not find disposable session {title!r}")
-
-
 def create_session(
     lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int
 ) -> None:
@@ -407,33 +398,14 @@ def create_session(
     if not isinstance(workspaces, list) or len(workspaces) != 1:
         raise ScenarioFailure(f"expected one disposable workspace, got {workspaces!r}")
     title = f"live-components-{seed}"
-    status, _ = lab.request(
-        "POST",
-        "/api/actions",
-        {
-            "action": "new",
-            "workspace_id": workspaces[0]["id"],
-            "profile_id": "fake",
-            "bundle_id": "fixture",
-            "target_id": "localhost",
-            "title": title,
-            "project_directory": str(lab.project),
-        },
-    )
+    from tui_components_actions import create_through_dialog
+    session_id = create_through_dialog(lab, tmux, evidence)
+    status, _ = lab.request("POST", "/api/actions", {"action": "rename", "session_id": session_id, "title": title})
     if status != 202:
-        raise ScenarioFailure(f"fixture new-session action returned {status}")
-    lab.wait_snapshot(
-        lambda value: any(
-            item.get("title") == title
-            and item.get("state") == "running"
-            and not item.get("has_error")
-            for item in value.get("sessions", [])
-        ),
-        "fake-ACP session to run",
-    )
+        raise ScenarioFailure(f"fixture rename returned {status}")
+    lab.wait_snapshot(lambda value: any(item.get("id") == session_id and item.get("state") == "running" and item.get("title") == title for item in value.get("sessions", [])), "created session running")
     tmux.wait_for(title, "new session title")
 
-    session_id = next_session_id(lab.snapshot(), title)
     prompt = f"component prompt {seed}"
     status, _ = lab.request(
         "POST",
@@ -447,9 +419,13 @@ def create_session(
     from tui_components_chat import run_chat_controls
     run_chat_controls(lab, tmux, evidence, session_id)
     screen = tmux.capture()
-    evidence.event("session-running", f"API new/prompt for {title!r}", "running session visible", "running session visible", evidence.capture("session-running", screen))
+    evidence.event("session-running", f"wizard Create and API prompt for {title!r}", "running session visible", "running session visible", evidence.capture("session-running", screen))
     from tui_components_dialogs import run_dialog_acceptance
     run_dialog_acceptance(lab, tmux, evidence)
+    from tui_components_actions import save_review_settings, save_target_id, stop_and_resume
+    save_target_id(lab, tmux, evidence)
+    save_review_settings(lab, tmux, evidence)
+    stop_and_resume(lab, tmux, evidence, session_id)
     tmux.release()
 
 
@@ -480,6 +456,7 @@ def run_workflow(
     # the container-backed fixture consistently.
     lab.stop_daemon()
     install_fake_podman(lab)
+    bare_config = (lab.config / "config.toml").read_text()
     overlay_container_target(lab)
 
     tmux.start("dashboard-components", 140, 40)
@@ -621,6 +598,9 @@ def run_workflow(
         evidence.capture("container-mouse-cancel", closed_screen),
     )
 
+    from tui_components_actions import save_container_settings
+    save_container_settings(lab, tmux, evidence)
+
     # Verify ordinary help and palette after a migrated modal changes focus.
     tmux.send_key("F1")
     help_screen = tmux.wait_for("Keys ·", "help after editor")
@@ -643,6 +623,20 @@ def run_workflow(
         evidence.capture("palette-after-editor", palette_screen),
     )
     tmux.send_key("Escape")
+    tmux.release()
+    # Container UI probes use a configuration overlay, not a real container.
+    # Restore the real worker's target before exercising runtime destruction.
+    lab.stop_daemon()
+    _write_text(lab.config / "config.toml", bare_config)
+    tmux.start("dashboard-destroy", 140, 40)
+    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "dashboard after restoring bare target")
+    if "Workspaces" in screen:
+        tmux.send_key("Enter")
+        time.sleep(0.05)
+        tmux.send_key("Enter")
+    tmux.wait_for("live-components", "owned session after target restoration")
+    from tui_components_actions import destroy_confirmation
+    destroy_confirmation(lab, tmux, evidence)
     tmux.release()
 
     tmux.start("dashboard-sigterm", 140, 40)

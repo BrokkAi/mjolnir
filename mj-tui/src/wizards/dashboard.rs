@@ -109,14 +109,7 @@ fn declare_resume_controls(dashboard: &DashboardState, wizard: &ResumeWizard) {
             declare_wizard_buttons(&mut form, false, true);
         }
         WizardStep::Target => {
-            let target_id = nth_key(&dashboard.config.targets, wizard.target);
-            let enabled = dashboard
-                .resume_target_rejection(&wizard.session_id, &target_id)
-                .is_none()
-                && (!matches!(
-                    dashboard.config.targets.get(&target_id),
-                    Some(TargetTemplate::AwsEc2 { .. })
-                ) || wizard.resource_allocation.is_some());
+            let enabled = wizard.can_advance_target(dashboard);
             form.declare_with_enabled(
                 WizardControl::TargetList,
                 ControlKind::ChoiceList {
@@ -315,6 +308,15 @@ impl DashboardState {
             return DashboardAction::None;
         }
         sync_new_legacy_focus(&mut wizard);
+        // Shared fields already received editing input. Do not let the old
+        // step handler edit a field while a footer button owns focus.
+        if matches!(
+            wizard.step,
+            WizardStep::ProjectDirectory | WizardStep::NewBundle
+        ) {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         match event {
             Event::Key(key) => self.handle_new_key(key, wizard),
             _ => {
@@ -1125,6 +1127,7 @@ impl DashboardState {
                     );
                     WizardStep::Bundle
                 };
+                wizard.focus = WizardFocus::Content;
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
@@ -1187,7 +1190,7 @@ impl DashboardState {
                 }
                 ReviewFocus::Add if can_attach => begin_mount_editor(&mut wizard),
                 ReviewFocus::Add => {}
-                ReviewFocus::Submit => return self.preflight_create_session_action(&wizard),
+                ReviewFocus::Submit => return self.preflight_create_session_action(wizard),
             },
             KeyCode::Esc => {
                 self.cancel_modal();
@@ -1406,16 +1409,18 @@ impl DashboardState {
         action
     }
 
-    fn preflight_create_session_action(&mut self, wizard: &NewWizard) -> DashboardAction {
+    fn preflight_create_session_action(&mut self, wizard: NewWizard) -> DashboardAction {
         if wizard.mounts.mounts.is_empty() {
-            return self.create_session_action(wizard);
+            return self.create_session_action(&wizard);
         }
-        let launch = self.create_session_action_without_closing(wizard);
-        DashboardAction::ValidateSessionMounts {
+        let launch = self.create_session_action_without_closing(&wizard);
+        let action = DashboardAction::ValidateSessionMounts {
             target_template_id: nth_key(&self.config.targets, wizard.target),
             mounts: wizard.mounts.mounts.clone(),
             launch: Box::new(launch),
-        }
+        };
+        self.mode = Mode::New(wizard);
+        action
     }
 
     fn create_session_action_without_closing(&self, wizard: &NewWizard) -> DashboardAction {

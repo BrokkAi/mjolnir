@@ -14,16 +14,10 @@ returns to the dashboard before the next one begins.  The types are kept
 duck-typed so this module can be loaded by the existing harness without a
 circular import.
 
-The review-settings probe is strict when the fixture exposes a configured
-review profile and a visible asynchronous readiness state.  A fixture with
-no review profile cannot enter that state; in that case the probe records a
-``review-settings-probe-gap`` evidence event and still exercises the draft
-selectors and cancellation.  Import rows may likewise be absent in a local
-fixture, but the import tab, search field, and cancellation remain testable.
-Those fixture limitations are observations for the caller; this module does
-not claim that a live run passed until the root harness invokes it.
-The typed force-stop/force-destroy confirmation needs a seeded failed
-operation and is therefore left for a caller that can provide that state.
+The review-settings probe uses a configured review profile and asynchronous
+readiness state. Import covers tab selection, search, and cancellation.
+Submission, persistence, Stop/Resume, and typed destroy are exercised by
+the companion tui_components_actions module against the same owned fixture.
 """
 
 from __future__ import annotations
@@ -44,15 +38,6 @@ def _wait(tmux: Any, marker: str, description: str | None = None, timeout: float
     """Wait for a visible marker and return the resulting pane."""
 
     return str(tmux.wait_for(marker, description or f"{marker!r} is visible", timeout=timeout))
-
-
-def _optional_wait(tmux: Any, marker: str, timeout: float = 2) -> str:
-    """Return the current pane, allowing an optional async state to settle."""
-
-    try:
-        return _wait(tmux, marker, f"optional {marker!r}", timeout=timeout)
-    except Exception:
-        return _capture(tmux)
 
 
 def _record(
@@ -312,7 +297,8 @@ def probe_new_wizard(lab: Any, tmux: Any, evidence: Any) -> None:
     # The wizard starts on its profile selector; one Tab reaches Cancel.
     tmux.send_key("Tab")
     tmux.send_key("Enter")
-    cancelled = _wait(tmux, "Sessions", "new session wizard cancellation")
+    tmux.wait_until(lambda: "New session ·" not in _capture(tmux), "new wizard dismissed")
+    cancelled = _capture(tmux)
     _record(
         evidence,
         tmux,
@@ -362,7 +348,8 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
     )
 
     tmux.send_key("Escape")
-    cancelled = _wait(tmux, "Sessions", "resume/import cancellation")
+    tmux.wait_until(lambda: "Resume a session" not in _capture(tmux), "resume/import dismissed")
+    cancelled = _capture(tmux)
     _record(
         evidence,
         tmux,
@@ -388,7 +375,8 @@ def probe_web_dialog(lab: Any, tmux: Any, evidence: Any) -> None:
         web,
     )
     tmux.send_key("Enter")
-    closed = _wait(tmux, "Sessions", "web dialog close")
+    tmux.wait_until(lambda: "Web viewer" not in _capture(tmux), "Web dialog dismissed")
+    closed = _capture(tmux)
     _record(
         evidence,
         tmux,

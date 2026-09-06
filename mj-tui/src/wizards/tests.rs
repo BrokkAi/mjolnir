@@ -263,6 +263,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         .collect::<String>();
     assert!(rendered.contains("Error: remote project directory /srv/project does not exist"));
 
+    dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     dashboard.handle_paste("/srv/repaired");
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("invalid project validation should keep the wizard open");
@@ -1600,4 +1601,100 @@ fn ec2_size_controls_use_exact_doubling_steps() {
     assert_eq!(allocation_cpus(allocation.as_ref().unwrap()), 16);
     adjust_resources(&mut allocation, Some(&options), None, KeyCode::Char('r'));
     assert_eq!(allocation_cpus(allocation.as_ref().unwrap()), 8);
+}
+
+#[test]
+fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('n'));
+    let pending = dashboard.session_preflight_generation();
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(alt_key('n'));
+    assert!(matches!(dashboard.mode, Mode::New(_)));
+    assert_ne!(pending, dashboard.session_preflight_generation());
+}
+
+#[test]
+fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
+    let mut config = config();
+    config.targets.clear();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(key(KeyCode::Enter));
+    for _ in 0..3 {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    assert!(dashboard.text_input_focused());
+    dashboard.handle_paste("/work/project");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("project step");
+    };
+    assert_eq!(wizard.project_directory, "/work/project");
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert!(!dashboard.text_input_focused());
+    dashboard.handle_key(key(KeyCode::Char('x')));
+    dashboard.handle_paste("ignored");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("project step");
+    };
+    assert_eq!(wizard.project_directory, "/work/project");
+}
+
+#[test]
+fn resume_target_next_mouse_release_advances_to_review() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut session = stopped_session();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some("/work/project".into());
+    let mut config = config();
+    config.targets.clear();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut state = HelState::default();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    open_resume_wizard(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    dashboard.reset_component_geometry();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let (column, row) = (0..40)
+        .find_map(|row| {
+            let text = (0..140)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>();
+            text.find("[ Next ]").map(|column| (column as u16 + 2, row))
+        })
+        .expect("Next button");
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        dashboard.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        dashboard.reset_component_geometry();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+    }
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("resume wizard");
+    };
+    assert_eq!(wizard.step, WizardStep::Review);
 }
