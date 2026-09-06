@@ -390,10 +390,18 @@ impl ReviewSettingsDialog {
         self.save_error = result.err();
     }
 
-    fn handle_event(&mut self, dashboard: &mut DashboardState, event: Event) -> DashboardAction {
+    fn handle_event(
+        &mut self,
+        dashboard: &mut DashboardState,
+        event: Event,
+    ) -> (DashboardAction, bool) {
         use ReviewSettingsFocus::*;
         let interaction = self.form.get_mut().handle(&event).action;
         let changed = interaction.is_some();
+        let close = matches!(
+            interaction,
+            Some(Interaction::Cancel | Interaction::Activate(Cancel))
+        );
         let action = match interaction {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => {
                 DashboardAction::CancelReviewSettingsProbe
@@ -450,7 +458,7 @@ impl ReviewSettingsDialog {
         if changed {
             self.prepare();
         }
-        action
+        (action, close)
     }
 }
 
@@ -477,8 +485,8 @@ impl DashboardState {
         event: Event,
         mut dialog: ReviewSettingsDialog,
     ) -> DashboardAction {
-        let action = dialog.handle_event(self, event);
-        if matches!(action, DashboardAction::CancelReviewSettingsProbe) {
+        let (action, close) = dialog.handle_event(self, event);
+        if close {
             self.cancel_modal();
         } else {
             self.mode = Mode::ReviewSettings(dialog);
@@ -699,6 +707,31 @@ mod tests {
                 .iter()
                 .any(|entry| entry.id == CommandId::ReviewSettings)
         );
+    }
+
+    #[test]
+    fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
+        let mut dashboard = dashboard_with_session(running_session());
+        open(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Char(' ')));
+        dashboard.handle_key(key(KeyCode::Tab));
+        dashboard.handle_key(key(KeyCode::Tab));
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::ProbeReviewSettings { .. }
+        ));
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Home)),
+            DashboardAction::CancelReviewSettingsProbe
+        ));
+        assert!(dialog(&dashboard).review.profile.is_none());
+        assert!(dialog(&dashboard).review.enabled);
+        assert!(!dialog(&dashboard).can_save());
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::CancelReviewSettingsProbe
+        ));
+        assert!(!matches!(dashboard.mode, Mode::ReviewSettings(_)));
     }
 
     #[test]

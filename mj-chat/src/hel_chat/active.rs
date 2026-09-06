@@ -647,15 +647,6 @@ impl ActiveChat {
             state.set_notice("Connecting to session relay…");
             queue_chat_remote_operation(remote.operations(), ChatRemoteOperation::Sync, &mut state);
         }
-        // Raised after the connection notice, because a notice is a single
-        // slot: a cold open would otherwise replace the failure the user has
-        // to see with "Connecting to session relay…".
-        if let Some(detail) = context
-            .as_ref()
-            .and_then(|context| context.session.last_checkpoint_error.as_deref())
-        {
-            state.set_notice(format!("Recovery copy failed: {detail}"));
-        }
         let mut diffstats_in_flight = 0;
         dispatch_diffstat_requests(&mut state, &chat_io_tx, &mut diffstats_in_flight);
         // A review that was open when the UI stopped is picked back up. The
@@ -663,6 +654,7 @@ impl ActiveChat {
         // split is restored by replaying it rather than by keeping a second
         // copy of the transcript here.
         let stored = stored_review.unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not restore the open review");
             state.set_notice(format!("Could not restore the open review: {error}"));
             None
         });
@@ -695,6 +687,15 @@ impl ActiveChat {
                 // once it does not.
                 view.restore_prepared_reviewer(reviewer);
             }
+        }
+        // Raised after connection and review notices, because a notice is a single
+        // slot: a cold open would otherwise replace the failure the user has
+        // to see with "Connecting to session relay…".
+        if let Some(detail) = context
+            .as_ref()
+            .and_then(|context| context.session.last_checkpoint_error.as_deref())
+        {
+            state.set_notice(format!("Recovery copy failed: {detail}"));
         }
         let mut chat = Self {
             state,

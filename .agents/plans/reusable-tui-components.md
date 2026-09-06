@@ -10,12 +10,13 @@ Buttons, fields, lists, and tabs must behave consistently in the dashboard and c
 
 - [x] (2026-09-06) Reviewed published rat-focus 2.1.1 and rat-event 2.1.0 and ran 13 standalone behavior probes against existing Ratatui artifacts.
 - [x] (2026-09-06) User approved all standard dashboard and chat controls and required live tmux validation.
-- [ ] Shared scope and container editor implemented; complete focused tests and live validation.
-- [ ] Validate the representative form through the actual TUI in isolated tmux.
+- [x] Shared scope and container editor implemented with behavior tests.
+- [x] Validate the representative form through the actual TUI in isolated tmux: seed 416 passed 55 assertions, including open-form resizing and SIGTERM.
 - [x] Palette, resume/import, review settings, and dashboard dialogs migrated; focused dashboard suite reached 293 passing tests with integration fixes underway.
-- [ ] Migrate chat forms, pickers, review controls, and microphone.
-- [ ] Integrate pointer routing, selection, focus restoration, help, and dynamic layout behavior.
-- [ ] Complete automated and live acceptance, license maintenance, final review, and commits.
+- [x] Chat forms, pickers, review controls, and microphone use the shared layer.
+- [x] Integrated pointer routing, selection, focus restoration, Help, and dynamic layout behavior.
+- [x] Complete automated and live acceptance, license maintenance, and final review; full cargo test, clippy, fmt, license checks, and live seed 417 passed.
+- [x] Final acceptance fixes and this record form the completion commit on the merged current branch; publication is the authorized push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -40,7 +41,7 @@ The complete CLI build confirmed that ActiveChat previously crossed a Tokio chan
 
 Add rat-focus 2.1.1 and rat-event 2.1.0 to mj-chat. Export an EventResult<A> containing Outcome and an optional typed action; it implements ConsumedEvent. Do not infer propagation from whether a domain action is None.
 
-The component layer supplies persistent control state, FocusScope, and button, button-row, text-field, checkbox, single/multiple-choice list, tab-strip, dialog, and form primitives. Use Ratatui rendering conventions and existing TextInput rather than a new editor. Record geometry during rendering and use it for focus, hit testing, horizontal text viewport, and cursor placement. Keep library focus flags internal. FocusScope rebuilds with the previous tree, preserves a valid control, and selects the next eligible entry when the current one disappears or becomes disabled.
+The component layer supplies persistent control state in `Form<K>` and button, button-row, text-field, checkbox, single/multiple-choice list, tab-strip, dialog layout, and form viewport primitives. Use Ratatui rendering conventions and existing TextInput rather than a new editor. Record geometry during rendering and use it for focus, hit testing, horizontal text viewport, and cursor placement. Keep library focus flags internal. Form rebuilds with the previous tree, preserves a valid control, and selects the next eligible entry when the current one disappears or becomes disabled. Metadata updates use begin_update/declare/end_frame and preserve drawn hitboxes; render passes use begin_frame/register/end_frame. Do not rebuild a form from scratch or treat a domain action as proof that an event was unconsumed.
 
 Ordinary Tab/Shift-Tab navigate eligible controls in visual order. Controls receive editing/navigation first, preserving composer completion. Button Enter/Space act on press only, ignoring reported repeats/releases. Mouse-down focuses and arms; release inside activates once and release outside cancels. Button rows allow left/right. Text fields preserve readline, filtering, limits, history, paste, and configured Enter submission. Lists and tab strips are one Tab stop with arrow/Home/End navigation; checkbox and multi-choice toggle with Space. Tab activation changes the visible panel while work remains asynchronous.
 
@@ -56,7 +57,7 @@ Root owns integration, focus/routing, the representative form, and review. Once 
 
 From /home/jonathan/Projects/hel4, use cargo fmt --check, cargo test, and cargo clippy --all-targets -- -D warnings. Every cargo test runs with elevated sandbox permissions. Focused package tests validate checkpoints; the complete required suite validates the integrated result. Build with cargo build -p brokk-mjolnir for live acceptance. Keep build artifacts under target, never /tmp. Update generated dependency-license reports using the existing repository tooling after dependencies settle.
 
-Use tests/e2e/prepare-luna-lab.py and the disposable fake-ACP/local-bare infrastructure, correcting old runbook package/binary names where necessary. Launch a unique tmux socket/server with isolated configuration and state beneath target. Run socket-based lab preparation and tmux control outside the restricted sandbox. Do not use personal sessions or paid harnesses.
+Use tests/e2e/prepare-luna-lab.py and the disposable fake-ACP/local-bare infrastructure, correcting old runbook package/binary names where necessary. Launch a unique tmux socket/server with isolated runtime state at a short /tmp/hel-r-* path to stay within Unix socket limits; retain captures and copied logs beneath target. Run socket-based lab preparation and tmux control outside the restricted sandbox. Do not use personal sessions or paid harnesses.
 
 ## Validation and Acceptance
 
@@ -76,8 +77,12 @@ The earlier source assessment executable at target/rat-focus-assessment/probes r
 
 ## Outcomes & Retrospective
 
-Shared controls, dashboard dialogs, and chat controls are implemented. Thirteen component tests passed before the final compound-field additions. Elicitation reached 23 passing tests of 24; the remaining test needed to locate the actual checkbox instead of any form hitbox. Wizard and chat integration fixes, full checks, and live tmux acceptance remain in progress; no checkpoint is yet validated.
+Shared controls, dashboard dialogs, and chat controls are implemented and committed as f3f2ad5e. Upstream master merged cleanly as dcf76eea. Final full cargo test passed, including 402 chat tests, 306 dashboard tests, 143 CLI tests, and PTY termination coverage. cargo clippy --all-targets -- -D warnings, cargo fmt --all -- --check, git diff --check, and the dependency license check passed. Final live seed 417 passed 56 assertions through real tmux keyboard and SGR mouse input, including reviewer Back-navigation, asynchronous discovery, captured release, four-size open-form resizing, detach/reattach, and SIGTERM. See .agents/docs/tui-components-live.md for reproducible commands and the exact binary hash. Microphone hardware and emulator-specific glyph appearance remain device-dependent and are not established by the fake-provider terminal harness. Final acceptance fixes are ready to commit and push.
 
 Revision: initial executable plan records the approved scope and live tmux requirement, 2026-09-06.
 
 Revision: records implemented integrations and outstanding validation, 2026-09-06.
+
+Revision: records the implementation checkpoint, upstream merge, and live findings. Web dialog width, captured plan restoration, pointer capture during metadata reconciliation, and cancellation of review discovery now have source fixes and regression coverage. Final review also identified stage-transition focus and clipped button visibility for correction before final acceptance.
+
+Revision: final automated and terminal acceptance passed on the merged implementation. Shared input state required explicit separation between rendered geometry, metadata updates, and domain transitions; the regression tests now cover those boundaries.

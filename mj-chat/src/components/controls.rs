@@ -66,6 +66,9 @@ impl ButtonRow {
             }
             return;
         }
+        for (id, _, enabled) in buttons {
+            form.declare_with_enabled(*id, ControlKind::Button, *enabled);
+        }
         let widths = buttons
             .iter()
             .map(|(_, label, _)| u16::try_from(label.width() + 4).unwrap_or(u16::MAX))
@@ -488,6 +491,43 @@ mod tests {
         form.handle(&event(MouseEventKind::Down(MouseButton::Left)));
         form.handle(&event(MouseEventKind::Up(MouseButton::Left)))
             .action
+    }
+
+    #[test]
+    fn tabbing_to_a_clipped_button_scrolls_it_into_view() {
+        let mut form = Form::new();
+        form.declare(1, ControlKind::Button);
+        form.declare(2, ControlKind::Button);
+        form.end_frame(1);
+        let mut terminal = Terminal::new(TestBackend::new(10, 1)).unwrap();
+        for selected in [1, 2] {
+            terminal
+                .draw(|frame| {
+                    form.begin_frame();
+                    ButtonRow::render(
+                        frame,
+                        frame.area(),
+                        &[(1, "First", true), (2, "Last", true)],
+                        &mut form,
+                    );
+                    form.end_frame(1);
+                })
+                .unwrap();
+            assert_eq!(form.focused(), Some(selected));
+            assert_eq!(
+                click(&mut form, 5, 0),
+                Some(Interaction::Activate(selected))
+            );
+            form.handle(&Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        }
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Last"));
     }
 
     #[test]

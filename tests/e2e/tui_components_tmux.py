@@ -483,10 +483,11 @@ def run_workflow(
     overlay_container_target(lab)
 
     tmux.start("dashboard-components", 140, 40)
-    tmux.wait_for("Workspaces", "workspace picker after reattach")
-    tmux.send_key("Enter")
-    time.sleep(0.05)
-    tmux.send_key("Enter")
+    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "workspace or remembered dashboard after reattach")
+    if "Workspaces" in screen:
+        tmux.send_key("Enter")
+        time.sleep(0.05)
+        tmux.send_key("Enter")
     tmux.wait_for_any(("Sessions", "live-components"), "dashboard after reattach")
 
     dashboard_dimensions(tmux, evidence)
@@ -645,10 +646,11 @@ def run_workflow(
     tmux.release()
 
     tmux.start("dashboard-sigterm", 140, 40)
-    tmux.wait_for("Workspaces", "workspace picker for SIGTERM test")
-    tmux.send_key("Enter")
-    time.sleep(0.05)
-    tmux.send_key("Enter")
+    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "workspace or remembered dashboard for SIGTERM test")
+    if "Workspaces" in screen:
+        tmux.send_key("Enter")
+        time.sleep(0.05)
+        tmux.send_key("Enter")
     tmux.wait_for("Sessions", "dashboard for SIGTERM test")
     pid = tmux.pane_pid()
     with contextlib.suppress(ProcessLookupError):

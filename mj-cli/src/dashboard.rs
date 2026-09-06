@@ -3685,7 +3685,8 @@ mod tests {
             DashboardAction::None
         ));
         assert!(dashboard.modal_open(), "the target actions dialog is open");
-        // Rename, Test, Close: one Tab lands on Test.
+        // The target list is one Tab stop before Rename and Test.
+        dashboard.handle_key(plain_key(crossterm::event::KeyCode::Tab));
         dashboard.handle_key(plain_key(crossterm::event::KeyCode::Tab));
         assert!(matches!(
             dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)),

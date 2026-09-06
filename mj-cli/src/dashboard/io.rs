@@ -1836,8 +1836,13 @@ mod tests {
             "a hel record is restored from what the write knew, not from the native set"
         );
         assert!(!state.sessions["session-1"].archived);
-        // The row is listed again, so archiving it asks for the same write the
-        // failed one attempted rather than an unarchive.
+        // Emptying the list moved focus to Cancel. Return to the restored row
+        // before archiving it; discovery must not steal focus from a button.
+        dashboard.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::BackTab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        // Archiving the row asks for the same write the failed one attempted.
         assert_eq!(
             dashboard.handle_key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),

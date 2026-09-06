@@ -571,16 +571,7 @@ impl super::ChatState {
                         (true, super::ChatAction::None)
                     }
                     SetupInteraction::Activate(control) => {
-                        let outcome = match self.second_opinion.as_mut() {
-                            Some(SecondOpinion::Setup { setup, .. }) => match control {
-                                SetupControl::Confirm | SetupControl::Options => setup.confirm(),
-                                SetupControl::Back => setup.back(),
-                                SetupControl::Retry => setup.retry(),
-                                SetupControl::Cancel => setup.cancel(),
-                            },
-                            _ => hel::hel_second_opinion::SetupOutcome::None,
-                        };
-                        (true, self.apply_setup_outcome(outcome))
+                        (true, self.apply_setup_control(control))
                     }
                 };
             }
@@ -642,32 +633,16 @@ impl super::ChatState {
                 super::ChatAction::None
             }
             Interaction::Activate(SetupControl::Options | SetupControl::Confirm) => {
-                let outcome = match self.second_opinion.as_mut() {
-                    Some(SecondOpinion::Setup { setup, .. }) => setup.confirm(),
-                    _ => hel::hel_second_opinion::SetupOutcome::None,
-                };
-                self.apply_setup_outcome(outcome)
+                self.apply_setup_control(SetupControl::Confirm)
             }
             Interaction::Activate(SetupControl::Back) => {
-                let outcome = match self.second_opinion.as_mut() {
-                    Some(SecondOpinion::Setup { setup, .. }) => setup.back(),
-                    _ => hel::hel_second_opinion::SetupOutcome::None,
-                };
-                self.apply_setup_outcome(outcome)
+                self.apply_setup_control(SetupControl::Back)
             }
             Interaction::Activate(SetupControl::Retry) => {
-                let outcome = match self.second_opinion.as_mut() {
-                    Some(SecondOpinion::Setup { setup, .. }) => setup.retry(),
-                    _ => hel::hel_second_opinion::SetupOutcome::None,
-                };
-                self.apply_setup_outcome(outcome)
+                self.apply_setup_control(SetupControl::Retry)
             }
             Interaction::Activate(SetupControl::Cancel) | Interaction::Cancel => {
-                let outcome = match self.second_opinion.as_mut() {
-                    Some(SecondOpinion::Setup { setup, .. }) => setup.cancel(),
-                    _ => hel::hel_second_opinion::SetupOutcome::None,
-                };
-                self.apply_setup_outcome(outcome)
+                self.apply_setup_control(SetupControl::Cancel)
             }
             _ => super::ChatAction::None,
         };
@@ -750,22 +725,24 @@ impl super::ChatState {
                 return action;
             }
         }
+        if matches!(self.second_opinion, Some(SecondOpinion::Setup { .. })) {
+            let failed = self.second_opinion.as_ref().is_some_and(|view| {
+                matches!(view, SecondOpinion::Setup { setup, .. } if setup.failure().is_some())
+            });
+            return match code {
+                KeyCode::Char('r') if failed => self.apply_setup_control(SetupControl::Retry),
+                KeyCode::Left | KeyCode::Backspace => self.apply_setup_control(SetupControl::Back),
+                KeyCode::Esc => self.apply_setup_control(SetupControl::Cancel),
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.apply_setup_control(SetupControl::Cancel)
+                }
+                _ => super::ChatAction::None,
+            };
+        }
         let Some(view) = self.second_opinion.as_mut() else {
             return super::ChatAction::None;
         };
         match view {
-            SecondOpinion::Setup { setup, .. } => {
-                let outcome = match code {
-                    KeyCode::Char('r') if setup.failure().is_some() => setup.retry(),
-                    KeyCode::Left | KeyCode::Backspace => setup.back(),
-                    KeyCode::Esc => setup.cancel(),
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        setup.cancel()
-                    }
-                    _ => return super::ChatAction::None,
-                };
-                self.apply_setup_outcome(outcome)
-            }
             SecondOpinion::Review(review) => match code {
                 KeyCode::Tab | KeyCode::Right => {
                     review.action = review.action.next(1);
@@ -789,7 +766,35 @@ impl super::ChatState {
                 KeyCode::Esc => self.cancel_review(),
                 _ => super::ChatAction::None,
             },
+            SecondOpinion::Setup { .. } => super::ChatAction::None,
         }
+    }
+
+    fn apply_setup_control(&mut self, control: SetupControl) -> super::ChatAction {
+        self.apply_setup_operation(|setup| match control {
+            SetupControl::Confirm | SetupControl::Options => setup.confirm(),
+            SetupControl::Back => setup.back(),
+            SetupControl::Retry => setup.retry(),
+            SetupControl::Cancel => setup.cancel(),
+        })
+    }
+
+    fn apply_setup_operation<F>(&mut self, operation: F) -> super::ChatAction
+    where
+        F: FnOnce(&mut ReviewerSetup) -> hel::hel_second_opinion::SetupOutcome,
+    {
+        let outcome = match self.second_opinion.as_mut() {
+            Some(SecondOpinion::Setup { setup, form, .. }) => {
+                let previous_stage = setup.stage();
+                let outcome = operation(setup);
+                if setup.stage() != previous_stage && !form.captures_pointer() {
+                    form.focus(SetupControl::Options);
+                }
+                outcome
+            }
+            _ => hel::hel_second_opinion::SetupOutcome::None,
+        };
+        self.apply_setup_outcome(outcome)
     }
 
     fn apply_setup_outcome(
@@ -1220,6 +1225,10 @@ mod tests {
     use super::*;
     use crate::hel_chat::test_support::{key, snapshot};
     use crate::hel_chat::{ChatAction, ChatState};
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        SessionConfigSelectOptions,
+    };
     use crossterm::event::{KeyCode, KeyModifiers};
     use hel::hel_second_opinion::{HARNESS_DEFAULT_VALUE, ReviewerDefaults, ReviewerProfileChoice};
     use hel::hel_transcript::ChatRole;
@@ -1250,6 +1259,19 @@ mod tests {
                 harness: "claude".into(),
             },
         ]
+    }
+
+    fn config_option(id: &str, category: SessionConfigOptionCategory) -> SessionConfigOption {
+        SessionConfigOption::select(
+            id.to_owned(),
+            id.to_owned(),
+            id.to_owned(),
+            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
+                id.to_owned(),
+                id.to_owned(),
+            )]),
+        )
+        .category(category)
     }
 
     fn chat_in_setup() -> ChatState {
@@ -1375,6 +1397,90 @@ mod tests {
                 profile_id: "claude".into(),
             }]
         );
+    }
+
+    #[test]
+    fn immediate_default_model_advance_focuses_effort_options() {
+        let mut chat = chat_in_setup();
+        let _ = press(&mut chat, KeyCode::Enter);
+        if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
+            assert!(setup.probe_succeeded(1, &[]).is_none());
+        } else {
+            panic!("the reviewer setup remains open while discovery completes");
+        }
+
+        let _ = press(&mut chat, KeyCode::Tab);
+        assert_eq!(press(&mut chat, KeyCode::Enter), ChatAction::None);
+        let Some(SecondOpinion::Setup { setup, form, .. }) = chat.second_opinion() else {
+            panic!("the reviewer setup remains open at the effort step");
+        };
+        assert_eq!(setup.stage(), SetupStage::Effort);
+        assert_eq!(form.focused(), Some(SetupControl::Options));
+    }
+
+    #[test]
+    fn backing_to_profile_focuses_profile_options() {
+        let mut chat = chat_in_setup();
+        let _ = press(&mut chat, KeyCode::Enter);
+        if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
+            assert!(setup.probe_succeeded(1, &[]).is_none());
+        } else {
+            panic!("the reviewer setup remains open while discovery completes");
+        }
+
+        let _ = press(&mut chat, KeyCode::Tab);
+        let _ = press(&mut chat, KeyCode::Tab);
+        let _ = press(&mut chat, KeyCode::Enter);
+
+        let Some(SecondOpinion::Setup { setup, form, .. }) = chat.second_opinion() else {
+            panic!("backing up keeps the reviewer setup open");
+        };
+        assert_eq!(setup.stage(), SetupStage::Profile);
+        assert_eq!(form.focused(), Some(SetupControl::Options));
+    }
+
+    #[test]
+    fn backing_to_model_focuses_model_options() {
+        let mut chat = chat_in_setup();
+        let _ = press(&mut chat, KeyCode::Enter);
+        if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
+            assert!(
+                setup
+                    .probe_succeeded(
+                        1,
+                        &[config_option("model", SessionConfigOptionCategory::Model)]
+                    )
+                    .is_none()
+            );
+        } else {
+            panic!("the reviewer setup remains open while discovery completes");
+        }
+        let _ = press(&mut chat, KeyCode::Enter);
+        if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
+            assert!(
+                setup
+                    .model_applied(
+                        1,
+                        &[
+                            config_option("model", SessionConfigOptionCategory::Model),
+                            config_option("effort", SessionConfigOptionCategory::ThoughtLevel,),
+                        ]
+                    )
+                    .is_none()
+            );
+        } else {
+            panic!("the reviewer setup remains open while model configuration completes");
+        }
+
+        let _ = press(&mut chat, KeyCode::Tab);
+        let _ = press(&mut chat, KeyCode::Tab);
+        let _ = press(&mut chat, KeyCode::Enter);
+
+        let Some(SecondOpinion::Setup { setup, form, .. }) = chat.second_opinion() else {
+            panic!("backing up keeps the reviewer setup open");
+        };
+        assert_eq!(setup.stage(), SetupStage::Model);
+        assert_eq!(form.focused(), Some(SetupControl::Options));
     }
 
     #[test]
