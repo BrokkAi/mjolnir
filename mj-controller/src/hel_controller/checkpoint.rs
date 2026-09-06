@@ -2153,6 +2153,7 @@ mod tests {
             latest_credential_sync_signal: None,
             worker_build: None,
             operational: hel::hel_worker::RelayOperationalState {
+                idle_since_ms: None,
                 session_id: "session-1".into(),
                 execution: RelayExecutionState::Idle,
                 latest_ordinal: cursor.ordinal,

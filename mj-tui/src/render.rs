@@ -3037,6 +3037,7 @@ mod tests {
         let background = SessionDetail {
             last_activity_at_ms: Some(1_297_000),
             activity: mj_chat::usage_format::SessionActivity {
+                idle_since_ms: None,
                 execution: None,
                 harness_turn_started_at_ms: None,
                 foreground_tool_started_at_ms: None,
@@ -4065,6 +4066,7 @@ mod tests {
     fn background_work_reaches_both_session_row_forms() {
         let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
         let activity = mj_chat::usage_format::SessionActivity {
+            idle_since_ms: None,
             execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,

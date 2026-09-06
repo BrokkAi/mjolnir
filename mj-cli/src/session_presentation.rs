@@ -157,6 +157,7 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            idle_since_ms: None,
             session_id: "session-1".into(),
             execution,
             latest_ordinal: 0,

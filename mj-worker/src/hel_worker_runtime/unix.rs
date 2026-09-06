@@ -820,7 +820,7 @@ pub(super) fn record_runtime_event(
             }
         }
         RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } => {
-            relay.claude_background_tasks_changed(tasks);
+            relay.claude_background_tasks_changed(tasks)?;
         }
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
@@ -907,7 +907,7 @@ pub(super) fn record_runtime_event(
             relay.record_observation(RelayObservation::Warning { message })?;
         }
         RuntimeEvent::HarnessRestarting { message } => {
-            relay.clear_agent_terminals();
+            relay.clear_agent_terminals()?;
             relay.record_observation(RelayObservation::Warning {
                 message: message.clone(),
             })?;
@@ -923,7 +923,7 @@ pub(super) fn record_runtime_event(
             exit_code,
             signal,
         } => {
-            relay.agent_terminal_closed(&terminal_id);
+            relay.agent_terminal_closed(&terminal_id)?;
             // Cap here rather than letting `clamp_observation` fire: that
             // keeps the head of a string, and a terminal's tail is what
             // says how the command ended.
@@ -948,7 +948,7 @@ pub(super) fn record_runtime_event(
                 terminal_id: terminal_id.clone(),
                 command: command.clone(),
                 started_at_ms,
-            });
+            })?;
             relay.record_session_update(SessionUpdate::ToolCall(
                 hel::hel_acp::fallback_terminal_tool_call(&terminal_id, command),
             ))?;
@@ -975,7 +975,7 @@ pub(super) fn record_runtime_event(
                 .record_command_completed(&request_id, RelayCommandOutcome::UserShell { result })?;
         }
         RuntimeEvent::Stopped => {
-            relay.clear_agent_terminals();
+            relay.clear_agent_terminals()?;
             relay.record_observation(RelayObservation::ElicitationsCleared)?;
             if relay.operational_state().execution != hel::hel_worker::RelayExecutionState::Closed {
                 relay.record_observation(RelayObservation::Warning {

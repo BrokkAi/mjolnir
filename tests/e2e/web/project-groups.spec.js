@@ -69,8 +69,8 @@ function snapshot() {
     revision: 1,
     generated_at: '2026-09-05T00:00:00Z',
     workspaces: [{ id: WORKSPACE_ID, name: 'Browser tests' }],
-    // Deliberately arrive out of label order. The TUI orders these project
-    // rows by their visible short label, not by whichever session came first.
+    // Deliberately arrive out of identity order. With equal creation times
+    // and no activity history, stable project IDs break the initial tie.
     sessions: [
       session('beta-session', 'project-beta', 'Beta'),
       session('alpha-first', 'project-alpha', 'Alpha'),
@@ -121,10 +121,10 @@ test('the live session list separates projected projects with visible divider he
   await mount(page);
 
   const groups = page.locator('#sessions > .project');
-  await expect(groups.locator('.project-heading')).toHaveText(['Alpha 2', 'Alpha 1', 'Beta 1']);
+  await expect(groups.locator('.project-heading')).toHaveText(['Alpha 2', 'Beta 1', 'Alpha 1']);
   await expect(groups.nth(0).locator('.session h3')).toHaveText(['alpha-first', 'alpha-second']);
-  await expect(groups.nth(1).locator('.session h3')).toHaveText(['other-alpha']);
-  await expect(groups.nth(2).locator('.session h3')).toHaveText(['beta-session']);
+  await expect(groups.nth(1).locator('.session h3')).toHaveText(['beta-session']);
+  await expect(groups.nth(2).locator('.session h3')).toHaveText(['other-alpha']);
 
   // A stopped session and a session from another workspace never enter the
   // live dashboard, so their project names cannot create false headings.

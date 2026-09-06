@@ -476,6 +476,7 @@ mod tests {
 
     fn operational() -> RelayOperationalState {
         RelayOperationalState {
+            idle_since_ms: None,
             session_id: "native-settings-test".to_owned(),
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,

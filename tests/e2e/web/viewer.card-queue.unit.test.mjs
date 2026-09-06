@@ -35,6 +35,9 @@ function makeNode(tag = 'div') {
     setAttribute(name, value) {
       this.attributes[name] = String(value);
     },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
   };
 }
 
@@ -50,10 +53,13 @@ function descendants(root, tag) {
 }
 
 function cardHarness() {
-  const source = sourceBetween('function sessionCard(session) {', '\n/// A glyph that repeats');
+  const source = sourceBetween('function sessionCard(session) {', '\nfunction action(');
   const context = vm.createContext({
-    LIFECYCLE_ICON: { live: '●' },
     pendingActions: new Set(),
+    openSessionMenuId: null,
+    snapshot: {},
+    epochMs(value) { return typeof value === 'number' ? value : null; },
+    sessionLifecycleLabel(session) { return session.state || session.lifecycle || 'live'; },
     document: { createElement: makeNode },
   });
   vm.runInContext(
@@ -103,7 +109,7 @@ test('session cards are focusable, have no Open button, and retain nested action
   assert.equal(card.attributes['aria-label'], 'Open session Build');
   assert.deepEqual(
     buttons.map(button => button.textContent),
-    ['Rename', 'Cancel', 'Stop', 'Resume'],
+    ['⋯', 'Rename', 'Cancel operation', 'Stop session', 'Resume'],
   );
   assert.ok(!buttons.some(button => button.textContent === 'Open'));
 
@@ -115,6 +121,38 @@ test('session cards are focusable, have no Open button, and retain nested action
   assert.equal(closed.attributes.tabindex, undefined);
 });
 
+test('session clocks keep the TUI units and structured activity truth', () => {
+  const clockSource = sourceBetween('function formatClock(', '\nfunction localClock');
+  const clockContext = vm.createContext({});
+  vm.runInContext(`${clockSource}\nglobalThis.formatClockForTest = formatClock;`, clockContext);
+  const formatClock = clockContext.formatClockForTest;
+  assert.equal(formatClock(36_000), '36s');
+  assert.equal(formatClock(60_000), '1m00s');
+  assert.equal(formatClock(65_000), '1m05s');
+  assert.equal(formatClock(3_600_000), '1h00m');
+  assert.equal(formatClock(6_216_000), '1h43m');
+  assert.equal(formatClock(172_800_000), '2d00h');
+
+  const activitySource = sourceBetween('function sessionActivityLabel(', '\nfunction updateSessionActivity');
+  const activityContext = vm.createContext({
+    snapshot: {},
+    epochMs(value) { return typeof value === 'number' ? value : null; },
+    formatClock,
+    serverClockMs: () => 100_000,
+    idleSinceLabel: () => 'Idle since 12:00',
+    operationLabel: () => 'Operation 1m00s',
+    sessionLifecycleLabel: session => session.lifecycle || 'live',
+  });
+  vm.runInContext(`${activitySource}\nglobalThis.activityForTest = sessionActivityLabel;`, activityContext);
+  const activity = activityContext.activityForTest;
+  assert.equal(activity({ activity_details: { kind: 'turn', turn_started_at_ms: 40_000 } }, 100_000), 'Turn 1m00s · Step 1m00s');
+  assert.equal(activity({ activity_details: { kind: 'step', step_started_at_ms: 40_000 } }, 100_000), 'Step 1m00s');
+  assert.equal(activity({ activity_details: { kind: 'idle' } }, 100_000), 'Idle');
+  assert.equal(activity({ activity_details: { kind: 'background' } }, 100_000), 'Background');
+  assert.equal(activity({ activity_details: { kind: 'lifecycle', label: 'Stopping' } }, 100_000), 'Stopping');
+  assert.equal(activity({ lifecycle: 'starting', activity_details: { kind: 'turn', turn_started_at_ms: 40_000 } }, 100_000), 'starting');
+});
+
 function cardEventHarness() {
   const source = sourceBetween(
     '/// Find a session card for an event',
@@ -122,6 +160,9 @@ function cardEventHarness() {
   );
   const navigations = [];
   const context = vm.createContext({
+    suppressedSessionClickId: null,
+    closeSessionMenu() {},
+    openSessionMenu() {},
     navigate(route) {
       navigations.push(route);
     },

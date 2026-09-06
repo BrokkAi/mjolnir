@@ -51,6 +51,7 @@ fn session_record(id: &str) -> SessionRecord {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        idle_since_ms: None,
         session_id: session_id.into(),
         execution: RelayExecutionState::Idle,
         latest_ordinal: 0,
