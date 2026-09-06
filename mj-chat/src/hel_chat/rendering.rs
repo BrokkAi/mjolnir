@@ -21,10 +21,10 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
     }
     let button_width = display_width(&format!(" {VOICE_BUTTON_GLYPH} "));
     let button_width = u16::try_from(button_width).ok()?;
-    let title_width = prompt_area.width.saturating_sub(2);
+    let title_width = prompt_area.width.saturating_sub(3);
     (button_width <= title_width).then(|| {
         Rect::new(
-            prompt_area.x.saturating_add(1),
+            prompt_area.x.saturating_add(2),
             prompt_area.bottom().saturating_sub(1),
             button_width,
             1,
