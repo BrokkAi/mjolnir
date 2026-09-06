@@ -1339,10 +1339,7 @@ impl ActiveChat {
     pub fn handle_event(&mut self, event: Event) -> ChatEventOutcome {
         let action = match event {
             Event::Key(key) => self.state.handle_key(key),
-            Event::Paste(pasted) => {
-                self.state.handle_paste(&pasted);
-                ChatAction::None
-            }
+            Event::Paste(pasted) => self.state.handle_terminal_paste(&pasted),
             Event::Mouse(mouse) => self.state.handle_mouse(mouse),
             // Resize and focus changes only need the redraw.
             _ => ChatAction::None,
