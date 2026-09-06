@@ -43,6 +43,9 @@ use crate::daemon;
 use crate::dashboard::io::DashboardIoUpdate;
 use crate::short_id;
 
+#[cfg(test)]
+mod runtime_feed_tests;
+
 pub(crate) const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// When a quota reading stops counting as current. A reading only goes stale
 /// once a scheduled refresh should already have replaced it, so this is
@@ -1541,6 +1544,247 @@ impl ProjectionConvergence {
     }
 }
 
+/// Read-only updates shared by the dashboard and workspace preview. A snapshot
+/// precedes its session views, so consumers can establish membership first.
+pub(crate) enum RuntimeFeedUpdate {
+    Snapshot(Box<daemon::RuntimeSnapshot>),
+    Session {
+        session_id: String,
+        view: Box<ManagedSessionView>,
+    },
+    Error(String),
+}
+
+/// Dropping a subscription cancels even a pending daemon long poll. The task
+/// owns no writer or relay connection; blocking projection reads are bounded.
+pub(crate) struct RuntimeFeed {
+    pub(crate) updates: tokio::sync::mpsc::Receiver<RuntimeFeedUpdate>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RuntimeFeed {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub(crate) fn spawn_runtime_feed(workspace_id: String) -> RuntimeFeed {
+    spawn_runtime_feed_with(workspace_id, poll_daemon_runtime, load_runtime_projection)
+}
+
+type StoredProjection = Option<(MaterializedSession, hel::hel_state::ProjectionWindow)>;
+
+async fn load_runtime_projection(session_id: String) -> Result<StoredProjection> {
+    static READERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    let permit = Arc::clone(&READERS)
+        .acquire_owned()
+        .await
+        .context("projection readers stopped")?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let result = hel::hel_database::load_materialized_projection_tail(
+            &session_id,
+            hel::hel_database::PROJECTION_TAIL_ITEMS,
+        );
+        // A blocking SQLite read can outlive cancellation of its subscriber.
+        if let Err(error) = &result {
+            tracing::warn!(%session_id, %error, "could not load runtime projection");
+        }
+        result
+    })
+    .await
+    .context("projection load task failed")?
+}
+
+fn spawn_runtime_feed_with<P, PF, L, LF>(workspace_id: String, poll: P, load: L) -> RuntimeFeed
+where
+    P: Fn(String, u64) -> PF + Send + 'static,
+    PF: Future<Output = Result<daemon::RuntimeSnapshot>> + Send,
+    L: Fn(String) -> LF + Clone + Send + 'static,
+    LF: Future<Output = Result<StoredProjection>> + Send + 'static,
+{
+    let (tx, updates) = tokio::sync::mpsc::channel(32);
+    let task = tokio::spawn(async move {
+        let result = run_runtime_feed(workspace_id, poll, load, &tx).await;
+        if let Err(error) = result {
+            let message = format!("Runtime feed stopped: {error:#}");
+            tracing::error!(%message);
+            let _ = tx.send(RuntimeFeedUpdate::Error(message)).await;
+        }
+    });
+    RuntimeFeed { updates, task }
+}
+
+async fn run_runtime_feed<P, PF, L, LF>(
+    workspace_id: String,
+    poll: P,
+    load: L,
+    tx: &tokio::sync::mpsc::Sender<RuntimeFeedUpdate>,
+) -> Result<()>
+where
+    P: Fn(String, u64) -> PF,
+    PF: Future<Output = Result<daemon::RuntimeSnapshot>>,
+    L: Fn(String) -> LF + Clone + Send + 'static,
+    LF: Future<Output = Result<StoredProjection>> + Send + 'static,
+{
+    let mut revision = 0;
+    let mut convergence = ProjectionConvergence::default();
+    let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
+    loop {
+        let mut snapshot = match poll(workspace_id.clone(), revision).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if tx
+                    .send(RuntimeFeedUpdate::Error(format!(
+                        "Could not refresh sessions: {error:#}"
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        let snapshot_revision = snapshot.revision;
+        let sessions = std::mem::take(&mut snapshot.sessions);
+        published.retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
+        convergence
+            .attempts
+            .retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
+        if tx
+            .send(RuntimeFeedUpdate::Snapshot(Box::new(snapshot)))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let mut pending = sessions
+            .into_iter()
+            .filter(|runtime| {
+                !published
+                    .get(&runtime.session_id)
+                    .is_some_and(|last| last.matches(runtime))
+            })
+            .collect::<std::collections::VecDeque<_>>();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut retry = false;
+        while !pending.is_empty() || !tasks.is_empty() {
+            // Independent session reads overlap, without flooding SQLite or
+            // leaving an unbounded number of blocking reads after cancellation.
+            while tasks.len() < 4 {
+                let Some(runtime) = pending.pop_front() else {
+                    break;
+                };
+                let load = load.clone();
+                tasks.spawn(async move {
+                    let stored = if runtime.operational.is_some() {
+                        load(runtime.session_id.clone()).await
+                    } else {
+                        Ok(None)
+                    };
+                    (runtime, stored)
+                });
+            }
+            let Some(result) = tasks.join_next().await else {
+                break;
+            };
+            let (runtime, stored) = result.context("join runtime projection reader")?;
+            let session_id = runtime.session_id.clone();
+            let fingerprint = PublishedView::of(&runtime);
+            let Some(view) = runtime_projection_view(runtime, stored, &mut convergence) else {
+                retry = true;
+                continue;
+            };
+            if view.snapshot.is_some() {
+                published.insert(session_id.clone(), fingerprint);
+            } else {
+                published.remove(&session_id);
+            }
+            if tx
+                .send(RuntimeFeedUpdate::Session {
+                    session_id,
+                    view: Box::new(view),
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        if retry {
+            tokio::time::sleep(PROJECTION_CONVERGENCE_RETRY_DELAY).await;
+        } else {
+            revision = revision.max(snapshot_revision);
+        }
+    }
+}
+
+fn runtime_projection_view(
+    runtime: daemon::RuntimeSessionView,
+    stored: Result<StoredProjection>,
+    convergence: &mut ProjectionConvergence,
+) -> Option<ManagedSessionView> {
+    let Some(operational) = runtime.operational else {
+        return Some(ManagedSessionView {
+            snapshot: None,
+            connected: runtime.connected,
+            error: runtime.error,
+        });
+    };
+    let detail = match stored {
+        Ok(Some((materialized, window)))
+            if materialized.applied_event_ordinal > runtime.projection_ordinal
+                || (materialized.applied_event_ordinal == runtime.projection_ordinal
+                    && materialized.applied_event_digest == runtime.projection_digest) =>
+        {
+            convergence.converged(&runtime.session_id);
+            return Some(ManagedSessionView {
+                snapshot: Some(ManagedSessionSnapshot {
+                    materialized,
+                    window,
+                    operational,
+                    latest_credential_sync_signal: runtime.latest_credential_sync_signal,
+                    worker_build: None,
+                }),
+                connected: runtime.connected,
+                error: runtime.error,
+            });
+        }
+        Ok(Some((materialized, _))) => {
+            let mismatch = ProjectionMismatch {
+                published_ordinal: runtime.projection_ordinal,
+                published_digest: runtime.projection_digest,
+                durable_ordinal: materialized.applied_event_ordinal,
+                durable_digest: materialized.applied_event_digest.clone(),
+            };
+            if convergence.should_retry(&runtime.session_id, mismatch) {
+                return None;
+            }
+            if materialized.applied_event_ordinal < runtime.projection_ordinal {
+                format!(
+                    "daemon published projection {} but SQLite contains only {} after a bounded convergence retry",
+                    runtime.projection_ordinal, materialized.applied_event_ordinal
+                )
+            } else {
+                format!(
+                    "daemon and SQLite projection digests differ at ordinal {} after a bounded convergence retry",
+                    runtime.projection_ordinal
+                )
+            }
+        }
+        Ok(None) => "daemon published a session with no durable projection".into(),
+        Err(error) => format!("load daemon-owned projection: {error:#}"),
+    };
+    Some(ManagedSessionView {
+        snapshot: None,
+        connected: false,
+        error: Some(ViewError::ProjectionIntegrity(detail)),
+    })
+}
+
 pub(crate) fn spawn_remote_dashboard_worker_poller(
     workspace_id: String,
 ) -> Result<RemoteDashboardWorkerPoller> {
@@ -1559,191 +1803,38 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
     let (config_tx, config_rx) = tokio::sync::watch::channel(hel::hel_config::HelConfig::default());
     let (records_tx, records_rx) = tokio::sync::watch::channel(Vec::new());
     tokio::spawn(async move {
-        let mut revision = 0_u64;
-        let mut requests_open = true;
-        let mut projection_convergence = ProjectionConvergence::default();
-        // What was last published for each session, so an unchanged session
-        // costs nothing. Without this every poll re-read and re-deserialised
-        // every live session's whole transcript to discover that none of it
-        // had moved, which made the cost of showing anything proportional to
-        // everything that had ever happened in the conversation. The stored
-        // value is bounded by the relay's operational state; the transcript
-        // itself is never held here.
-        let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
-        // One session's requests reach the daemon in the order they were made;
-        // different sessions still overlap.
+        let mut feed = spawn_runtime_feed(workspace_id);
         let mut request_order = mj_controller::hel_session_manager::SessionRequestOrder::new();
         loop {
             tokio::select! {
-                request = requests.recv(), if requests_open => {
-                    let Some(request) = request else {
-                        requests_open = false;
-                        continue;
-                    };
+                request = requests.recv() => {
+                    let Some(request) = request else { return; };
                     request_order.dispatch(request, forward_remote_session_request);
                 }
-                snapshot = poll_daemon_runtime(workspace_id.clone(), revision) => {
-                    match snapshot {
-                        Ok(snapshot) => {
-                            let snapshot_revision = snapshot.revision;
-                            let mut retry_projection = false;
+                update = feed.updates.recv() => {
+                    match update {
+                        Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
                             config_tx.send_if_modified(|config| {
-                                if *config == snapshot.config {
-                                    false
-                                } else {
-                                    *config = snapshot.config.clone();
-                                    true
-                                }
+                                if *config == snapshot.config { false }
+                                else { *config = snapshot.config.clone(); true }
                             });
                             records_tx.send_if_modified(|records| {
-                                if *records == snapshot.records {
-                                    false
-                                } else {
-                                    records.clone_from(&snapshot.records);
-                                    true
-                                }
+                                if *records == snapshot.records { false }
+                                else { records.clone_from(&snapshot.records); true }
                             });
                             lifecycle_tx.send_replace(snapshot.lifecycles);
                             reviews_tx.send_replace(snapshot.reviews);
                             notices_tx.send_replace(snapshot.notices);
-                            for runtime in snapshot.sessions {
-                                let session_id = runtime.session_id.clone();
-                                // Nothing about this session has moved, so
-                                // there is nothing to read and nothing to say.
-                                // Consumers hold the last view they were sent.
-                                if published
-                                    .get(&session_id)
-                                    .is_some_and(|last| last.matches(&runtime))
-                                {
-                                    continue;
-                                }
-                                let fingerprint = PublishedView::of(&runtime);
-                                let view = match runtime.operational.clone() {
-                                    Some(operational) => {
-                                        // Bounded: the window is everything any
-                                        // viewer shows. Reading the whole
-                                        // transcript here was work proportional
-                                        // to the conversation, on every poll a
-                                        // session moved.
-                                        let loaded = tokio::task::spawn_blocking({
-                                            let session_id = session_id.clone();
-                                            move || hel::hel_database::load_materialized_projection_tail(
-                                                &session_id,
-                                                hel::hel_database::PROJECTION_TAIL_ITEMS,
-                                            )
-                                        }).await;
-                                        match loaded {
-                                            Ok(Ok(Some((materialized, window))))
-                                                if materialized.applied_event_ordinal > runtime.projection_ordinal
-                                                    || (materialized.applied_event_ordinal == runtime.projection_ordinal
-                                                        && materialized.applied_event_digest == runtime.projection_digest) =>
-                                            {
-                                                projection_convergence.converged(&session_id);
-                                                ManagedSessionView {
-                                                    snapshot: Some(ManagedSessionSnapshot {
-                                                        materialized,
-                                                        window,
-                                                        operational,
-                                                        latest_credential_sync_signal:
-                                                            runtime.latest_credential_sync_signal,
-                                                        // Views rebuilt from a
-                                                        // daemon snapshot carry
-                                                        // no live connection,
-                                                        // so they report no
-                                                        // worker build.
-                                                        worker_build: None,
-                                                    }),
-                                                    connected: runtime.connected,
-                                                    error: runtime.error,
-                                                }
-                                            }
-                                            Ok(Ok(Some((materialized, _)))) => {
-                                                let mismatch = ProjectionMismatch {
-                                                    published_ordinal: runtime.projection_ordinal,
-                                                    published_digest: runtime.projection_digest.clone(),
-                                                    durable_ordinal: materialized.applied_event_ordinal,
-                                                    durable_digest: materialized.applied_event_digest.clone(),
-                                                };
-                                                if projection_convergence.should_retry(&session_id, mismatch) {
-                                                    retry_projection = true;
-                                                    continue;
-                                                }
-                                                let detail = if materialized.applied_event_ordinal
-                                                    < runtime.projection_ordinal
-                                                {
-                                                    format!(
-                                                        "daemon published projection {} but SQLite contains only {} after a bounded convergence retry",
-                                                        runtime.projection_ordinal,
-                                                        materialized.applied_event_ordinal,
-                                                    )
-                                                } else {
-                                                    format!(
-                                                        "daemon and SQLite projection digests differ at ordinal {} after a bounded convergence retry",
-                                                        runtime.projection_ordinal,
-                                                    )
-                                                };
-                                                ManagedSessionView {
-                                                    snapshot: None,
-                                                    connected: false,
-                                                    error: Some(ViewError::ProjectionIntegrity(detail)),
-                                                }
-                                            }
-                                            Ok(Ok(None)) => ManagedSessionView {
-                                                snapshot: None,
-                                                connected: false,
-                                                error: Some(ViewError::ProjectionIntegrity(
-                                                    "daemon published a session with no durable projection".into(),
-                                                )),
-                                            },
-                                            Ok(Err(error)) => ManagedSessionView {
-                                                snapshot: None,
-                                                connected: false,
-                                                error: Some(ViewError::ProjectionIntegrity(format!(
-                                                    "load daemon-owned projection: {error:#}",
-                                                ))),
-                                            },
-                                            Err(error) => ManagedSessionView {
-                                                snapshot: None,
-                                                connected: false,
-                                                error: Some(ViewError::ProjectionIntegrity(format!(
-                                                    "projection load task failed: {error}",
-                                                ))),
-                                            },
-                                        }
-                                    }
-                                    None => ManagedSessionView {
-                                        snapshot: None,
-                                        connected: runtime.connected,
-                                        error: runtime.error,
-                                    },
-                                };
-                                // Only a view that was actually built is
-                                // remembered: an error path must be retried on
-                                // the next poll rather than cached as current.
-                                if view.snapshot.is_some() {
-                                    published.insert(session_id.clone(), fingerprint);
-                                } else {
-                                    published.remove(&session_id);
-                                }
-                                if publisher.publish(session_id, view).await.is_err() {
-                                    return;
-                                }
-                            }
-                            if retry_projection {
-                                tokio::time::sleep(PROJECTION_CONVERGENCE_RETRY_DELAY).await;
-                            } else {
-                                revision = revision.max(snapshot_revision);
-                            }
                         }
-                        Err(error) => {
+                        Some(RuntimeFeedUpdate::Session { session_id, view }) => {
+                            if publisher.publish(session_id, *view).await.is_err() { return; }
+                        }
+                        Some(RuntimeFeedUpdate::Error(error)) => {
                             tracing::warn!(%error, "could not refresh sessions from controller daemon");
-                            tokio::time::sleep(Duration::from_millis(250)).await;
                         }
+                        None => return,
                     }
                 }
-            }
-            if !requests_open {
-                return;
             }
         }
     });

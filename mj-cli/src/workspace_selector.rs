@@ -1,26 +1,26 @@
-//! Terminal workspace picker with a compact read-only dashboard preview.
+//! Terminal workspace picker with a live, read-only expanded session preview.
 
-use std::collections::BTreeMap;
+use std::time::Duration;
 
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+mod preview;
+use preview::WorkspacePreview;
+
+use anyhow::{Context, Result};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
+use hel_tui::{SessionsPreviewState, render_sessions_preview};
 use mj_chat::hel_chat::Notices;
 use mj_chat::hel_text_input::TextInput;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use tokio_stream::StreamExt;
 
 use crate::TerminalGuard;
 use crate::daemon::{WorkspaceListing, WorkspaceSnapshot};
 
 const SELECTOR_HINTS: &str =
-    "↑↓ select  Enter open  N new  R rename  V recover draft  D delete  Esc cancel";
-
-pub(crate) struct SelectorWorkspace {
-    pub listing: WorkspaceListing,
-    pub snapshot: WorkspaceSnapshot,
-}
+    "↑↓ select  PgUp/PgDn preview  Enter open  N new  R rename  V recover  D delete  Esc cancel";
 
 pub(crate) enum SelectorOutcome {
     Select(String),
@@ -36,6 +36,7 @@ pub(crate) enum SelectorOutcome {
         draft_id: String,
     },
     Cancel,
+    Interrupted,
 }
 
 enum EditMode {
@@ -83,19 +84,46 @@ fn delete_prompt(confirm: &ConfirmDelete, input: &TextInput) -> String {
     )
 }
 
-pub(crate) fn select_workspace(
-    workspaces: &[SelectorWorkspace],
+pub(crate) async fn select_workspace(
+    workspaces: &[WorkspaceListing],
     suggested_name: &str,
     notices: &Notices,
     selected_workspace_id: Option<&str>,
 ) -> Result<SelectorOutcome> {
+    static TERMINATION: std::sync::OnceLock<hel::termination::Coordinator> =
+        std::sync::OnceLock::new();
+    let termination = TERMINATION
+        .get_or_init(hel::termination::Coordinator::install)
+        .token();
     let mut terminal = TerminalGuard::enter()?;
     let mut selected = initial_selection(workspaces, selected_workspace_id);
     let mut editing: Option<EditMode> = None;
     let mut confirming: Option<ConfirmDelete> = None;
     let mut input = TextInput::new().with_max_chars(64);
 
+    let mut events = event::EventStream::new();
+    let mut ticks = tokio::time::interval(Duration::from_secs(1));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut preview: Option<WorkspacePreview> = None;
+    let mut preview_workspace_id = None;
+    let mut preview_scroll = SessionsPreviewState::default();
+    let mut preview_area = Rect::default();
+    let mut list_state = ListState::default();
+
     loop {
+        let workspace_id = workspaces
+            .get(selected)
+            .map(|candidate| candidate.workspace.id.clone());
+        if preview_workspace_id != workspace_id {
+            preview_workspace_id = workspace_id;
+            preview_scroll = SessionsPreviewState::default();
+            preview = workspaces.get(selected).map(|candidate| {
+                WorkspacePreview::new(
+                    candidate.workspace.id.clone(),
+                    candidate.workspace.name.clone(),
+                )
+            });
+        }
         terminal.terminal.draw(|frame| {
             let [body, footer] = Layout::default()
                 .direction(Direction::Vertical)
@@ -109,13 +137,12 @@ pub(crate) fn select_workspace(
             let mut items = workspaces
                 .iter()
                 .map(|candidate| {
-                    let attached = if candidate.listing.attached_pids.is_empty() {
+                    let attached = if candidate.attached_pids.is_empty() {
                         String::new()
                     } else {
                         format!(
                             " [attached to {}]",
                             candidate
-                                .listing
                                 .attached_pids
                                 .iter()
                                 .map(u32::to_string)
@@ -123,11 +150,11 @@ pub(crate) fn select_workspace(
                                 .join(", ")
                         )
                     };
-                    ListItem::new(format!("{}{}", candidate.listing.workspace.name, attached))
+                    ListItem::new(format!("{}{}", candidate.workspace.name, attached))
                 })
                 .collect::<Vec<_>>();
             items.push(ListItem::new("＋ Create new"));
-            let mut list_state = ListState::default().with_selected(Some(selected));
+            list_state.select(Some(selected));
             frame.render_stateful_widget(
                 List::new(items)
                     .block(Block::default().title(" Workspaces ").borders(Borders::ALL))
@@ -137,28 +164,84 @@ pub(crate) fn select_workspace(
                 &mut list_state,
             );
 
-            let preview = if let Some(candidate) = workspaces.get(selected) {
-                preview_lines(candidate)
+            preview_area = right;
+            if let (Some(candidate), Some(preview)) = (workspaces.get(selected), preview.as_ref()) {
+                let metadata = preview_lines(
+                    candidate,
+                    preview.metadata.as_ref(),
+                    preview.session_count(),
+                );
+                let status = preview.status();
+                let [header, sessions, status_area] = Layout::vertical([
+                    Constraint::Length(metadata.len() as u16),
+                    Constraint::Min(0),
+                    Constraint::Length(u16::from(status.is_some())),
+                ])
+                .areas(right);
+                frame.render_widget(Paragraph::new(metadata), header);
+                if preview.loaded {
+                    render_sessions_preview(
+                        frame,
+                        sessions,
+                        &preview.dashboard,
+                        &mut preview_scroll,
+                    );
+                } else {
+                    frame.render_widget(
+                        Paragraph::new("Loading sessions…")
+                            .block(Block::default().title(" Sessions ").borders(Borders::ALL)),
+                        sessions,
+                    );
+                }
+                if let Some(status) = status {
+                    frame.render_widget(
+                        Paragraph::new(status).style(Style::default().fg(Color::Yellow)),
+                        status_area,
+                    );
+                }
             } else {
-                vec![
-                    Line::from("Create a durable workspace for a group of sessions."),
-                    Line::from(""),
-                    Line::from(format!("Suggested name: {suggested_name}")),
-                ]
-            };
-            frame.render_widget(
-                Paragraph::new(preview)
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Line::from("Create a durable workspace for a group of sessions."),
+                        Line::from(""),
+                        Line::from(format!("Suggested name: {suggested_name}")),
+                    ])
                     .block(Block::default().title(" Preview ").borders(Borders::ALL))
                     .wrap(Wrap { trim: false }),
-                right,
-            );
+                    right,
+                );
+            }
 
             let (footer_text, footer_style) =
                 selector_footer(editing.as_ref(), confirming.as_ref(), &input, notices);
             frame.render_widget(Paragraph::new(footer_text).style(footer_style), footer);
         })?;
 
-        let Event::Key(key) = event::read()? else {
+        let event = tokio::select! {
+            _ = termination.cancelled() => return Ok(SelectorOutcome::Interrupted),
+            event = events.next() => match event {
+                Some(event) => event.context("read workspace selector input")?,
+                None => return Ok(SelectorOutcome::Cancel),
+            },
+            _ = ticks.tick() => {
+                if let Some(preview) = preview.as_mut() { preview.tick(); }
+                continue;
+            }
+            _ = async { preview.as_mut().expect("guarded preview").update().await }, if preview.is_some() => continue,
+        };
+        if editing.is_none()
+            && confirming.is_none()
+            && let Event::Mouse(mouse) = &event
+            && preview_area.contains((mouse.column, mouse.row).into())
+        {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => preview_scroll.scroll_lines(-3),
+                MouseEventKind::ScrollDown => preview_scroll.scroll_lines(3),
+                _ => {}
+            }
+            continue;
+        }
+        let Event::Key(key) = event else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -230,6 +313,17 @@ pub(crate) fn select_workspace(
 
         match key.code {
             KeyCode::Esc => return Ok(SelectorOutcome::Cancel),
+            KeyCode::Char('c')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                return Ok(SelectorOutcome::Cancel);
+            }
+            KeyCode::PageUp => preview_scroll.scroll_page(-1),
+            KeyCode::PageDown => preview_scroll.scroll_page(1),
+            KeyCode::Home => preview_scroll.home(),
+            KeyCode::End => preview_scroll.end(),
             KeyCode::Up | KeyCode::Char('k') => {
                 selected = selected.saturating_sub(1);
             }
@@ -238,7 +332,7 @@ pub(crate) fn select_workspace(
             }
             KeyCode::Enter if selected < workspaces.len() => {
                 return Ok(SelectorOutcome::Select(
-                    workspaces[selected].listing.workspace.id.clone(),
+                    workspaces[selected].workspace.id.clone(),
                 ));
             }
             KeyCode::Enter | KeyCode::Char('n' | 'N') => {
@@ -247,30 +341,37 @@ pub(crate) fn select_workspace(
             }
             KeyCode::Char('r' | 'R') if selected < workspaces.len() => {
                 editing = Some(EditMode::Rename {
-                    workspace_id: workspaces[selected].listing.workspace.id.clone(),
+                    workspace_id: workspaces[selected].workspace.id.clone(),
                 });
-                input.set_value(&workspaces[selected].listing.workspace.name);
+                input.set_value(&workspaces[selected].workspace.name);
             }
-            KeyCode::Char('d' | 'D') if selected < workspaces.len() => {
+            KeyCode::Char('d' | 'D' | 'v' | 'V') if selected < workspaces.len() => {
+                let Some(preview) = preview.as_ref().filter(|preview| preview.metadata_ready())
+                else {
+                    notices
+                        .set("Workspace details are unavailable or still loading; retry shortly.");
+                    continue;
+                };
+                let snapshot = preview.metadata.as_ref().expect("ready metadata");
                 let candidate = &workspaces[selected];
-                confirming = Some(ConfirmDelete {
-                    workspace_id: candidate.listing.workspace.id.clone(),
-                    name: candidate.listing.workspace.name.clone(),
-                    active: candidate
-                        .snapshot
-                        .sessions
-                        .iter()
-                        .filter(|session| session.active)
-                        .count(),
-                    drafts: candidate.snapshot.drafts.len(),
-                });
-            }
-            KeyCode::Char('v' | 'V') if selected < workspaces.len() => {
-                if let Some(draft) = workspaces[selected].snapshot.drafts.first() {
+                if matches!(key.code, KeyCode::Char('d' | 'D')) {
+                    confirming = Some(ConfirmDelete {
+                        workspace_id: candidate.workspace.id.clone(),
+                        name: candidate.workspace.name.clone(),
+                        active: snapshot
+                            .sessions
+                            .iter()
+                            .filter(|session| session.active)
+                            .count(),
+                        drafts: snapshot.drafts.len(),
+                    });
+                } else if let Some(draft) = snapshot.drafts.first() {
                     return Ok(SelectorOutcome::RecoverDraft {
-                        workspace_id: workspaces[selected].listing.workspace.id.clone(),
+                        workspace_id: candidate.workspace.id.clone(),
                         draft_id: draft.id.clone(),
                     });
+                } else {
+                    notices.set("This workspace has no recoverable drafts.");
                 }
             }
             _ => {}
@@ -279,14 +380,14 @@ pub(crate) fn select_workspace(
 }
 
 fn initial_selection(
-    workspaces: &[SelectorWorkspace],
+    workspaces: &[WorkspaceListing],
     selected_workspace_id: Option<&str>,
 ) -> usize {
     selected_workspace_id
         .and_then(|workspace_id| {
             workspaces
                 .iter()
-                .position(|candidate| candidate.listing.workspace.id == workspace_id)
+                .position(|candidate| candidate.workspace.id == workspace_id)
         })
         .unwrap_or(0)
 }
@@ -316,27 +417,25 @@ fn selector_footer(
     }
 }
 
-fn preview_lines(candidate: &SelectorWorkspace) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            candidate.listing.workspace.name.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "  {} session{}",
-            candidate.snapshot.sessions.len(),
-            if candidate.snapshot.sessions.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )),
-    ])];
-    if !candidate.listing.attached_pids.is_empty() {
+fn preview_lines(
+    candidate: &WorkspaceListing,
+    snapshot: Option<&WorkspaceSnapshot>,
+    session_count: Option<usize>,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        candidate.workspace.name.clone(),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    if let Some(count) = session_count {
+        lines[0].spans.push(Span::raw(format!(
+            "  {count} session{}",
+            if count == 1 { "" } else { "s" }
+        )));
+    }
+    if !candidate.attached_pids.is_empty() {
         lines.push(Line::from(format!(
             "attached to {}",
             candidate
-                .listing
                 .attached_pids
                 .iter()
                 .map(u32::to_string)
@@ -344,42 +443,16 @@ fn preview_lines(candidate: &SelectorWorkspace) -> Vec<Line<'static>> {
                 .join(", ")
         )));
     }
-    lines.push(Line::from(""));
-    if !candidate.snapshot.drafts.is_empty() {
-        lines.push(Line::from(format!(
-            "{} recoverable draft{}  (V restores newest)",
-            candidate.snapshot.drafts.len(),
-            if candidate.snapshot.drafts.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )));
-        lines.push(Line::from(""));
-    }
-
-    let mut projects = BTreeMap::<&str, Vec<_>>::new();
-    for session in candidate
-        .snapshot
-        .sessions
-        .iter()
-        .filter(|session| session.active)
-    {
-        projects
-            .entry(session.project.as_str())
-            .or_default()
-            .push(session);
-    }
-    if projects.is_empty() {
-        lines.push(Line::from("No active sessions"));
-    } else {
-        for (project, sessions) in projects {
+    if let Some(snapshot) = snapshot {
+        if !snapshot.drafts.is_empty() {
             lines.push(Line::from(format!(
-                "▸ {project}  {} active session{}",
-                sessions.len(),
-                if sessions.len() == 1 { "" } else { "s" }
+                "{} recoverable draft{}  (V restores newest)",
+                snapshot.drafts.len(),
+                if snapshot.drafts.len() == 1 { "" } else { "s" }
             )));
         }
+    } else {
+        lines.push(Line::from("Loading workspace details…"));
     }
     lines
 }
@@ -387,27 +460,18 @@ fn preview_lines(candidate: &SelectorWorkspace) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::{WorkspaceListing, WorkspaceSnapshot};
     use hel::hel_workspace::WorkspaceRecord;
 
-    fn candidate(id: &str) -> SelectorWorkspace {
-        let workspace = WorkspaceRecord {
-            id: id.into(),
-            name: id.into(),
-            created_at: "2026-09-03T00:00:00Z".into(),
-            last_opened_at: "2026-09-03T00:00:00Z".into(),
-            session_count: 0,
-        };
-        SelectorWorkspace {
-            listing: WorkspaceListing {
-                workspace: workspace.clone(),
-                attached_pids: Vec::new(),
+    fn candidate(id: &str) -> WorkspaceListing {
+        WorkspaceListing {
+            workspace: WorkspaceRecord {
+                id: id.into(),
+                name: id.into(),
+                created_at: "2026-09-03T00:00:00Z".into(),
+                last_opened_at: "2026-09-03T00:00:00Z".into(),
+                session_count: 0,
             },
-            snapshot: WorkspaceSnapshot {
-                workspace,
-                sessions: Vec::new(),
-                drafts: Vec::new(),
-            },
+            attached_pids: Vec::new(),
         }
     }
 
