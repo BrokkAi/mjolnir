@@ -465,11 +465,12 @@ impl DashboardState {
 
     /// Whether anything on screen animates on its own and so needs a redraw
     /// faster than the one-second clock: the import progress dialog, or the
-    /// resume dialog's scanning spinner.
+    /// resume dialog's scanning spinner, or review settings discovery.
     pub fn needs_fast_tick(&self) -> bool {
         match &self.mode {
             Mode::Importing(_) => true,
             Mode::ResumeDialog(dialog) => dialog.is_scanning(),
+            Mode::ReviewSettings(dialog) => dialog.probing,
             _ => false,
         }
     }

@@ -1444,9 +1444,15 @@ pub(crate) fn render_session_scrollbar(
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .thumb_style(Style::default().fg(Color::Gray))
         .track_style(Style::default().fg(Color::DarkGray));
-    let mut state = ScrollbarState::new(content_length)
-        .position(position)
-        .viewport_content_length(viewport_content_length.max(1));
+    // Ratatui counts possible viewport positions, not total content rows.
+    // The last offset must put the thumb against the end of the track.
+    let mut state = ScrollbarState::new(
+        content_length
+            .saturating_sub(viewport_content_length.max(1))
+            .saturating_add(1),
+    )
+    .position(position)
+    .viewport_content_length(viewport_content_length.max(1));
     frame.render_stateful_widget(
         scrollbar,
         area.inner(Margin {
@@ -2572,6 +2578,25 @@ mod tests {
 
     use crate::ingest::SessionDetail;
     use crate::{DashboardAction, DashboardState, Focus, SessionOperationKind};
+
+    #[test]
+    fn scrollbar_thumb_reaches_both_ends_of_the_viewport() {
+        let mut terminal = Terminal::new(TestBackend::new(1, 10)).unwrap();
+        for (position, thumb_row) in [(0, 2), (90, 7)] {
+            terminal
+                .draw(|frame| {
+                    render_session_scrollbar(frame, Rect::new(0, 0, 1, 10), 100, position, 10);
+                })
+                .unwrap();
+            assert_eq!(terminal.backend().buffer()[(0, thumb_row)].symbol(), "█");
+        }
+        terminal
+            .draw(|frame| {
+                render_session_scrollbar(frame, Rect::new(0, 0, 1, 10), 10, 0, 10);
+            })
+            .unwrap();
+        assert!((0..10).all(|row| terminal.backend().buffer()[(0, row)].symbol() == " "));
+    }
 
     fn minimize_all_panes(dashboard: &mut DashboardState) {
         for pane in [

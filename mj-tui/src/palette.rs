@@ -25,6 +25,7 @@ use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, spec};
+use crate::render::render_session_scrollbar;
 use crate::widgets::centered_modal;
 use crate::{DashboardAction, DashboardState, Focus, Mode};
 
@@ -111,7 +112,7 @@ fn pane_scope(focus: Focus) -> Scope {
 /// The groups the palette walks, in the order it prints them.
 fn scope_order(dashboard: &DashboardState) -> Vec<Scope> {
     let mut order = vec![Scope::Session, pane_scope(dashboard.focus)];
-    for scope in [Scope::Setup, Scope::Pane, Scope::Global] {
+    for scope in [Scope::Setup, Scope::Pane, Scope::Settings, Scope::Global] {
         if !order.contains(&scope) {
             order.push(scope);
         }
@@ -302,7 +303,11 @@ pub(crate) fn render_palette(
     palette: &CommandPalette,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 72, 22, area);
+    let lines = palette_lines(dashboard, palette);
+    // The popup grows with the complete list. The shared modal helper clamps
+    // it to the usable terminal bounds when the list cannot fit.
+    let popup_height = u16::try_from(lines.len().saturating_add(4).max(5)).unwrap_or(u16::MAX);
+    let popup = centered_modal(frame, surfaces, 72, popup_height, area);
     let outer = Block::default().borders(Borders::ALL).title(" Commands ");
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
@@ -325,8 +330,22 @@ pub(crate) fn render_palette(
         PaletteControl::Query,
     );
 
-    let width = usize::from(rows[1].width).saturating_sub(2);
-    let lines = palette_lines(dashboard, palette);
+    // Keep the rail outside the list's registered area. Besides leaving the
+    // command text untouched, this means clicking the scrollbar cannot be
+    // interpreted as clicking a command row.
+    let list_area = Rect::new(
+        rows[1].x,
+        rows[1].y,
+        rows[1].width.saturating_sub(1),
+        rows[1].height,
+    );
+    let scrollbar_area = Rect::new(
+        rows[1].x.saturating_add(list_area.width),
+        rows[1].y,
+        rows[1].width.saturating_sub(list_area.width),
+        rows[1].height,
+    );
+    let width = usize::from(list_area.width).saturating_sub(1);
     let mut row_map = Vec::new();
     let mut enabled = Vec::new();
     let items = lines
@@ -371,20 +390,20 @@ pub(crate) fn render_palette(
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
-        frame.render_widget(Line::raw("No matching command"), rows[1]);
+        frame.render_widget(Line::raw("No matching command"), list_area);
         form.register(
             PaletteControl::Commands,
             ControlKind::ChoiceList {
                 len: 0,
                 selected: 0,
             },
-            rows[1],
+            list_area,
             false,
         );
     } else {
         ChoiceList::render_with_rows(
             frame,
-            rows[1],
+            list_area,
             &items,
             palette.selected,
             &row_map,
@@ -393,6 +412,13 @@ pub(crate) fn render_palette(
             PaletteControl::Commands,
         );
     }
+    render_session_scrollbar(
+        frame,
+        scrollbar_area,
+        items.len(),
+        form.list_offset(PaletteControl::Commands),
+        usize::from(list_area.height).max(1),
+    );
     form.end_frame(PaletteControl::Query);
 
     frame.render_widget(
@@ -447,11 +473,67 @@ mod tests {
         let lines = drawn(&mut dashboard, 120, 44);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
         let rename = row_of(&lines, "Rename session").expect("Rename session");
+        let settings = row_of(&lines, "Settings").expect("the settings heading");
+        let review = row_of(&lines, "Review settings").expect("Review settings");
+        let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
         let workspaces = row_of(&lines, "Workspaces").expect("Workspaces");
         assert!(heading < rename, "{lines:#?}");
-        assert!(rename < workspaces, "{lines:#?}");
+        assert!(rename < settings, "{lines:#?}");
+        assert!(settings < review && review < anywhere, "{lines:#?}");
+        assert!(anywhere < workspaces, "{lines:#?}");
         // The palette never lists itself.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
+    }
+
+    #[test]
+    fn palette_shows_the_selected_row_and_scrolls_the_list_on_a_short_terminal() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::F(2)));
+
+        // Focus the list and select its final command before drawing the
+        // constrained viewport. The shared list renderer must reveal it and
+        // publish the same offset used by the scrollbar.
+        dashboard.handle_key(key(KeyCode::Tab));
+        dashboard.handle_key(key(KeyCode::End));
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw the constrained palette");
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("F2 should leave the palette open")
+        };
+        assert_eq!(
+            palette.selected,
+            palette.entries.len().saturating_sub(1),
+            "End selects the final command"
+        );
+        assert!(
+            palette.form.borrow().list_offset(PaletteControl::Commands) > 0,
+            "the selected final command requires scrolling: {lines:#?}"
+        );
+        assert!(
+            row_of(&lines, "Help").is_some(),
+            "the selected row is visible"
+        );
+    }
+
+    #[test]
+    fn palette_searches_and_activates_review_settings() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::F(2)));
+        type_query(&mut dashboard, "review settings");
+
+        let lines = drawn(&mut dashboard, 120, 30);
+        assert!(row_of(&lines, "Review settings").is_some(), "{lines:#?}");
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::ReviewSettings(_)));
     }
 
     /// From the composer the selection is the conversation on screen, so the

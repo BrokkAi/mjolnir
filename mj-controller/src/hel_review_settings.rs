@@ -10,6 +10,7 @@ use hel::hel_review::bifrost::review_mcp_servers;
 use hel::hel_targets::CancellableProcessExecutor;
 use hel::hel_worker::{AnalyzeDeltaRepository, RepoDelta};
 use hel::hel_worker_launch::ReviewerLaunchConfig;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::hel_controller::Controller;
 use crate::hel_review_host::{next_review_generation, validate_reviewer_assignment};
@@ -23,6 +24,12 @@ pub struct ReviewProbeRequest {
     pub profile: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewCapabilityChoices {
+    pub model_choices: Vec<SessionConfigChoice>,
+    pub effort_choices: Vec<SessionConfigChoice>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,6 +54,19 @@ pub async fn probe_review_settings(
     control: SessionManagerControl,
     request: ReviewProbeRequest,
     cancelled: Arc<AtomicBool>,
+) -> Result<ReviewReadinessReport, String> {
+    let (progress, _progress_receiver) = tokio::sync::mpsc::unbounded_channel();
+    probe_review_settings_with_progress(control, request, cancelled, progress).await
+}
+
+/// Discover review settings while reporting the first target's advertised
+/// selectors as soon as capability probing completes. The final report still
+/// waits for every target's readiness checks.
+pub async fn probe_review_settings_with_progress(
+    control: SessionManagerControl,
+    request: ReviewProbeRequest,
+    cancelled: Arc<AtomicBool>,
+    progress: UnboundedSender<ReviewCapabilityChoices>,
 ) -> Result<ReviewReadinessReport, String> {
     check_cancelled(&cancelled)?;
     let controller = Arc::new(
@@ -81,12 +101,20 @@ pub async fn probe_review_settings(
         ));
     }
     targets.sort_by(|left, right| left.0.cmp(&right.0));
-    let reports = stream::iter(targets.into_iter().map(|(session, label, handle)| {
-        let controller = Arc::clone(&controller);
-        let request = request.clone();
-        let cancelled = Arc::clone(&cancelled);
-        async move { probe_target(controller, session, label, handle, request, cancelled).await }
-    }))
+    let reports = stream::iter(targets.into_iter().enumerate().map(
+        |(index, (session, label, handle))| {
+            let controller = Arc::clone(&controller);
+            let request = request.clone();
+            let cancelled = Arc::clone(&cancelled);
+            let progress = (index == 0).then(|| progress.clone());
+            async move {
+                probe_target(
+                    controller, session, label, handle, request, cancelled, progress,
+                )
+                .await
+            }
+        },
+    ))
     .buffered(3)
     .collect::<Vec<_>>()
     .await;
@@ -113,6 +141,7 @@ async fn probe_target(
     handle: ManagedSessionHandle,
     request: ReviewProbeRequest,
     cancelled: Arc<AtomicBool>,
+    progress: Option<UnboundedSender<ReviewCapabilityChoices>>,
 ) -> (
     ReviewTargetReadiness,
     Vec<SessionConfigChoice>,
@@ -182,7 +211,7 @@ async fn probe_target(
         .await
         .map_err(|error| format!("Reviewer staging task failed: {error}"))?
         .map_err(|error| format!("Stage reviewer: {error:#}"))?;
-        probe_capabilities(
+        let capabilities_result = probe_capabilities(
             &handle,
             &role,
             config,
@@ -191,7 +220,29 @@ async fn probe_target(
             &mut models,
             &mut efforts,
         )
-        .await?;
+        .await;
+        let progress_result = match progress.as_ref() {
+            Some(progress)
+                if (capabilities_result.is_ok() || !models.is_empty() || !efforts.is_empty())
+                    && !cancelled.load(Ordering::Acquire) =>
+            {
+                progress
+                    .send(ReviewCapabilityChoices {
+                        model_choices: models.clone(),
+                        effort_choices: efforts.clone(),
+                    })
+                    .map_err(|_| "Review capability progress receiver closed".to_owned())
+            }
+            _ => Ok(()),
+        };
+        match (capabilities_result, progress_result) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(()), Err(error)) => return Err(error),
+            (Err(error), Err(progress_error)) => {
+                return Err(format!("{error}; {progress_error}"));
+            }
+        }
         assignment?;
         check_cancelled(&cancelled)?;
         cancellable(&cancelled, verify_tools(&handle, &role, repositories)).await?;
@@ -346,6 +397,8 @@ async fn cancellable<T>(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
@@ -353,7 +406,10 @@ mod tests {
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigSelectOption, SessionConfigSelectOptions,
     };
-    use hel::hel_config::{ExecutionPolicy, HarnessKind};
+    use hel::hel_config::{
+        ExecutionPolicy, HarnessKind, HarnessProfile, HelConfig, TargetTemplate,
+    };
+    use hel::hel_state::{HelState, SessionRecord, SessionState, TargetLocator};
     use hel::hel_targets::CommandSpec;
     use hel::hel_worker::{RelayExecutionState, RelayOperationalState, RepoDelta};
     use hel::hel_worker_launch::ReviewerLaunchConfig;
@@ -818,5 +874,174 @@ mod tests {
                 .is_err(),
             "tool verification must not advance the review baseline"
         );
+    }
+
+    #[tokio::test]
+    async fn capability_progress_arrives_before_tool_verification() {
+        let (mut manager, handle) = FakeManager::new().await;
+        let profile_home = tempfile::tempdir().expect("profile home");
+        fs::write(profile_home.path().join("settings.json"), b"{}").expect("profile settings");
+        let worker_root_parent = tempfile::tempdir().expect("worker root");
+        let worker_root = worker_root_parent.path().join(SESSION);
+        fs::create_dir_all(&worker_root).expect("session worker root");
+        let repository_root = tempfile::tempdir().expect("repository root");
+        let mut config = HelConfig::default();
+        config.profiles.insert(
+            "reviewer".to_owned(),
+            HarnessProfile {
+                kind: HarnessKind::Claude,
+                home: profile_home.path().to_owned(),
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+            },
+        );
+        config
+            .targets
+            .insert("local".to_owned(), TargetTemplate::LocalBare);
+        let mut state = HelState::default();
+        state.sessions.insert(
+            SESSION.to_owned(),
+            SessionRecord {
+                id: SESSION.to_owned(),
+                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                title: "review settings test".to_owned(),
+                harness_kind: HarnessKind::Codex,
+                last_profile: "primary".to_owned(),
+                bundle_id: "project".to_owned(),
+                project_directory: Some(repository_root.path().to_owned()),
+                managed_worktree: None,
+                target_template_id: "local".to_owned(),
+                resource_allocation: None,
+                additional_mounts: Vec::new(),
+                container_cpus: None,
+                container_memory: None,
+                state: SessionState::Running,
+                archived: false,
+                target: Some(TargetLocator::LocalBare {
+                    worker_root: worker_root.clone(),
+                }),
+                native_session_id: Some("native-settings-test".to_owned()),
+                acp_session_title: None,
+                session_title_override: None,
+                created_at: "2026-08-12T00:00:00Z".to_owned(),
+                updated_at: "2026-08-12T00:00:00Z".to_owned(),
+                viewed_through_event_ordinal: 0,
+                draft_input: String::new(),
+                last_error: None,
+                last_checkpoint_error: None,
+                checkpoint: None,
+            },
+        );
+        let controller = Arc::new(Controller { config, state });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let request = ReviewProbeRequest {
+            profile: "reviewer".to_owned(),
+            model: None,
+            effort: None,
+        };
+        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(probe_target(
+            controller,
+            SESSION.to_owned(),
+            "review settings target".to_owned(),
+            handle,
+            request,
+            cancelled,
+            Some(progress),
+        ));
+
+        let RemoteSessionRequest::Reviewer {
+            action: ReviewerAction::CaptureDelta { .. },
+            reply,
+            ..
+        } = manager.next().await
+        else {
+            panic!("settings discovery must capture repositories first");
+        };
+        reply
+            .send(Ok(ReviewerOutcome::Delta {
+                repositories: vec![RepoDelta {
+                    root: PathBuf::from(repository_root.path()),
+                    baseline_tree: None,
+                    current_tree: "current-tree".to_owned(),
+                    patch: String::new(),
+                    diffstat: String::new(),
+                    changed_lines: 0,
+                }],
+            }))
+            .expect("the probe is still waiting for repository discovery");
+
+        let request = manager.next().await;
+        let (config, reply) = match request {
+            RemoteSessionRequest::Reviewer {
+                action: ReviewerAction::Start { config },
+                reply,
+                ..
+            } => (config, reply),
+            RemoteSessionRequest::Reviewer {
+                action: ReviewerAction::Pause,
+                reply,
+                ..
+            } => {
+                reply
+                    .send(Ok(ReviewerOutcome::Paused))
+                    .expect("the probe is still waiting for cleanup");
+                let (target, _, _) = task.await.expect("probe task");
+                panic!("profile staging failed before startup: {}", target.message);
+            }
+            _ => panic!("unexpected request before reviewer start"),
+        };
+        assert_eq!((config.model, config.effort), (None, None));
+        reply
+            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
+            .expect("the probe is still waiting for capability discovery");
+
+        let choices = tokio::time::timeout(Duration::from_secs(5), progress_rx.recv())
+            .await
+            .expect("capability progress is emitted before slow verification")
+            .expect("the progress sender remains alive");
+        assert_eq!(
+            choices
+                .model_choices
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["fast", "deep"]
+        );
+        assert_eq!(
+            choices
+                .effort_choices
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "high"]
+        );
+
+        let RemoteSessionRequest::Reviewer {
+            action: ReviewerAction::AnalyzeDelta { .. },
+            reply,
+            ..
+        } = manager.next().await
+        else {
+            panic!("tool verification must follow capability progress");
+        };
+        reply
+            .send(Ok(ReviewerOutcome::ChangedFunctions {
+                packet: "verified".to_owned(),
+            }))
+            .expect("the probe is still waiting for tool verification");
+        let RemoteSessionRequest::Reviewer {
+            action: ReviewerAction::Pause,
+            reply,
+            ..
+        } = manager.next().await
+        else {
+            panic!("the probe must clean up after tool verification");
+        };
+        reply
+            .send(Ok(ReviewerOutcome::Paused))
+            .expect("the probe is still waiting for cleanup");
+        let (target, _, _) = task.await.expect("probe task");
+        assert!(target.ready, "the full readiness check should still pass");
     }
 }

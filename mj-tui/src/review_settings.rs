@@ -5,6 +5,7 @@
 //! carry a generation so a slow probe can never replace a newer choice.
 
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 
 use crossterm::event::Event;
 use hel::hel_acp::SessionConfigChoice;
@@ -18,9 +19,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::widgets::centered_modal;
+use crate::widgets::{centered_modal, centered_rect};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// A readiness observation for one actual review execution target.
@@ -108,6 +109,7 @@ pub(crate) struct ReviewSettingsDialog {
     pub(crate) readiness: ReviewReadiness,
     pub(crate) generation: u64,
     pub(crate) probing: bool,
+    probe_started: Instant,
     pub(crate) saving: bool,
     pub(crate) save_error: Option<String>,
     pub(crate) read_only_reason: Option<String>,
@@ -138,6 +140,7 @@ impl ReviewSettingsDialog {
             readiness,
             generation: 0,
             probing: false,
+            probe_started: Instant::now(),
             saving: false,
             save_error: None,
             read_only_reason: config.newer_build_notice(),
@@ -319,6 +322,7 @@ impl ReviewSettingsDialog {
             return DashboardAction::CancelReviewSettingsProbe;
         };
         self.probing = true;
+        self.probe_started = Instant::now();
         self.readiness = ReviewReadiness::Loading;
         DashboardAction::ProbeReviewSettings {
             generation: self.generation,
@@ -463,6 +467,33 @@ impl ReviewSettingsDialog {
 }
 
 impl DashboardState {
+    /// Publish adapter choices while the slower target checks continue.
+    pub fn apply_review_settings_capabilities(
+        &mut self,
+        generation: u64,
+        profile_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        choices: (Vec<SessionConfigChoice>, Vec<SessionConfigChoice>),
+    ) -> bool {
+        let Mode::ReviewSettings(dialog) = &mut self.mode else {
+            return false;
+        };
+        if !dialog.probing
+            || generation != dialog.generation
+            || dialog.review.profile.as_deref() != Some(profile_id)
+            || dialog.review.model.as_deref() != model
+            || dialog.review.effort.as_deref() != effort
+        {
+            return false;
+        }
+        (dialog.model_choices, dialog.effort_choices) = choices;
+        dialog.model_capabilities_discovered = true;
+        dialog.effort_capabilities_discovered = true;
+        dialog.prepare();
+        true
+    }
+
     fn next_review_settings_generation(&mut self) -> u64 {
         self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
         self.review_settings_generation
@@ -528,9 +559,23 @@ pub(crate) fn render_review_settings(
     surfaces: &mut FrameSurfaces,
 ) {
     use ReviewSettingsFocus::*;
+    let spinner =
+        ['|', '/', '-', '\\'][(dialog.probe_started.elapsed().as_millis() / 125 % 4) as usize];
+    let readiness = if dialog.probing {
+        format!(
+            "{spinner} {}",
+            if dialog.model_capabilities_discovered {
+                "Models loaded; checking target readiness…"
+            } else {
+                "Loading models and checking targets…"
+            }
+        )
+    } else {
+        dialog.readiness.label()
+    };
     let mut notes = vec![
         Line::raw("Global settings; changes apply to subsequent reviews."),
-        Line::raw(format!("Readiness: {}", dialog.readiness.label())),
+        Line::raw(format!("Readiness: {readiness}")),
     ];
     for target in &dialog.target_readiness {
         notes.push(Line::raw(format!(
@@ -560,11 +605,23 @@ pub(crate) fn render_review_settings(
             "Choose a profile before enabling automatic review.",
         ));
     }
+    let description = Paragraph::new(match dialog.review.tier {
+        ReviewTier::Quick => "One general reviewer; a validator checks any findings.",
+        ReviewTier::Extended => "A supervisor selects specialist reviewers for deeper coverage.",
+    })
+    .style(Style::default().fg(Color::DarkGray))
+    .wrap(Wrap { trim: true });
+    let description_width = centered_rect(86, 1, area).width.saturating_sub(12);
+    let description_height =
+        u16::try_from(description.line_count(description_width.max(1))).unwrap_or(u16::MAX);
     let popup = centered_modal(
         frame,
         surfaces,
         86,
-        (notes.len() as u16).saturating_add(10).max(20),
+        (notes.len() as u16)
+            .saturating_add(10)
+            .saturating_add(description_height)
+            .max(20),
         area,
     );
     let block = Block::default()
@@ -581,14 +638,16 @@ pub(crate) fn render_review_settings(
     let focus_row = match dialog.focused() {
         Enabled => 0,
         Tier => 1,
-        Profile => 2,
-        Model => 3,
-        Effort => 4,
+        Profile => 2 + description_height,
+        Model => 3 + description_height,
+        Effort => 4 + description_height,
         _ => 0,
     };
     let viewport = FormViewport::new(
         body,
-        (notes.len() as u16).saturating_add(6),
+        (notes.len() as u16)
+            .saturating_add(6)
+            .saturating_add(description_height),
         dialog.scroll.get(),
         Some(focus_row),
     );
@@ -606,10 +665,17 @@ pub(crate) fn render_review_settings(
         Enabled,
     );
     for (index, (id, label, values, selected)) in dialog.selectors().iter().enumerate() {
-        let area = row(index as u16 + 1);
+        let area = row(index as u16 + 1 + if index > 0 { description_height } else { 0 });
         let label_width = 10.min(area.width);
+        let loading = dialog.probing
+            && ((*id == Model && !dialog.model_capabilities_discovered)
+                || (*id == Effort && !dialog.effort_capabilities_discovered));
         frame.render_widget(
-            Line::raw(*label),
+            Line::raw(if loading {
+                format!("{label} {spinner}")
+            } else {
+                (*label).to_owned()
+            }),
             Rect::new(area.x, area.y, label_width, area.height),
         );
         let field = Rect::new(
@@ -628,8 +694,19 @@ pub(crate) fn render_review_settings(
             *id,
         );
     }
+    let help_area = viewport.row(2, description_height);
+    let indent = 10.min(help_area.width);
+    frame.render_widget(
+        description.scroll((viewport.offset().saturating_sub(2), 0)),
+        Rect::new(
+            help_area.x + indent,
+            help_area.y,
+            help_area.width - indent,
+            help_area.height,
+        ),
+    );
     for (index, line) in notes.into_iter().enumerate() {
-        frame.render_widget(line, row(index as u16 + 6));
+        frame.render_widget(line, row(index as u16 + 6 + description_height));
     }
     let footer = Rect::new(
         inner.x,
@@ -678,6 +755,44 @@ mod tests {
             panic!("expected review settings dialog")
         };
         dialog
+    }
+
+    #[test]
+    fn early_choices_keep_readiness_pending_and_ignore_cancelled_generations() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.config.review.profile = Some("codex-1".into());
+        dashboard.config.review.enabled = true;
+        let DashboardAction::ProbeReviewSettings {
+            generation,
+            profile_id,
+            model,
+            effort,
+        } = open(&mut dashboard)
+        else {
+            panic!("configured profile must start discovery")
+        };
+        assert!(dashboard.needs_fast_tick());
+        assert!(dashboard.apply_review_settings_capabilities(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            effort.as_deref(),
+            (Vec::new(), Vec::new()),
+        ));
+        assert!(dialog(&dashboard).model_capabilities_discovered);
+        assert!(dialog(&dashboard).probing);
+        assert!(!dialog(&dashboard).can_save());
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(!dashboard.needs_fast_tick());
+        open(&mut dashboard);
+        assert!(!dashboard.apply_review_settings_capabilities(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            effort.as_deref(),
+            (Vec::new(), Vec::new()),
+        ));
+        assert!(!dialog(&dashboard).model_capabilities_discovered);
     }
 
     #[test]
