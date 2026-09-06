@@ -73,4 +73,8 @@ that combined tree, and live seed 520 passed all 79 checks at
 `target/reliability-artifacts/tui-components-seed-520-3510340/` (CLI SHA-256
 `9b93b9bb230e2fa64071fe4305dc55df76d910bc508cc3d7d6086f07b7c81553`).
 Upstream subsequently added ac14410e, changing web project grouping without
-overlapping discovery code; integrate it with focused checks before pushing.
+overlapping discovery code. It merged cleanly. Focused Cargo runs for project,
+raw checkout, bundle and review-settings behavior passed, as did final clippy,
+formatting and diff checks. Those logs are retained as
+`target/lightweight-review-final-integration-tests.log` and
+`target/lightweight-review-final-clippy.log`.

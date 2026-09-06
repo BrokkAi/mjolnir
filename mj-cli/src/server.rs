@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessProfile, HelConfig, PhoneConfig, is_bare_project_target};
-use hel::hel_state::{HelState, MaterializedSession, SessionRecord};
+use hel::hel_state::{HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord};
 use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, ProcessExecutor};
 use hel::hel_worker::RelayCommand;
 use hel::hel_workspace::WorkspaceRecord;
@@ -732,6 +732,7 @@ pub(crate) async fn run_server(
     let mut prompt_images = std::collections::BTreeSet::new();
     let mut operational = std::collections::BTreeMap::new();
     let mut materialized_activity = load_materialized_activity(&controller).await?;
+    let mut project_sources = PhoneProjectSources::default();
     let mut operations = std::collections::BTreeMap::new();
     let mut launch_failures = Vec::new();
     // What the capacity poller last said, per probe target. The projection is
@@ -753,6 +754,7 @@ pub(crate) async fn run_server(
             prompt_images: &prompt_images,
             operational: &operational,
             materialized_activity: &materialized_activity,
+            project_sources: &project_sources,
             operations: &operations,
             capacity: &viewer_capacity(&capacity_state),
             launch_failures: &launch_failures,
@@ -896,6 +898,7 @@ pub(crate) async fn run_server(
                         prompt_images: &prompt_images,
                         operational: &operational,
                         materialized_activity: &materialized_activity,
+                        project_sources: &project_sources,
                         operations: &operations,
                         capacity: &viewer_capacity(&capacity_state),
                         launch_failures: &launch_failures,
@@ -908,8 +911,21 @@ pub(crate) async fn run_server(
             };
         }
         loop {
+            project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
+                resolved = project_sources.jobs.join_next(), if !project_sources.jobs.is_empty() => {
+                    match resolved {
+                        Some(Ok(resolved)) => project_sources.complete(resolved),
+                        Some(Err(error)) => {
+                            failure = Some(anyhow::anyhow!("web project source task failed: {error}"));
+                            break;
+                        }
+                        None => unreachable!("project source jobs were not empty"),
+                    }
+                    revision = daemon_runtime.allocate_revision();
+                    publish_snapshot!(revision);
+                }
                 changed = daemon_revisions.changed() => {
                     if changed.is_err() {
                         failure = feed_stopped(
@@ -1607,6 +1623,7 @@ pub(crate) async fn run_server(
                                 prompt_images: &prompt_images,
                                 operational: &operational,
                                 materialized_activity: &materialized_activity,
+                                project_sources: &project_sources,
                                 operations: &operations,
                                 capacity: &viewer_capacity(&capacity_state),
                                 launch_failures: &launch_failures,
@@ -2325,6 +2342,146 @@ async fn apply_phone_action(
     }
 }
 
+/// Inputs that can change a session's source without changing its ID.
+#[derive(Clone, PartialEq, Eq)]
+struct ProjectSourceKey {
+    directory: Option<PathBuf>,
+    worktree: Option<hel::hel_state::ManagedWorktree>,
+    target: Option<hel::hel_config::TargetTemplate>,
+    fallback: ProjectSourceIdentity,
+}
+
+impl ProjectSourceKey {
+    fn of(session: &SessionRecord, config: &HelConfig) -> Self {
+        Self {
+            directory: session.project_directory.clone(),
+            worktree: session.managed_worktree.clone(),
+            target: config.targets.get(&session.target_template_id).cloned(),
+            fallback: session.project_source(config),
+        }
+    }
+}
+
+struct ProjectSourceEntry {
+    key: ProjectSourceKey,
+    source: Option<ProjectSourceIdentity>,
+    retry_at: Option<Instant>,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct ProjectSourceResolved {
+    cancelled: Arc<AtomicBool>,
+    session_id: String,
+    key: ProjectSourceKey,
+    result: Result<ProjectSourceIdentity, String>,
+}
+
+/// Git/SSH probes run independently of snapshot publication and are bounded
+/// and cancelled when their inputs disappear or the server shuts down.
+#[derive(Default)]
+struct PhoneProjectSources {
+    entries: std::collections::BTreeMap<String, ProjectSourceEntry>,
+    jobs: tokio::task::JoinSet<ProjectSourceResolved>,
+}
+
+impl PhoneProjectSources {
+    fn synchronize(&mut self, controller: &Controller) {
+        self.entries.retain(|id, entry| {
+            let keep = controller.state.sessions.get(id).is_some_and(|session| {
+                session.project_directory.is_some()
+                    && entry.key == ProjectSourceKey::of(session, &controller.config)
+            });
+            if !keep {
+                entry.cancelled.store(true, Ordering::Release);
+            }
+            keep
+        });
+        for session in controller.state.sessions.values() {
+            if self.jobs.len() >= 8 {
+                break;
+            }
+            if session.project_directory.is_none()
+                || self.entries.get(&session.id).is_some_and(|entry| {
+                    entry
+                        .retry_at
+                        .is_none_or(|deadline| Instant::now() < deadline)
+                })
+            {
+                continue;
+            }
+            let key = ProjectSourceKey::of(session, &controller.config);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            self.entries.insert(
+                session.id.clone(),
+                ProjectSourceEntry {
+                    key: key.clone(),
+                    source: None,
+                    retry_at: None,
+                    cancelled: cancelled.clone(),
+                },
+            );
+            let source_controller = Controller {
+                config: controller.config.clone(),
+                state: HelState {
+                    sessions: [(session.id.clone(), session.clone())]
+                        .into_iter()
+                        .collect(),
+                    ..HelState::default()
+                },
+            };
+            let session_id = session.id.clone();
+            self.jobs.spawn_blocking(move || {
+                let executor = CancellableProcessExecutor::new(cancelled.clone())
+                    .with_deadline(Duration::from_secs(8));
+                let result = source_controller
+                    .resolve_session_project_source(&session_id, &executor)
+                    .map_err(|error| format!("{error:#}"));
+                ProjectSourceResolved {
+                    cancelled,
+                    session_id,
+                    key,
+                    result,
+                }
+            });
+        }
+    }
+
+    fn complete(&mut self, resolved: ProjectSourceResolved) {
+        let Some(entry) = self.entries.get_mut(&resolved.session_id) else {
+            return;
+        };
+        if entry.key != resolved.key || !Arc::ptr_eq(&entry.cancelled, &resolved.cancelled) {
+            return;
+        }
+        match resolved.result {
+            Ok(source) => entry.source = Some(source),
+            Err(error) => {
+                tracing::warn!(session_id = %resolved.session_id, %error, "could not resolve web project source");
+                entry.retry_at = Some(Instant::now() + Duration::from_secs(30));
+            }
+        }
+    }
+
+    fn source(
+        &self,
+        session: &SessionRecord,
+        config: &HelConfig,
+    ) -> Option<&ProjectSourceIdentity> {
+        self.entries
+            .get(&session.id)
+            .filter(|entry| entry.key == ProjectSourceKey::of(session, config))
+            .and_then(|entry| entry.source.as_ref())
+    }
+}
+
+impl Drop for PhoneProjectSources {
+    fn drop(&mut self) {
+        for entry in self.entries.values() {
+            entry.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// The live, per-session projections the phone snapshot layers on top of the
 /// controller's durable state. They arrive from relay snapshots rather than
 /// from disk, so they travel together instead of as separate arguments.
@@ -2346,6 +2503,7 @@ struct PhoneSessionViews<'a> {
     /// snapshots. Keeping this in the control-loop cache avoids a database
     /// read while rendering each viewer snapshot.
     materialized_activity: &'a std::collections::BTreeMap<String, Option<i64>>,
+    project_sources: &'a PhoneProjectSources,
     /// Lifecycle operations running now, keyed by session.
     operations: &'a std::collections::BTreeMap<String, mj_controller::hel_server::ViewerOperation>,
     /// The most recent capacity reading per probe target.
@@ -2701,6 +2859,7 @@ fn viewer_snapshot(
         prompt_images,
         operational,
         materialized_activity,
+        project_sources,
         operations,
         capacity,
         launch_failures,
@@ -2753,6 +2912,11 @@ fn viewer_snapshot(
         });
     }
     for session in &mut snapshot.sessions {
+        if let Some(record) = controller.state.sessions.get(&session.id)
+            && let Some(source) = project_sources.source(record, &controller.config)
+        {
+            session.set_project_source(source);
+        }
         session.last_activity_at_ms = materialized_activity.get(&session.id).copied().flatten();
         session.queued_prompts = queued_prompts
             .get(&session.id)
@@ -3227,6 +3391,7 @@ mod tests {
                     prompt_images: &std::collections::BTreeSet::new(),
                     operational,
                     materialized_activity: &materialized_activity,
+                    project_sources: &PhoneProjectSources::default(),
                     operations: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
@@ -3336,6 +3501,117 @@ mod tests {
             },
             state: HelState::default(),
         }
+    }
+
+    fn snapshot_with_project_sources(
+        controller: &Controller,
+        sources: &PhoneProjectSources,
+    ) -> ViewerSnapshot {
+        viewer_snapshot(
+            controller,
+            &[],
+            &Default::default(),
+            &PhoneSessionViews {
+                conversations: &Default::default(),
+                queued_prompts: &Default::default(),
+                active_user_shells: &Default::default(),
+                pending_elicitations: &Default::default(),
+                prompt_images: &Default::default(),
+                operational: &Default::default(),
+                materialized_activity: &Default::default(),
+                project_sources: sources,
+                operations: &Default::default(),
+                capacity: &[],
+                launch_failures: &[],
+                reviews: &Default::default(),
+            },
+            1,
+        )
+    }
+
+    #[tokio::test]
+    async fn phone_projects_resolve_origins_and_discard_results_after_location_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = controller_with_profiles(&["codex"]);
+        controller
+            .config
+            .targets
+            .insert("local".into(), TargetTemplate::LocalBare);
+        for (id, origin) in [
+            ("first-checkout", "git@github.com:BrokkAi/hel.git"),
+            ("second-checkout", "https://github.com/BrokkAi/hel.git"),
+        ] {
+            let directory = root.path().join(id);
+            std::fs::create_dir(&directory).unwrap();
+            for args in [vec!["init"], vec!["remote", "add", "origin", origin]] {
+                let command = hel::hel_targets::CommandSpec::new(
+                    "git",
+                    ["-C".to_owned(), directory.to_string_lossy().into_owned()]
+                        .into_iter()
+                        .chain(args.into_iter().map(str::to_owned)),
+                );
+                assert_eq!(ProcessExecutor.execute(&command).unwrap().status, 0);
+            }
+            let mut record = phone_session(id, 0);
+            record.project_directory = Some(directory);
+            record.target_template_id = "local".into();
+            controller.state.sessions.insert(id.into(), record);
+        }
+        let mut sources = PhoneProjectSources::default();
+        sources.synchronize(&controller);
+        assert_eq!(sources.jobs.len(), 2);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(result) = sources.jobs.join_next().await {
+                sources.complete(result.unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = snapshot_with_project_sources(&controller, &sources);
+        assert_eq!(
+            snapshot.sessions[0].project_key,
+            snapshot.sessions[1].project_key
+        );
+        assert!(
+            snapshot
+                .sessions
+                .iter()
+                .all(|session| session.project_label == "hel")
+        );
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains(&root.path().to_string_lossy().to_string())
+        );
+        sources.synchronize(&controller);
+        assert!(
+            sources.jobs.is_empty(),
+            "unchanged inputs reuse the resolved origin"
+        );
+
+        let previous = &sources.entries["first-checkout"];
+        let late = ProjectSourceResolved {
+            cancelled: previous.cancelled.clone(),
+            session_id: "first-checkout".into(),
+            key: previous.key.clone(),
+            result: Ok(ProjectSourceIdentity::git_remote("old/wrong").unwrap()),
+        };
+        controller
+            .state
+            .sessions
+            .get_mut("first-checkout")
+            .unwrap()
+            .project_directory = None;
+        let snapshot = snapshot_with_project_sources(&controller, &sources);
+        assert_ne!(
+            snapshot.sessions[0].project_key,
+            snapshot.sessions[1].project_key
+        );
+        sources.synchronize(&controller);
+        assert!(late.cancelled.load(Ordering::Acquire));
+        sources.complete(late);
+        assert!(!sources.entries.contains_key("first-checkout"));
+        assert_eq!(snapshot.sessions[0].project_label, "project");
     }
 
     #[test]
@@ -3695,6 +3971,7 @@ mod tests {
                     prompt_images: &std::collections::BTreeSet::new(),
                     operational: &std::collections::BTreeMap::new(),
                     materialized_activity: &std::collections::BTreeMap::new(),
+                    project_sources: &PhoneProjectSources::default(),
                     operations: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
@@ -3771,6 +4048,7 @@ mod tests {
                 prompt_images: &std::collections::BTreeSet::new(),
                 operational: &std::collections::BTreeMap::new(),
                 materialized_activity: &std::collections::BTreeMap::new(),
+                project_sources: &PhoneProjectSources::default(),
                 operations: &std::collections::BTreeMap::new(),
                 capacity: &[],
                 launch_failures: &failures,
