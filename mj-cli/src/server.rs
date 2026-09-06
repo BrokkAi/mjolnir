@@ -1430,19 +1430,26 @@ pub(crate) async fn run_server(
                     match &request.action {
                         ControllerAction::RefreshCapacity { target_id } => {
                             let known = capacity_state.contains_key(target_id);
+                            // One queued nudge refreshes every target. Do not
+                            // block the consumer while readings wait for it.
+                            let accepted = known && match capacity_triggers_tx.try_send(()) {
+                                Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => true,
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                                    tracing::warn!("phone capacity refresh rejected: poller stopped");
+                                    false
+                                }
+                            };
                             if known {
                                 if let Some(entry) = capacity_state.get_mut(target_id) {
-                                    entry.refreshing = true;
+                                    entry.refreshing = accepted;
+                                    if !accepted {
+                                        entry.failed = true;
+                                    }
                                 }
-                                // The trigger is a nudge with no payload: it
-                                // asks the poller to sample every target now,
-                                // which is what a person pressing refresh on
-                                // the Targets page means.
-                                capacity_triggers_tx.send(()).await.ok();
                                 revision = daemon_runtime.allocate_revision();
                                 publish_snapshot!(revision);
                             }
-                            let outcome = if known {
+                            let outcome = if accepted {
                                 ActionOutcome::Accepted
                             } else {
                                 ActionOutcome::Failed
@@ -2375,7 +2382,9 @@ fn publish_capacity_targets(
                 failed: false,
             });
     }
-    targets_tx.send_replace(targets);
+    if targets_tx.borrow().as_slice() != targets.as_slice() {
+        targets_tx.send_replace(targets);
+    }
 }
 
 /// Project the capacity readings for the phone.
@@ -3235,6 +3244,83 @@ mod tests {
             },
             state: HelState::default(),
         }
+    }
+
+    #[test]
+    fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() {
+        let mut controller = controller_with_profiles(&[]);
+        controller
+            .config
+            .targets
+            .insert("raw".into(), TargetTemplate::LocalBare);
+        let (targets_tx, mut targets_rx) = tokio::sync::watch::channel(Vec::new());
+        let mut state = std::collections::BTreeMap::new();
+
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 1);
+
+        let usage = hel::hel_targets::DeploymentCapacityUsage {
+            cpu_percent: Some(37),
+            memory_used_bytes: 3,
+            memory_total_bytes: 4,
+            logical_cores: 8,
+            disk_total_bytes: Some(5),
+        };
+        let local = state.get_mut("local").expect("local capacity state");
+        local.usage = Some(usage.clone());
+        local.on_demand = true;
+        local.sampled_at_epoch_seconds = Some(42);
+        local.refreshing = false;
+
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(!targets_rx.has_changed().expect("target sender is alive"));
+        let local_capacity = viewer_capacity(&state)
+            .into_iter()
+            .find(|capacity| capacity.id == "local")
+            .expect("local viewer capacity");
+        assert_eq!(local_capacity.cpu_percent, usage.cpu_percent);
+        assert_eq!(
+            local_capacity.memory_used_bytes,
+            Some(usage.memory_used_bytes)
+        );
+        assert_eq!(local_capacity.logical_cores, Some(usage.logical_cores));
+        assert_eq!(local_capacity.sampled_at_epoch_seconds, Some(42));
+
+        controller
+            .config
+            .targets
+            .insert("second-local".into(), TargetTemplate::LocalBare);
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 1);
+        assert_eq!(state["local"].usage, Some(usage.clone()));
+
+        controller.config.targets.insert(
+            "fleet".into(),
+            TargetTemplate::AwsEc2 {
+                aws_profile: None,
+                region: "us-east-1".into(),
+                launch_template: "hel-runson".into(),
+                launch_template_version: None,
+                ssh_user: "ubuntu".into(),
+                address_source: Default::default(),
+                identity_file: None,
+                ssh_args: Vec::new(),
+            },
+        );
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 2);
+        assert!(state.contains_key("aws:fleet"));
+        assert_eq!(state["local"].usage, Some(usage.clone()));
+
+        controller.config.targets.remove("fleet");
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 1);
+        assert!(!state.contains_key("aws:fleet"));
+        assert_eq!(state["local"].usage, Some(usage));
     }
 
     fn prompt_action() -> ControllerAction {

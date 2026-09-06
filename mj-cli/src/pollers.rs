@@ -1154,61 +1154,154 @@ pub(crate) fn spawn_dashboard_capacity_poller() -> (
     tokio::sync::mpsc::Sender<()>,
     tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
 ) {
+    spawn_capacity_poller_with(|target| async move {
+        if let Some(error) = &target.probe_error {
+            bail!("capacity probe is unavailable: {error}");
+        }
+        if target.local {
+            return collect_local_capacity_with(collect_local_capacity)
+                .await
+                .map(Some);
+        }
+        tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
+            .await
+            .context("capacity probe timed out")?
+    })
+}
+
+fn spawn_capacity_poller_with<F, Fut>(
+    collect: F,
+) -> (
+    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    tokio::sync::mpsc::Sender<()>,
+    tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+)
+where
+    F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
+{
     let (targets_tx, mut targets_rx) =
         tokio::sync::watch::channel(Vec::<DeploymentCapacityTarget>::new());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(64);
     let (triggers_tx, mut triggers_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         let mut targets = Vec::new();
-        let mut interval = tokio::time::interval(CAPACITY_POLL_INTERVAL);
+        let collect = Arc::new(collect);
+        let mut samples = CapacitySamples::default();
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + CAPACITY_POLL_INTERVAL,
+            CAPACITY_POLL_INTERVAL,
+        );
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = updates_tx.closed() => break,
                 _ = interval.tick() => {
-                    schedule_capacity_samples(&targets, &updates_tx);
+                    samples.schedule(targets.iter().cloned(), &collect);
                 }
                 changed = targets_rx.changed() => {
                     if changed.is_err() {
                         tracing::debug!("capacity poll target feed closed; stopping capacity poller");
                         break;
                     }
-                    targets = targets_rx.borrow_and_update().clone();
-                    schedule_capacity_samples(&targets, &updates_tx);
+                    let updated = targets_rx.borrow_and_update().clone();
+                    samples.schedule(
+                        updated.iter().filter(|target| !targets.contains(target)).cloned(),
+                        &collect,
+                    );
+                    targets = updated;
                 }
                 trigger = triggers_rx.recv() => {
                     if trigger.is_none() {
                         break;
                     }
-                    schedule_capacity_samples(&targets, &updates_tx);
+                    samples.schedule(targets.iter().cloned(), &collect);
                 }
+                completed = samples.tasks.join_next_with_id(), if !samples.tasks.is_empty() => {
+                    let (id, result) = match completed.expect("capacity task exists") {
+                        Ok((id, result)) => (id, result.map_err(|error| format!("{error:#}"))),
+                        Err(error) => (error.id(), Err(format!("capacity probe task failed: {error}"))),
+                    };
+                    let sampled = samples.targets.remove(&id).expect("capacity task retains its target");
+                    if let Err(error) = &result {
+                        tracing::warn!(target_id = %sampled.id, %error, "capacity probe failed");
+                    }
+                    let Ok(permit) = updates_tx.reserve().await else {
+                        break;
+                    };
+                    // A watch update and completion can become ready together.
+                    // Revalidate after backpressure, with no await between
+                    // reading the latest target and publishing the result.
+                    let current = targets_rx.borrow().iter().find(|target| target.id == sampled.id).cloned();
+                    let Some(current) = current else {
+                        continue;
+                    };
+                    if current != sampled {
+                        // A changed target gets one follow-up; its old result
+                        // must not overwrite a reading for the new configuration.
+                        // If changed() is still pending, that arm will start it.
+                        if targets.contains(&current) {
+                            samples.schedule(std::iter::once(current), &collect);
+                        }
+                        continue;
+                    }
+                    permit.send(CapacityPollUpdate {
+                        target_id: sampled.id,
+                        result,
+                        sampled_at_epoch_seconds: epoch_seconds(),
+                    });
+                }
+            }
+        }
+        samples.tasks.abort_all();
+        while let Some(completed) = samples.tasks.join_next().await {
+            match completed {
+                Ok(Err(error)) => tracing::warn!(%error, "capacity probe failed during shutdown"),
+                Err(error) if !error.is_cancelled() => {
+                    tracing::error!(%error, "capacity probe task failed during shutdown");
+                }
+                _ => {}
             }
         }
     });
     (targets_tx, triggers_tx, updates_rx)
 }
 
-fn schedule_capacity_samples(
-    targets: &[DeploymentCapacityTarget],
-    updates: &tokio::sync::mpsc::Sender<CapacityPollUpdate>,
-) {
-    for target in targets.iter().cloned() {
-        let updates = updates.clone();
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
-                .await
-                .map_err(|_| "capacity probe timed out".to_string())
-                .and_then(|result| result.map_err(|error| format!("{error:#}")));
-            if let Err(error) = updates
-                .send(CapacityPollUpdate {
-                    target_id: target.id.clone(),
-                    result,
-                    sampled_at_epoch_seconds: epoch_seconds(),
-                })
-                .await
-            {
-                tracing::debug!(target_id = %target.id, %error, "capacity probe result dropped after dashboard shutdown");
+#[derive(Default)]
+struct CapacitySamples {
+    tasks: tokio::task::JoinSet<Result<Option<DeploymentCapacityUsage>>>,
+    targets: std::collections::HashMap<tokio::task::Id, DeploymentCapacityTarget>,
+}
+
+impl CapacitySamples {
+    fn schedule<F, Fut>(
+        &mut self,
+        targets: impl IntoIterator<Item = DeploymentCapacityTarget>,
+        collect: &Arc<F>,
+    ) where
+        F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
+    {
+        for target in targets {
+            if self.targets.values().any(|running| running.id == target.id) {
+                continue;
             }
-        });
+            let collect = collect.clone();
+            let sampled = target.clone();
+            let task = self.tasks.spawn(async move {
+                let started = Instant::now();
+                let target_id = sampled.id.clone();
+                let result = collect(sampled).await;
+                tracing::debug!(
+                    %target_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    success = result.is_ok(),
+                    "capacity probe completed",
+                );
+                result
+            });
+            self.targets.insert(task.id(), target);
+        }
     }
 }
 
@@ -1217,12 +1310,6 @@ async fn collect_capacity(
 ) -> Result<Option<DeploymentCapacityUsage>> {
     if let Some(error) = &target.probe_error {
         anyhow::bail!("capacity probe is unavailable: {error}");
-    }
-    if target.local {
-        return tokio::task::spawn_blocking(collect_local_capacity)
-            .await
-            .context("join local capacity probe")?
-            .map(Some);
     }
     match target.kind {
         DeploymentCapacityKind::Host => {
@@ -1290,7 +1377,8 @@ pub(crate) fn aggregate_aws_capacity(
 fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
-    system.refresh_cpu_all();
+    // Frequency is unused and scans every core in parallel on each refresh.
+    system.refresh_cpu_usage();
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
     Ok(DeploymentCapacityUsage {
@@ -1306,6 +1394,32 @@ fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
             .context("logical CPU count overflow")?,
         disk_total_bytes: None,
     })
+}
+
+async fn collect_local_capacity_with(
+    collect: impl FnOnce() -> Result<DeploymentCapacityUsage> + Send + 'static,
+) -> Result<DeploymentCapacityUsage> {
+    // A blocking sample cannot be cancelled. Keep its slot occupied
+    // until it exits, even when the deadline has elapsed.
+    let mut sample = tokio::task::spawn_blocking(move || {
+        let result = collect();
+        // Shutdown can drop the awaiting future before this thread exits.
+        if let Err(error) = &result {
+            tracing::warn!(%error, "local capacity sample failed");
+        }
+        result
+    });
+    match tokio::time::timeout(RESOURCE_POLL_TIMEOUT, &mut sample).await {
+        Ok(result) => result.context("join local capacity probe")?,
+        Err(_) => {
+            match sample.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "timed-out capacity probe failed"),
+                Err(error) => tracing::error!(%error, "timed-out capacity probe task failed"),
+            }
+            bail!("capacity probe timed out")
+        }
+    }
 }
 
 async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
@@ -2375,9 +2489,268 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn capacity_samples_refresh_every_thirty_seconds() {
-        assert_eq!(CAPACITY_POLL_INTERVAL, Duration::from_secs(30));
+    struct PendingCapacityProbe {
+        target: DeploymentCapacityTarget,
+        finish: tokio::sync::oneshot::Sender<Result<Option<DeploymentCapacityUsage>>>,
+    }
+
+    struct CapacityPollerFixture {
+        targets: tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+        triggers: tokio::sync::mpsc::Sender<()>,
+        updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+        started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
+    }
+
+    impl CapacityPollerFixture {
+        fn new() -> Self {
+            let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
+            let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
+                let started_tx = started_tx.clone();
+                async move {
+                    let (finish, result) = tokio::sync::oneshot::channel();
+                    started_tx
+                        .send(PendingCapacityProbe { target, finish })
+                        .unwrap();
+                    result.await.context("test probe completion dropped")?
+                }
+            });
+            Self {
+                targets,
+                triggers,
+                updates,
+                started,
+            }
+        }
+
+        async fn assert_no_start(&mut self) {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), self.started.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    fn capacity_target(id: &str) -> DeploymentCapacityTarget {
+        DeploymentCapacityTarget {
+            id: id.into(),
+            host: id.into(),
+            target_ids: vec![id.into()],
+            kind: DeploymentCapacityKind::Host,
+            local: true,
+            probes: Vec::new(),
+            probe_error: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publications() {
+        let mut fixture = CapacityPollerFixture::new();
+        let targets = vec![capacity_target("local")];
+        fixture.targets.send_replace(targets.clone());
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+
+        fixture.targets.send_replace(targets);
+        fixture.assert_no_start().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        fixture.assert_no_start().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+
+        fixture.triggers.send(()).await.unwrap();
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_busy_targets_coalesce_requests_without_blocking_other_targets() {
+        let mut fixture = CapacityPollerFixture::new();
+        let first_target = capacity_target("first");
+        fixture.targets.send_replace(vec![first_target.clone()]);
+        let first = fixture.started.recv().await.unwrap();
+        fixture
+            .targets
+            .send_replace(vec![first_target, capacity_target("second")]);
+        let second = fixture.started.recv().await.unwrap();
+        assert_eq!(second.target.id, "second");
+
+        fixture.triggers.send(()).await.unwrap();
+        fixture.assert_no_start().await;
+        tokio::time::advance(CAPACITY_POLL_INTERVAL).await;
+        fixture.assert_no_start().await;
+        first.finish.send(Ok(None)).unwrap();
+        second.finish.send(Ok(None)).unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_discarded() {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut target = capacity_target("local");
+        fixture.targets.send_replace(vec![target.clone()]);
+        let first = fixture.started.recv().await.unwrap();
+        target.host = "new-host".into();
+        fixture.targets.send_replace(vec![target.clone()]);
+        fixture.assert_no_start().await;
+        first.finish.send(Ok(None)).unwrap();
+        let changed = fixture.started.recv().await.unwrap();
+        assert_eq!(changed.target, target);
+        assert!(
+            fixture.updates.try_recv().is_err(),
+            "old configuration result escaped"
+        );
+        changed
+            .finish
+            .send(Err(anyhow::anyhow!("new host unavailable")))
+            .unwrap();
+        assert!(
+            fixture
+                .updates
+                .recv()
+                .await
+                .unwrap()
+                .result
+                .unwrap_err()
+                .contains("new host unavailable")
+        );
+
+        fixture.triggers.send(()).await.unwrap();
+        let removed = fixture.started.recv().await.unwrap();
+        fixture.targets.send_replace(Vec::new());
+        fixture.assert_no_start().await;
+        removed.finish.send(Ok(None)).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), fixture.updates.recv())
+                .await
+                .is_err()
+        );
+        fixture.targets.send_replace(vec![target]);
+        let mut last = fixture.started.recv().await.unwrap();
+        drop(fixture.updates);
+        last.finish.closed().await;
+    }
+
+    #[tokio::test]
+    async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
+        let first = AtomicBool::new(true);
+        let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("test capacity probe panic");
+            }
+            async { Ok(None) }
+        });
+        targets.send_replace(vec![capacity_target("local")]);
+        let failure = updates.recv().await.unwrap();
+        assert_eq!(failure.target_id, "local");
+        assert!(
+            failure
+                .result
+                .unwrap_err()
+                .contains("test capacity probe panic")
+        );
+        triggers.send(()).await.unwrap();
+        assert!(updates.recv().await.unwrap().result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_results_are_revalidated_after_output_backpressure() {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut targets: Vec<_> = (0..65).map(|id| capacity_target(&id.to_string())).collect();
+        fixture.targets.send_replace(targets.clone());
+        let mut pending = Vec::new();
+        for _ in 0..65 {
+            pending.push(fixture.started.recv().await.unwrap());
+        }
+        let last = pending.pop().unwrap();
+        let last_id = last.target.id;
+        for probe in pending {
+            probe.finish.send(Ok(None)).unwrap();
+        }
+        fixture.assert_no_start().await;
+        assert_eq!(fixture.updates.len(), 64);
+        last.finish.send(Ok(None)).unwrap();
+        fixture.assert_no_start().await;
+
+        targets
+            .iter_mut()
+            .find(|target| target.id == last_id)
+            .unwrap()
+            .host = "changed".into();
+        fixture.targets.send_replace(targets);
+        for _ in 0..64 {
+            let update = fixture.updates.recv().await.unwrap();
+            assert_ne!(update.target_id, last_id);
+        }
+        let changed = fixture.started.recv().await.unwrap();
+        assert_eq!(changed.target.id, last_id);
+        assert_eq!(changed.target.host, "changed");
+        assert!(
+            fixture.updates.try_recv().is_err(),
+            "stale blocked result escaped"
+        );
+        changed.finish.send(Ok(None)).unwrap();
+        assert_eq!(fixture.updates.recv().await.unwrap().target_id, last_id);
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let sample = tokio::spawn(collect_local_capacity_with(move || {
+            started_tx.send(()).unwrap();
+            // Dropping finish_tx on a test failure also releases this thread.
+            finish_rx.recv().context("test sample was cancelled")?;
+            Ok(DeploymentCapacityUsage {
+                cpu_percent: Some(10),
+                memory_used_bytes: 1,
+                memory_total_bytes: 2,
+                logical_cores: 4,
+                disk_total_bytes: None,
+            })
+        }));
+        started_rx.await.unwrap();
+        tokio::time::advance(RESOURCE_POLL_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !sample.is_finished(),
+            "timeout released a still-running blocking sample"
+        );
+        finish_tx.send(()).unwrap();
+        assert!(
+            sample
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
     }
 
     #[test]
