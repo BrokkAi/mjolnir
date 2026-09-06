@@ -20,12 +20,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crossterm::event::{Event, MouseEvent};
+use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use crate::components::{ButtonRow, ControlKind, Form, Interaction, TabStrip};
 use hel::hel_review::driver::{Resolution, RoleState, TurnReviewPhase};
 use mj_controller::hel_review_host::{RuntimeReviewView, VerdictKind};
 
@@ -44,6 +47,14 @@ enum ReviewTab {
     Overview,
     Transcript,
     Verdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReviewControl {
+    Tabs,
+    Forward,
+    Dismiss,
+    Cancel,
 }
 
 impl ReviewAction {
@@ -112,6 +123,8 @@ pub(super) struct TurnReview {
     /// A refusal from the daemon, shown in place rather than in a dialog that
     /// would take the review off screen with it.
     pub(super) failure: Option<String>,
+    pub(super) form: Form<ReviewControl>,
+    component_ready: bool,
 }
 
 impl std::fmt::Debug for TurnReview {
@@ -175,6 +188,8 @@ impl TurnReview {
             overview_total_rows: 0,
             overview_viewport_height: 0,
             failure: None,
+            form: review_form(),
+            component_ready: false,
         }
     }
 
@@ -416,6 +431,77 @@ impl TurnReview {
     }
 }
 
+fn review_form() -> Form<ReviewControl> {
+    let mut form = Form::new();
+    form.declare(
+        ReviewControl::Tabs,
+        ControlKind::Tabs {
+            len: 0,
+            selected: 0,
+        },
+    );
+    form.declare(ReviewControl::Forward, ControlKind::Button);
+    form.declare(ReviewControl::Dismiss, ControlKind::Button);
+    form.declare(ReviewControl::Cancel, ControlKind::Button);
+    form.end_frame(ReviewControl::Tabs);
+    form
+}
+
+fn review_tab_index(review: &TurnReview) -> usize {
+    match review.tab {
+        ReviewTab::Overview => 0,
+        ReviewTab::Transcript => review
+            .view
+            .roles
+            .iter()
+            .position(|role| role.role == review.selected)
+            .map_or(0, |index| {
+                index + usize::from(review.verdict_text().is_none())
+            }),
+        ReviewTab::Verdict => {
+            review.view.roles.len() + usize::from(review.verdict_text().is_none())
+        }
+    }
+}
+
+fn review_tab_labels(review: &TurnReview) -> Vec<String> {
+    let mut labels = Vec::new();
+    if review.verdict_text().is_none() {
+        labels.push("Overview".to_owned());
+    }
+    labels.extend(
+        review
+            .view
+            .roles
+            .iter()
+            .map(|role| format!("{} {}", role.label, role.state.label())),
+    );
+    if review.verdict_text().is_some() {
+        labels.push("Verdict".to_owned());
+    }
+    labels
+}
+
+fn select_review_tab(review: &mut TurnReview, selected: usize) {
+    let has_overview = review.verdict_text().is_none();
+    if has_overview && selected == 0 {
+        review.tab = ReviewTab::Overview;
+        return;
+    }
+    let role_start = usize::from(has_overview);
+    if let Some(role) = review.view.roles.get(selected.saturating_sub(role_start))
+        && selected >= role_start
+        && selected < role_start + review.view.roles.len()
+    {
+        review.tab = ReviewTab::Transcript;
+        review.selected = role.role.clone();
+        return;
+    }
+    if review.verdict_text().is_some() {
+        review.tab = ReviewTab::Verdict;
+    }
+}
+
 /// What the turn-review view asked the session to do. Every variant is a
 /// request to the daemon: the terminal hosts no part of a review.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,6 +532,55 @@ impl super::ChatState {
         self.turn_review.as_deref_mut()
     }
 
+    pub(super) fn turn_review_handles_mouse(&self, column: u16, row: u16) -> bool {
+        self.turn_review.as_ref().is_some_and(|review| {
+            review.form.captures_pointer() || review.form.contains(column, row)
+        })
+    }
+
+    pub(super) fn cancel_turn_review_pointer(&mut self) {
+        if let Some(review) = self.turn_review.as_mut() {
+            review.form.cancel_pointer();
+        }
+    }
+
+    pub(super) fn reset_turn_review_geometry(&mut self) {
+        if let Some(review) = self.turn_review.as_mut() {
+            review.form.reset_geometry();
+        }
+    }
+
+    pub(super) fn handle_turn_review_mouse(
+        &mut self,
+        mouse: MouseEvent,
+    ) -> (bool, super::ChatAction) {
+        let event = Event::Mouse(mouse);
+        let result = match self.turn_review.as_mut() {
+            Some(review) => review.form.handle(&event),
+            None => return (false, super::ChatAction::None),
+        };
+        match result.action {
+            Some(Interaction::Activate(control)) => {
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.action = Some(match control {
+                        ReviewControl::Forward => ReviewAction::Forward,
+                        ReviewControl::Dismiss => ReviewAction::Dismiss,
+                        ReviewControl::Cancel => ReviewAction::Cancel,
+                        ReviewControl::Tabs => return (true, super::ChatAction::None),
+                    });
+                }
+                return (true, self.activate_turn_review_action());
+            }
+            Some(Interaction::Select(ReviewControl::Tabs, selected)) => {
+                if let Some(review) = self.turn_review.as_mut() {
+                    select_review_tab(review, selected);
+                }
+            }
+            _ => {}
+        }
+        (result.outcome.is_consumed(), super::ChatAction::None)
+    }
+
     /// Shows the daemon's review, or takes the pane down when it has resolved.
     pub(super) fn set_turn_review(&mut self, view: Option<RuntimeReviewView>) {
         match (view, self.turn_review.as_mut()) {
@@ -460,17 +595,53 @@ impl super::ChatState {
         self.turn_review_action_areas.clear();
     }
 
-    /// Drives the turn-review view from one key press.
-    pub(super) fn handle_turn_review_key(
+    pub(super) fn handle_turn_review_event(
         &mut self,
-        code: crossterm::event::KeyCode,
-        modifiers: crossterm::event::KeyModifiers,
+        key: crossterm::event::KeyEvent,
     ) -> super::ChatAction {
         use crossterm::event::{KeyCode, KeyModifiers};
 
+        let (code, modifiers) = super::normalize_key(key.code, key.modifiers);
+        let event = Event::Key(crossterm::event::KeyEvent::new_with_kind_and_state(
+            code, modifiers, key.kind, key.state,
+        ));
         let Some(review) = self.turn_review.as_mut() else {
             return super::ChatAction::None;
         };
+        let component_ready = review.component_ready;
+        let result = review.form.handle(&event);
+        if let Some(interaction) = result.action {
+            match interaction {
+                Interaction::Select(ReviewControl::Tabs, selected) => {
+                    select_review_tab(review, selected);
+                    return super::ChatAction::None;
+                }
+                Interaction::Activate(ReviewControl::Tabs) => {
+                    return self.activate_turn_review_action();
+                }
+                Interaction::Activate(ReviewControl::Forward) => {
+                    review.action = Some(ReviewAction::Forward);
+                    return self.activate_turn_review_action();
+                }
+                Interaction::Activate(ReviewControl::Dismiss) => {
+                    review.action = Some(ReviewAction::Dismiss);
+                    return self.activate_turn_review_action();
+                }
+                Interaction::Activate(ReviewControl::Cancel) => {
+                    review.action = Some(ReviewAction::Cancel);
+                    return self.activate_turn_review_action();
+                }
+                Interaction::Cancel => {
+                    return self.resolve_turn_review(Resolution::Cancelled);
+                }
+                _ => {}
+            }
+        }
+        if result.outcome.is_consumed()
+            && (component_ready || !matches!(key.code, KeyCode::Tab | KeyCode::BackTab))
+        {
+            return super::ChatAction::None;
+        }
         match code {
             // Tab moves between the reviewing agents; the arrows move between
             // the actions, so a fan-out stays readable without giving up the
@@ -581,44 +752,64 @@ pub(super) fn render_turn_review_pane(
     area: Rect,
     review: &mut TurnReview,
 ) -> (Rect, usize, usize) {
+    review.form.begin_frame();
+    review.component_ready = true;
+    let tab_labels = review_tab_labels(review);
+    let tab_area = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        1.min(area.height.saturating_sub(2)),
+    );
     let title = verdict_title(Some(review)).to_owned();
     let strip = role_strip(review);
     let status = review.status();
-    let Some(verdict_text) = review.verdict_text().map(str::to_owned) else {
-        if review.overview_selected() {
-            return render_review_overview(frame, area, review, &title, strip);
-        }
-        return super::second_opinion::render_reviewer_titled(
-            frame,
-            area,
-            review.selected_pane(),
-            &status,
-            &title,
-            strip,
-        );
-    };
-
-    if review.verdict_selected() {
-        return render_verdict_panel(frame, area, review, &verdict_text, &title, strip);
-    }
-
-    // Keep the role transcript as the full pane. Tab reaches the verdict as
-    // its own scrollable panel, so a long synthesis never competes with or
-    // hides the journal the reader is following.
-    let transcript_status = "this reviewer has not written a transcript";
-    let transcript_empty = review.selected_pane_is_empty();
-    super::second_opinion::render_reviewer_titled(
-        frame,
-        area,
-        review.selected_pane(),
-        if transcript_empty {
-            transcript_status
+    let result = if let Some(verdict_text) = review.verdict_text().map(str::to_owned) {
+        if review.verdict_selected() {
+            render_verdict_panel(frame, area, review, &verdict_text, &title, strip)
         } else {
-            &status
-        },
-        &title,
-        strip,
-    )
+            // Keep the role transcript as the full pane. Tab reaches the
+            // verdict as its own scrollable panel, so a long synthesis never
+            // competes with or hides the journal the reader is following.
+            let transcript_status = "this reviewer has not written a transcript";
+            let transcript_empty = review.selected_pane_is_empty();
+            super::second_opinion::render_reviewer_titled(
+                frame,
+                area,
+                review.selected_pane(),
+                if transcript_empty {
+                    transcript_status
+                } else {
+                    &status
+                },
+                &title,
+                strip,
+            )
+        }
+    } else {
+        if review.overview_selected() {
+            render_review_overview(frame, area, review, &title, strip)
+        } else {
+            super::second_opinion::render_reviewer_titled(
+                frame,
+                area,
+                review.selected_pane(),
+                &status,
+                &title,
+                strip,
+            )
+        }
+    };
+    let tab_refs = tab_labels.iter().map(String::as_str).collect::<Vec<_>>();
+    TabStrip::render(
+        frame,
+        tab_area,
+        &tab_refs,
+        review_tab_index(review),
+        &mut review.form,
+        ReviewControl::Tabs,
+    );
+    result
 }
 
 /// Draws the compact progress tab shown until a verdict is available. The
@@ -733,24 +924,14 @@ fn render_verdict_panel(
 pub(super) fn render_turn_review_actions(
     frame: &mut ratatui::Frame,
     area: Rect,
-    review: &TurnReview,
+    review: &mut TurnReview,
     status: &str,
 ) -> Vec<(ReviewAction, Rect)> {
-    let mut spans = Vec::new();
     let mut buttons = Vec::new();
     let mut column = area.x;
+    let mut specs = Vec::new();
     for candidate in ReviewAction::ORDER {
         let available = review.allows(candidate);
-        let mut style = Style::default();
-        if !available {
-            style = style.fg(Color::DarkGray);
-        }
-        // A running review intentionally has no selected action, so its
-        // action bar shows all choices without implying that Enter will
-        // cancel the review.
-        if Some(candidate) == review.action {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
         let failed_delivery = matches!(
             review.view.phase,
             TurnReviewPhase::Forwarding { error: Some(_), .. }
@@ -760,23 +941,52 @@ pub(super) fn render_turn_review_actions(
             (true, ReviewAction::Cancel) => "Stop retrying",
             _ => candidate.label(),
         };
-        let label = format!(" {label} ");
-        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        let width = u16::try_from(label.chars().count() + 4).unwrap_or(u16::MAX);
         if column < area.right() {
             buttons.push((
                 candidate,
                 Rect::new(column, area.y, width.min(area.right() - column), 1),
             ));
         }
-        column = column.saturating_add(width).saturating_add(2);
-        spans.push(Span::styled(label, style));
-        spans.push(Span::raw("  "));
+        specs.push((
+            match candidate {
+                ReviewAction::Forward => ReviewControl::Forward,
+                ReviewAction::Dismiss => ReviewControl::Dismiss,
+                ReviewAction::Cancel => ReviewControl::Cancel,
+            },
+            label,
+            available,
+        ));
+        column = column.saturating_add(width).saturating_add(1);
     }
-    spans.push(Span::styled(
-        status.to_owned(),
-        Style::default().fg(Color::DarkGray),
-    ));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    review.form.focus(match review.action {
+        Some(ReviewAction::Forward) => ReviewControl::Forward,
+        Some(ReviewAction::Dismiss) => ReviewControl::Dismiss,
+        Some(ReviewAction::Cancel) => ReviewControl::Cancel,
+        None => ReviewControl::Tabs,
+    });
+    ButtonRow::render(frame, area, &specs, &mut review.form);
+    let status_column = area.x.saturating_add(
+        u16::try_from(
+            specs
+                .iter()
+                .map(|(_, label, _)| label.len() + 6)
+                .sum::<usize>(),
+        )
+        .unwrap_or(u16::MAX),
+    );
+    if status_column < area.right() {
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            Rect::new(
+                status_column,
+                area.y,
+                area.right() - status_column,
+                area.height,
+            ),
+        );
+    }
+    review.form.end_frame(ReviewControl::Tabs);
     buttons
 }
 

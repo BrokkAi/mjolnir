@@ -28,19 +28,19 @@ use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_review_host::RuntimeReviewView;
 
 use crate::dialogs::{
-    ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
-    ImportBundleConfirmation, ImportProgress, RenameEditor, RenameFocus, RepositoryOriginDialog,
-    TargetActionsDialog, WebDialog,
+    ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, ImportBundleConfirmation,
+    ImportProgress, RenameEditor, RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
 use crate::review_settings::ReviewSettingsDialog;
-use crate::wizards::{MountFocus, NewWizard, ResumeWizard, WizardStep};
+use crate::wizards::{NewWizard, ResumeWizard};
 
 mod actions;
 mod combined;
+mod component_events;
 mod dialogs;
 mod help;
 mod ingest;
@@ -402,38 +402,6 @@ pub(crate) enum Mode {
     Palette(CommandPalette),
     /// The global `[review]` configuration editor, opened from the F2 palette.
     ReviewSettings(ReviewSettingsDialog),
-}
-
-/// What a key press means for a focusable button row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ButtonKey {
-    Focus(usize),
-    Activate(usize),
-    Cancel,
-    Ignored,
-}
-
-pub(crate) fn button_row_key(code: KeyCode, focus: usize, count: usize) -> ButtonKey {
-    match code {
-        KeyCode::Tab | KeyCode::Right => ButtonKey::Focus(cycle_button_focus(focus, count, false)),
-        KeyCode::BackTab | KeyCode::Left => {
-            ButtonKey::Focus(cycle_button_focus(focus, count, true))
-        }
-        KeyCode::Enter => ButtonKey::Activate(focus),
-        KeyCode::Esc => ButtonKey::Cancel,
-        _ => ButtonKey::Ignored,
-    }
-}
-
-pub(crate) fn cycle_button_focus(focus: usize, count: usize, reverse: bool) -> usize {
-    if count == 0 {
-        return 0;
-    }
-    if reverse {
-        focus.min(count - 1).checked_sub(1).unwrap_or(count - 1)
-    } else {
-        (focus + 1) % count
-    }
 }
 
 pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], reverse: bool) -> T {
@@ -841,143 +809,50 @@ impl DashboardState {
             });
             return DashboardAction::None;
         }
-        // The resume dialog carries every scanned native session, so it is
-        // handled where it lives rather than through a copy of the mode.
-        if matches!(self.mode, Mode::ResumeDialog(_)) {
-            return self.handle_resume_dialog_key(key);
+        if self.component_modal_open() {
+            return self.handle_component_event(crossterm::event::Event::Key(key));
         }
-        // The palette is edited where it lives too: its entry list is rebuilt
-        // on every keystroke and there is no reason to copy it first.
-        if matches!(self.mode, Mode::Palette(_)) {
-            return self.handle_palette_key(key);
+        if matches!(self.mode, Mode::Help(_)) {
+            return self.handle_help_key(key);
         }
-        match self.mode.clone() {
-            Mode::Dashboard => self.handle_dashboard_key(key),
-            Mode::New(wizard) => self.handle_new_key(key, wizard),
-            Mode::Resume(wizard) => self.handle_resume_key(key, wizard),
-            Mode::ResumeDialog(_) => unreachable!("the resume dialog is handled in place"),
-            Mode::RepositoryOrigin(dialog) => self.handle_repository_origin_key(key, dialog),
-            Mode::ConfigId(editor) => self.handle_config_id_key(key, editor),
-            Mode::TargetActions(dialog) => self.handle_target_actions_key(key, dialog),
-            Mode::Web(_) => match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    self.cancel_modal();
-                    DashboardAction::None
-                }
-                _ => DashboardAction::None,
-            },
-            Mode::Rename(editor) => self.handle_rename_key(key, editor),
-            Mode::EditContainer(editor) => self.handle_container_edit_key(key, editor),
-            // The only control is the Cancel button, so Enter presses it too.
-            Mode::Importing(_) => match key.code {
-                KeyCode::Esc | KeyCode::Enter => DashboardAction::CancelImport,
-                _ => DashboardAction::None,
-            },
-            Mode::ConfirmImportBundle(confirmation) => {
-                self.handle_import_bundle_key(key.code, confirmation)
-            }
-            Mode::Confirm(dialog) => self.handle_confirmation_key(key, dialog),
-            Mode::Help(overlay) => self.handle_help_key(key, overlay),
-            Mode::Palette(_) => unreachable!("the command palette is handled in place"),
-            Mode::ReviewSettings(dialog) => self.handle_review_settings_key(key, dialog),
-        }
+        self.handle_dashboard_key(key)
     }
 
     fn text_input_focused(&self) -> bool {
         match &self.mode {
-            Mode::Rename(editor) => editor.focus == RenameFocus::Field,
-            Mode::RepositoryOrigin(dialog) => dialog.focus == dialogs::RepositoryOriginFocus::Field,
+            Mode::Rename(editor) => editor
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
+            Mode::RepositoryOrigin(dialog) => dialog
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
             Mode::EditContainer(editor) => editor.field().is_some(),
-            Mode::ResumeDialog(dialog) => dialog.focus == crate::resume::ResumeFocus::Search,
+            Mode::ResumeDialog(dialog) => dialog.focused() == crate::resume::ResumeFocus::Search,
             // The palette's query is a text field, so Ctrl-C closes it and a
             // paste lands in the query rather than on the dashboard.
-            Mode::Palette(_) => true,
+            Mode::Palette(palette) => palette
+                .form
+                .borrow()
+                .is_focused(palette::PaletteControl::Query),
+            Mode::ConfigId(editor) => editor
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
             Mode::New(wizard) => wizard.text_input_focused(),
             Mode::Resume(wizard) => wizard.text_input_focused(),
-            Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::ForceStop { .. } | Confirmation::ForceDestroy { .. },
-                ..
-            }) => true,
+            Mode::Confirm(dialog) => dialog
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::TypedField),
             _ => false,
         }
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
-        let pasted = single_line_paste(pasted);
-        if pasted.is_empty() {
-            return;
-        }
-        // The palette rebuilds its list from the query, so its paste is
-        // handled before the borrow the match below takes.
-        if let Mode::Palette(palette) = &mut self.mode {
-            palette.query.push_str(&pasted);
-            self.rebuild_palette_entries();
-            return;
-        }
-        match &mut self.mode {
-            Mode::Rename(editor) if editor.focus == RenameFocus::Field => {
-                let remaining = 64_usize.saturating_sub(editor.title.chars().count());
-                editor.title.extend(pasted.chars().take(remaining));
-            }
-            Mode::New(wizard) => match wizard.step {
-                WizardStep::ProjectDirectory => {
-                    wizard.project_directory.push_str(&pasted);
-                    wizard.project_directory_error = None;
-                }
-                WizardStep::NewBundle => wizard.new_bundle_source.push_str(&pasted),
-                WizardStep::Mounts => match wizard.mounts.focus {
-                    MountFocus::Source => wizard.mounts.source.push_str(&pasted),
-                    MountFocus::Destination => wizard.mounts.destination.push_str(&pasted),
-                    _ => {}
-                },
-                _ => {}
-            },
-            Mode::Resume(wizard) if wizard.step == WizardStep::Mounts => {
-                match wizard.mounts.focus {
-                    MountFocus::Source => wizard.mounts.source.push_str(&pasted),
-                    MountFocus::Destination => wizard.mounts.destination.push_str(&pasted),
-                    _ => {}
-                }
-            }
-            Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::ForceStop { typed, .. },
-                ..
-            }) => {
-                let remaining = FORCE_STOP_CONFIRMATION.len().saturating_sub(typed.len());
-                typed.extend(
-                    pasted
-                        .chars()
-                        .filter(char::is_ascii_alphabetic)
-                        .take(remaining)
-                        .map(|character| character.to_ascii_uppercase()),
-                );
-            }
-            Mode::Confirm(ConfirmDialog {
-                confirmation:
-                    Confirmation::ForceDestroy {
-                        expected, typed, ..
-                    },
-                ..
-            }) => {
-                let remaining = expected
-                    .chars()
-                    .count()
-                    .saturating_sub(typed.chars().count());
-                typed.extend(
-                    pasted
-                        .chars()
-                        .filter(char::is_ascii_hexdigit)
-                        .take(remaining)
-                        .map(|character| character.to_ascii_lowercase()),
-                );
-            }
-            Mode::RepositoryOrigin(dialog)
-                if dialog.focus == dialogs::RepositoryOriginFocus::Field =>
-            {
-                dialog.replacement.push_str(&pasted);
-                dialog.error = None;
-            }
-            _ => {}
+        if self.component_modal_open() {
+            self.handle_component_event(crossterm::event::Event::Paste(pasted.to_owned()));
         }
     }
 
@@ -987,27 +862,8 @@ impl DashboardState {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
-        if matches!(self.mode, Mode::ResumeDialog(_)) {
-            let Some(area) = self.resume_sessions_area else {
-                return DashboardAction::None;
-            };
-            if !rect_contains(area, mouse.column, mouse.row) {
-                return DashboardAction::None;
-            }
-            // The resume list is a list, so a wheel notch moves by one row.
-            let delta = match mouse.kind {
-                MouseEventKind::ScrollUp => -1,
-                MouseEventKind::ScrollDown => 1,
-                _ => return DashboardAction::None,
-            };
-            let len = self.resume_rows().len();
-            let Mode::ResumeDialog(dialog) = &mut self.mode else {
-                return DashboardAction::None;
-            };
-            dialog.focus = crate::resume::ResumeFocus::Sessions;
-            let index = offset_index(dialog.row_index, len, delta);
-            self.select_resume_row(index);
-            return DashboardAction::None;
+        if self.component_modal_open() {
+            return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
         }
         if !matches!(self.mode, Mode::Dashboard) {
             return DashboardAction::None;
@@ -1583,19 +1439,6 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
-fn offset_index(index: usize, len: usize, delta: isize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    if delta.is_negative() {
-        index.saturating_sub(delta.unsigned_abs())
-    } else {
-        index
-            .saturating_add(delta as usize)
-            .min(len.saturating_sub(1))
-    }
-}
-
 pub(crate) fn move_index(index: &mut usize, len: usize, delta: isize) {
     if len == 0 {
         *index = 0;
@@ -1632,10 +1475,6 @@ fn dashboard_accelerator(modifiers: KeyModifiers) -> bool {
 #[cfg(not(target_os = "macos"))]
 fn dashboard_accelerator(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::CONTROL)
-}
-
-fn single_line_paste(pasted: &str) -> String {
-    pasted.trim_matches(['\r', '\n']).replace(['\r', '\n'], " ")
 }
 
 #[cfg(test)]

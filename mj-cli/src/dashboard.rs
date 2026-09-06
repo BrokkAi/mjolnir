@@ -596,8 +596,12 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // follows input order.
                 loop {
                     let batched = if let Some(command) =
-                        global_chord_event(&context.dashboard, &event)
+                        global_chord_event(&context.dashboard, &event).filter(|command| {
+                            !context.visible_chat().is_some_and(|chat| chat.component_modal_open())
+                                || matches!(command, CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh)
+                        })
                     {
+                        if let Some(chat) = context.visible_chat() { chat.cancel_component_pointer(); }
                         // Detaching from an open conversation has to save the
                         // draft and the read cursor, which is the chat's own
                         // bookkeeping rather than the dashboard's.
@@ -1425,11 +1429,24 @@ impl DashboardContext {
     /// Routes one terminal event through the selection engine, hit-testing
     /// against the surfaces the view on screen registered.
     fn route_selection(&mut self, event: Event) -> SelectionRouting {
+        let chat_owns_pointer = !self.dashboard.modal_open()
+            && match &event {
+                Event::Mouse(mouse) => self
+                    .visible_chat()
+                    .is_some_and(|chat| chat.component_handles_mouse(*mouse)),
+                _ => false,
+            };
         let Self {
             selection,
             dashboard,
             ..
         } = self;
+        if let Event::Mouse(mouse) = &event
+            && (dashboard.component_handles_mouse(*mouse) || chat_owns_pointer)
+        {
+            selection.clear();
+            return SelectionRouting::Forward(event);
+        }
         let focus_question = match &event {
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
                 question_click_focuses(dashboard.modal_open(), dashboard.frame_surfaces(), mouse)
@@ -1759,11 +1776,13 @@ impl DashboardContext {
         self.dashboard.set_opening_session(Some(&session_id));
         self.dashboard.set_notice("Opening session…");
         tokio::spawn(async move {
-            let result = sessions
-                .session(session_id.clone())
-                .await
-                .map(|managed| {
-                    mj_chat::hel_chat::ActiveChat::open_with_persistence(
+            let result = async {
+                let managed = sessions
+                    .session(session_id.clone())
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                tokio::task::spawn_blocking(move || {
+                    mj_chat::hel_chat::ActiveChat::prepare_with_persistence(
                         managed,
                         &bundle_id,
                         Some(context),
@@ -1774,7 +1793,10 @@ impl DashboardContext {
                         Some(persistence_tx),
                     )
                 })
-                .map_err(|error| format!("{error:#}"));
+                .await
+                .map_err(|error| format!("chat preparation task failed: {error}"))
+            }
+            .await;
             if let Err(error) = updates.send(DashboardIoUpdate::ChatOpened {
                 session_id,
                 result: Box::new(result),
@@ -2640,33 +2662,52 @@ fn dispatch_event(
     action: &mut DashboardAction,
     chat_outcome: &mut mj_chat::hel_chat::ChatEventOutcome,
 ) -> bool {
-    let to_chat = match &event {
-        Event::Mouse(mouse) if !context.dashboard.modal_open() => {
-            let over_chat = context
-                .dashboard
-                .chat_region_contains(mouse.column, mouse.row);
-            if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                context.dashboard.focus_prompt();
+    let dashboard_modal = context.dashboard.modal_open();
+    let geometry_event = matches!(&event, Event::Resize(..) | Event::Mouse(_));
+    let chat_modal = !context.dashboard.modal_open()
+        && context
+            .visible_chat()
+            .is_some_and(|chat| chat.component_modal_open());
+    let to_chat = chat_modal
+        || match &event {
+            Event::Mouse(mouse) if !context.dashboard.modal_open() => {
+                let over_chat = context
+                    .dashboard
+                    .chat_region_contains(mouse.column, mouse.row);
+                if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    context.dashboard.focus_prompt();
+                }
+                over_chat
+                    || context
+                        .visible_chat()
+                        .is_some_and(|chat| chat.component_handles_mouse(*mouse))
+                    || (matches!(
+                        mouse.kind,
+                        MouseEventKind::Drag(MouseButton::Left)
+                            | MouseEventKind::Up(MouseButton::Left)
+                    ) && context
+                        .visible_chat()
+                        .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
             }
-            over_chat
-                || (matches!(
-                    mouse.kind,
-                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-                ) && context
-                    .visible_chat()
-                    .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
-        }
-        _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
-    };
+            _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
+        };
     match context.visible_chat().filter(|_| to_chat) {
         Some(chat) => {
             *chat_outcome = chat.handle_event(event);
             matches!(*chat_outcome, mj_chat::hel_chat::ChatEventOutcome::None)
+                && !geometry_event
+                && !chat_modal
+                && !chat.component_modal_open()
         }
         None => {
             *action = dashboard_event_action(&mut context.dashboard, event);
             context.controller_changed = true;
+            // A modal can change its control geometry without asking for domain
+            // work. Draw that state before taking the next queued pointer event.
             matches!(*action, DashboardAction::None)
+                && !dashboard_modal
+                && !context.dashboard.modal_open()
+                && !geometry_event
         }
     }
 }
@@ -3644,7 +3685,8 @@ mod tests {
             DashboardAction::None
         ));
         assert!(dashboard.modal_open(), "the target actions dialog is open");
-        // Rename, Test, Close: one Tab lands on Test.
+        // The target list is one Tab stop before Rename and Test.
+        dashboard.handle_key(plain_key(crossterm::event::KeyCode::Tab));
         dashboard.handle_key(plain_key(crossterm::event::KeyCode::Tab));
         assert!(matches!(
             dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)),

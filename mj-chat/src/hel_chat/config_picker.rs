@@ -1,10 +1,11 @@
 //! The `/model` and `/effort` selector: a modal over the chat listing every
 //! value the harness advertises, filtered as the user types.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent};
+use rat_event::ConsumedEvent;
 use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -12,8 +13,17 @@ use hel::hel_acp::SessionConfigChoice;
 use hel::hel_worker::WorkerPhase;
 
 use super::autocomplete::{config_value_row, matching_indices};
-use super::rendering::truncate_to_width;
 use super::{ChatAction, ChatState};
+use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
+use crate::hel_text_input::TextInput;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigControl {
+    Filter,
+    Values,
+    Apply,
+    Cancel,
+}
 
 /// Modal state for choosing one advertised config value.
 ///
@@ -25,9 +35,10 @@ pub(super) struct ConfigPicker {
     key: &'static str,
     choices: Vec<SessionConfigChoice>,
     current: Option<String>,
-    /// Cursor position within `filtered`.
+    filter: TextInput,
+    form: Form<ConfigControl>,
+    /// Cursor position within `filtered`, mirrored in the list's typed metadata.
     selected: usize,
-    query: String,
     /// Indices into `choices` that match `query`; all of them when empty.
     filtered: Vec<usize>,
 }
@@ -39,12 +50,25 @@ impl ConfigPicker {
             .and_then(|current| choices.iter().position(|choice| choice.value == current))
             .unwrap_or(0);
         let filtered = (0..choices.len()).collect();
+        let mut form = Form::new();
+        form.declare(ConfigControl::Filter, ControlKind::TextField);
+        form.declare(
+            ConfigControl::Values,
+            ControlKind::ChoiceList {
+                len: choices.len(),
+                selected,
+            },
+        );
+        form.declare(ConfigControl::Apply, ControlKind::Button);
+        form.declare(ConfigControl::Cancel, ControlKind::Button);
+        form.end_frame(ConfigControl::Filter);
         Self {
             key,
             choices,
             current,
+            filter: TextInput::new(),
+            form,
             selected,
-            query: String::new(),
             filtered,
         }
     }
@@ -55,26 +79,14 @@ impl ConfigPicker {
             .and_then(|&index| self.choices.get(index))
     }
 
-    fn move_selection(&mut self, delta: isize) {
-        let len = self.filtered.len();
-        if len == 0 {
-            return;
-        }
-        self.selected = if delta.is_negative() {
-            self.selected.checked_sub(1).unwrap_or(len - 1)
-        } else {
-            (self.selected + 1) % len
-        };
-    }
-
     /// Recomputes the matches, keeping the cursor on the same choice when it
     /// survives the new filter.
     fn refilter(&mut self) {
         let kept = self.filtered.get(self.selected).copied();
-        self.filtered = if self.query.is_empty() {
+        self.filtered = if self.filter.is_empty() {
             (0..self.choices.len()).collect()
         } else {
-            matching_indices(&self.choices, &self.query, |choice| {
+            matching_indices(&self.choices, self.filter.value(), |choice| {
                 (&choice.value, Some(choice.name.as_str()))
             })
         };
@@ -110,93 +122,128 @@ impl ChatState {
         self.config_picker.is_some()
     }
 
-    /// Drives the selector from one key press. Every key belongs to the modal
-    /// while it is up: printable characters build the filter rather than
-    /// reaching the composer.
-    pub(super) fn handle_config_picker_key(
+    pub(super) fn config_picker_handles_mouse(&self, column: u16, row: u16) -> bool {
+        self.config_picker.as_ref().is_some_and(|picker| {
+            picker.form.captures_pointer() || picker.form.contains(column, row)
+        })
+    }
+
+    pub(super) fn cancel_config_picker_pointer(&mut self) {
+        if let Some(picker) = self.config_picker.as_mut() {
+            picker.form.cancel_pointer();
+        }
+    }
+
+    pub(super) fn reset_config_picker_geometry(&mut self) {
+        if let Some(picker) = self.config_picker.as_mut() {
+            picker.form.reset_geometry();
+        }
+    }
+
+    pub(super) fn handle_config_picker_mouse(
         &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> ChatAction {
+        mouse: crossterm::event::MouseEvent,
+    ) -> (bool, ChatAction) {
+        let event = Event::Mouse(mouse);
+        let result = match self.config_picker.as_mut() {
+            Some(picker) => picker.form.handle(&event),
+            None => return (false, ChatAction::None),
+        };
+        match result.action {
+            Some(Interaction::Edit(ConfigControl::Filter, edit)) => {
+                if let Some(picker) = self.config_picker.as_mut() {
+                    TextField::apply(&mut picker.filter, edit);
+                    picker.refilter();
+                }
+                (true, ChatAction::None)
+            }
+            Some(Interaction::Select(ConfigControl::Values, selected)) => {
+                if let Some(picker) = self.config_picker.as_mut() {
+                    picker.selected = selected;
+                }
+                (true, ChatAction::None)
+            }
+            Some(Interaction::Activate(ConfigControl::Values | ConfigControl::Apply)) => {
+                (true, self.apply_config_picker_selection())
+            }
+            Some(Interaction::Activate(ConfigControl::Cancel) | Interaction::Cancel) => {
+                self.config_picker = None;
+                (true, ChatAction::None)
+            }
+            _ => (result.outcome.is_consumed(), ChatAction::None),
+        }
+    }
+
+    pub(super) fn handle_config_picker_event(&mut self, key: KeyEvent) -> ChatAction {
         let Some(picker) = self.config_picker.as_mut() else {
             return ChatAction::None;
         };
-        match code {
-            KeyCode::Up => {
-                picker.move_selection(-1);
-                ChatAction::None
-            }
-            KeyCode::Down => {
-                picker.move_selection(1);
-                ChatAction::None
-            }
-            KeyCode::Esc => {
-                self.config_picker = None;
-                ChatAction::None
-            }
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.config_picker = None;
-                ChatAction::None
-            }
-            KeyCode::Enter | KeyCode::Tab => {
-                let Some(choice) = picker.selection() else {
-                    return ChatAction::None;
-                };
-                let key = picker.key;
-                let value = choice.value.clone();
-                self.config_picker = None;
-                if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
-                    self.set_notice(
-                        "The worker is closing; this configuration change was not sent",
-                    );
-                    return ChatAction::None;
-                }
-                // A busy agent does not refuse the change: it waits in the
-                // command queue and applies when its turn comes.
-                ChatAction::SetConfig {
-                    key: key.to_owned(),
-                    value,
-                }
-            }
-            KeyCode::Backspace => {
-                if picker.query.pop().is_some() {
+        if picker.form.is_focused(ConfigControl::Filter)
+            && key.modifiers.is_empty()
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+        {
+            picker.form.focus(ConfigControl::Values);
+        }
+        let event = Event::Key(key);
+        let result = picker.form.handle(&event);
+        if let Some(action) = result.action {
+            match action {
+                Interaction::Edit(ConfigControl::Filter, edit) => {
+                    TextField::apply(&mut picker.filter, edit);
                     picker.refilter();
                 }
-                ChatAction::None
+                Interaction::Select(ConfigControl::Values, selected) => {
+                    picker.selected = selected;
+                }
+                Interaction::Activate(ConfigControl::Values | ConfigControl::Apply) => {
+                    return self.apply_config_picker_selection();
+                }
+                Interaction::Activate(ConfigControl::Filter) => {
+                    return self.apply_config_picker_selection();
+                }
+                Interaction::Activate(ConfigControl::Cancel) | Interaction::Cancel => {
+                    self.config_picker = None;
+                }
+                _ => {}
             }
-            KeyCode::Char(character)
-                if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                picker.query.push(character);
-                picker.refilter();
-                ChatAction::None
-            }
-            _ => ChatAction::None,
+            return ChatAction::None;
+        }
+        if result.outcome.is_consumed() {
+            return ChatAction::None;
+        }
+        ChatAction::None
+    }
+
+    fn apply_config_picker_selection(&mut self) -> ChatAction {
+        let Some(picker) = self.config_picker.as_ref() else {
+            return ChatAction::None;
+        };
+        let Some(choice) = picker.selection() else {
+            return ChatAction::None;
+        };
+        let key = picker.key;
+        let value = choice.value.clone();
+        self.config_picker = None;
+        if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
+            self.set_notice("The worker is closing; this configuration change was not sent");
+            return ChatAction::None;
+        }
+        ChatAction::SetConfig {
+            key: key.to_owned(),
+            value,
         }
     }
-}
-
-/// Rows of the list to draw so the cursor stays visible in the middle of a
-/// long value list.
-fn visible_range(total: usize, selected: usize, visible: usize) -> std::ops::Range<usize> {
-    if total <= visible {
-        return 0..total;
-    }
-    let start = selected
-        .saturating_sub(visible / 2)
-        .min(total.saturating_sub(visible));
-    start..(start + visible)
 }
 
 /// Draws the selector over the chat and reports the rows it owns.
 pub(super) fn render_config_picker(
     frame: &mut Frame,
     area: Rect,
-    chat: &ChatState,
+    chat: &mut ChatState,
 ) -> Option<Rect> {
-    let picker = chat.config_picker.as_ref()?;
+    let picker = chat.config_picker.as_mut()?;
     let visible = picker.filtered.len().clamp(1, 8);
-    let rect = crate::hel_modal::centered_modal_rect_fixed(frame, 72, visible as u16 + 6, area);
+    let rect = crate::hel_modal::centered_modal_rect_fixed(frame, 72, visible as u16 + 7, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Choose a {} ", picker.key))
@@ -204,52 +251,67 @@ pub(super) fn render_config_picker(
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let dim = Style::default().fg(Color::DarkGray);
-    let mut lines = vec![if picker.query.is_empty() {
-        Line::from(Span::styled("filter: (type to filter)", dim))
-    } else {
-        Line::from(vec![
-            Span::styled("filter: ", dim),
-            Span::raw(picker.query.clone()),
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
-    }];
-    lines.push(Line::from(""));
-    if picker.filtered.is_empty() {
-        lines.push(Line::from(Span::styled("no matches", dim)));
-    } else {
-        let range = visible_range(
-            picker.filtered.len(),
-            picker.selected,
-            usize::from(inner.height.saturating_sub(4)).max(1),
-        );
-        let start = range.start;
-        for (offset, &index) in picker.filtered[range].iter().enumerate() {
-            let Some(choice) = picker.choices.get(index) else {
-                continue;
-            };
-            let selected = start + offset == picker.selected;
-            let marker = if selected { "› " } else { "  " };
+        .split(inner);
+    let label = Paragraph::new(Line::from(Span::styled(
+        "filter:",
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(label, chunks[0]);
+    let filter_area = chunks[1];
+    picker.form.begin_frame();
+    TextField::render(
+        frame,
+        filter_area,
+        &picker.filter,
+        &mut picker.form,
+        ConfigControl::Filter,
+    );
+
+    let rows = picker
+        .filtered
+        .iter()
+        .filter_map(|&index| picker.choices.get(index))
+        .map(|choice| {
             let mut row = config_value_row(choice).unwrap_or_else(|| choice.value.clone());
             if picker.current.as_deref() == Some(choice.value.as_str()) {
                 row.push_str("  (current)");
             }
-            let style = if selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(
-                truncate_to_width(&format!("{marker}{row}"), usize::from(inner.width)),
-                style,
-            )));
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "↑/↓ choose · type to filter · Enter apply · Esc cancel",
-        dim,
-    )));
-    frame.render_widget(Paragraph::new(lines), inner);
+            Line::from(row)
+        })
+        .collect::<Vec<_>>();
+    let row_area = chunks[2];
+    ChoiceList::render(
+        frame,
+        row_area,
+        &rows,
+        picker.selected,
+        &mut picker.form,
+        ConfigControl::Values,
+    );
+    ButtonRow::render(
+        frame,
+        chunks[3],
+        &[
+            (ConfigControl::Apply, "Apply", !picker.filtered.is_empty()),
+            (ConfigControl::Cancel, "Cancel", true),
+        ],
+        &mut picker.form,
+    );
+    frame.render_widget(
+        Paragraph::new("↑/↓ choose · type to filter · Tab controls · Enter apply · Esc cancel")
+            .style(Style::default().fg(Color::DarkGray)),
+        chunks[4],
+    );
+    picker.form.end_frame(ConfigControl::Filter);
     Some(inner)
 }
 
@@ -360,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn effort_selector_wraps_and_escape_closes_without_a_change() {
+    fn effort_selector_stops_at_the_end_and_escape_closes_without_a_change() {
         let mut chat = chat_with_models();
         chat.set_input("/effort".into());
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
@@ -369,7 +431,7 @@ mod tests {
             picker.selection().map(|choice| choice.value.as_str()),
             Some("high")
         );
-        // Down from "high" reaches "max"; another Down wraps to "low".
+        // Down from "high" reaches "max" and stays there at the end.
         chat.handle_key(key(KeyCode::Down));
         chat.handle_key(key(KeyCode::Down));
         assert_eq!(
@@ -378,7 +440,7 @@ mod tests {
                 .unwrap()
                 .selection()
                 .map(|choice| choice.value.as_str()),
-            Some("low")
+            Some("max")
         );
         assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
         assert!(!chat.config_picker_active());
