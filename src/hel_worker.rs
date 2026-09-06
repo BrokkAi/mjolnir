@@ -82,15 +82,17 @@ pub enum HarnessTurnPolicy {
 
 /// Where this relay learns about commands the agent left running.
 ///
-/// Claude and Kimi run their shells through Hel's terminals, which are live
-/// processes the relay already tracks. Codex runs them itself and only reports
-/// them as tool cards, so for Codex the evidence is a card whose result
-/// carries no exit code.
+/// Claude also reports its own background tasks; Kimi uses Hel's terminals,
+/// which are live processes the relay already tracks. Codex runs them itself
+/// and only reports them as tool cards, so for Codex the evidence is a card
+/// whose result carries no exit code.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BackgroundWorkPolicy {
     /// Live terminals Hel spawned for the agent.
     #[default]
     HostedTerminals,
+    /// Claude's live background-task set, together with hosted terminals.
+    ClaudeTasks,
     /// `exec_command` cards whose result has no exit code.
     CodexExecCards,
 }
@@ -304,6 +306,8 @@ pub struct DurableRelay {
     /// tool call id so a later card for the same call clears it. In memory,
     /// like the terminals: it describes processes that are alive now.
     background_exec_cards: BTreeMap<String, BackgroundCommand>,
+    /// Claude's process-local background-task level, replaced on every update.
+    claude_background_tasks: BTreeMap<String, BackgroundCommand>,
     /// ACP terminals are connection-owned and disappear when that connection
     /// is torn down, so they belong in memory rather than the durable relay
     /// snapshot or transcript journal.
@@ -463,6 +467,7 @@ impl DurableRelay {
             foreground_tools: BTreeMap::new(),
             codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
+            claude_background_tasks: BTreeMap::new(),
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
             #[cfg(test)]
@@ -576,7 +581,7 @@ impl DurableRelay {
     /// because Codex starts these during a turn and never mentions them again.
     fn background_commands(&self) -> Vec<BackgroundCommand> {
         let mut commands: Vec<BackgroundCommand> = match self.background_work {
-            BackgroundWorkPolicy::HostedTerminals => {
+            BackgroundWorkPolicy::HostedTerminals | BackgroundWorkPolicy::ClaudeTasks => {
                 if self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some() {
                     Vec::new()
                 } else {
@@ -593,12 +598,49 @@ impl DurableRelay {
                 self.background_exec_cards.values().cloned().collect()
             }
         };
+        if self.background_work == BackgroundWorkPolicy::ClaudeTasks {
+            commands.extend(self.claude_background_tasks.values().cloned());
+        }
         commands.sort_by(|left, right| {
             left.started_at_ms
                 .cmp(&right.started_at_ms)
                 .then_with(|| left.command.cmp(&right.command))
         });
         commands
+    }
+
+    /// Replace Claude's background-task level without opening a foreground
+    /// turn. Edge bookends cannot be paired safely with this signal: their
+    /// ordering is unspecified, and task starts also include foreground work.
+    pub fn claude_background_tasks_changed(
+        &mut self,
+        tasks: Vec<crate::hel_acp::ClaudeBackgroundTask>,
+    ) {
+        if self.background_work != BackgroundWorkPolicy::ClaudeTasks
+            || matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+        {
+            return;
+        }
+        let now = epoch_millis();
+        self.claude_background_tasks = tasks
+            .into_iter()
+            .map(|task| {
+                let started_at_ms = self
+                    .claude_background_tasks
+                    .get(&task.task_id)
+                    .map_or(now, |previous| previous.started_at_ms);
+                (
+                    task.task_id,
+                    BackgroundCommand {
+                        started_at_ms,
+                        command: task.description,
+                    },
+                )
+            })
+            .collect();
     }
 
     pub fn agent_terminal_started(&mut self, terminal: ActiveAgentTerminal) {
@@ -623,6 +665,7 @@ impl DurableRelay {
         // it left running: a restart cannot poll a process it no longer has.
         self.codex_execute_tools.clear();
         self.background_exec_cards.clear();
+        self.claude_background_tasks.clear();
         self.foreground_tools.clear();
     }
 
@@ -1676,6 +1719,7 @@ impl DurableRelay {
         ) {
             self.codex_execute_tools.clear();
             self.background_exec_cards.clear();
+            self.claude_background_tasks.clear();
             self.foreground_tools.clear();
         }
         self.append_relay_event(None, observation)
@@ -1734,8 +1778,7 @@ impl DurableRelay {
     }
 
     /// Forget provisional tool statuses at a boundary the harness itself has
-    /// confirmed. Only a Codex execute card already known to have detached may
-    /// survive into idle as background work.
+    /// confirmed. Independently tracked background work survives into idle.
     fn finish_turn_activity(&mut self) {
         self.foreground_tools.clear();
         self.codex_execute_tools
@@ -3733,6 +3776,7 @@ mod tests {
     fn claude_relay(root: &std::path::Path) -> DurableRelay {
         let mut relay = DurableRelay::open(root, SESSION, "1.0.0").unwrap();
         relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        relay.set_background_work_policy(BackgroundWorkPolicy::ClaudeTasks);
         relay
     }
 
@@ -3983,6 +4027,136 @@ mod tests {
             relay.operational_state().background_commands.is_empty(),
             "the process exited, so there is nothing left running"
         );
+    }
+
+    fn claude_task(task_id: &str, description: &str) -> crate::hel_acp::ClaudeBackgroundTask {
+        crate::hel_acp::ClaudeBackgroundTask {
+            task_id: task_id.into(),
+            description: description.into(),
+        }
+    }
+
+    #[test]
+    fn claude_background_tasks_survive_prompt_boundaries_until_the_level_is_empty() {
+        for outcome in ["completed", "rejected", "interrupted"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = claude_relay(temp.path());
+            submit_relay(
+                &mut relay,
+                "review-prompt",
+                prompt("start background reviews"),
+            );
+            assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+            relay.record_session_update(tool_call_update()).unwrap();
+            relay.claude_background_tasks_changed(vec![
+                claude_task("design", "Design review"),
+                claude_task("refuter", "Refute findings"),
+            ]);
+            match outcome {
+                "completed" => relay.record_command_completed(
+                    "review-prompt",
+                    RelayCommandOutcome::Prompt {
+                        stop_reason: "end_turn".into(),
+                    },
+                ),
+                "rejected" => relay.record_command_rejected("review-prompt", "adapter failed"),
+                _ => relay.record_command_interrupted("review-prompt", "cancelled"),
+            }
+            .unwrap();
+
+            let state = relay.operational_state();
+            assert_eq!(state.execution, RelayExecutionState::Idle, "{outcome}");
+            assert!(state.harness_turn.is_none());
+            assert!(state.foreground_tool_started_at_ms.is_none());
+            assert_eq!(state.background_commands.len(), 2);
+            assert!(
+                !state.is_quiet(),
+                "background agents must prevent worker replacement"
+            );
+
+            // A replacement level clears missing tasks even without a completion
+            // bookend, and keeps the clock of a task that remains live.
+            relay
+                .claude_background_tasks
+                .get_mut("design")
+                .unwrap()
+                .started_at_ms = 123;
+            relay.claude_background_tasks_changed(vec![claude_task("design", "Design cleanup")]);
+            assert_eq!(
+                relay.operational_state().background_commands,
+                vec![BackgroundCommand {
+                    started_at_ms: 123,
+                    command: "Design cleanup".into(),
+                }]
+            );
+            relay.claude_background_tasks_changed(Vec::new());
+            assert!(relay.operational_state().is_quiet());
+        }
+    }
+
+    #[test]
+    fn claude_background_levels_do_not_open_turns_or_enter_the_transcript() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        let ordinal = relay.snapshot.latest_ordinal;
+        relay.claude_background_tasks_changed(vec![claude_task("workflow", "Design reviews")]);
+        assert_eq!(relay.snapshot.latest_ordinal, ordinal);
+        assert_eq!(
+            relay.operational_state().execution,
+            RelayExecutionState::Idle
+        );
+        assert!(relay.operational_state().harness_turn.is_none());
+
+        // An autonomous follow-up keeps its foreground state while tasks live,
+        // and settling that turn returns to background work.
+        relay.record_session_update(tool_call_update()).unwrap();
+        assert_eq!(
+            relay.operational_state().execution,
+            RelayExecutionState::Running
+        );
+        relay
+            .record_session_update(settling_usage_update("task-notification"))
+            .unwrap();
+        assert_eq!(
+            relay.operational_state().execution,
+            RelayExecutionState::Idle
+        );
+        assert_eq!(relay.operational_state().background_commands.len(), 1);
+
+        relay.agent_terminal_started(ActiveAgentTerminal {
+            terminal_id: "shell".into(),
+            command: "sleep 600".into(),
+            started_at_ms: 1,
+        });
+        assert_eq!(relay.operational_state().background_commands.len(), 2);
+        relay.claude_background_tasks_changed(Vec::new());
+        assert_eq!(relay.operational_state().background_commands.len(), 1);
+        relay.agent_terminal_closed("shell");
+        assert!(relay.operational_state().is_quiet());
+    }
+
+    #[test]
+    fn claude_background_tasks_are_process_local_and_clear_on_teardown() {
+        for observation in [
+            RelayObservation::SessionRestarted,
+            RelayObservation::Closing,
+            RelayObservation::Closed,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = claude_relay(temp.path());
+            relay.claude_background_tasks_changed(vec![claude_task("design", "Design review")]);
+            relay.record_observation(observation).unwrap();
+            assert!(relay.operational_state().background_commands.is_empty());
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay.claude_background_tasks_changed(vec![claude_task("design", "Design review")]);
+        relay.clear_agent_terminals();
+        assert!(relay.operational_state().background_commands.is_empty());
+        relay.claude_background_tasks_changed(vec![claude_task("design", "Design review")]);
+        drop(relay);
+        let relay = claude_relay(temp.path());
+        assert!(relay.operational_state().background_commands.is_empty());
     }
 
     #[test]

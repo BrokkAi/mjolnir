@@ -306,20 +306,89 @@ fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
 }
 
 fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, serde_json::Value>> {
-    (spec.harness == HarnessKind::Claude && spec.execution_policy.is_unconstrained()).then(|| {
-        let serde_json::Value::Object(meta) = serde_json::json!({
-            "claudeCode": {
-                "options": {
-                    "sandbox": {
-                        "enabled": false
-                    }
+    if spec.harness != HarnessKind::Claude {
+        return None;
+    }
+    let mut claude_code = serde_json::Map::from_iter([(
+        "emitRawSDKMessages".to_owned(),
+        serde_json::json!([{
+            "type": "system",
+            "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE,
+        }]),
+    )]);
+    if spec.execution_policy.is_unconstrained() {
+        claude_code.insert(
+            "options".to_owned(),
+            serde_json::json!({
+                "sandbox": {
+                    "enabled": false
                 }
-            }
-        }) else {
-            unreachable!("Claude session metadata is an object")
-        };
-        meta
-    })
+            }),
+        );
+    }
+    Some(serde_json::Map::from_iter([(
+        "claudeCode".to_owned(),
+        serde_json::Value::Object(claude_code),
+    )]))
+}
+
+const CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE: &str = "background_tasks_changed";
+
+/// A task in Claude Code's process-local background-task level signal.
+///
+/// The adapter also sends `task_type` and an optional `ambient` marker. Hel
+/// only needs the stable id and user-facing description, and filters ambient
+/// housekeeping tasks before publishing the replacement level to the relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeBackgroundTask {
+    pub task_id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeBackgroundTaskPayload {
+    task_id: String,
+    description: String,
+    #[serde(default)]
+    ambient: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
+#[notification(method = "_claude/sdkMessage")]
+struct ClaudeSdkMessageNotification {
+    #[serde(rename = "sessionId")]
+    session_id: SessionId,
+    message: serde_json::Value,
+}
+
+/// Extract the one Claude SDK level signal Hel subscribes to. Edge lifecycle
+/// messages and foreground activity are deliberately ignored: their ordering
+/// is unspecified and task starts include foreground work.
+fn claude_background_tasks(
+    message: &serde_json::Value,
+) -> std::result::Result<Option<Vec<ClaudeBackgroundTask>>, serde_json::Error> {
+    if message.get("type").and_then(serde_json::Value::as_str) != Some("system")
+        || message.get("subtype").and_then(serde_json::Value::as_str)
+            != Some(CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE)
+    {
+        return Ok(None);
+    }
+    let payload = serde_json::from_value::<Vec<ClaudeBackgroundTaskPayload>>(
+        message
+            .get("tasks")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )?;
+    Ok(Some(
+        payload
+            .into_iter()
+            .filter(|task| !task.ambient)
+            .map(|task| ClaudeBackgroundTask {
+                task_id: task.task_id,
+                description: task.description,
+            })
+            .collect(),
+    ))
 }
 
 /// The reviewing agents' analyzer servers, for harnesses that accept a server
@@ -427,6 +496,11 @@ pub enum RuntimeEvent {
     },
     SessionUpdate {
         update: serde_json::Value,
+    },
+    /// Replacement level for Claude Code's live non-ambient background tasks.
+    /// This provider signal does not represent transcript or foreground work.
+    ClaudeBackgroundTasksChanged {
+        tasks: Vec<ClaudeBackgroundTask>,
     },
     ElicitationRequested {
         request: ElicitationRequest,
@@ -1223,6 +1297,8 @@ where
     // updates on the same ACP connection.
     let live_tool_calls = Arc::new(Mutex::new(BTreeSet::<String>::new()));
     let notification_live_tool_calls = live_tool_calls.clone();
+    let claude_sdk_events = events.clone();
+    let claude_sdk_harness = spec.harness;
     let permission_events = events.clone();
     let permission_activity = spec.acp_activity.clone();
     let permission_step_clock = spec.step_clock.clone();
@@ -1284,6 +1360,37 @@ where
                 notification_session_update_count.fetch_add(1, Ordering::Release);
                 notification_events
                     .send(RuntimeEvent::SessionUpdate { update })
+                    .await
+                    .map_err(|_| relay_event_channel_error())?;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_notification(
+            async move |notification: ClaudeSdkMessageNotification, _cx| {
+                if claude_sdk_harness != HarnessKind::Claude {
+                    return Ok(());
+                }
+                let tasks = match claude_background_tasks(&notification.message) {
+                    Ok(Some(tasks)) => tasks,
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        claude_sdk_events
+                            .send(RuntimeEvent::Warning {
+                                message: format!(
+                                    "ignored malformed Claude background task level: {error}"
+                                ),
+                            })
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                        // A malformed level cannot establish which provider
+                        // tasks are still live, so keep the last known level
+                        // until a valid replacement arrives.
+                        return Ok(());
+                    }
+                };
+                claude_sdk_events
+                    .send(RuntimeEvent::ClaudeBackgroundTasksChanged { tasks })
                     .await
                     .map_err(|_| relay_event_channel_error())?;
                 Ok(())

@@ -259,6 +259,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_background_agents_render_bg_until_the_live_set_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = hel::hel_worker::DurableRelay::open(
+            temp.path(),
+            "018f9dd2-a3b4-7c8d-9000-123456789abc",
+            "1.0.0",
+        )
+        .unwrap();
+        relay.set_background_work_policy(hel::hel_worker::BackgroundWorkPolicy::ClaudeTasks);
+        relay.claude_background_tasks_changed(vec![hel::hel_acp::ClaudeBackgroundTask {
+            task_id: "design-review".into(),
+            description: "Design simplification and cleanup review".into(),
+        }]);
+        let state = relay.operational_state();
+        let activity = SessionActivity::of(&state);
+        let now = (state.background_commands[0].started_at_ms / 1_000) as u64 + 60;
+        assert!(!activity.is_idle(None));
+        assert_eq!(format_activity_clock(now, None, &activity), "[BG 1m00s]");
+        assert_eq!(
+            format_activity_columns(now, None, None, &activity),
+            vec!["  BG 1m00s"]
+        );
+
+        relay.claude_background_tasks_changed(Vec::new());
+        let activity = SessionActivity::of(&relay.operational_state());
+        assert!(activity.is_idle(None));
+        assert_eq!(format_activity_clock(now, None, &activity), "[idle]");
+    }
+
+    #[test]
     fn running_clocks_read_as_the_two_largest_units_that_fit() {
         for (seconds, expected) in [
             (0, "0s"),

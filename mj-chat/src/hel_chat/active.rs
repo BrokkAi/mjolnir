@@ -2418,8 +2418,7 @@ pub(super) fn render_in(
         let prompt_block = Block::default()
             .borders(Borders::ALL)
             .border_type(prompt_border)
-            .title(prompt_title)
-            .title_bottom(voice_button_line(chat.voice_available, chat.voice_active));
+            .title(prompt_title);
         let prompt_inner = prompt_block.inner(prompt_area);
         chat.voice_button_area = voice_button_area(prompt_area);
         let mut prompt_lines = chat
@@ -2465,6 +2464,12 @@ pub(super) fn render_in(
                 .block(prompt_block),
             prompt_area,
         );
+        if let Some(button_area) = chat.voice_button_area {
+            frame.render_widget(
+                voice_button_line(chat.voice_available, chat.voice_active),
+                button_area,
+            );
+        }
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::PromptInput, prompt_inner));
         // The cursor belongs to whatever has focus, so the composer only shows one
@@ -2644,7 +2649,7 @@ fn background_work_label(chat: &ChatState) -> Option<String> {
             super::transcript::compact_terminal_command(&oldest.command)
         )
     } else {
-        format!("Background: {} commands, oldest {elapsed}", commands.len())
+        format!("Background: {} tasks, oldest {elapsed}", commands.len())
     })
 }
 
@@ -3866,7 +3871,7 @@ mod tests {
             active_user_shells: Vec::new(),
         });
         assert!(
-            prompt_title(&chat, 0).contains("Background: 2 commands, oldest 43m36s"),
+            prompt_title(&chat, 0).contains("Background: 2 tasks, oldest 43m36s"),
             "{}",
             prompt_title(&chat, 0)
         );
