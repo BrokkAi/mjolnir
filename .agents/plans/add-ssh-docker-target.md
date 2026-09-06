@@ -13,7 +13,7 @@ A user can configure `kind = "ssh-docker"`, launch coding sessions in Docker on 
 - [x] (2026-09-06) Integrated controller lifecycle, setup, doctor, UI, and documentation; focused tests and all-target compilation pass.
 - [x] (2026-09-06) Full `cargo test`, formatting, and Clippy with warnings denied pass; host CLI and portable musl worker built.
 - [ ] Perform live acceptance tests (completed: new EC2 instance i-097865482bc2da7d5, Docker 29.8.0 ready; remaining: full lifecycle, failure injection, and orphan adoption).
-- [ ] Collect evidence, remove test resources, and commit validated changes.
+- [ ] Collect evidence and remove test resources (implementation checkpoint committed as 9b82b0e8; final test-runner/fix commit pending).
 
 ## Surprises & Discoveries
 
@@ -113,3 +113,7 @@ Plan revision 2026-09-06: Recorded passing full tests, formatting, Clippy, binar
 Plan revision 2026-09-06: Recorded the naming mismatch found by live validation and the required regression tests before repeating the smoke test.
 
 Plan revision 2026-09-06: Recorded successful corrected smoke, real session launches, checkpoint staging fix, and passing focused regression tests. Preparing a validated implementation checkpoint; cloud cleanup remains mandatory.
+
+Plan revision 2026-09-06: The main live lifecycle run passed in acceptance-2: two coding tasks, unchanged attachment sources, checkpoint/close/restore, restart/reconnect, and normal close. Extra failure tests found early provisioning discard was only in memory, leaving a database ghost; fixing and regression-testing persistence before repetition. The extra checkpoint fixture must send an initial Codex turn because Codex does not create a native rollout for an untouched conversation. Its leftover session was identified through recovery scan and removed using exact-ID recovery destroy.
+
+Plan revision 2026-09-06: Early provisioning discard now persists before returning its original error. The isolated reload regression and all 24 provisioning tests pass; repeated live failed-image launch removed both its cloud resources and controller row. Host CLI rebuilt and Clippy passed. Final extended recovery run is in progress.
