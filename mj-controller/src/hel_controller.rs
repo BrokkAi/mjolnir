@@ -364,7 +364,7 @@ impl Controller {
             | TargetTemplate::LocalDocker { .. }
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::AwsEc2 { .. } => Ok(hel_targets::local_directory_completions(prefix)),
-            TargetTemplate::SshPodman { ssh, .. } => {
+            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
                 hel_targets::ssh_directory_completions(&backend_ssh(ssh), prefix, executor)
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -404,7 +404,7 @@ impl Controller {
                     }
                 })
                 .with_context(|| format!("inspect resource source {}", source.display()))?,
-            TargetTemplate::SshPodman { ssh, .. } => {
+            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
                 hel_targets::ssh_directory_exists(&backend_ssh(ssh), source, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -428,7 +428,9 @@ impl Controller {
     ) -> Option<String> {
         let ssh = match target {
             TargetTemplate::LocalPodman { .. } | TargetTemplate::LocalDocker { .. } => None,
-            TargetTemplate::SshPodman { ssh, .. } => Some(backend_ssh(ssh)),
+            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
+                Some(backend_ssh(ssh))
+            }
             // Apple Container already mounts read-only, and EC2 copies instead
             // of mounting, so neither has an overlay to lose.
             _ => return None,
@@ -937,6 +939,7 @@ fn target_kind(locator: &hel_targets::TargetLocator) -> &'static str {
         hel_targets::TargetLocator::AwsEc2 { .. } => "aws-ec2",
         hel_targets::TargetLocator::SshBare { .. } => "ssh-bare",
         hel_targets::TargetLocator::SshPodman { .. } => "ssh-podman",
+        hel_targets::TargetLocator::SshDocker { .. } => "ssh-docker",
     }
 }
 
@@ -950,7 +953,8 @@ fn target_profile_home(
         hel_targets::TargetLocator::LocalPodman { .. }
         | hel_targets::TargetLocator::LocalDocker { .. }
         | hel_targets::TargetLocator::AppleContainer { .. }
-        | hel_targets::TargetLocator::SshPodman { .. } => {
+        | hel_targets::TargetLocator::SshPodman { .. }
+        | hel_targets::TargetLocator::SshDocker { .. } => {
             format!("/var/lib/hel/profiles/{session_id}")
         }
         hel_targets::TargetLocator::AwsEc2 { .. } | hel_targets::TargetLocator::SshBare { .. } => {

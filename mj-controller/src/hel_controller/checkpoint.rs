@@ -627,7 +627,8 @@ impl Controller {
                     hel_targets::TargetLocator::LocalPodman { .. }
                     | hel_targets::TargetLocator::LocalDocker { .. }
                     | hel_targets::TargetLocator::AppleContainer { .. }
-                    | hel_targets::TargetLocator::SshPodman { .. } => "/workspace".to_string(),
+                    | hel_targets::TargetLocator::SshPodman { .. }
+                    | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
                     hel_targets::TargetLocator::AwsEc2 { workspace, .. }
                     | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
                     hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
@@ -1860,7 +1861,13 @@ pub(super) fn upload_checkpoint_spec(
         .map(|_| ()),
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => {
+        }
+        | hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            let engine = match locator {
+                hel_targets::TargetLocator::SshPodman { .. } => "podman",
+                hel_targets::TargetLocator::SshDocker { .. } => "docker",
+                _ => unreachable!("matched remote container target"),
+            };
             let staging = format!(".local/share/hel/uploads/{session_id}-checkpoint.json");
             execute_checked(
                 executor,
@@ -1870,20 +1877,15 @@ pub(super) fn upload_checkpoint_spec(
             execute_checked(
                 executor,
                 scp_command_spec(ssh, local, &staging, false)
-                    .purpose("upload remote Podman checkpoint specification"),
+                    .purpose("upload remote container checkpoint specification"),
             )?;
             execute_checked(
                 executor,
                 ssh_command_spec(
                     ssh,
-                    [
-                        "podman",
-                        "cp",
-                        &staging,
-                        &format!("{container_id}:{remote}"),
-                    ],
+                    [engine, "cp", &staging, &format!("{container_id}:{remote}")],
                 )
-                .purpose("install remote Podman checkpoint specification"),
+                .purpose("install remote container checkpoint specification"),
             )?;
             execute_checked(
                 executor,

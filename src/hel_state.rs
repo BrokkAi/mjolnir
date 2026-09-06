@@ -687,6 +687,10 @@ pub enum TargetLocator {
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
     },
+    SshDocker {
+        host: String,
+        container_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,6 +827,7 @@ impl TargetLocator {
             | Self::LocalDocker { container_id }
             | Self::AppleContainer { container_id }
             | Self::SshPodman { container_id, .. }
+            | Self::SshDocker { container_id, .. }
                 if container_id.trim().is_empty() =>
             {
                 bail!("target locator has an empty container id")
@@ -847,6 +852,9 @@ impl TargetLocator {
             }
             Self::SshPodman { host, .. } if host.trim().is_empty() => {
                 bail!("SSH Podman target locator has an empty host")
+            }
+            Self::SshDocker { host, .. } if host.trim().is_empty() => {
+                bail!("SSH Docker target locator has an empty host")
             }
             _ => {}
         }

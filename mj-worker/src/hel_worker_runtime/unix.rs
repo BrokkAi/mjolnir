@@ -154,6 +154,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // only evidence of a command it left running is a card with no exit code.
     durable_relay.set_background_work_policy(match config.harness {
         HarnessKind::Codex => hel::hel_worker::BackgroundWorkPolicy::CodexExecCards,
+        HarnessKind::Claude => hel::hel_worker::BackgroundWorkPolicy::ClaudeTasks,
         _ => hel::hel_worker::BackgroundWorkPolicy::HostedTerminals,
     });
     let resume_session = select_resume_session(&config, &durable_relay);
@@ -817,6 +818,9 @@ pub(super) fn record_runtime_event(
                     return Err(error);
                 }
             }
+        }
+        RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } => {
+            relay.claude_background_tasks_changed(tasks);
         }
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;

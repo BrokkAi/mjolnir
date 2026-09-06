@@ -747,6 +747,12 @@ pub enum TargetTemplate {
         #[serde(flatten)]
         container: ContainerTemplate,
     },
+    SshDocker {
+        #[serde(flatten)]
+        ssh: SshConnection,
+        #[serde(flatten)]
+        container: ContainerTemplate,
+    },
 }
 
 impl TargetTemplate {
@@ -821,6 +827,14 @@ impl TargetTemplate {
                 }
                 Ok(())
             }
+            Self::SshDocker { ssh, container } => {
+                ssh.validate(id)?;
+                container.validate(id)?;
+                if !container.workspace_storage.is_default() {
+                    bail!("target template {id:?} workspace storage is only supported by Podman");
+                }
+                Ok(())
+            }
             Self::SshPodman { ssh, container, .. } => {
                 ssh.validate(id)?;
                 container.validate(id)?;
@@ -848,7 +862,9 @@ pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::LocalDocker { .. }
         | TargetTemplate::AppleContainer { .. }
         | TargetTemplate::AwsEc2 { .. } => Some("local"),
-        TargetTemplate::SshPodman { ssh, .. } => Some(&ssh.host),
+        TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
+            Some(&ssh.host)
+        }
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => None,
     }
 }
@@ -864,7 +880,8 @@ pub fn project_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::LocalDocker { .. }
         | TargetTemplate::AppleContainer { .. }
         | TargetTemplate::AwsEc2 { .. }
-        | TargetTemplate::SshPodman { .. } => None,
+        | TargetTemplate::SshPodman { .. }
+        | TargetTemplate::SshDocker { .. } => None,
     }
 }
 
@@ -874,7 +891,9 @@ pub fn container_size_host(template: &TargetTemplate) -> Option<&str> {
         TargetTemplate::LocalPodman { .. }
         | TargetTemplate::LocalDocker { .. }
         | TargetTemplate::AppleContainer { .. } => Some("local"),
-        TargetTemplate::SshPodman { ssh, .. } => Some(&ssh.host),
+        TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
+            Some(&ssh.host)
+        }
         TargetTemplate::LocalBare
         | TargetTemplate::SshBare { .. }
         | TargetTemplate::AwsEc2 { .. } => None,
@@ -2603,5 +2622,31 @@ mod tests {
         assert_eq!(container_size_host(&apple), Some("local"));
         assert_eq!(container_size_host(&ssh), Some("builder.example.test"));
         assert_eq!(container_size_host(&TargetTemplate::LocalBare), None);
+    }
+    #[test]
+    fn ssh_docker_target_round_trips_and_rejects_podman_storage() {
+        let text = r#"kind = "ssh-docker"
+host = "builder"
+user = "ubuntu"
+image = "ubuntu:24.04"
+"#;
+        let target: TargetTemplate = toml::from_str(text).unwrap();
+        target.validate("remote-docker").unwrap();
+        assert_eq!(
+            toml::from_str::<TargetTemplate>(&toml::to_string(&target).unwrap()).unwrap(),
+            target
+        );
+        assert_eq!(container_size_host(&target), Some("builder"));
+        let TargetTemplate::SshDocker { ssh, mut container } = target else {
+            panic!("wrong kind")
+        };
+        container.workspace_storage = PodmanWorkspaceStorage::ContainerLayer;
+        assert!(
+            TargetTemplate::SshDocker { ssh, container }
+                .validate("remote-docker")
+                .unwrap_err()
+                .to_string()
+                .contains("only supported by Podman")
+        );
     }
 }

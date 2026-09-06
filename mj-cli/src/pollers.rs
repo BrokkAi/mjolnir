@@ -2489,6 +2489,10 @@ mod tests {
                 container_id: "remote-podman".into(),
                 workspace_storage: Default::default(),
             },
+            TargetLocator::SshDocker {
+                host: "ssh.example".into(),
+                container_id: "remote-docker".into(),
+            },
         ];
         for target in &remotes {
             assert!(target_syncs_github_token(Some(target)), "{target:?}");

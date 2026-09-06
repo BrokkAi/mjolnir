@@ -351,7 +351,13 @@ fn upload_reviewer_profile(
         }
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => {
+        }
+        | hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            let engine = match locator {
+                hel_targets::TargetLocator::SshPodman { .. } => "podman",
+                hel_targets::TargetLocator::SshDocker { .. } => "docker",
+                _ => unreachable!("matched remote container target"),
+            };
             let upload = format!("{worker_root}/.reviewer-upload-{generation}");
             execute_checked(
                 executor,
@@ -365,7 +371,7 @@ fn upload_reviewer_profile(
             )?;
             for arguments in [
                 vec![
-                    "podman".to_owned(),
+                    engine.to_owned(),
                     "exec".to_owned(),
                     container_id.clone(),
                     "rm".to_owned(),
@@ -374,7 +380,7 @@ fn upload_reviewer_profile(
                     home.clone(),
                 ],
                 vec![
-                    "podman".to_owned(),
+                    engine.to_owned(),
                     "exec".to_owned(),
                     container_id.clone(),
                     "mkdir".to_owned(),
@@ -382,13 +388,13 @@ fn upload_reviewer_profile(
                     home.clone(),
                 ],
                 vec![
-                    "podman".to_owned(),
+                    engine.to_owned(),
                     "cp".to_owned(),
                     format!("{upload}/."),
                     format!("{container_id}:{home}"),
                 ],
                 vec![
-                    "podman".to_owned(),
+                    engine.to_owned(),
                     "exec".to_owned(),
                     container_id.clone(),
                     "chmod".to_owned(),

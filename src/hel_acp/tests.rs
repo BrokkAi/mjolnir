@@ -113,7 +113,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
 }
 
 #[test]
-fn claude_session_metadata_disables_sandbox_only_for_unconstrained_targets() {
+fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies() {
     let mut spec = LaunchSpec {
         command: "claude-agent-acp".into(),
         args: Vec::new(),
@@ -134,6 +134,14 @@ fn claude_session_metadata_disables_sandbox_only_for_unconstrained_targets() {
         meta.pointer("/claudeCode/options/sandbox/enabled"),
         Some(&serde_json::Value::Bool(false))
     );
+    let filter = serde_json::json!([{
+        "type": "system",
+        "subtype": "background_tasks_changed",
+    }]);
+    assert_eq!(
+        meta.pointer("/claudeCode/emitRawSDKMessages"),
+        Some(&filter)
+    );
     for request in [
         serde_json::to_value(new_session_request(&spec, true)).unwrap(),
         serde_json::to_value(new_session_request(&spec, false)).unwrap(),
@@ -145,6 +153,11 @@ fn claude_session_metadata_disables_sandbox_only_for_unconstrained_targets() {
             "{request}"
         );
         assert_eq!(
+            request.pointer("/_meta/claudeCode/emitRawSDKMessages"),
+            Some(&filter),
+            "{request}"
+        );
+        assert_eq!(
             request["additionalDirectories"],
             serde_json::json!(["/workspace/api"]),
             "{request}"
@@ -152,16 +165,210 @@ fn claude_session_metadata_disables_sandbox_only_for_unconstrained_targets() {
     }
 
     spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    assert_eq!(session_request_meta(&spec), None);
+    let configured_meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+    assert_eq!(
+        configured_meta.pointer("/claudeCode/emitRawSDKMessages"),
+        Some(&filter)
+    );
     assert!(
-        serde_json::to_value(new_session_request(&spec, true))
-            .unwrap()
-            .get("_meta")
+        configured_meta
+            .pointer("/claudeCode/options/sandbox")
             .is_none()
     );
+    for request in [
+        serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
+    ] {
+        assert_eq!(
+            request.pointer("/_meta/claudeCode/emitRawSDKMessages"),
+            Some(&filter),
+            "{request}"
+        );
+        assert!(
+            request
+                .pointer("/_meta/claudeCode/options/sandbox")
+                .is_none(),
+            "{request}"
+        );
+    }
     spec.execution_policy = ExecutionPolicy::Unconstrained;
     spec.harness = HarnessKind::Codex;
     assert_eq!(session_request_meta(&spec), None);
+}
+
+#[test]
+fn claude_sdk_messages_keep_only_non_ambient_background_task_levels() {
+    let notification = <ClaudeSdkMessageNotification as agent_client_protocol::JsonRpcMessage>::parse_message(
+        "_claude/sdkMessage",
+        &serde_json::json!({
+            "sessionId": "native",
+            "message": {
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": [
+                    {"task_id": "server", "task_type": "shell", "description": "npm run dev"},
+                    {"task_id": "watcher", "task_type": "watch", "description": "Watch files", "ambient": true},
+                ],
+            },
+        }),
+    )
+    .expect("Claude extension notification deserializes");
+    assert_eq!(notification.session_id.to_string(), "native");
+    assert_eq!(
+        claude_background_tasks(&notification.message).unwrap(),
+        Some(vec![ClaudeBackgroundTask {
+            task_id: "server".into(),
+            description: "npm run dev".into(),
+        }])
+    );
+    assert_eq!(
+        claude_background_tasks(&serde_json::json!({
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "foreground",
+        }))
+        .unwrap(),
+        None,
+        "edge lifecycle messages must not become background levels"
+    );
+}
+
+#[tokio::test]
+async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_step() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    for resume_session in [None, Some("native")] {
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(bridge_stream);
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.expect("read fake adapter input") {
+                let request: serde_json::Value =
+                    serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
+                let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let id = request
+                    .get("id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let response = match method {
+                    "initialize" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"protocolVersion": 1},
+                    }),
+                    "session/new" | "session/load" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"sessionId": "scripted"},
+                    }),
+                    _ => continue,
+                };
+                if matches!(method, "session/new" | "session/load") {
+                    for message in [
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "_claude/sdkMessage",
+                            "params": {
+                                "sessionId": "scripted",
+                                "message": {
+                                    "type": "system",
+                                    "subtype": "task_started",
+                                    "task_id": "foreground",
+                                },
+                            },
+                        }),
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "_claude/sdkMessage",
+                            "params": {
+                                "sessionId": "scripted",
+                                "message": {
+                                    "type": "system",
+                                    "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE,
+                                    "tasks": [{
+                                        "task_id": "server",
+                                        "task_type": "shell",
+                                        "description": "npm run dev",
+                                    }],
+                                },
+                            },
+                        }),
+                    ] {
+                        write
+                            .write_all(format!("{message}\n").as_bytes())
+                            .await
+                            .expect("write fake adapter extension notification");
+                    }
+                }
+                write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .expect("write fake adapter response");
+            }
+        });
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let (request_tx, mut request_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let step_clock = crate::hel_acp::StepClock::default();
+        let observed_step_clock = step_clock.clone();
+        let spec = LaunchSpec {
+            command: "scripted".into(),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cwd: std::env::current_dir().unwrap(),
+            additional_directories: Vec::new(),
+            extra_mcp_servers: Vec::new(),
+            project_memory: None,
+            resume_session: resume_session.map(str::to_owned),
+            accepted_config: Default::default(),
+            harness: HarnessKind::Claude,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            acp_activity: AcpActivityClock::default(),
+            step_clock,
+        };
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
+            .await
+        });
+
+        let event = wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::ClaudeBackgroundTasksChanged { .. })
+        })
+        .await;
+        let RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } = event else {
+            unreachable!("wait_for_runtime_event matched the Claude level event");
+        };
+        assert_eq!(
+            tasks,
+            vec![ClaudeBackgroundTask {
+                task_id: "server".into(),
+                description: "npm run dev".into(),
+            }]
+        );
+        assert_eq!(
+            observed_step_clock.started_at_ms(),
+            None,
+            "a provider background level must not advance the step clock"
+        );
+
+        drop(request_tx);
+        tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("closing the command channel ends the runtime")
+            .expect("the runtime task does not panic")
+            .expect("the fake adapter session ends cleanly");
+        bridge.abort();
+    }
 }
 
 #[test]

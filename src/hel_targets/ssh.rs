@@ -22,7 +22,7 @@ pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
     ssh_command(&probe, ["true"]).purpose("verify SSH connectivity")
 }
 
-pub(super) fn ssh_command(
+pub fn ssh_command(
     ssh: &SshTarget,
     args: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> CommandSpec {
@@ -214,7 +214,8 @@ pub(super) fn verify_locator(locator: &TargetLocator, session_id: &str) -> Resul
         TargetLocator::LocalPodman { container_id, .. }
         | TargetLocator::LocalDocker { container_id }
         | TargetLocator::AppleContainer { container_id }
-        | TargetLocator::SshPodman { container_id, .. } => {
+        | TargetLocator::SshPodman { container_id, .. }
+        | TargetLocator::SshDocker { container_id, .. } => {
             if container_id != &expected_name && !is_runtime_container_id(container_id) {
                 bail!(
                     "refusing cleanup: container locator is neither the generated name nor an immutable runtime ID"

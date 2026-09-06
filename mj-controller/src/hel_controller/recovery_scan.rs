@@ -123,17 +123,20 @@ impl Controller {
                     .bundles
                     .get(&bundle_id)
                     .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
+                let workspace_id = resolve_recovery_workspace_id(
+                    candidate
+                        .ownership
+                        .as_ref()
+                        .map(|ownership| ownership.workspace_id.as_str())
+                        .unwrap_or(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                )?;
                 let record = adopted_session_record(
                     session_id,
                     target_id,
                     profile_id,
                     profile.kind,
                     bundle_id,
-                    candidate
-                        .ownership
-                        .as_ref()
-                        .map(|ownership| ownership.workspace_id.clone())
-                        .unwrap_or_else(|| hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned()),
+                    workspace_id,
                     candidate.locator,
                 );
                 (record, true)
@@ -239,6 +242,22 @@ impl Controller {
             .execute(executor)
             .map(|_| ())
     }
+}
+
+/// Worker markers can outlive the controller database that created them. Keep
+/// a workspace marker only when this controller knows its identity; otherwise
+/// group the adopted worker under one durable recovery workspace.
+fn resolve_recovery_workspace_id(marked_workspace_id: &str) -> Result<String> {
+    if marked_workspace_id == hel::hel_workspace::DEFAULT_WORKSPACE_ID {
+        return Ok(marked_workspace_id.to_owned());
+    }
+    if hel::hel_database::list_workspaces()?
+        .into_iter()
+        .any(|workspace| workspace.id == marked_workspace_id)
+    {
+        return Ok(marked_workspace_id.to_owned());
+    }
+    Ok(hel::hel_database::create_or_get_workspace("Recovered")?.id)
 }
 
 /// The session record adoption commits before it tries the relay handshake.
@@ -356,6 +375,23 @@ fn scan_target_workers(
                 executor,
                 ssh_spec(ssh, [remote]),
                 "scan remote Podman workers",
+            )?;
+            candidates_from_container_json(target_id, template, &output.stdout)?
+        }
+        TargetTemplate::SshDocker { ssh, .. } => {
+            let remote = hel_targets::join_remote_command(&[
+                "docker".into(),
+                "ps".into(),
+                "--all".into(),
+                "--filter".into(),
+                format!("label={}=true", hel_targets::MANAGED_LABEL),
+                "--format".into(),
+                "json".into(),
+            ]);
+            let output = execute_scan(
+                executor,
+                ssh_spec(ssh, [remote]),
+                "scan remote Docker workers",
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
         }
@@ -511,6 +547,10 @@ fn candidates_from_container_json(
                     host: ssh.host.clone(),
                     container_id: generated,
                     workspace_storage: Default::default(),
+                },
+                TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+                    host: ssh.host.clone(),
+                    container_id: generated,
                 },
                 _ => return None,
             };
@@ -795,6 +835,18 @@ fn recovery_backend_locator(
                 workspace_storage: Default::default(),
             }
         }
+        (
+            TargetTemplate::SshDocker { ssh, .. },
+            TargetLocator::SshDocker { host, container_id },
+        ) => {
+            if host != &ssh.host {
+                bail!("recovery SSH Docker host does not match target template")
+            }
+            hel_targets::TargetLocator::SshDocker {
+                ssh: backend_ssh(ssh),
+                container_id: container_id.clone(),
+            }
+        }
         (TargetTemplate::SshBare { ssh, .. }, TargetLocator::SshBare { workspace, .. }) => {
             hel_targets::TargetLocator::SshBare {
                 ssh: backend_ssh(ssh),
@@ -941,6 +993,99 @@ mod tests {
         assert!(
             !retry.contains("already tracked"),
             "a session adoption never finished blocked its own retry: {retry}"
+        );
+    }
+
+    const RECOVERY_WORKSPACE_CHILD: &str = "MJ_TEST_RECOVERY_WORKSPACE_CHILD";
+
+    #[tokio::test]
+    async fn orphan_workspace_ids_are_reconciled_before_adoption_persistence() {
+        if std::env::var_os(RECOVERY_WORKSPACE_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let test = "orphan_workspace_ids_are_reconciled_before_adoption_persistence";
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    &format!("hel_controller::recovery_scan::tests::{test}"),
+                    "--nocapture",
+                ])
+                .env(RECOVERY_WORKSPACE_CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path());
+            let output = hel::hel_subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "isolated recovery workspace test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        let default =
+            resolve_recovery_workspace_id(hel::hel_workspace::DEFAULT_WORKSPACE_ID).unwrap();
+        assert_eq!(default, hel::hel_workspace::DEFAULT_WORKSPACE_ID);
+
+        let known = hel::hel_database::create_or_get_workspace("Known").unwrap();
+        assert_eq!(resolve_recovery_workspace_id(&known.id).unwrap(), known.id);
+
+        let recovered = resolve_recovery_workspace_id("workspace-from-old-controller").unwrap();
+        let repeated = resolve_recovery_workspace_id("another-old-workspace").unwrap();
+        assert_eq!(repeated, recovered);
+        assert_eq!(
+            hel::hel_database::list_workspaces()
+                .unwrap()
+                .iter()
+                .filter(|workspace| workspace.name == "Recovered")
+                .count(),
+            1
+        );
+
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let workers = tempfile::tempdir().unwrap();
+        let record = adopted_session_record(
+            session_id,
+            "local-bare",
+            "codex".into(),
+            HarnessKind::Codex,
+            "project".into(),
+            recovered.clone(),
+            TargetLocator::LocalBare {
+                worker_root: workers.path().join(session_id),
+            },
+        );
+        hel::hel_database::save_session(&record).unwrap();
+        assert_eq!(
+            hel::hel_database::load_state().unwrap().sessions[session_id].workspace_id,
+            recovered
+        );
+
+        // Adoption has already committed the reconciled workspace. Exercise
+        // the post-save handshake path with the same fake used by the retry
+        // regression, which leaves and persists a diagnostic on failure.
+        let mut state = HelState::default();
+        state.sessions.insert(session_id.to_owned(), record);
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("local-bare".into(), TargetTemplate::LocalBare);
+        let mut controller = Controller { config, state };
+        let failure = controller
+            .adopt_orphan_worker(session_id, "local-bare", None, None, &ProcessExecutor)
+            .await
+            .expect_err("a worker root without a worker cannot complete the handshake");
+        assert!(
+            format!("{failure:#}").contains("orphan relay"),
+            "unexpected failure: {failure:#}"
+        );
+        let stored = hel::hel_database::load_state().unwrap();
+        assert_eq!(stored.sessions[session_id].workspace_id, recovered);
+        assert!(
+            stored.sessions[session_id]
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("orphan adoption failed"))
         );
     }
 
