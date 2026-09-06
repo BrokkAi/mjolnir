@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 use hel::hel_config::{HelConfig, TargetTemplate, project_history_host, validate_id};
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
-use hel::hel_state::{HelState, SessionState};
+use hel::hel_state::{HelState, ProjectSourceIdentity, SessionState};
 
 /// Select the process-wide rustls provider before any TLS configuration is built.
 ///
@@ -354,6 +354,7 @@ impl ViewerSnapshot {
                     .cloned()
                     .collect::<Vec<_>>();
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
+                let source = session.project_source(config);
                 ViewerSession {
                     id: session.id.clone(),
                     workspace_id: session.workspace_id.clone(),
@@ -379,8 +380,8 @@ impl ViewerSnapshot {
                         .filter(|target_id| !incompatible.contains(*target_id))
                         .cloned()
                         .collect(),
-                    project_label: session.project_name(config),
-                    project_key: project_key(&session.project_source(config).key),
+                    project_label: source.short,
+                    project_key: project_key(&source.key),
                     display_location: session.project_target(config, &session.target_template_id),
                     lifecycle,
                     latest_event_ordinal: 0,
@@ -481,10 +482,10 @@ impl ViewerSnapshot {
 
 /// A stable, opaque grouping key for a project.
 ///
-/// The controller's own project identity is a filesystem path or a Git remote,
-/// and this projection publishes neither. A digest groups exactly as well and
-/// says nothing: two sessions in the same project share a key, and a key on
-/// its own reveals no path.
+/// The controller's own project identity is a bundle, filesystem path, or Git
+/// remote, and this projection publishes neither. A digest groups exactly as
+/// well and says nothing: two sessions in the same project share a key, and a
+/// key on its own reveals no source.
 fn project_key(identity: &str) -> String {
     use sha2::Digest as _;
     let digest = Sha256::digest(identity.as_bytes());
@@ -538,13 +539,13 @@ pub struct ViewerSession {
     /// subtract one set from another to find out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compatible_resume_targets: Vec<String>,
-    /// The project this session works in, as a name a person recognises. This
-    /// is the leaf of a path or a repository name, never the path itself.
+    /// The canonical short source label for this session: a bundle name, path
+    /// leaf, or repository name, never a source path itself.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project_label: String,
     /// A stable key for grouping sessions by project. The controller's own
-    /// identity for a project is a path or a remote, so what travels is a
-    /// digest of it: enough to group by, and nothing to read.
+    /// source identity stays private, so what travels is a digest of it:
+    /// enough to group by, and nothing to read.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project_key: String,
     /// The configured target's human-facing project location. This is the
@@ -594,6 +595,15 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_commands: Vec<ViewerMjCommand>,
     pub capabilities: ViewerSessionCapabilities,
+}
+
+impl ViewerSession {
+    /// Apply a resolved controller source while keeping paths and remotes out
+    /// of the public projection.
+    pub fn set_project_source(&mut self, source: &ProjectSourceIdentity) {
+        self.project_label = source.short.clone();
+        self.project_key = project_key(&source.key);
+    }
 }
 
 /// Structured live activity for a session card. The timestamps are epoch
@@ -2771,7 +2781,7 @@ mod tests {
         CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode,
         ProjectBundle, ProjectRepository, SshConnection,
     };
-    use hel::hel_state::{STATE_VERSION, SessionRecord};
+    use hel::hel_state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
     #[test]
     fn unified_tls_backends_use_the_selected_crypto_provider() {
@@ -3631,6 +3641,58 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             snapshot.sessions[0].project_label, "hel",
             "the project label should be a name a person recognises"
         );
+    }
+
+    #[test]
+    fn web_bundle_labels_and_keys_keep_same_primary_bundles_separate() {
+        let (mut config, mut state) = sample_config_state();
+        let shared_bundle = config.bundles["hel"].clone();
+        config.bundles.insert("other".into(), shared_bundle);
+
+        let mut other = state.sessions["session-1"].clone();
+        other.id = "session-2".into();
+        other.bundle_id = "other".into();
+        state.sessions.insert(other.id.clone(), other);
+
+        assert_eq!(
+            config.bundles["hel"].primary_repo,
+            config.bundles["other"].primary_repo
+        );
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let first = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == "session-1")
+            .expect("first session");
+        let second = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == "session-2")
+            .expect("second session");
+
+        assert_eq!(first.project_label, "hel");
+        assert_eq!(second.project_label, "other");
+        assert_ne!(first.project_key, second.project_key);
+    }
+
+    #[test]
+    fn viewer_session_applies_a_resolved_source_without_publishing_it() {
+        let (config, state) = sample_config_state();
+        let mut viewer = ViewerSnapshot::from_config_state(&config, &state, 1)
+            .sessions
+            .into_iter()
+            .next()
+            .expect("session");
+        let source = ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git")
+            .expect("GitHub source");
+
+        viewer.set_project_source(&source);
+
+        assert_eq!(viewer.project_label, "bifrost-dev");
+        assert_eq!(viewer.project_key, project_key(&source.key));
+        let json = serde_json::to_string(&viewer).expect("serialize viewer session");
+        assert!(!json.contains("BrokkAi"));
+        assert!(!json.contains("github.com"));
     }
 
     /// A phone groups and filters by the lifecycle category, so the mapping
