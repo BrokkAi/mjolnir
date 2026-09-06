@@ -63,6 +63,7 @@ pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
 };
+pub use crate::render::render_sessions_preview;
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsProbeResult, ReviewTargetReadiness};
 pub use hel::hel_workspace::{PaneSize, PaneSizes};
@@ -79,6 +80,67 @@ pub(crate) enum SessionsRow {
     /// A live session, by index into `ordered_sessions()`. `expanded` picks
     /// the four-row form over the one-line form.
     Session { index: usize, expanded: bool },
+}
+
+/// Scroll state for the read-only Sessions preview.
+///
+/// The preview owns its viewport independently from the dashboard. Its
+/// position is measured in rendered content lines so callers can offer both
+/// line and page movement without changing dashboard selection or scroll
+/// state. The renderer remembers the first visible session as an anchor, so a
+/// refreshed session list keeps that session at the same rendered line when
+/// it is still present.
+#[derive(Debug, Clone, Default)]
+pub struct SessionsPreviewState {
+    preview_scroll: usize,
+    anchor_session_id: Option<String>,
+    anchor_line_offset: usize,
+    last_viewport: usize,
+    last_max_scroll: usize,
+    anchor_dirty: bool,
+}
+
+impl SessionsPreviewState {
+    /// Scroll by rendered content lines. The offset is clamped to the last
+    /// viewport seen by the renderer.
+    pub fn scroll_lines(&mut self, delta: isize) {
+        self.anchor_dirty = true;
+        if delta.is_negative() {
+            self.preview_scroll = self.preview_scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.preview_scroll = self
+                .preview_scroll
+                .saturating_add(delta as usize)
+                .min(self.last_max_scroll);
+        }
+    }
+
+    /// Scroll by pages sized to the last rendered viewport.
+    pub fn scroll_page(&mut self, delta: isize) {
+        let page = self.last_viewport.max(1);
+        let magnitude = delta.unsigned_abs().saturating_mul(page);
+        self.anchor_dirty = true;
+        if delta.is_negative() {
+            self.preview_scroll = self.preview_scroll.saturating_sub(magnitude);
+        } else {
+            self.preview_scroll = self
+                .preview_scroll
+                .saturating_add(magnitude)
+                .min(self.last_max_scroll);
+        }
+    }
+
+    /// Move to the first rendered content line.
+    pub fn home(&mut self) {
+        self.anchor_dirty = true;
+        self.preview_scroll = 0;
+    }
+
+    /// Move to the last rendered viewport.
+    pub fn end(&mut self) {
+        self.anchor_dirty = true;
+        self.preview_scroll = self.last_max_scroll;
+    }
 }
 
 /// Sessions, targets, and quotas. Sessions that are not live live in

@@ -66,6 +66,9 @@ use crate::pollers::{
     spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller, spawn_quota_refresher,
     spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
+use crate::session_presentation::{
+    apply_lifecycle_display, apply_session_activity, lifecycle_kind,
+};
 use crate::{TerminalGuard, short_id};
 
 /// Redraw cadence for displays that move with the wall clock: turn timers,
@@ -1982,6 +1985,7 @@ impl DashboardContext {
             self.controller_changed = true;
             let session_id = update.session_id.clone();
             let connected = update.view.connected;
+            apply_session_activity(&mut self.dashboard, &session_id, &update.view);
             // Only unreachable relays drive the worker diagnostics flow.
             let connection_error = match update.view.error.as_ref() {
                 Some(ViewError::Unreachable(detail)) => Some(detail.clone()),
@@ -2001,29 +2005,6 @@ impl DashboardContext {
                 .snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.materialized.clone());
-            let current_step_started_at_ms = update
-                .view
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.operational.current_step_started_at_ms);
-            self.dashboard
-                .set_current_step_start(&session_id, current_step_started_at_ms);
-            // What the session is doing beyond its turn clock: the turn the
-            // harness started on its own, and the commands the agent left
-            // running after the turn that started them ended.
-            self.dashboard.set_session_activity(
-                &session_id,
-                update.view.snapshot.as_ref().map_or_else(
-                    mj_chat::usage_format::SessionActivity::default,
-                    |snapshot| mj_chat::usage_format::SessionActivity::of(&snapshot.operational),
-                ),
-            );
-            // A view is published as disconnected only once the relay has
-            // failed past the unreachable threshold, so this reddens the band
-            // exactly when the target is genuinely unreachable and clears it on
-            // recovery.
-            self.dashboard
-                .set_session_connectivity(&session_id, connected);
             match apply_worker_poll_update(
                 &mut self.controller,
                 &mut self.dashboard,
@@ -2089,15 +2070,7 @@ impl DashboardContext {
             self.remote_lifecycle_sessions.remove(&session_id);
         }
         for lifecycle in lifecycles {
-            let kind = match lifecycle.kind {
-                crate::daemon::RuntimeLifecycleKind::Create => SessionOperationKind::Launching,
-                crate::daemon::RuntimeLifecycleKind::Close
-                | crate::daemon::RuntimeLifecycleKind::ForceStop => SessionOperationKind::Stopping,
-                crate::daemon::RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
-                crate::daemon::RuntimeLifecycleKind::DestroyStopped
-                | crate::daemon::RuntimeLifecycleKind::ForceDestroy
-                | crate::daemon::RuntimeLifecycleKind::Cleanup => SessionOperationKind::Destroying,
-            };
+            let kind = lifecycle_kind(lifecycle.kind);
             mark_active_chat_retiring_for_remote_lifecycle(
                 self.active_chat.as_mut(),
                 &lifecycle.session_id,
@@ -2106,22 +2079,22 @@ impl DashboardContext {
             if !self
                 .lifecycle_operations
                 .contains_key(&lifecycle.session_id)
-                && self
-                    .remote_lifecycle_sessions
-                    .insert(lifecycle.session_id.clone())
             {
-                self.dashboard.begin_session_operation_at(
-                    lifecycle.session_id.clone(),
-                    kind,
-                    None,
-                    lifecycle.started_at_epoch_seconds,
+                self.remote_lifecycle_sessions
+                    .insert(lifecycle.session_id.clone());
+                apply_lifecycle_display(&mut self.dashboard, &lifecycle);
+            } else {
+                self.dashboard.replace_session_operation_stages(
+                    &lifecycle.session_id,
+                    lifecycle.active_stages,
                 );
-            }
-            self.dashboard
-                .replace_session_operation_stages(&lifecycle.session_id, lifecycle.active_stages);
-            if let Some((profile_id, target_id)) = lifecycle.resume_destination {
-                self.dashboard
-                    .set_resume_destination(&lifecycle.session_id, profile_id, target_id);
+                if let Some((profile_id, target_id)) = lifecycle.resume_destination {
+                    self.dashboard.set_resume_destination(
+                        &lifecycle.session_id,
+                        profile_id,
+                        target_id,
+                    );
+                }
             }
             if let Some(notice) = lifecycle.notice {
                 self.dashboard.set_notice(notice);
