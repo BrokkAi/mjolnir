@@ -15,7 +15,7 @@ duck-typed so this module can be loaded by the existing harness without a
 circular import.
 
 The review-settings probe uses a configured review profile and asynchronous
-readiness state. Import covers tab selection, search, and cancellation.
+discovery state. Import covers tab selection, search, and cancellation.
 Submission, persistence, Stop/Resume, and typed destroy are exercised by
 the companion tui_components_actions module against the same owned fixture.
 """
@@ -256,17 +256,20 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     _record(evidence, tmux, "review-disabled-save", "enable without a reviewer; click disabled Save", "invalid draft stays open and persisted settings are unchanged")
     tmux.send_key("Right")
     tmux.send_key("Right")
-    _wait(tmux, "Loading models and checking targets")
     tmux.send_key("F1")
     _wait(tmux, "Keys ·")
     tmux.send_key("Escape")
     tmux.wait_until(lambda: "Keys ·" not in _capture(tmux), "Help dismissed during review discovery")
-    _wait(tmux, "Review settings")
-    _record(evidence, tmux, "review-async-help", "select fake profile; open and close Help during discovery", "review draft restored during async readiness discovery")
+    _wait(tmux, "Choices loaded")
+    _record(evidence, tmux, "review-async-help", "select fake profile; open and close Help during discovery", "choices arrive and the review draft is restored")
+    from tui_review_discovery import exercise_choices
+    exercise_choices(lab, tmux, evidence)
     tmux.send_key("Escape")
     tmux.wait_until(lambda: "Review settings" not in _capture(tmux), "review cancellation")
     if lab.snapshot()["review_config"] != before:
         raise AssertionError("cancelling review settings persisted the draft")
+    from tui_review_discovery import exercise_cached_reopen
+    exercise_cached_reopen(lab, tmux, evidence)
 
 
 def probe_new_wizard(lab: Any, tmux: Any, evidence: Any) -> None:

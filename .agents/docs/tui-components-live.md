@@ -49,6 +49,15 @@ personal tmux server, real container runtime, or paid provider is used. These
 checks establish terminal input behavior; microphone device capture and an
 individual emulator's emoji glyph appearance require the actual device.
 
+Review settings acceptance also counts requests in fake-acp.log. Changing tier
+or effort and revisiting cached model choices must start no adapters. A model
+cache miss and explicit Refresh each start exactly one adapter, with no prompt
+or effort-setting request. Help may cover the dialog while choices arrive.
+Closing and reopening reuses the dashboard cache. After Stop, Refresh explains
+that a connected session is needed while keeping existing choices, and Save
+still closes the dialog. These checks live in tui_review_discovery.py and run
+as part of the main harness.
+
 Seed 416 completed all 55 recorded assertions at
 `target/reliability-artifacts/tui-components-seed-416-3625603/`. Earlier runs
 exposed Web dialog sizing, reviewer cancellation, capture across redraw, and
@@ -86,3 +95,11 @@ includes the shared scrollbar correction: Ratatui receives the count of valid
 viewport offsets, so the thumb reaches both ends of the track.
 Its CLI SHA-256 is
 `e1a49740f8a082ec1880aaae7dc54dad75d2ddec941176589ceeb08a31a0ceb0`.
+
+Lightweight review discovery seed 519 passed all 79 checks at
+`target/reliability-artifacts/tui-components-seed-519-3412378/`. Request-count
+assertions confirmed zero starts for tier/effort edits and cache hits, and one
+start for a model cache miss or Refresh. Choices arrived through Help, Save
+closed during Refresh, and offline Refresh retained choices while Save worked.
+The CLI SHA-256 is
+`6fddeb49a422b9f1d13b518c46c48f301d4761765c8e7729696ac91e00f0853f`.

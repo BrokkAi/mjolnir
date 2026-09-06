@@ -152,6 +152,8 @@ def stop_and_resume(lab, tmux, evidence, session_id):
     absent(tmux, "Stop session?")
     lab.wait_snapshot(lambda value: any(row["id"] == session_id and row["state"] == "stopped" for row in value["sessions"]), "session stopped with recovery copy")
     record(tmux, evidence, "stop-confirm-dismissed", "Cancel then reopen and Stop", "Cancel retains the session; Stop closes confirmation and stops it")
+    from tui_review_discovery import exercise_offline_save
+    exercise_offline_save(lab, tmux, evidence)
     tmux.send_key("M-s")
     tmux.wait_for("Resume a session")
     tmux.send_key("Enter")

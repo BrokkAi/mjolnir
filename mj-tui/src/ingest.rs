@@ -477,6 +477,7 @@ impl DashboardState {
         if self.config == config {
             return;
         }
+        self.invalidate_review_settings_choices_for_config(&config);
         self.config = config;
         // Closing the modal drops the resume dialog, and with it its rows.
         self.cancel_modal();

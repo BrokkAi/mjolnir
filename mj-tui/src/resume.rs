@@ -470,7 +470,7 @@ impl DashboardState {
         match &self.mode {
             Mode::Importing(_) => true,
             Mode::ResumeDialog(dialog) => dialog.is_scanning(),
-            Mode::ReviewSettings(dialog) => dialog.probing,
+            Mode::ReviewSettings(_) | Mode::Help(_) => self.review_settings_discovery_active(),
             _ => false,
         }
     }

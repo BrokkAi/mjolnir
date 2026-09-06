@@ -11,7 +11,7 @@ use hel::hel_targets::CancellableProcessExecutor;
 use hel_tui::WebViewerAccess;
 use hel_tui::{DashboardAction, SessionOperationKind};
 use mj_controller::hel_controller::{Controller, ResumeRepositorySourceReceipt};
-use mj_controller::hel_review_settings::ReviewProbeRequest;
+use mj_controller::hel_review_settings::ReviewDiscoveryRequest;
 use mj_controller::hel_setup::SetupOutcome;
 
 use crate::daemon;
@@ -21,7 +21,8 @@ use crate::dashboard::io::{
     spawn_archive_write, spawn_cancellable_io, spawn_cancellable_io_with_token,
     spawn_clipboard_read, spawn_config_rename, spawn_create_bundle,
     spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_io, spawn_lifecycle_operation, spawn_review_settings_probe, spawn_review_settings_save,
+    spawn_io, spawn_lifecycle_operation, spawn_review_settings_discovery,
+    spawn_review_settings_save,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -63,21 +64,20 @@ pub(crate) async fn apply_dashboard_action(
             }
             SetupOutcome::Cancelled => context.dashboard.set_notice("Setup cancelled."),
         },
-        DashboardAction::ProbeReviewSettings {
+        DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
             model,
-            effort,
         } => {
-            if let Some(cancelled) = context.review_probe_cancel.take() {
+            if let Some(cancelled) = context.review_discovery_cancel.take() {
                 cancelled.store(true, Ordering::Release);
             }
-            let request = ReviewProbeRequest {
-                profile: profile_id.clone(),
-                model: model.clone(),
-                effort: effort.clone(),
+            let request = ReviewDiscoveryRequest {
+                profile: profile_id,
+                model,
+                preferred_session: context.dashboard.selected_session_id().map(str::to_owned),
             };
-            context.review_probe_cancel = Some(spawn_review_settings_probe(
+            context.review_discovery_cancel = Some(spawn_review_settings_discovery(
                 context.worker_commands_tx.clone(),
                 request,
                 generation,
@@ -85,13 +85,13 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             ));
         }
-        DashboardAction::CancelReviewSettingsProbe => {
-            if let Some(cancelled) = context.review_probe_cancel.take() {
+        DashboardAction::CancelReviewSettingsDiscovery => {
+            if let Some(cancelled) = context.review_discovery_cancel.take() {
                 cancelled.store(true, Ordering::Release);
             }
         }
         DashboardAction::SaveReviewSettings { review } => {
-            if let Some(cancelled) = context.review_probe_cancel.take() {
+            if let Some(cancelled) = context.review_discovery_cancel.take() {
                 cancelled.store(true, Ordering::Release);
             }
             spawn_review_settings_save(

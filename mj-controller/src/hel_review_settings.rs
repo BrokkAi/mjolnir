@@ -4,70 +4,59 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use futures::{StreamExt, stream};
 use hel::hel_acp::{SessionConfigChoice, session_config_choices};
-use hel::hel_review::bifrost::review_mcp_servers;
 use hel::hel_targets::CancellableProcessExecutor;
-use hel::hel_worker::{AnalyzeDeltaRepository, RepoDelta};
 use hel::hel_worker_launch::ReviewerLaunchConfig;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::hel_controller::Controller;
-use crate::hel_review_host::{next_review_generation, validate_reviewer_assignment};
 use crate::hel_session_manager::{
     ManagedSessionHandle, ReviewerAction, ReviewerOutcome, SessionManagerControl,
 };
 use crate::hel_worker_client::StartedReviewer;
 
+const REVIEW_DISCOVERY_CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
+const REVIEW_DISCOVERY_STAGING_TIMEOUT: Duration = Duration::from_secs(90);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewProbeRequest {
+pub struct ReviewDiscoveryRequest {
     pub profile: String,
     pub model: Option<String>,
-    pub effort: Option<String>,
+    pub preferred_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewCapabilityChoices {
     pub model_choices: Vec<SessionConfigChoice>,
     pub effort_choices: Vec<SessionConfigChoice>,
+    /// Whether effort choices were obtained for the selected model. An
+    /// explicit model that the adapter does not advertise leaves this false,
+    /// even when the initial startup advertised generic effort choices.
+    pub effort_capabilities_discovered: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ReviewReadinessReport {
-    pub model_choices: Vec<SessionConfigChoice>,
-    pub effort_choices: Vec<SessionConfigChoice>,
-    /// Empty means unverified: no attached target was available to inspect.
-    pub targets: Vec<ReviewTargetReadiness>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewDiscoveryOutcome {
+    Available {
+        choices: ReviewCapabilityChoices,
+        cleanup_warning: Option<String>,
+    },
+    Unavailable,
 }
 
-#[derive(Debug, Clone)]
-pub struct ReviewTargetReadiness {
-    pub target: String,
-    pub ready: bool,
-    pub message: String,
-}
-
-/// Discover choices without prompting a model or provisioning a hidden session.
-/// Each actual placement is checked independently: a template name alone does
-/// not prove that two existing containers have the same adapter installed.
-pub async fn probe_review_settings(
+/// Discover review selectors from one already connected active worker.
+///
+/// The selected dashboard session is preferred when it is an eligible
+/// worker. Otherwise eligible sessions are considered by session id. The
+/// reviewer is staged without MCP servers and started only to read its ACP
+/// configuration choices; no review prompt, repository inspection, or tool
+/// verification is performed.
+pub async fn discover_review_settings(
     control: SessionManagerControl,
-    request: ReviewProbeRequest,
-    cancelled: Arc<AtomicBool>,
-) -> Result<ReviewReadinessReport, String> {
-    let (progress, _progress_receiver) = tokio::sync::mpsc::unbounded_channel();
-    probe_review_settings_with_progress(control, request, cancelled, progress).await
-}
-
-/// Discover review settings while reporting the first target's advertised
-/// selectors as soon as capability probing completes. The final report still
-/// waits for every target's readiness checks.
-pub async fn probe_review_settings_with_progress(
-    control: SessionManagerControl,
-    request: ReviewProbeRequest,
+    request: ReviewDiscoveryRequest,
     cancelled: Arc<AtomicBool>,
     progress: UnboundedSender<ReviewCapabilityChoices>,
-) -> Result<ReviewReadinessReport, String> {
+) -> Result<ReviewDiscoveryOutcome, String> {
     check_cancelled(&cancelled)?;
     let controller = Arc::new(
         tokio::task::spawn_blocking(Controller::load)
@@ -78,246 +67,209 @@ pub async fn probe_review_settings_with_progress(
     if !controller.config.profiles.contains_key(&request.profile) {
         return Err(format!("Unknown reviewer profile {:?}", request.profile));
     }
-    let mut placements = Vec::new();
-    let mut targets = Vec::new();
-    for session in controller.state.sessions.values() {
-        let Some(placement) = session.target.as_ref() else {
-            continue;
-        };
-        if placements.contains(placement) {
-            continue;
-        }
-        let Ok(handle) = control.session(&session.id).await else {
-            continue;
-        };
-        if !handle.view().connected || handle.is_stopped() {
-            continue;
-        }
-        placements.push(placement.clone());
-        targets.push((
-            session.id.clone(),
-            format!("{} ({})", session.title, session.target_template_id),
-            handle,
-        ));
-    }
-    targets.sort_by(|left, right| left.0.cmp(&right.0));
-    let reports = stream::iter(targets.into_iter().enumerate().map(
-        |(index, (session, label, handle))| {
-            let controller = Arc::clone(&controller);
-            let request = request.clone();
-            let cancelled = Arc::clone(&cancelled);
-            let progress = (index == 0).then(|| progress.clone());
-            async move {
-                probe_target(
-                    controller, session, label, handle, request, cancelled, progress,
-                )
-                .await
-            }
-        },
-    ))
-    .buffered(3)
-    .collect::<Vec<_>>()
-    .await;
-    check_cancelled(&cancelled)?;
-    let mut report = ReviewReadinessReport::default();
-    let mut choices_selected = false;
-    for (target, models, efforts) in reports {
-        // The first adapter supplies the picker; every target independently
-        // validates that selection and reports incompatibilities below it.
-        if !choices_selected && (!models.is_empty() || !efforts.is_empty() || target.ready) {
-            report.model_choices = models;
-            report.effort_choices = efforts;
-            choices_selected = true;
-        }
-        report.targets.push(target);
-    }
-    Ok(report)
+
+    let Some((session_id, handle)) = select_worker(
+        &control,
+        &controller,
+        request.preferred_session.as_deref(),
+        &cancelled,
+    )
+    .await?
+    else {
+        return Ok(ReviewDiscoveryOutcome::Unavailable);
+    };
+
+    // Once a worker has been selected, every path through the attempt runs a
+    // bounded cleanup. This includes cancellation and a failed Start: a
+    // worker can launch its process before returning a configuration error.
+    let generation = crate::hel_review_host::next_review_generation()?;
+    discover_selected_worker(
+        Arc::clone(&controller),
+        session_id,
+        generation,
+        handle,
+        &request,
+        &cancelled,
+        &progress,
+    )
+    .await
 }
 
-async fn probe_target(
+async fn discover_selected_worker(
     controller: Arc<Controller>,
-    session: String,
-    target: String,
+    session_id: String,
+    generation: u64,
     handle: ManagedSessionHandle,
-    request: ReviewProbeRequest,
-    cancelled: Arc<AtomicBool>,
-    progress: Option<UnboundedSender<ReviewCapabilityChoices>>,
-) -> (
-    ReviewTargetReadiness,
-    Vec<SessionConfigChoice>,
-    Vec<SessionConfigChoice>,
-) {
-    let mut models = Vec::new();
-    let mut efforts = Vec::new();
-    let generation = match next_review_generation() {
-        Ok(generation) => generation,
-        Err(message) => {
-            return (
-                ReviewTargetReadiness {
-                    target,
-                    ready: false,
-                    message,
-                },
-                models,
-                efforts,
-            );
-        }
-    };
-    let role = format!("readiness-{generation:016x}");
-    let assignment = validate_reviewer_assignment(
-        &session,
-        controller.state.sessions.get(&session),
-        &request.profile,
-    );
-    let result = async {
-        check_cancelled(&cancelled)?;
-        let repositories = match cancellable(
-            &cancelled,
-            call(
-                &handle,
-                &role,
-                ReviewerAction::CaptureDelta {
-                    baselines: Default::default(),
-                },
-            ),
-        )
-        .await?
-        {
-            ReviewerOutcome::Delta { repositories } => repositories,
-            _ => {
-                return Err(
-                    "Worker returned an unexpected repository discovery response".to_owned(),
-                );
-            }
-        };
-        if repositories.is_empty() {
-            return Err("No Git repositories are available to verify review tooling".to_owned());
-        }
-        check_cancelled(&cancelled)?;
-        let roots = repositories
+    request: &ReviewDiscoveryRequest,
+    cancelled: &Arc<AtomicBool>,
+    progress: &UnboundedSender<ReviewCapabilityChoices>,
+) -> Result<ReviewDiscoveryOutcome, String> {
+    let role = format!("settings-{generation:016x}");
+    let discovery = discover_on_worker(
+        controller,
+        &session_id,
+        generation,
+        &handle,
+        request,
+        cancelled,
+        progress,
+    )
+    .await;
+    let cleanup = cleanup_worker(&handle, &role).await;
+    if let Err(error) = &cleanup {
+        tracing::warn!(
+            session_id = %session_id,
+            role = %role,
+            error = %error,
+            "review settings discovery cleanup failed"
+        );
+    }
+
+    match (discovery, cleanup) {
+        (Ok(choices), Ok(())) => Ok(ReviewDiscoveryOutcome::Available {
+            choices,
+            cleanup_warning: None,
+        }),
+        (Ok(choices), Err(warning)) => Ok(ReviewDiscoveryOutcome::Available {
+            choices,
+            cleanup_warning: Some(warning),
+        }),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(format!("{error}; {cleanup_error}")),
+    }
+}
+
+async fn select_worker(
+    control: &SessionManagerControl,
+    controller: &Controller,
+    preferred_session: Option<&str>,
+    cancelled: &AtomicBool,
+) -> Result<Option<(String, ManagedSessionHandle)>, String> {
+    let mut session_ids = controller
+        .state
+        .sessions
+        .iter()
+        .filter(|(_, session)| session.target.is_some() && session.state.is_active())
+        .map(|(session_id, _)| session_id.clone())
+        .collect::<Vec<_>>();
+    session_ids.sort();
+    if let Some(preferred) = preferred_session
+        && let Some(index) = session_ids
             .iter()
-            .map(|repository| repository.root.clone())
-            .collect::<Vec<_>>();
-        let servers = review_mcp_servers(&roots, "core|slopcop");
-        let flag = Arc::clone(&cancelled);
-        let profile = request.profile.clone();
-        let config = tokio::task::spawn_blocking(move || {
-            let executor =
-                CancellableProcessExecutor::new(flag).with_deadline(Duration::from_secs(90));
-            controller.stage_reviewer_profile_controlled(
-                &session, &profile, generation, &servers, &executor,
-            )
+            .position(|session_id| session_id == preferred)
+    {
+        let selected = session_ids.remove(index);
+        session_ids.insert(0, selected);
+    }
+
+    for session_id in session_ids {
+        check_cancelled(cancelled)?;
+        let handle = match cancellable(cancelled, async {
+            control
+                .session(session_id.clone())
+                .await
+                .map_err(|error| format!("{error:#}"))
         })
         .await
-        .map_err(|error| format!("Reviewer staging task failed: {error}"))?
-        .map_err(|error| format!("Stage reviewer: {error:#}"))?;
-        let capabilities_result = probe_capabilities(
-            &handle,
-            &role,
-            config,
-            &request,
-            &cancelled,
-            &mut models,
-            &mut efforts,
-        )
-        .await;
-        let progress_result = match progress.as_ref() {
-            Some(progress)
-                if (capabilities_result.is_ok() || !models.is_empty() || !efforts.is_empty())
-                    && !cancelled.load(Ordering::Acquire) =>
-            {
-                progress
-                    .send(ReviewCapabilityChoices {
-                        model_choices: models.clone(),
-                        effort_choices: efforts.clone(),
-                    })
-                    .map_err(|_| "Review capability progress receiver closed".to_owned())
+        {
+            Ok(handle) => handle,
+            Err(_) => {
+                check_cancelled(cancelled)?;
+                continue;
             }
-            _ => Ok(()),
         };
-        match (capabilities_result, progress_result) {
-            (Ok(()), Ok(())) => {}
-            (Err(error), Ok(())) => return Err(error),
-            (Ok(()), Err(error)) => return Err(error),
-            (Err(error), Err(progress_error)) => {
-                return Err(format!("{error}; {progress_error}"));
-            }
+        let view = handle.view();
+        if view.connected && !handle.is_stopped() {
+            return Ok(Some((session_id, handle)));
         }
-        assignment?;
-        check_cancelled(&cancelled)?;
-        cancellable(&cancelled, verify_tools(&handle, &role, repositories)).await?;
-        check_cancelled(&cancelled)
     }
-    .await;
-    // Await cleanup even after cancellation or a rejected selector. A failed
-    // Start may have launched a process before reporting configuration failure.
-    let cleanup = call(&handle, &role, ReviewerAction::Pause).await;
-    let result = match (result, cleanup) {
-        (result, Ok(ReviewerOutcome::Paused)) => result,
-        (Ok(()), Ok(_)) => Err("Unexpected response while stopping readiness probe".to_owned()),
-        (Ok(()), Err(error)) => Err(format!("Could not stop readiness probe: {error}")),
-        (Err(error), Ok(_)) => Err(error),
-        (Err(error), Err(cleanup)) => Err(format!(
-            "{error}; could not stop readiness probe: {cleanup}"
-        )),
-    };
-    let ready = result.is_ok();
-    let message = result.err().unwrap_or_else(|| {
-        "Reviewer starts, selected options apply, and Bifrost analysis works".to_owned()
-    });
-    (
-        ReviewTargetReadiness {
-            target,
-            ready,
-            message,
-        },
-        models,
-        efforts,
-    )
+    check_cancelled(cancelled)?;
+    Ok(None)
 }
 
-async fn probe_capabilities(
+async fn discover_on_worker(
+    controller: Arc<Controller>,
+    session_id: &str,
+    generation: u64,
     handle: &ManagedSessionHandle,
-    role: &str,
-    mut config: ReviewerLaunchConfig,
-    request: &ReviewProbeRequest,
-    cancelled: &AtomicBool,
-    models: &mut Vec<SessionConfigChoice>,
-    efforts: &mut Vec<SessionConfigChoice>,
-) -> Result<(), String> {
+    request: &ReviewDiscoveryRequest,
+    cancelled: &Arc<AtomicBool>,
+    progress: &UnboundedSender<ReviewCapabilityChoices>,
+) -> Result<ReviewCapabilityChoices, String> {
+    let role = format!("settings-{generation:016x}");
+    check_cancelled(cancelled)?;
+    let session_id_for_stage = session_id.to_owned();
+    let profile = request.profile.clone();
+    let flag = Arc::clone(cancelled);
+    let config = tokio::task::spawn_blocking(move || {
+        let executor =
+            CancellableProcessExecutor::new(flag).with_deadline(REVIEW_DISCOVERY_STAGING_TIMEOUT);
+        controller.stage_reviewer_profile_controlled(
+            &session_id_for_stage,
+            &profile,
+            generation,
+            &[],
+            &executor,
+        )
+    })
+    .await
+    .map_err(|error| format!("Reviewer staging task failed: {error}"))?
+    .map_err(|error| format!("Stage reviewer: {error:#}"))?;
+
+    let mut config = config;
     config.model = None;
     config.effort = None;
-    check_cancelled(cancelled)?;
-    let started = cancellable(cancelled, start(handle, role, &config)).await?;
-    *models = session_config_choices(&started.config_options, "model");
-    *efforts = session_config_choices(&started.config_options, "effort");
+    let started = cancellable(cancelled, start(handle, &role, &config)).await?;
+    let model_choices = session_config_choices(&started.config_options, "model");
+    let initial_effort_choices = session_config_choices(&started.config_options, "effort");
+    let mut choices = ReviewCapabilityChoices {
+        model_choices,
+        effort_choices: initial_effort_choices,
+        effort_capabilities_discovered: true,
+    };
+
     if let Some(model) = &request.model {
-        validate_choice("model", model, models)?;
-        check_cancelled(cancelled)?;
-        config.model = Some(model.clone());
-        let started = cancellable(cancelled, start(handle, role, &config)).await?;
-        *efforts = session_config_choices(&started.config_options, "effort");
+        if !choices
+            .model_choices
+            .iter()
+            .any(|choice| choice.value == *model)
+        {
+            // The initial Start still gave us useful model choices. Its
+            // generic effort choices cannot be claimed for an unsupported
+            // explicit model.
+            choices.effort_choices.clear();
+            choices.effort_capabilities_discovered = false;
+        } else {
+            check_cancelled(cancelled)?;
+            config.model = Some(model.clone());
+            config.effort = None;
+            let started = cancellable(cancelled, start(handle, &role, &config)).await?;
+            choices.effort_choices = session_config_choices(&started.config_options, "effort");
+            choices.effort_capabilities_discovered = true;
+        }
     }
-    if let Some(effort) = &request.effort {
-        validate_choice("effort", effort, efforts)?;
-        check_cancelled(cancelled)?;
-        config.effort = Some(effort.clone());
-        cancellable(cancelled, start(handle, role, &config)).await?;
-    }
-    check_cancelled(cancelled)
+
+    check_cancelled(cancelled)?;
+    progress
+        .send(choices.clone())
+        .map_err(|_| "Review capability progress receiver closed".to_owned())?;
+    Ok(choices)
 }
 
-fn validate_choice(key: &str, value: &str, choices: &[SessionConfigChoice]) -> Result<(), String> {
-    if choices.iter().any(|choice| choice.value == value) {
-        Ok(())
-    } else if choices.is_empty() {
-        Err(format!(
-            "This adapter does not advertise configurable {key}; choose Profile default or update the adapter"
-        ))
-    } else {
-        Err(format!(
-            "This adapter does not advertise {key} {value:?}; choose an advertised value"
-        ))
+async fn cleanup_worker(handle: &ManagedSessionHandle, role: &str) -> Result<(), String> {
+    match tokio::time::timeout(
+        REVIEW_DISCOVERY_CLEANUP_TIMEOUT,
+        call(handle, role, ReviewerAction::Pause),
+    )
+    .await
+    {
+        Ok(Ok(ReviewerOutcome::Paused)) => Ok(()),
+        Ok(Ok(_)) => Err("Unexpected response while stopping review settings discovery".to_owned()),
+        Ok(Err(error)) => Err(format!("Could not stop review settings discovery: {error}")),
+        Err(_) => Err(format!(
+            "Could not stop review settings discovery within {} seconds",
+            REVIEW_DISCOVERY_CLEANUP_TIMEOUT.as_secs()
+        )),
     }
 }
 
@@ -340,25 +292,6 @@ async fn start(
     }
 }
 
-async fn verify_tools(
-    handle: &ManagedSessionHandle,
-    role: &str,
-    repositories: Vec<RepoDelta>,
-) -> Result<(), String> {
-    let repositories = repositories
-        .into_iter()
-        .map(|repository| AnalyzeDeltaRepository {
-            root: repository.root,
-            baseline_tree: Some(repository.current_tree.clone()),
-            current_tree: repository.current_tree,
-        })
-        .collect();
-    match call(handle, role, ReviewerAction::AnalyzeDelta { repositories }).await? {
-        ReviewerOutcome::ChangedFunctions { .. } => Ok(()),
-        _ => Err("Worker returned an unexpected Bifrost analysis response".to_owned()),
-    }
-}
-
 async fn call(
     handle: &ManagedSessionHandle,
     role: &str,
@@ -372,7 +305,7 @@ async fn call(
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
     if cancelled.load(Ordering::Acquire) {
-        Err("Review readiness check cancelled".to_owned())
+        Err("Review settings discovery cancelled".to_owned())
     } else {
         Ok(())
     }
@@ -389,7 +322,7 @@ async fn cancellable<T>(
             while !cancelled.load(Ordering::Acquire) {
                 interval.tick().await;
             }
-        } => Err("Review readiness check cancelled".to_owned()),
+        } => Err("Review settings discovery cancelled".to_owned()),
         result = operation => result,
     }
 }
@@ -398,36 +331,26 @@ async fn cancellable<T>(
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::path::Path;
     use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
 
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigSelectOption, SessionConfigSelectOptions,
     };
-    use hel::hel_config::{
-        ExecutionPolicy, HarnessKind, HarnessProfile, HelConfig, TargetTemplate,
-    };
+    use hel::hel_config::{HarnessKind, HarnessProfile, HelConfig, TargetTemplate};
     use hel::hel_state::{HelState, SessionRecord, SessionState, TargetLocator};
     use hel::hel_targets::CommandSpec;
-    use hel::hel_worker::{RelayExecutionState, RelayOperationalState, RepoDelta};
-    use hel::hel_worker_launch::ReviewerLaunchConfig;
+    use hel::hel_worker::{RelayExecutionState, RelayOperationalState};
     use tokio::sync::watch;
 
     use super::*;
     use crate::hel_session_manager::{
         ManagedSessionView, RelaySessionTarget, RemoteSessionPublisher, RemoteSessionRequest,
-        RemoteSessionRequests, ReviewerAction, ReviewerOutcome, SessionManagerControl,
-        SessionManagerShutdown, spawn_remote_session_manager,
+        RemoteSessionRequests, SessionManagerShutdown, spawn_remote_session_manager,
     };
-    use crate::hel_worker_client::StartedReviewer;
 
-    const SESSION: &str = "review-settings-test";
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
 
-    /// The production remote manager is retained while this hand fake answers
-    /// each reviewer action. This keeps the test on the same control path as a
-    /// controller daemon without starting a worker or an adapter process.
     struct FakeManager {
         control: SessionManagerControl,
         requests: RemoteSessionRequests,
@@ -437,14 +360,19 @@ mod tests {
     }
 
     impl FakeManager {
-        async fn new() -> (Self, crate::hel_session_manager::ManagedSessionHandle) {
+        async fn new(session_ids: &[&str]) -> Self {
             let channels = spawn_remote_session_manager().expect("remote manager");
-            channels.targets.send_replace(vec![RelaySessionTarget {
-                session_id: SESSION.to_owned(),
-                spec: CommandSpec::new("true", Vec::<String>::new()),
-                worker_recovery: None,
-                project_memory: None,
-            }]);
+            channels.targets.send_replace(
+                session_ids
+                    .iter()
+                    .map(|session_id| RelaySessionTarget {
+                        session_id: (*session_id).to_owned(),
+                        spec: CommandSpec::new("true", Vec::<String>::new()),
+                        worker_recovery: None,
+                        project_memory: None,
+                    })
+                    .collect(),
+            );
             let manager = Self {
                 control: channels.control,
                 requests: channels.requests,
@@ -452,45 +380,48 @@ mod tests {
                 _shutdown: channels.shutdown,
                 _targets: channels.targets,
             };
+            for session_id in session_ids {
+                manager
+                    .publisher
+                    .publish(
+                        (*session_id).to_owned(),
+                        ManagedSessionView {
+                            connected: true,
+                            ..ManagedSessionView::default()
+                        },
+                    )
+                    .await
+                    .expect("publish the managed session view");
+            }
+            for session_id in session_ids {
+                manager.wait_connected(session_id, true).await;
+            }
             manager
-                .publisher
-                .publish(
-                    SESSION.to_owned(),
-                    ManagedSessionView {
-                        connected: true,
-                        ..ManagedSessionView::default()
-                    },
-                )
+        }
+
+        async fn wait_connected(&self, session_id: &str, connected: bool) {
+            let mut handle = self.handle(session_id).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while handle.view().connected != connected {
+                    handle.changed().await.expect("published view");
+                }
+            })
+            .await
+            .expect("connection update applied");
+        }
+
+        async fn handle(&self, session_id: &str) -> ManagedSessionHandle {
+            self.control
+                .wait_for_session(session_id, Duration::from_secs(5))
                 .await
-                .expect("publish the managed session view");
-            let handle = manager
-                .control
-                .wait_for_session(SESSION, Duration::from_secs(5))
-                .await
-                .expect("the fake manager manages the session");
-            (manager, handle)
+                .expect("the fake manager manages the session")
         }
 
         async fn next(&mut self) -> RemoteSessionRequest {
             tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
                 .await
-                .expect("the settings helper makes a request")
+                .expect("the discovery makes a request")
                 .expect("the remote manager remains alive")
-        }
-    }
-
-    fn launch_config() -> ReviewerLaunchConfig {
-        ReviewerLaunchConfig {
-            profile_id: "reviewer".to_owned(),
-            harness: HarnessKind::Claude,
-            bridge_command: "/bin/false".into(),
-            bridge_args: Vec::new(),
-            environment: BTreeMap::new(),
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
-            model: Some("profile-default-model".to_owned()),
-            effort: Some("profile-default-effort".to_owned()),
-            generation: 1,
-            mcp_servers: Vec::new(),
         }
     }
 
@@ -511,28 +442,19 @@ mod tests {
     }
 
     fn advertised(models: &[&str], efforts: &[&str]) -> Vec<SessionConfigOption> {
-        let mut options = Vec::new();
+        let mut choices = Vec::new();
         if !models.is_empty() {
-            options.push(option("model", models));
+            choices.push(option("model", models));
         }
         if !efforts.is_empty() {
-            options.push(option("effort", efforts));
+            choices.push(option("effort", efforts));
         }
-        options
+        choices
     }
 
-    fn started(options: Vec<SessionConfigOption>) -> Result<ReviewerOutcome, String> {
-        Ok(ReviewerOutcome::Started(Box::new(StartedReviewer {
-            native_session_id: Some("native-settings-test".to_owned()),
-            config_options: options,
-            reused: false,
-            state: operational(),
-        })))
-    }
-
-    fn operational() -> RelayOperationalState {
+    fn operational(session_id: &str) -> RelayOperationalState {
         RelayOperationalState {
-            session_id: "native-settings-test".to_owned(),
+            session_id: session_id.to_owned(),
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
             latest_digest: hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
@@ -540,7 +462,7 @@ mod tests {
             acknowledged_digest: hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             recovery_floor_ordinal: 0,
             recovery_floor_digest: hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-            native_session_id: Some("native-settings-test".to_owned()),
+            native_session_id: Some(session_id.to_owned()),
             agent_capabilities: None,
             agent_info: None,
             config_options: Vec::new(),
@@ -562,6 +484,79 @@ mod tests {
         }
     }
 
+    fn started(options: Vec<SessionConfigOption>) -> Result<ReviewerOutcome, String> {
+        Ok(ReviewerOutcome::Started(Box::new(StartedReviewer {
+            native_session_id: Some("native-settings-test".to_owned()),
+            config_options: options,
+            reused: false,
+            state: operational("native-settings-test"),
+        })))
+    }
+
+    fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
+        let profile_home = directory.join("reviewer");
+        fs::create_dir_all(&profile_home).expect("profile home");
+        fs::write(profile_home.join("settings.json"), b"{}").expect("profile settings");
+        let mut config = HelConfig::default();
+        config.profiles.insert(
+            "reviewer".to_owned(),
+            HarnessProfile {
+                kind: HarnessKind::Claude,
+                home: profile_home,
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+            },
+        );
+        config
+            .targets
+            .insert("local".to_owned(), TargetTemplate::LocalBare);
+        let sessions = session_ids
+            .iter()
+            .map(|session_id| {
+                let worker_root = directory.join(session_id);
+                fs::create_dir_all(&worker_root).expect("worker root");
+                (
+                    (*session_id).to_owned(),
+                    SessionRecord {
+                        id: (*session_id).to_owned(),
+                        workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                        title: "review settings test".to_owned(),
+                        harness_kind: HarnessKind::Codex,
+                        last_profile: "primary".to_owned(),
+                        bundle_id: "project".to_owned(),
+                        project_directory: None,
+                        managed_worktree: None,
+                        target_template_id: "local".to_owned(),
+                        resource_allocation: None,
+                        additional_mounts: Vec::new(),
+                        container_cpus: None,
+                        container_memory: None,
+                        state: SessionState::Running,
+                        archived: false,
+                        target: Some(TargetLocator::LocalBare { worker_root }),
+                        native_session_id: Some("native-primary".to_owned()),
+                        acp_session_title: None,
+                        session_title_override: None,
+                        created_at: "2026-08-12T00:00:00Z".to_owned(),
+                        updated_at: "2026-08-12T00:00:00Z".to_owned(),
+                        viewed_through_event_ordinal: 0,
+                        draft_input: String::new(),
+                        last_error: None,
+                        last_checkpoint_error: None,
+                        checkpoint: None,
+                    },
+                )
+            })
+            .collect();
+        Controller {
+            config,
+            state: HelState {
+                sessions,
+                ..HelState::default()
+            },
+        }
+    }
+
     fn start_request(
         request: RemoteSessionRequest,
     ) -> (
@@ -574,473 +569,331 @@ mod tests {
             ..
         } = request
         else {
-            panic!("settings discovery must use reviewer start, not a prompt or config command");
+            panic!("discovery must use reviewer Start");
         };
         (config, reply)
     }
 
-    #[tokio::test]
-    async fn cancellation_drops_an_inflight_start_without_waiting_for_the_adapter() {
-        let (mut manager, handle) = FakeManager::new().await;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let flag = cancelled.clone();
-        let task = tokio::spawn(async move {
-            cancellable(&flag, start(&handle, "cancel-live", &launch_config())).await
-        });
-        let (_, mut reply) = start_request(manager.next().await);
-        cancelled.store(true, Ordering::Release);
-        tokio::time::timeout(Duration::from_secs(1), reply.closed())
-            .await
-            .expect("cancellation reaches the outstanding actor request promptly");
-        assert!(task.await.unwrap().unwrap_err().contains("cancelled"));
-    }
-
-    #[tokio::test]
-    async fn an_invalid_model_keeps_advertised_choices_without_a_second_start() {
-        let (mut manager, handle) = FakeManager::new().await;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let request = ReviewProbeRequest {
-            profile: "reviewer".to_owned(),
-            model: Some("missing".to_owned()),
-            effort: None,
-        };
-        let task = tokio::spawn({
-            let cancelled = Arc::clone(&cancelled);
-            async move {
-                let mut models = Vec::new();
-                let mut efforts = Vec::new();
-                let result = probe_capabilities(
-                    &handle,
-                    "invalid-model",
-                    launch_config(),
-                    &request,
-                    &cancelled,
-                    &mut models,
-                    &mut efforts,
-                )
-                .await;
-                (result, models, efforts)
-            }
-        });
-
-        let (config, reply) = start_request(manager.next().await);
-        assert_eq!(
-            config.model, None,
-            "profile defaults are not applied implicitly"
-        );
-        assert_eq!(
-            config.effort, None,
-            "profile defaults are not applied implicitly"
-        );
-        reply
-            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
-            .expect("the probe is still waiting for startup");
-
-        let (result, models, efforts) = task.await.expect("probe task");
-        let error = result.expect_err("an unadvertised model must be rejected");
-        assert!(error.contains("does not advertise model"), "{error}");
-        assert_eq!(
-            models
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["fast", "deep"]
-        );
-        assert_eq!(
-            efforts
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "high"]
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
-                .await
-                .is_err(),
-            "invalid choices must not trigger another start"
-        );
-    }
-
-    #[tokio::test]
-    async fn selecting_a_model_refreshes_efforts_before_applying_it() {
-        let (mut manager, handle) = FakeManager::new().await;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let request = ReviewProbeRequest {
-            profile: "reviewer".to_owned(),
-            model: Some("deep".to_owned()),
-            effort: Some("high".to_owned()),
-        };
-        let task = tokio::spawn({
-            let cancelled = Arc::clone(&cancelled);
-            async move {
-                let mut models = Vec::new();
-                let mut efforts = Vec::new();
-                let result = probe_capabilities(
-                    &handle,
-                    "refresh-effort",
-                    launch_config(),
-                    &request,
-                    &cancelled,
-                    &mut models,
-                    &mut efforts,
-                )
-                .await;
-                (result, models, efforts)
-            }
-        });
-
-        let (first, reply) = start_request(manager.next().await);
-        assert_eq!((first.model, first.effort), (None, None));
-        reply
-            .send(started(advertised(&["fast", "deep"], &["low"])))
-            .expect("the probe is still waiting for startup");
-
-        let (second, reply) = start_request(manager.next().await);
-        assert_eq!(second.model.as_deref(), Some("deep"));
-        assert_eq!(
-            second.effort, None,
-            "model selection refreshes before effort selection"
-        );
-        reply
-            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
-            .expect("the probe is still waiting for the refreshed options");
-
-        let (third, reply) = start_request(manager.next().await);
-        assert_eq!(third.model.as_deref(), Some("deep"));
-        assert_eq!(third.effort.as_deref(), Some("high"));
-        reply
-            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
-            .expect("the probe is still waiting for the selected startup");
-
-        let (result, models, efforts) = task.await.expect("probe task");
-        result.expect("advertised model and refreshed effort are accepted");
-        assert_eq!(
-            models
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["fast", "deep"]
-        );
-        assert_eq!(
-            efforts
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "high"]
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
-                .await
-                .is_err(),
-            "selector application must not send a separate config command"
-        );
-    }
-
-    #[tokio::test]
-    async fn profile_defaults_do_not_force_a_selector_start() {
-        let (mut manager, handle) = FakeManager::new().await;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let request = ReviewProbeRequest {
-            profile: "reviewer".to_owned(),
-            model: None,
-            effort: None,
-        };
-        let task = tokio::spawn({
-            let cancelled = Arc::clone(&cancelled);
-            async move {
-                let mut models = Vec::new();
-                let mut efforts = Vec::new();
-                let result = probe_capabilities(
-                    &handle,
-                    "profile-defaults",
-                    launch_config(),
-                    &request,
-                    &cancelled,
-                    &mut models,
-                    &mut efforts,
-                )
-                .await;
-                (result, models, efforts)
-            }
-        });
-
-        let (config, reply) = start_request(manager.next().await);
-        assert_eq!(config.model, None);
-        assert_eq!(config.effort, None);
-        reply
-            .send(started(advertised(&["fast"], &["low"])))
-            .expect("the probe is still waiting for startup");
-        let (result, _, _) = task.await.expect("probe task");
-        result.expect("profile defaults are a valid no-selector probe");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
-                .await
-                .is_err(),
-            "profile defaults must not trigger an extra start"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancellation_after_discovery_prevents_a_new_selector_start() {
-        let (mut manager, handle) = FakeManager::new().await;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let request = ReviewProbeRequest {
-            profile: "reviewer".to_owned(),
-            model: Some("deep".to_owned()),
-            effort: None,
-        };
-        let task = tokio::spawn({
-            let cancelled = Arc::clone(&cancelled);
-            async move {
-                let mut models = Vec::new();
-                let mut efforts = Vec::new();
-                let result = probe_capabilities(
-                    &handle,
-                    "cancel-before-selection",
-                    launch_config(),
-                    &request,
-                    &cancelled,
-                    &mut models,
-                    &mut efforts,
-                )
-                .await;
-                (result, models, efforts)
-            }
-        });
-
-        let (_, reply) = start_request(manager.next().await);
-        cancelled.store(true, std::sync::atomic::Ordering::Release);
-        reply
-            .send(started(advertised(&["deep"], &["low"])))
-            .expect("the probe is still waiting for startup");
-        let (result, _, _) = task.await.expect("probe task");
-        assert_eq!(
-            result.expect_err("cancellation must stop selector application"),
-            "Review readiness check cancelled"
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
-                .await
-                .is_err(),
-            "cancellation must prevent a second reviewer start"
-        );
-    }
-
-    #[tokio::test]
-    async fn verify_tools_uses_the_current_tree_for_both_analysis_endpoints() {
-        let (mut manager, handle) = FakeManager::new().await;
-        let task = tokio::spawn(async move {
-            verify_tools(
-                &handle,
-                "verify-current-tree",
-                vec![RepoDelta {
-                    root: "/workspace/app".into(),
-                    baseline_tree: Some("old-tree".to_owned()),
-                    current_tree: "current-tree".to_owned(),
-                    patch: "diff --git a/a b/a\n@@\n+change\n".to_owned(),
-                    diffstat: "1 file changed, 1 insertion(+)".to_owned(),
-                    changed_lines: 1,
-                }],
-            )
-            .await
-        });
-
-        let RemoteSessionRequest::Reviewer {
-            action: ReviewerAction::AnalyzeDelta { repositories },
-            reply,
-            ..
-        } = manager.next().await
-        else {
-            panic!("tool verification must use analysis, not a prompt or baseline update");
-        };
-        assert_eq!(repositories.len(), 1);
-        assert_eq!(
-            repositories[0].baseline_tree.as_deref(),
-            Some("current-tree")
-        );
-        assert_eq!(repositories[0].current_tree, "current-tree");
-        reply
-            .send(Ok(ReviewerOutcome::ChangedFunctions {
-                packet: "verified".to_owned(),
-            }))
-            .expect("the verification task is still waiting");
-        task.await
-            .expect("verification task")
-            .expect("the analysis response is accepted");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
-                .await
-                .is_err(),
-            "tool verification must not advance the review baseline"
-        );
-    }
-
-    #[tokio::test]
-    async fn capability_progress_arrives_before_tool_verification() {
-        let (mut manager, handle) = FakeManager::new().await;
-        let profile_home = tempfile::tempdir().expect("profile home");
-        fs::write(profile_home.path().join("settings.json"), b"{}").expect("profile settings");
-        let worker_root_parent = tempfile::tempdir().expect("worker root");
-        let worker_root = worker_root_parent.path().join(SESSION);
-        fs::create_dir_all(&worker_root).expect("session worker root");
-        let repository_root = tempfile::tempdir().expect("repository root");
-        let mut config = HelConfig::default();
-        config.profiles.insert(
-            "reviewer".to_owned(),
-            HarnessProfile {
-                kind: HarnessKind::Claude,
-                home: profile_home.path().to_owned(),
-                environment: BTreeMap::new(),
-                context_window_bytes: None,
-            },
-        );
-        config
-            .targets
-            .insert("local".to_owned(), TargetTemplate::LocalBare);
-        let mut state = HelState::default();
-        state.sessions.insert(
-            SESSION.to_owned(),
-            SessionRecord {
-                id: SESSION.to_owned(),
-                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-                title: "review settings test".to_owned(),
-                harness_kind: HarnessKind::Codex,
-                last_profile: "primary".to_owned(),
-                bundle_id: "project".to_owned(),
-                project_directory: Some(repository_root.path().to_owned()),
-                managed_worktree: None,
-                target_template_id: "local".to_owned(),
-                resource_allocation: None,
-                additional_mounts: Vec::new(),
-                container_cpus: None,
-                container_memory: None,
-                state: SessionState::Running,
-                archived: false,
-                target: Some(TargetLocator::LocalBare {
-                    worker_root: worker_root.clone(),
-                }),
-                native_session_id: Some("native-settings-test".to_owned()),
-                acp_session_title: None,
-                session_title_override: None,
-                created_at: "2026-08-12T00:00:00Z".to_owned(),
-                updated_at: "2026-08-12T00:00:00Z".to_owned(),
-                viewed_through_event_ordinal: 0,
-                draft_input: String::new(),
-                last_error: None,
-                last_checkpoint_error: None,
-                checkpoint: None,
-            },
-        );
-        let controller = Arc::new(Controller { config, state });
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let request = ReviewProbeRequest {
-            profile: "reviewer".to_owned(),
-            model: None,
-            effort: None,
-        };
-        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let task = tokio::spawn(probe_target(
-            controller,
-            SESSION.to_owned(),
-            "review settings target".to_owned(),
-            handle,
-            request,
-            cancelled,
-            Some(progress),
-        ));
-
-        let RemoteSessionRequest::Reviewer {
-            action: ReviewerAction::CaptureDelta { .. },
-            reply,
-            ..
-        } = manager.next().await
-        else {
-            panic!("settings discovery must capture repositories first");
-        };
-        reply
-            .send(Ok(ReviewerOutcome::Delta {
-                repositories: vec![RepoDelta {
-                    root: PathBuf::from(repository_root.path()),
-                    baseline_tree: None,
-                    current_tree: "current-tree".to_owned(),
-                    patch: String::new(),
-                    diffstat: String::new(),
-                    changed_lines: 0,
-                }],
-            }))
-            .expect("the probe is still waiting for repository discovery");
-
-        let request = manager.next().await;
-        let (config, reply) = match request {
-            RemoteSessionRequest::Reviewer {
-                action: ReviewerAction::Start { config },
-                reply,
-                ..
-            } => (config, reply),
-            RemoteSessionRequest::Reviewer {
-                action: ReviewerAction::Pause,
-                reply,
-                ..
-            } => {
-                reply
-                    .send(Ok(ReviewerOutcome::Paused))
-                    .expect("the probe is still waiting for cleanup");
-                let (target, _, _) = task.await.expect("probe task");
-                panic!("profile staging failed before startup: {}", target.message);
-            }
-            _ => panic!("unexpected request before reviewer start"),
-        };
-        assert_eq!((config.model, config.effort), (None, None));
-        reply
-            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
-            .expect("the probe is still waiting for capability discovery");
-
-        let choices = tokio::time::timeout(Duration::from_secs(5), progress_rx.recv())
-            .await
-            .expect("capability progress is emitted before slow verification")
-            .expect("the progress sender remains alive");
-        assert_eq!(
-            choices
-                .model_choices
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["fast", "deep"]
-        );
-        assert_eq!(
-            choices
-                .effort_choices
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "high"]
-        );
-
-        let RemoteSessionRequest::Reviewer {
-            action: ReviewerAction::AnalyzeDelta { .. },
-            reply,
-            ..
-        } = manager.next().await
-        else {
-            panic!("tool verification must follow capability progress");
-        };
-        reply
-            .send(Ok(ReviewerOutcome::ChangedFunctions {
-                packet: "verified".to_owned(),
-            }))
-            .expect("the probe is still waiting for tool verification");
+    fn pause_request(
+        request: RemoteSessionRequest,
+    ) -> tokio::sync::oneshot::Sender<Result<ReviewerOutcome, String>> {
         let RemoteSessionRequest::Reviewer {
             action: ReviewerAction::Pause,
             reply,
             ..
-        } = manager.next().await
+        } = request
         else {
-            panic!("the probe must clean up after tool verification");
+            panic!("discovery cleanup must use reviewer Pause");
         };
         reply
+    }
+
+    fn request(model: Option<&str>) -> ReviewDiscoveryRequest {
+        ReviewDiscoveryRequest {
+            profile: "reviewer".to_owned(),
+            model: model.map(str::to_owned),
+            preferred_session: Some(SESSION.to_owned()),
+        }
+    }
+
+    async fn discover_for_test(
+        controller: Arc<Controller>,
+        handle: ManagedSessionHandle,
+        request: ReviewDiscoveryRequest,
+        cancelled: Arc<AtomicBool>,
+        progress: UnboundedSender<ReviewCapabilityChoices>,
+    ) -> Result<ReviewDiscoveryOutcome, String> {
+        discover_selected_worker(
+            controller,
+            SESSION.to_owned(),
+            1,
+            handle,
+            &request,
+            &cancelled,
+            &progress,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_empty_start_and_pauses_after_publishing_choices() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut manager = FakeManager::new(&[SESSION]).await;
+        let handle = manager.handle(SESSION).await;
+        let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(discover_for_test(
+            controller,
+            handle,
+            request(None),
+            cancelled,
+            progress,
+        ));
+
+        let (config, reply) = start_request(manager.next().await);
+        assert_eq!(config.model, None);
+        assert_eq!(config.effort, None);
+        assert!(config.mcp_servers.is_empty());
+        reply
+            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
+            .expect("startup reply");
+        let choices = progress_rx.recv().await.expect("progress before cleanup");
+        assert_eq!(choices.model_choices.len(), 2);
+        assert_eq!(choices.effort_choices.len(), 2);
+        assert!(choices.effort_capabilities_discovered);
+
+        let reply = pause_request(manager.next().await);
+        reply
             .send(Ok(ReviewerOutcome::Paused))
-            .expect("the probe is still waiting for cleanup");
-        let (target, _, _) = task.await.expect("probe task");
-        assert!(target.ready, "the full readiness check should still pass");
+            .expect("cleanup reply");
+        let ReviewDiscoveryOutcome::Available {
+            choices: result,
+            cleanup_warning,
+        } = task.await.expect("discovery task").expect("choices")
+        else {
+            panic!("discovery should be available");
+        };
+        assert_eq!(result, choices);
+        assert!(cleanup_warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn supported_model_starts_again_without_applying_effort() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut manager = FakeManager::new(&[SESSION]).await;
+        let handle = manager.handle(SESSION).await;
+        let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(discover_for_test(
+            controller,
+            handle,
+            request(Some("deep")),
+            cancelled,
+            progress,
+        ));
+
+        let (_, reply) = start_request(manager.next().await);
+        reply
+            .send(started(advertised(&["fast", "deep"], &["low"])))
+            .expect("initial startup reply");
+        let (config, reply) = start_request(manager.next().await);
+        assert_eq!(config.model.as_deref(), Some("deep"));
+        assert_eq!(config.effort, None);
+        assert!(config.mcp_servers.is_empty());
+        reply
+            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
+            .expect("model startup reply");
+        let choices = progress_rx.recv().await.expect("progress");
+        assert_eq!(choices.effort_choices.len(), 2);
+        assert!(choices.effort_capabilities_discovered);
+        let reply = pause_request(manager.next().await);
+        reply
+            .send(Ok(ReviewerOutcome::Paused))
+            .expect("cleanup reply");
+        task.await.expect("discovery task").expect("choices");
+    }
+
+    #[tokio::test]
+    async fn unsupported_model_keeps_models_without_claiming_efforts() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut manager = FakeManager::new(&[SESSION]).await;
+        let handle = manager.handle(SESSION).await;
+        let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(discover_for_test(
+            controller,
+            handle,
+            request(Some("missing")),
+            cancelled,
+            progress,
+        ));
+
+        let (_, reply) = start_request(manager.next().await);
+        reply
+            .send(started(advertised(&["fast", "deep"], &["low", "high"])))
+            .expect("startup reply");
+        let choices = progress_rx.recv().await.expect("progress");
+        assert_eq!(choices.model_choices.len(), 2);
+        assert!(choices.effort_choices.is_empty());
+        assert!(!choices.effort_capabilities_discovered);
+        // Pause must be the very next request: no attempt applies the
+        // unsupported model or its effort before cleanup.
+        let reply = pause_request(manager.next().await);
+        reply
+            .send(Ok(ReviewerOutcome::Paused))
+            .expect("cleanup reply");
+        task.await.expect("discovery task").expect("choices");
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_keeps_choices_as_a_warning() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut manager = FakeManager::new(&[SESSION]).await;
+        let handle = manager.handle(SESSION).await;
+        let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(discover_for_test(
+            controller,
+            handle,
+            request(None),
+            cancelled,
+            progress,
+        ));
+        let (_, reply) = start_request(manager.next().await);
+        reply
+            .send(started(advertised(&["fast"], &["low"])))
+            .expect("startup reply");
+        progress_rx.recv().await.expect("choices before cleanup");
+        let reply = pause_request(manager.next().await);
+        reply
+            .send(Err("worker vanished".to_owned()))
+            .expect("cleanup reply");
+        let outcome = task.await.expect("discovery task").expect("outcome");
+        let ReviewDiscoveryOutcome::Available {
+            choices,
+            cleanup_warning,
+        } = outcome
+        else {
+            panic!("choices remain available after cleanup failure");
+        };
+        assert_eq!(choices.model_choices.len(), 1);
+        assert!(cleanup_warning.unwrap().contains("worker vanished"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_and_start_error_still_pause_without_progress() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut manager = FakeManager::new(&[SESSION]).await;
+        let handle = manager.handle(SESSION).await;
+        let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(discover_for_test(
+            controller,
+            handle,
+            request(None),
+            cancelled.clone(),
+            progress,
+        ));
+        let (_, reply) = start_request(manager.next().await);
+        cancelled.store(true, Ordering::Release);
+        drop(reply);
+        let reply = pause_request(manager.next().await);
+        reply
+            .send(Ok(ReviewerOutcome::Paused))
+            .expect("cleanup reply");
+        assert!(task.await.expect("discovery task").is_err());
+        assert!(progress_rx.try_recv().is_err());
+
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut manager = FakeManager::new(&[SESSION]).await;
+        let handle = manager.handle(SESSION).await;
+        let controller = Arc::new(controller_fixture(directory.path(), &[SESSION]));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(discover_for_test(
+            controller,
+            handle,
+            request(None),
+            cancelled,
+            progress,
+        ));
+        let (_, reply) = start_request(manager.next().await);
+        reply
+            .send(Err("adapter failed".to_owned()))
+            .expect("startup reply");
+        let reply = pause_request(manager.next().await);
+        reply
+            .send(Ok(ReviewerOutcome::Paused))
+            .expect("cleanup reply");
+        assert!(task.await.expect("discovery task").is_err());
+        assert!(progress_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn selected_worker_precedes_sorted_connected_active_workers() {
+        let manager = FakeManager::new(&["worker-z", "worker-a", "worker-m"]).await;
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let controller =
+            controller_fixture(directory.path(), &["worker-z", "worker-a", "worker-m"]);
+        let selected = select_worker(
+            &manager.control,
+            &controller,
+            Some("worker-z"),
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("worker selection")
+        .expect("selected worker");
+        assert_eq!(selected.0, "worker-z");
+
+        let fallback = select_worker(
+            &manager.control,
+            &controller,
+            Some("missing"),
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("worker selection")
+        .expect("fallback worker");
+        assert_eq!(fallback.0, "worker-a");
+    }
+
+    #[tokio::test]
+    async fn unavailable_workers_are_skipped_and_no_worker_is_reported_honestly() {
+        let manager = FakeManager::new(&["worker-a", "worker-b", "worker-c"]).await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller =
+            controller_fixture(directory.path(), &["worker-a", "worker-b", "worker-c"]);
+        controller.state.sessions.get_mut("worker-a").unwrap().state = SessionState::Stopped;
+        manager
+            .publisher
+            .publish("worker-b".to_owned(), ManagedSessionView::default())
+            .await
+            .unwrap();
+        manager.wait_connected("worker-b", false).await;
+        let selected = select_worker(
+            &manager.control,
+            &controller,
+            Some("worker-b"),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.0, "worker-c");
+        controller
+            .state
+            .sessions
+            .get_mut("worker-c")
+            .unwrap()
+            .target = None;
+        assert!(
+            select_worker(&manager.control, &controller, None, &AtomicBool::new(false))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_is_bounded_when_the_worker_never_replies() {
+        let mut manager = FakeManager::new(&[SESSION]).await;
+        let handle = manager.handle(SESSION).await;
+        let task = tokio::spawn(async move { cleanup_worker(&handle, "settings-test").await });
+        let reply = pause_request(manager.next().await);
+        tokio::time::pause();
+        tokio::time::advance(REVIEW_DISCOVERY_CLEANUP_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(
+            task.await
+                .unwrap()
+                .unwrap_err()
+                .contains("within 15 seconds")
+        );
+        assert!(reply.is_closed());
     }
 }

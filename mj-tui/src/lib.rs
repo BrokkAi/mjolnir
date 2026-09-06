@@ -65,7 +65,7 @@ pub use crate::ingest::{
 };
 pub use crate::render::render_sessions_preview;
 pub use crate::resume::resume_profile_placeholders;
-pub use crate::review_settings::{ReviewSettingsProbeResult, ReviewTargetReadiness};
+pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
 pub use hel::hel_workspace::{PaneSize, PaneSizes};
 
 /// One drawn row of the Sessions pane.
@@ -273,16 +273,15 @@ pub enum DashboardAction {
         include_untracked: bool,
     },
     OpenConfig,
-    /// Probe the selected reviewer profile against actual targets. The
-    /// generation ties the response to the current dialog draft.
-    ProbeReviewSettings {
+    /// Discover the selectors advertised by the selected reviewer profile.
+    /// The generation ties the response to the current dialog draft.
+    DiscoverReviewSettings {
         generation: u64,
         profile_id: String,
         model: Option<String>,
-        effort: Option<String>,
     },
-    /// Cancel a reviewer capability probe that is no longer visible.
-    CancelReviewSettingsProbe,
+    /// Cancel a reviewer selector discovery that is no longer visible.
+    CancelReviewSettingsDiscovery,
     /// Persist only the global `[review]` section.
     SaveReviewSettings {
         review: hel::hel_config::ReviewConfig,
@@ -435,6 +434,14 @@ pub(crate) enum Mode {
     ReviewSettings(ReviewSettingsDialog),
 }
 
+fn mode_contains_review_settings(mode: &Mode) -> bool {
+    match mode {
+        Mode::ReviewSettings(_) => true,
+        Mode::Help(overlay) => mode_contains_review_settings(&overlay.return_to),
+        _ => false,
+    }
+}
+
 pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], reverse: bool) -> T {
     let index = order
         .iter()
@@ -534,10 +541,14 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
-    /// Monotonic identity for global review settings probes. Keeping it on
+    /// Monotonic identity for global review settings discoveries. Keeping it on
     /// the dashboard prevents a late result from an older dialog instance
     /// matching a newly opened dialog with the same values.
     pub(crate) review_settings_generation: u64,
+    /// Successful reviewer selector discoveries, retained after the dialog
+    /// closes. The key is the profile definition's id and the optional model
+    /// whose effort choices were discovered.
+    pub(crate) review_settings_choices: BTreeMap<(String, Option<String>), ReviewSettingsChoices>,
     session_preflight_generation: u64,
     pub(crate) notices: Notices,
     /// The workspace name, shown at the right of the Sessions title bar.
@@ -585,6 +596,7 @@ impl DashboardState {
             last_row_click: None,
             mode: Mode::Dashboard,
             review_settings_generation: 0,
+            review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
             notices: Notices::default(),
             workspace_name: String::new(),
@@ -1372,6 +1384,9 @@ impl DashboardState {
     }
 
     pub fn cancel_modal(&mut self) {
+        if mode_contains_review_settings(&self.mode) {
+            self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
+        }
         self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
         self.mode = Mode::Dashboard;
         self.rebuild_resume_rows();
