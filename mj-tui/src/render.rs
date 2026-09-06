@@ -358,6 +358,27 @@ struct DrawnSessionRow {
     spacing: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SessionRowsRenderOptions {
+    force_expanded: bool,
+    show_project_numbers: bool,
+    show_selection: bool,
+}
+
+impl SessionRowsRenderOptions {
+    const DASHBOARD: Self = Self {
+        force_expanded: false,
+        show_project_numbers: true,
+        show_selection: true,
+    };
+
+    const PREVIEW: Self = Self {
+        force_expanded: true,
+        show_project_numbers: false,
+        show_selection: false,
+    };
+}
+
 impl DrawnSessionRow {
     fn content_height(&self) -> u16 {
         u16::try_from(self.lines.len()).unwrap_or(u16::MAX)
@@ -367,15 +388,34 @@ impl DrawnSessionRow {
 /// Lays the pane out without drawing it, so the layout can ask how tall it
 /// wants to be before it has any rows to give it.
 fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessionRow> {
+    drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::DASHBOARD)
+}
+
+fn drawn_session_rows_with_options(
+    dashboard: &DashboardState,
+    width: u16,
+    options: SessionRowsRenderOptions,
+) -> Vec<DrawnSessionRow> {
     let now_epoch_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let sessions = dashboard.ordered_sessions();
     let targets = session_display_targets(dashboard, &sessions);
+    let flow_rows = dashboard.sessions_rows().into_iter().map(|row| match row {
+        SessionsRow::ProjectHeading { key, label, number } => SessionsRow::ProjectHeading {
+            key,
+            label,
+            number: options.show_project_numbers.then_some(number).flatten(),
+        },
+        SessionsRow::Session { index, expanded } => SessionsRow::Session {
+            index,
+            expanded: options.force_expanded || expanded,
+        },
+    });
     let mut rows: Vec<DrawnSessionRow> = Vec::new();
     let mut pending_heading: Option<(String, Line<'static>)> = None;
-    for row in dashboard.sessions_rows() {
+    for row in flow_rows {
         match row {
             SessionsRow::ProjectHeading { key, label, number } => {
                 let hotkey = number.map_or_else(String::new, |number| format!("[{number}] "));
@@ -410,8 +450,8 @@ fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessio
                 let permission = session_permission_badge(session, operation, &dashboard.config);
                 // The selection drives which conversation is on screen, so
                 // the caret marks it in both forms.
-                let selected =
-                    dashboard.selected_session_id.as_deref() == Some(session.id.as_str());
+                let selected = options.show_selection
+                    && dashboard.selected_session_id.as_deref() == Some(session.id.as_str());
                 let prefix = if selected { "› " } else { "  " };
                 let (heading_key, heading_line) = match pending_heading.take() {
                     Some((key, line)) => (Some(key), Some(line)),
@@ -426,7 +466,6 @@ fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessio
                 if expanded {
                     expanded_session_lines(
                         &mut lines,
-                        dashboard,
                         session,
                         detail,
                         review,
@@ -436,6 +475,7 @@ fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessio
                         &target,
                         permission,
                         width,
+                        selected,
                     );
                 } else {
                     lines.push(collapsed_session_line(
@@ -471,7 +511,6 @@ fn drawn_session_rows(dashboard: &DashboardState, width: u16) -> Vec<DrawnSessio
 #[allow(clippy::too_many_arguments)]
 fn expanded_session_lines(
     lines: &mut Vec<Line<'static>>,
-    dashboard: &DashboardState,
     session: &SessionRecord,
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
@@ -481,8 +520,8 @@ fn expanded_session_lines(
     target: &str,
     permission: Option<Span<'static>>,
     width: u16,
+    selected: bool,
 ) {
-    let selected = dashboard.selected_session_id.as_deref() == Some(session.id.as_str());
     let prefix = if selected { "› " } else { "  " };
     lines.push(session_top_line(
         prefix,
@@ -815,6 +854,119 @@ pub(crate) fn render_sessions(
     SessionRowsRendered {
         session_row_areas,
         project_heading_areas,
+    }
+}
+
+struct PreviewSessionAnchor {
+    session_id: String,
+    start: usize,
+    height: usize,
+}
+
+struct SessionsPreviewLayout {
+    lines: Vec<Line<'static>>,
+    anchors: Vec<PreviewSessionAnchor>,
+}
+
+fn sessions_preview_layout(dashboard: &DashboardState, width: u16) -> SessionsPreviewLayout {
+    let sessions = dashboard.ordered_sessions();
+    let drawn =
+        drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::PREVIEW);
+    let mut lines = Vec::new();
+    let mut anchors = Vec::new();
+    for row in drawn {
+        let start = lines.len();
+        let height = row.lines.len().saturating_add(usize::from(row.spacing));
+        if let Some(index) = row.session
+            && let Some(session) = sessions.get(index)
+        {
+            anchors.push(PreviewSessionAnchor {
+                session_id: session.id.clone(),
+                start,
+                height,
+            });
+        }
+        lines.extend(row.lines);
+        lines.extend(std::iter::repeat_with(Line::default).take(usize::from(row.spacing)));
+    }
+    SessionsPreviewLayout { lines, anchors }
+}
+
+/// Draws a read-only, independently scrollable Sessions pane.
+///
+/// This is the shared session view used by CLI surfaces that need to show the
+/// live dashboard list without giving it dashboard input semantics. Every
+/// project is expanded, and the preview does not read or update the
+/// dashboard's selected session or scroll position.
+pub fn render_sessions_preview(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &DashboardState,
+    preview: &mut crate::SessionsPreviewState,
+) {
+    let layout = sessions_preview_layout(dashboard, area.width);
+    let content_length = layout.lines.len().max(1);
+    let viewport = usize::from(area.height.saturating_sub(2));
+    preview.last_viewport = viewport;
+    preview.last_max_scroll = content_length.saturating_sub(viewport);
+
+    let mut offset = preview.preview_scroll;
+    if !preview.anchor_dirty
+        && let Some(anchor_id) = preview.anchor_session_id.as_deref()
+        && let Some(anchor) = layout
+            .anchors
+            .iter()
+            .find(|anchor| anchor.session_id == anchor_id)
+    {
+        offset = anchor.start.saturating_add(
+            preview
+                .anchor_line_offset
+                .min(anchor.height.saturating_sub(1)),
+        );
+    }
+    offset = offset.min(preview.last_max_scroll);
+    preview.preview_scroll = offset;
+
+    preview.anchor_session_id = layout
+        .anchors
+        .iter()
+        .find(|anchor| {
+            offset >= anchor.start && offset < anchor.start.saturating_add(anchor.height.max(1))
+        })
+        .map(|anchor| {
+            preview.anchor_line_offset = offset.saturating_sub(anchor.start);
+            anchor.session_id.clone()
+        });
+    if preview.anchor_session_id.is_none() {
+        preview.anchor_line_offset = 0;
+    }
+    preview.anchor_dirty = false;
+
+    let lines = if layout.lines.is_empty() {
+        vec![Line::styled(
+            "No active sessions",
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        layout.lines
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .title(" Sessions ");
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(offset)
+                .take(viewport)
+                .collect::<Vec<_>>(),
+        )
+        .block(block),
+        area,
+    );
+    if viewport > 0 && area.height >= 2 {
+        render_session_scrollbar(frame, area, content_length, offset, viewport);
     }
 }
 
@@ -3975,6 +4127,169 @@ mod tests {
             lines[first + 3].trim_matches(['│', '║', ' ']).is_empty(),
             "{:?}",
             lines[first + 3]
+        );
+    }
+
+    fn preview_dashboard() -> DashboardState {
+        let mut first = running_session();
+        first.id = "session-1".into();
+        first.acp_session_title = Some("first".into());
+        first.created_at = "2026-08-01T00:00:00Z".into();
+        let mut second = running_session();
+        second.id = "session-2".into();
+        second.acp_session_title = Some("second".into());
+        second.created_at = "2026-08-02T00:00:00Z".into();
+        let mut inactive = stopped_session();
+        inactive.id = "stopped".into();
+        inactive.acp_session_title = Some("stopped".into());
+        inactive.created_at = "2026-08-03T00:00:00Z".into();
+        DashboardState::new(
+            config(),
+            HelState {
+                version: STATE_VERSION,
+                sessions: BTreeMap::from([
+                    (first.id.clone(), first),
+                    (second.id.clone(), second),
+                    (inactive.id.clone(), inactive),
+                ]),
+                mount_history: BTreeMap::new(),
+                container_sizes: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+        )
+    }
+
+    fn drawn_preview(
+        dashboard: &DashboardState,
+        preview: &mut crate::SessionsPreviewState,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_sessions_preview(frame, area, dashboard, preview);
+            })
+            .expect("draw preview");
+        buffer_lines(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn preview_reuses_expanded_rows_but_removes_dashboard_selection_and_hotkeys() {
+        let mut dashboard = preview_dashboard();
+        dashboard.selected_session_id = None;
+        let dashboard_lines =
+            drawn_session_rows(&dashboard, 120)
+                .into_iter()
+                .fold(Vec::new(), |mut lines, row| {
+                    let DrawnSessionRow {
+                        lines: row_lines,
+                        spacing,
+                        ..
+                    } = row;
+                    lines.extend(row_lines);
+                    lines.extend(std::iter::repeat_with(Line::default).take(usize::from(spacing)));
+                    lines
+                });
+        let preview_lines = sessions_preview_layout(&dashboard, 120).lines;
+        assert_eq!(preview_lines, dashboard_lines);
+
+        let mut preview = crate::SessionsPreviewState::default();
+        let rendered = drawn_preview(&dashboard, &mut preview, 80, 24).join("\n");
+        assert!(rendered.contains("first"), "{rendered}");
+        assert!(rendered.contains("second"), "{rendered}");
+        assert!(
+            !rendered.contains("stopped"),
+            "inactive session leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("[1] hel"),
+            "project hotkey leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("›"),
+            "selection caret leaked: {rendered}"
+        );
+
+        let key = dashboard.project_source(
+            dashboard
+                .ordered_sessions()
+                .first()
+                .expect("active session"),
+        );
+        dashboard.collapsed_project_keys.insert(key.key);
+        let collapsed = sessions_preview_layout(&dashboard, 120);
+        assert_eq!(
+            collapsed
+                .lines
+                .iter()
+                .filter(|line| line.to_string().contains("You:"))
+                .count(),
+            2,
+            "collapsed dashboard projects stay expanded in preview"
+        );
+    }
+
+    #[test]
+    fn preview_scrolls_by_lines_and_pages_and_clamps_small_viewports() {
+        let dashboard = preview_dashboard();
+        let mut preview = crate::SessionsPreviewState::default();
+        let top = drawn_preview(&dashboard, &mut preview, 80, 8).join("\n");
+        assert!(top.contains("first"), "{top}");
+        assert!(
+            !top.contains("second"),
+            "viewport should start at first row: {top}"
+        );
+
+        preview.scroll_lines(6);
+        let middle = drawn_preview(&dashboard, &mut preview, 80, 8).join("\n");
+        assert!(
+            middle.contains("second"),
+            "line scrolling did not advance: {middle}"
+        );
+
+        preview.home();
+        preview.scroll_page(1);
+        let paged = drawn_preview(&dashboard, &mut preview, 80, 8).join("\n");
+        assert!(
+            paged.contains("second"),
+            "page scrolling did not advance: {paged}"
+        );
+
+        preview.end();
+        let end = drawn_preview(&dashboard, &mut preview, 3, 1).join("\n");
+        assert_eq!(
+            end.lines().count(),
+            1,
+            "narrow and short areas must still render safely"
+        );
+    }
+
+    #[test]
+    fn preview_preserves_session_anchor_when_rows_are_inserted() {
+        let mut dashboard = preview_dashboard();
+        let mut preview = crate::SessionsPreviewState::default();
+        drawn_preview(&dashboard, &mut preview, 80, 8);
+        preview.scroll_lines(6);
+        let before = drawn_preview(&dashboard, &mut preview, 80, 8).join("\n");
+        assert!(before.contains("second"), "{before}");
+
+        let mut inserted = running_session();
+        inserted.id = "inserted".into();
+        inserted.created_at = "2026-07-01T00:00:00Z".into();
+        dashboard
+            .state
+            .sessions
+            .insert(inserted.id.clone(), inserted);
+        dashboard
+            .session_details
+            .insert("inserted".into(), SessionDetail::default());
+        let after = drawn_preview(&dashboard, &mut preview, 80, 8).join("\n");
+        assert!(after.contains("second"), "anchor session was lost: {after}");
+        assert!(
+            !after.contains("inserted"),
+            "inserted row displaced the anchor: {after}"
         );
     }
 
