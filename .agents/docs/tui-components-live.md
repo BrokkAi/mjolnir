@@ -67,3 +67,22 @@ Next, and an unchanged config reply closing a newly opened palette. These now
 have event regression tests. Live coverage does not include successful native
 import, replacement repository origins, or provisioning cloud targets; their
 state transitions remain covered by automated tests.
+
+Palette/review follow-up seed 516 passed 72 recorded checks at
+`target/reliability-artifacts/tui-components-seed-516-2647648/`, with CLI SHA-256
+`df81d232229d86009ce1bb879722c4f0b09d05aeb7d4673f1a2474fdce4d8f8f`.
+It adds F2 at 140x60 with all groups visible and no scrollbar, 100x18 with a
+scrollbar and End navigation, then filtering to Review settings with no
+scrollbar. It also verifies the Quick and Extended descriptions and the new
+model-loading message. The controller's progress test holds repository tooling
+verification pending and verifies that model/effort choices arrive first;
+the TUI test checks that progress leaves readiness pending and rejects an old
+generation after cancellation/reopening.
+
+Final seed 518 passed 72 checks at
+`target/reliability-artifacts/tui-components-seed-518-2766281/`, including the
+thumb reaching the bottom at End and explicit nested Help dismissal. This run
+includes the shared scrollbar correction: Ratatui receives the count of valid
+viewport offsets, so the thumb reaches both ends of the track.
+Its CLI SHA-256 is
+`e1a49740f8a082ec1880aaae7dc54dad75d2ddec941176589ceeb08a31a0ceb0`.

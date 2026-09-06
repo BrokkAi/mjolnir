@@ -422,6 +422,8 @@ def create_session(
     evidence.event("session-running", f"wizard Create and API prompt for {title!r}", "running session visible", "running session visible", evidence.capture("session-running", screen))
     from tui_components_dialogs import run_dialog_acceptance
     run_dialog_acceptance(lab, tmux, evidence)
+    from tui_components_actions import palette_viewport
+    palette_viewport(tmux, evidence)
     from tui_components_actions import save_review_settings, save_target_id, stop_and_resume
     save_target_id(lab, tmux, evidence)
     save_review_settings(lab, tmux, evidence)
@@ -493,6 +495,7 @@ def run_workflow(
         evidence.capture("nested-help-open", help_screen),
     )
     tmux.send_key("Escape")
+    tmux.wait_until(lambda: "Keys ·" not in tmux.capture(), "nested Help dismissed")
     target_screen = tmux.wait_for("Target actions", "target actions restored after help")
     evidence.event(
         "nested-help-close",
@@ -502,7 +505,7 @@ def run_workflow(
         evidence.capture("nested-help-close", target_screen),
     )
     tmux.send_key("Escape")
-    tmux.wait_for("Sessions", "dashboard after target actions")
+    tmux.wait_until(lambda: "Target actions" not in tmux.capture(), "target actions dismissed")
 
     # F2 is the user-facing route to the migrated representative form.
     tmux.send_key("F2")

@@ -45,7 +45,7 @@ pub enum CommandId {
 }
 
 /// Where a command belongs: which pane has to own the keyboard for it to
-/// apply, or `Global`/`Pane` for the ones that apply wherever the keyboard is.
+/// apply, or `Global`/`Pane`/`Settings` for commands available from any pane.
 ///
 /// `Sessions` is the pane itself (create, mark read); `Session` is the
 /// selected row (rename, container settings, stop). `Setup` is the first-run
@@ -53,6 +53,7 @@ pub enum CommandId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
     Global,
+    Settings,
     Pane,
     Sessions,
     Session,
@@ -66,6 +67,7 @@ impl Scope {
     pub(crate) const fn heading(self) -> &'static str {
         match self {
             Self::Global => "Anywhere",
+            Self::Settings => "Settings",
             Self::Pane => "Panes",
             Self::Sessions => "Sessions pane",
             Self::Session => "Selected session",
@@ -78,13 +80,14 @@ impl Scope {
 
 /// The order the help overlay prints the groups in, and the order
 /// [`available`] walks when it collects what applies at the current focus.
-pub(crate) const SCOPE_ORDER: [Scope; 7] = [
+pub(crate) const SCOPE_ORDER: [Scope; 8] = [
     Scope::Sessions,
     Scope::Session,
     Scope::Targets,
     Scope::Quota,
     Scope::Setup,
     Scope::Pane,
+    Scope::Settings,
     Scope::Global,
 ];
 
@@ -540,7 +543,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         id: CommandId::ReviewSettings,
         label: "Review settings…",
         description: "Edit the global automatic review profile, tier, model, and effort.",
-        scope: Scope::Global,
+        scope: Scope::Settings,
         keys: &[],
         footer: no_footer,
         footer_group: FooterGroup::Function,
@@ -622,7 +625,7 @@ pub(crate) fn spec(id: CommandId) -> &'static CommandSpec {
 /// still empty.
 fn scope_applies(scope: Scope, focus: Focus) -> bool {
     match scope {
-        Scope::Global | Scope::Pane | Scope::Setup => true,
+        Scope::Global | Scope::Settings | Scope::Pane | Scope::Setup => true,
         Scope::Sessions | Scope::Session => focus == Focus::Sessions,
         Scope::Targets => focus == Focus::Targets,
         Scope::Quota => focus == Focus::Quota,

@@ -30,18 +30,67 @@ def command(tmux, query, dialog):
     tmux.wait_for(dialog)
 
 
+def palette_viewport(tmux, evidence):
+    """Exercise fit, overflow, filtering, and resize in the actual palette."""
+    def popup_text():
+        rows = tmux.capture().splitlines()
+        top = next(index for index, line in enumerate(rows) if " Commands " in line)
+        left = rows[top].index("┌")
+        right = rows[top].index("┐", left)
+        bottom = next(index for index in range(top + 1, len(rows))
+                      if len(rows[index]) > right and rows[index][left] == "└" and rows[index][right] == "┘")
+        return "\n".join(line[left:right + 1] for line in rows[top:bottom + 1])
+
+    tmux.resize(140, 60)
+    tmux.send_key("F2")
+    screen = tmux.wait_for("Review settings…")
+    if not screen.index("Settings") < screen.index("Review settings…") < screen.index("Anywhere"):
+        raise ScenarioFailure("review settings is not in its own Settings section")
+    tmux.wait_for("Detach from this terminal")
+    if "▲" in popup_text():
+        raise ScenarioFailure("roomy palette unnecessarily shows a scrollbar")
+    record(tmux, evidence, "palette-roomy", "F2 at 140x60", "Settings and the final commands fit together")
+    tmux.resize(100, 18)
+    tmux.wait_for("Commands")
+    tmux.wait_until(lambda: "▲" in popup_text(), "overflow palette scrollbar")
+    # Tab moves from the query to the shared list; End must reveal its tail.
+    tmux.send_key("Tab")
+    tmux.send_key("End")
+    tmux.wait_for("Detach from this terminal")
+    def thumb_at_end():
+        rows = popup_text().splitlines()
+        bottom = next(index for index, line in enumerate(rows) if "▼" in line)
+        column = rows[bottom].index("▼")
+        return rows[bottom - 1][column] == "█"
+    tmux.wait_until(thumb_at_end, "scrollbar thumb at the bottom after End")
+    record(tmux, evidence, "palette-scroll-end", "resize 100x18; Tab, End", "the final command rows remain reachable")
+    tmux.send_key("BTab")
+    tmux.send_text("review settings")
+    tmux.wait_for("Review settings…")
+    tmux.wait_until(lambda: "▲" not in popup_text(), "filtered palette fits without scrollbar")
+    record(tmux, evidence, "palette-filter-small", "Shift-Tab; type review settings", "filtered settings entry fits in the short palette")
+    tmux.send_key("Enter")
+    tmux.wait_for("Automatic review")
+    tmux.send_key("Escape")
+    absent(tmux, "Automatic review")
+    tmux.resize(140, 40)
+
+
 def save_review_settings(lab, tmux, evidence):
     original = lab.snapshot()["review_config"]
     command(tmux, "review settings", "Automatic review")
     # The fixture starts disabled, so changing tier can be saved independently
     # of target discovery. Validate persistence and disappearance separately.
     click(tmux, "Quick")
+    tmux.wait_for("One general reviewer; a validator checks any findings.")
     click(tmux, "[ Save ]")
     absent(tmux, "┌ Review settings")
     lab.wait_snapshot(lambda value: value["review_config"]["tier"].lower() == "quick", "review tier persisted")
     record(tmux, evidence, "review-save-dismissed", "choose Quick and click Save", "settings close and persisted tier changes")
     command(tmux, "review settings", "Automatic review")
     click(tmux, "Extended" if original["tier"].lower() == "extended" else "Quick")
+    if original["tier"].lower() == "extended":
+        tmux.wait_for("A supervisor selects specialist reviewers for deeper coverage.")
     click(tmux, "[ Save ]")
     absent(tmux, "┌ Review settings")
     lab.wait_snapshot(lambda value: value["review_config"] == original, "original review settings restored")

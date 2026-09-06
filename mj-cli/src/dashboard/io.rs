@@ -96,6 +96,13 @@ pub(crate) enum DashboardIoUpdate {
         effort: Option<String>,
         result: std::result::Result<ReviewSettingsProbeResult, String>,
     },
+    ReviewSettingsCapabilities {
+        generation: u64,
+        profile_id: String,
+        model: Option<String>,
+        effort: Option<String>,
+        choices: mj_controller::hel_review_settings::ReviewCapabilityChoices,
+    },
     ReviewSettingsSaved {
         result: std::result::Result<HelConfig, String>,
     },
@@ -377,12 +384,33 @@ pub(crate) fn spawn_review_settings_probe(
     let guard = tracker.begin_cancellable("checking review readiness", cancelled.clone());
     let worker_cancelled = cancelled.clone();
     tokio::spawn(async move {
-        let result = mj_controller::hel_review_settings::probe_review_settings(
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let probe = mj_controller::hel_review_settings::probe_review_settings_with_progress(
             control,
             request,
             worker_cancelled,
-        )
-        .await
+            progress_tx,
+        );
+        tokio::pin!(probe);
+        let result = loop {
+            tokio::select! {
+                // Drain ready choices before final completion so a queued progress
+                // event can never arrive after the final readiness result.
+                biased;
+                Some(choices) = progress_rx.recv() => {
+                    if let Err(error) = updates.send(DashboardIoUpdate::ReviewSettingsCapabilities {
+                        generation,
+                        profile_id: profile_id.clone(),
+                        model: model.clone(),
+                        effort: effort.clone(),
+                        choices,
+                    }) {
+                        tracing::debug!(%error, "review choices dropped after dashboard shutdown");
+                    }
+                }
+                result = &mut probe => break result,
+            }
+        }
         .map(|report| ReviewSettingsProbeResult {
             model_choices: report.model_choices,
             effort_choices: report.effort_choices,
@@ -1365,6 +1393,21 @@ impl DashboardContext {
                         .set_notice(format!("Could not reload setup changes: {error}"));
                 }
             },
+            DashboardIoUpdate::ReviewSettingsCapabilities {
+                generation,
+                profile_id,
+                model,
+                effort,
+                choices,
+            } => {
+                self.dashboard.apply_review_settings_capabilities(
+                    generation,
+                    &profile_id,
+                    model.as_deref(),
+                    effort.as_deref(),
+                    (choices.model_choices, choices.effort_choices),
+                );
+            }
             DashboardIoUpdate::ReviewSettingsProbed {
                 generation,
                 profile_id,
