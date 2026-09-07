@@ -220,6 +220,76 @@ function transcript(text) {
   };
 }
 
+test('dashboard adapts from a phone column to workstation session columns', async ({ page }, testInfo) => {
+  await mount(page, [
+    ...Array.from({ length: 6 }, (_, index) => session(`session-${index}`, 'mjolnir', 'Mjolnir', {
+      title: `Session ${index}: investigate the desktop layout and validate responsive behavior`,
+      capabilities: { rename: true },
+    })),
+    session('other-project', 'other', 'Other project'),
+  ]);
+
+  for (const width of [390, 900, 1024, 1440, 1920, 2560, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const first = await card(page, 'session-0').boundingBox();
+    const second = await card(page, 'session-1').boundingBox();
+    const app = await page.locator('#app').boundingBox();
+    if (width >= 1024) {
+      expect(app.width).toBeGreaterThanOrEqual(Math.min(width - 64, 1600) - 1);
+      expect(second.y).toBe(first.y);
+      expect(second.x).toBeGreaterThan(first.x + first.width);
+    } else {
+      expect(second.x).toBe(first.x);
+      expect(second.y).toBeGreaterThan(first.y + first.height);
+    }
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+    expect(overflow).toBe(false);
+    if (width === 1440) {
+      await card(page, 'session-1').getByRole('button', { name: /actions/i }).click();
+      await expect(card(page, 'session-1').getByRole('menu')).toBeVisible();
+      await page.keyboard.press('Escape');
+      await page.screenshot({ path: testInfo.outputPath('desktop-dashboard.png'), fullPage: true });
+    }
+  }
+});
+
+test('desktop transcript scrolls without moving the header or composer', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const state = await mount(page, [session('desktop', 'mjolnir', 'Mjolnir', {
+    queued: 20,
+    capabilities: { prompt: true },
+  })]);
+  state.conversation = transcript('A long transcript paragraph to exercise scrolling.\n\n'.repeat(100));
+  await card(page, 'desktop').click();
+  await expect(page.locator('#conversation-feed')).toContainText('A long transcript paragraph');
+  await page.locator('#conversation-side > summary').click();
+  await page.locator('#prompt-text').fill('Keep this draft while resizing the window.');
+
+  for (const size of [{ width: 1440, height: 900 }, { width: 1920, height: 1080 }, { width: 1024, height: 768 }]) {
+    await page.setViewportSize(size);
+    // Include the real offline banner: it consumes height above the header.
+    await page.evaluate(() => { document.body.dataset.connection = 'offline'; });
+    const header = await page.locator('#shell-header').boundingBox();
+    const composer = await page.locator('#prompt-form').boundingBox();
+    const conversation = await page.locator('#conversation').boundingBox();
+    expect(conversation.width).toBeGreaterThan(900);
+    expect(composer.y + composer.height).toBeLessThanOrEqual(size.height);
+    const metrics = await page.locator('#conversation-scroll').evaluate(node => {
+      node.scrollTop = 0;
+      return { height: node.clientHeight, scrollHeight: node.scrollHeight };
+    });
+    expect(metrics.height).toBeGreaterThan(100);
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.height);
+    expect(await page.locator('#shell-header').boundingBox()).toEqual(header);
+    expect(await page.locator('#prompt-form').boundingBox()).toEqual(composer);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(size.height);
+    await expect(page.locator('#prompt-text')).toHaveText('Keep this draft while resizing the window.');
+    if (size.width === 1440) {
+      await page.screenshot({ path: testInfo.outputPath('desktop-conversation.png') });
+    }
+  }
+});
+
 test('compact cards sort initial activity, expose metadata, clocks, attention, and a phone screenshot', async ({ page }) => {
   const longTitle = 'A long session title that occupies one ellipsized line on a narrow phone screen';
   await mount(page, [
