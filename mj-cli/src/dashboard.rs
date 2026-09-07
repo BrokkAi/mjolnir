@@ -3136,7 +3136,7 @@ mod tests {
     }
 
     #[test]
-    fn short_bordered_grid_can_be_selected_and_copied() {
+    fn short_bordered_minimized_list_can_be_selected_and_copied() {
         let mut dashboard = populated_dashboard();
         dashboard.set_pane_size(hel_tui::SupportPane::Sessions, hel_tui::PaneSize::Minimized);
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("terminal");
@@ -3145,8 +3145,8 @@ mod tests {
         let surface = *dashboard
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
-            .expect("tiny sessions grid registered");
-        assert_eq!(surface.rect.height, 1);
+            .expect("tiny minimized sessions list registered");
+        assert_eq!(surface.rect.height, 2);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);
@@ -3179,8 +3179,8 @@ mod tests {
         ));
 
         let copied = draw_with_selection(&mut terminal, &mut dashboard, &selection)
-            .expect("tiny grid selection extracts text");
-        assert!(copied.contains("podman"), "copied grid text: {copied:?}");
+            .expect("tiny minimized list selection extracts text");
+        assert!(copied.contains("podman"), "copied list text: {copied:?}");
     }
 
     /// A press is held back until the button comes up, then replayed to the

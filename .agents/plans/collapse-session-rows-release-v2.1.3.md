@@ -22,6 +22,8 @@ Alt-G promises a compact dashboard, but minimized Sessions currently switches to
   Evidence: The focused Alt-G render test shows no `You:` or `Agent:` text and passes after asserting rendered behavior rather than equating hitbox height with content height.
 - Observation: The macOS CI failure compares a canonicalized stored project directory (`/private/var/...`) with the non-canonical temporary path (`/var/...`).
   Evidence: Job 101815217520 failed only `first_launch_creates_a_workspace_and_local_session_without_terminal_input`; startup intentionally canonicalizes the directory before storing it.
+- Observation: The full suite retained one integration assertion that a short minimized Sessions selection surface was exactly one grid row high.
+  Evidence: `dashboard::tests::short_bordered_grid_can_be_selected_and_copied` expected height 1; the vertical list correctly exposes the two content rows allocated on a short frame.
 
 ## Decision Log
 
