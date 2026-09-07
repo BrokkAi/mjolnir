@@ -107,8 +107,8 @@ composer as text. Tab walks Sessions, Prompt, Targets, Quota; Shift+Tab
 reverses it, and neither changes pane geometry. Sessions, Targets, and Quota
 each expose `▁`, `▪`, and `□` title controls for minimized, standard, and
 maximized size. Alt+Z cycles the focused support pane without moving focus.
-Alt+G changes an all-standard layout to maximized Sessions with minimized
-Targets and Quota; from any customized layout it restores all three to
+Alt+G changes an all-standard layout to minimized Sessions, Targets, and
+Quota; from any customized layout it restores all three to
 standard. F2 is the command palette, F3 is Workspaces, F4 is the web viewer,
 and Alt+Q detaches.
 

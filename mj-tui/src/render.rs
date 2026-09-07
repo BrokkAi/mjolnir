@@ -3155,6 +3155,42 @@ mod tests {
     }
 
     #[test]
+    fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
+        for (height, expected_sessions_height) in [(32, 4), (44, 5)] {
+            let mut dashboard = minimized_grid_dashboard(3, 2);
+            dashboard
+                .restore_pane_sizes(crate::PaneSizes::default())
+                .unwrap();
+            dashboard.focus_sessions();
+            drawn(&mut dashboard, 120, height);
+            let standard_panes = dashboard.pane_areas.unwrap();
+            let standard_transcript = dashboard.chat_transcript_area.unwrap();
+
+            dashboard.handle_key(alt_key('g'));
+            drawn(&mut dashboard, 120, height);
+            let compact_panes = dashboard.pane_areas.unwrap();
+            assert_eq!(compact_panes[0].height, expected_sessions_height);
+            assert_eq!(compact_panes[1].height, 1);
+            assert_eq!(compact_panes[2].height, 1);
+            assert!(compact_panes[0].height < standard_panes[0].height);
+            assert!(dashboard.chat_transcript_area.unwrap().height > standard_transcript.height);
+            assert!(
+                dashboard
+                    .session_row_areas
+                    .iter()
+                    .all(|(_, area)| area.height == 1),
+                "minimized sessions must occupy single-line grid cells"
+            );
+            assert!(dashboard.session_row_areas.len() >= 3);
+
+            dashboard.handle_key(alt_key('g'));
+            drawn(&mut dashboard, 120, height);
+            assert_eq!(dashboard.pane_areas.unwrap(), standard_panes);
+            assert_eq!(dashboard.chat_transcript_area.unwrap(), standard_transcript);
+        }
+    }
+
+    #[test]
     fn tab_focus_never_changes_band_geometry() {
         let mut dashboard = minimized_grid_dashboard(3, 2);
         for pane in [

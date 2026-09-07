@@ -523,7 +523,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::TogglePanePreset,
         label: "Pane preset",
-        description: "Restore standard panes, or maximize Sessions when all are standard.",
+        description: "Restore standard panes, or minimize all three for the conversation.",
         scope: Scope::Pane,
         keys: &[KeyHint::alt(KeyCode::Char('g'), "Alt-G")],
         footer: footer_word!("panes"),

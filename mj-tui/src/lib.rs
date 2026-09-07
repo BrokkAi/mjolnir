@@ -760,11 +760,11 @@ impl DashboardState {
     }
 
     /// Alt-G's stable global preset: restore any custom arrangement to all
-    /// Standard; from all Standard, spend the screen on Sessions.
+    /// Standard; from all Standard, minimize every support pane for the conversation.
     pub fn toggle_pane_preset(&mut self) {
         if self.pane_sizes.all_standard() {
             self.pane_sizes = PaneSizes {
-                sessions: PaneSize::Maximized,
+                sessions: PaneSize::Minimized,
                 targets: PaneSize::Minimized,
                 quota: PaneSize::Minimized,
             };
@@ -1859,7 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_g_toggles_standard_and_the_sessions_preset_without_moving_focus() {
+    fn alt_g_toggles_standard_and_minimized_panes_without_moving_focus() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
@@ -1872,7 +1872,7 @@ mod tests {
         assert_eq!(dashboard.handle_key(alt_key('g')), DashboardAction::None);
         assert_eq!(
             dashboard.pane_size(SupportPane::Sessions),
-            PaneSize::Maximized
+            PaneSize::Minimized
         );
         assert_eq!(
             dashboard.pane_size(SupportPane::Targets),

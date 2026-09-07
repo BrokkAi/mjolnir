@@ -210,9 +210,9 @@ Prompt has grown, while every other band keeps its minimum. Only one pane can
 be maximized at a time.
 
 `Alt+Z` cycles the focused support pane through its three sizes without moving
-focus. `Alt+G` is the layout shortcut: from all-standard it maximizes Sessions
-and minimizes Targets and Quota; from any customized layout it restores all
-three panes to standard. Tab leaves every chosen size alone.
+focus. `Alt+G` is the layout shortcut: from all-standard it minimizes Sessions,
+Targets, and Quota to leave more room for the conversation; from any customized
+layout it restores all three panes to standard. Tab leaves every chosen size alone.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
 `F2` opens the command palette, `F3` the workspace picker, `F4` the web
