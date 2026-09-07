@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use crate::hel_config::{
-    HarnessKind, HelConfig, TargetTemplate, atomic_write, data_dir, validate_id,
+    HarnessKind, HelConfig, ProjectRepository, TargetTemplate, atomic_write, data_dir, validate_id,
 };
 use crate::hel_credentials::CredentialSyncSignal;
 use crate::hel_targets::{AdditionalMount, validate_additional_mounts};
@@ -1016,9 +1016,7 @@ impl SessionRecord {
     /// Stable source identity used to group sessions. Managed worktrees point
     /// back at their source repository, raw sessions use their project
     /// directory until their Git origin is resolved, and bundle sessions use
-    /// the bundle itself. The bundle identity keeps bundles separate even
-    /// when they happen to share a primary repository, while its display name
-    /// comes from that repository's canonical source when configured.
+    /// their complete canonical repository set when configured.
     pub fn project_source(&self, config: &HelConfig) -> ProjectSourceIdentity {
         if let Some(worktree) = &self.managed_worktree {
             return ProjectSourceIdentity::path(&worktree.source_repository, None);
@@ -1030,41 +1028,32 @@ impl SessionRecord {
             };
             return ProjectSourceIdentity::path(project_directory, remote);
         }
-        let name = self.bundle_source_name(config);
-        let full = if name == self.bundle_id {
-            self.bundle_id.clone()
-        } else {
-            format!("{name} ({})", self.bundle_id)
-        };
-        ProjectSourceIdentity {
-            key: format!("bundle:{}", self.bundle_id),
-            short: name,
-            full,
-        }
+        self.bundle_source_identity(config)
+            .unwrap_or_else(|| ProjectSourceIdentity {
+                key: format!("bundle:{}", self.bundle_id),
+                short: path_leaf(Path::new(&self.bundle_id)),
+                full: self.bundle_id.clone(),
+            })
     }
 
     /// Resolve the display name shared by session headings, chat headers, and
     /// resume details for a bundle-backed session.
     fn bundle_source_name(&self, config: &HelConfig) -> String {
-        let Some(repository) = config
-            .bundles
-            .get(&self.bundle_id)
-            .and_then(|bundle| bundle.primary().or_else(|| bundle.repositories.first()))
-        else {
-            return path_leaf(Path::new(&self.bundle_id));
-        };
-        if let Some(source) = repository
-            .github
-            .as_deref()
-            .and_then(ProjectSourceIdentity::git_remote)
-        {
-            return source.short;
-        }
-        repository
-            .local
-            .as_deref()
-            .map(path_leaf)
+        self.bundle_source_identity(config)
+            .map(|source| source.short)
             .unwrap_or_else(|| path_leaf(Path::new(&self.bundle_id)))
+    }
+
+    /// Resolve the canonical identity of every repository in a bundle for
+    /// grouping and display naming.
+    fn bundle_source_identity(&self, config: &HelConfig) -> Option<ProjectSourceIdentity> {
+        let bundle = config.bundles.get(&self.bundle_id)?;
+        let sources = bundle
+            .repositories
+            .iter()
+            .map(repository_source_identity)
+            .collect::<Option<Vec<_>>>()?;
+        ProjectSourceIdentity::bundle(sources)
     }
 
     /// Orders two sessions the way the session list's sequence view does:
@@ -1137,6 +1126,19 @@ impl SessionRecord {
     }
 }
 
+fn repository_source_identity(repository: &ProjectRepository) -> Option<ProjectSourceIdentity> {
+    repository
+        .github
+        .as_deref()
+        .and_then(ProjectSourceIdentity::git_remote)
+        .or_else(|| {
+            repository
+                .local
+                .as_deref()
+                .map(|path| ProjectSourceIdentity::path(path, None))
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProjectSourceIdentity {
     pub key: String,
@@ -1145,6 +1147,41 @@ pub struct ProjectSourceIdentity {
 }
 
 impl ProjectSourceIdentity {
+    /// Combine repository identities into one stable bundle identity.
+    pub fn bundle(mut sources: Vec<Self>) -> Option<Self> {
+        if sources.is_empty() {
+            return None;
+        }
+        sources.sort_by(|left, right| {
+            left.key
+                .cmp(&right.key)
+                .then_with(|| left.full.cmp(&right.full))
+                .then_with(|| left.short.cmp(&right.short))
+        });
+        sources.dedup_by(|left, right| left.key == right.key);
+        if sources.len() == 1 {
+            return sources.pop();
+        }
+        let keys = sources
+            .iter()
+            .map(|source| source.key.clone())
+            .collect::<Vec<_>>();
+        let key = serde_json::to_string(&keys).ok()?;
+        Some(Self {
+            key: format!("bundle:{key}"),
+            short: sources
+                .iter()
+                .map(|source| source.short.as_str())
+                .collect::<Vec<_>>()
+                .join(" + "),
+            full: sources
+                .iter()
+                .map(|source| source.full.as_str())
+                .collect::<Vec<_>>()
+                .join(" + "),
+        })
+    }
+
     /// Canonicalizes a Git remote so raw checkouts group as the same project
     /// even when their worktree paths differ.
     pub fn git_remote(source: &str) -> Option<Self> {
@@ -1793,7 +1830,7 @@ mod tests {
             });
         let mut session = sample_session();
 
-        assert_eq!(session.project_name(&config), "hel");
+        assert_eq!(session.project_name(&config), "docs + hel");
 
         session.project_directory = Some(PathBuf::from("/home/test/Projects/raw-project"));
         assert_eq!(session.project_name(&config), "raw-project");
@@ -1836,9 +1873,9 @@ mod tests {
         assert_eq!(
             session.project_source(&config),
             ProjectSourceIdentity {
-                key: "bundle:bifrost".into(),
+                key: "github:brokkai/bifrost-dev".into(),
                 short: "bifrost-dev".into(),
-                full: "bifrost-dev (bifrost)".into(),
+                full: "BrokkAi/bifrost-dev".into(),
             }
         );
     }
@@ -1863,11 +1900,32 @@ mod tests {
         session.bundle_id = "local-bundle".into();
 
         assert_eq!(session.project_name(&config), "bifrost-dev");
-        assert_eq!(session.project_source(&config).short, "bifrost-dev");
+        assert_eq!(
+            session.project_source(&config),
+            ProjectSourceIdentity {
+                key: "path:/home/test/Projects/bifrost-dev".into(),
+                short: "bifrost-dev".into(),
+                full: "/home/test/Projects/bifrost-dev".into(),
+            }
+        );
 
         session.bundle_id = "missing-bundle".into();
         assert_eq!(session.project_name(&config), "missing-bundle");
-        assert_eq!(session.project_source(&config).short, "missing-bundle");
+        assert_eq!(
+            session.project_source(&config),
+            ProjectSourceIdentity {
+                key: "bundle:missing-bundle".into(),
+                short: "missing-bundle".into(),
+                full: "missing-bundle".into(),
+            }
+        );
+
+        let mut other_missing = session.clone();
+        other_missing.bundle_id = "another-missing-bundle".into();
+        assert_ne!(
+            session.project_source(&config).key,
+            other_missing.project_source(&config).key
+        );
     }
 
     #[test]
@@ -1891,16 +1949,20 @@ mod tests {
     }
 
     #[test]
-    fn project_source_uses_bundle_identity_and_ignores_managed_worktree_destinations() {
+    fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinations() {
         let config = sample_config();
         let mut session = sample_session();
         let source = session.project_source(&config);
-        assert_eq!(source.key, "bundle:hel");
+        assert_eq!(source.key, "github:brokkai/hel");
         assert_eq!(source.short, "hel");
-        assert_eq!(source.full, "hel");
+        assert_eq!(source.full, "BrokkAi/hel");
         assert_eq!(
             ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git"),
             ProjectSourceIdentity::git_remote("https://github.com/BrokkAi/bifrost-dev.git")
+        );
+        assert_ne!(
+            ProjectSourceIdentity::git_remote("BrokkAi/bifrost-dev"),
+            ProjectSourceIdentity::git_remote("OtherOrg/bifrost-dev")
         );
 
         session.project_directory = Some(PathBuf::from(
@@ -1922,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_project_sources_stay_separate_when_the_primary_repository_matches() {
+    fn single_repository_bundle_uses_the_standalone_repository_identity() {
         let mut config = sample_config();
         let shared_bundle = config.bundles["hel"].clone();
         config.bundles.insert("other".into(), shared_bundle);
@@ -1937,11 +1999,151 @@ mod tests {
         );
         let first_source = first.project_source(&config);
         let second_source = second.project_source(&config);
-        assert_eq!(first_source.short, "hel");
-        assert_eq!(second_source.short, "hel");
-        assert_eq!(first_source.full, "hel");
-        assert_eq!(second_source.full, "hel (other)");
-        assert_ne!(first_source.key, second_source.key);
+        let standalone = ProjectSourceIdentity::git_remote("BrokkAi/hel").unwrap();
+        assert_eq!(first_source, standalone);
+        assert_eq!(second_source, standalone);
+    }
+
+    #[test]
+    fn multi_repository_bundles_include_all_repositories_in_sorted_identity_order() {
+        let mut config = sample_config();
+        let primary = config.bundles["hel"].repositories[0].clone();
+        let secondary = ProjectRepository {
+            id: "docs".into(),
+            github: Some("BrokkAi/docs".into()),
+            local: None,
+            destination: PathBuf::from("docs"),
+            git_ref: None,
+        };
+        config.bundles.insert(
+            "with-docs".into(),
+            ProjectBundle {
+                primary_repo: primary.id.clone(),
+                repositories: vec![primary.clone(), secondary.clone()],
+            },
+        );
+        let mut session = sample_session();
+        session.bundle_id = "with-docs".into();
+
+        assert_eq!(session.project_name(&config), "docs + hel");
+        assert_eq!(
+            session.project_source(&config),
+            ProjectSourceIdentity {
+                key: "bundle:[\"github:brokkai/docs\",\"github:brokkai/hel\"]".into(),
+                short: "docs + hel".into(),
+                full: "BrokkAi/docs + BrokkAi/hel".into(),
+            }
+        );
+
+        let mut other_secondary = secondary;
+        other_secondary.github = Some("OtherOrg/docs".into());
+        config.bundles.insert(
+            "with-other-docs".into(),
+            ProjectBundle {
+                primary_repo: primary.id.clone(),
+                repositories: vec![primary, other_secondary],
+            },
+        );
+        let mut other_session = session.clone();
+        other_session.bundle_id = "with-other-docs".into();
+        assert_ne!(
+            session.project_source(&config).key,
+            other_session.project_source(&config).key
+        );
+    }
+
+    #[test]
+    fn multi_repository_bundle_identity_ignores_repository_order_and_primary_selection() {
+        let mut config = sample_config();
+        let primary = config.bundles["hel"].repositories[0].clone();
+        let secondary = ProjectRepository {
+            id: "docs".into(),
+            github: Some("BrokkAi/docs".into()),
+            local: None,
+            destination: PathBuf::from("docs"),
+            git_ref: None,
+        };
+        config.bundles.insert(
+            "first-order".into(),
+            ProjectBundle {
+                primary_repo: primary.id.clone(),
+                repositories: vec![primary.clone(), secondary.clone()],
+            },
+        );
+        config.bundles.insert(
+            "second-order".into(),
+            ProjectBundle {
+                primary_repo: secondary.id.clone(),
+                repositories: vec![secondary, primary],
+            },
+        );
+
+        let mut first = sample_session();
+        first.bundle_id = "first-order".into();
+        let mut second = first.clone();
+        second.bundle_id = "second-order".into();
+        assert_eq!(
+            first.project_source(&config),
+            second.project_source(&config)
+        );
+    }
+
+    #[test]
+    fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
+        let mut config = sample_config();
+        let primary = config.bundles["hel"].repositories[0].clone();
+        let duplicate = ProjectRepository {
+            id: "hel-copy".into(),
+            github: primary.github.clone(),
+            local: None,
+            destination: PathBuf::from("hel-copy"),
+            git_ref: None,
+        };
+        config.bundles.insert(
+            "duplicate".into(),
+            ProjectBundle {
+                primary_repo: primary.id.clone(),
+                repositories: vec![primary, duplicate],
+            },
+        );
+        let mut session = sample_session();
+        session.bundle_id = "duplicate".into();
+
+        let source = session.project_source(&config);
+        assert_eq!(
+            source,
+            ProjectSourceIdentity::git_remote("BrokkAi/hel").unwrap()
+        );
+    }
+
+    #[test]
+    fn unresolved_bundle_repository_uses_the_bundle_fallback() {
+        let mut config = sample_config();
+        config.bundles.insert(
+            "incomplete".into(),
+            ProjectBundle {
+                primary_repo: "broken".into(),
+                repositories: vec![ProjectRepository {
+                    id: "broken".into(),
+                    github: None,
+                    local: None,
+                    destination: PathBuf::from("broken"),
+                    git_ref: None,
+                }],
+            },
+        );
+        let mut session = sample_session();
+        session.bundle_id = "incomplete".into();
+
+        assert_eq!(session.project_name(&config), "incomplete");
+        assert_eq!(
+            session.project_source(&config),
+            ProjectSourceIdentity {
+                key: "bundle:incomplete".into(),
+                short: "incomplete".into(),
+                full: "incomplete".into(),
+            }
+        );
     }
 
     #[test]
