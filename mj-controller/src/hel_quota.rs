@@ -398,6 +398,14 @@ async fn refresh_profile(
             error: None,
             refreshed_at_epoch_seconds,
         }),
+        HarnessKind::Muse => Ok(ProfileQuota {
+            profile_id: profile_id.clone(),
+            harness,
+            windows: Vec::new(),
+            extra: Some("Quota unavailable".into()),
+            error: None,
+            refreshed_at_epoch_seconds,
+        }),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         profile_id,

@@ -9,7 +9,7 @@ A Mjolnir session is a durable conversation plus the target on which its coding 
 
 Press `Alt+N` anywhere in the terminal dashboard. The wizard resolves four things:
 
-1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, or DeepSeek Harness and the credentials to use.
+1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, DeepSeek Harness, or Muse Code and the credentials to use.
 2. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
 3. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
@@ -85,11 +85,44 @@ Resume provisions a fresh target and restores the verified archive; it does not 
 
 Cross-harness resume is supported. When the new profile uses a different harness, Mjolnir condenses the canonical transcript into a size-bounded handoff. The repository state and visible conversation survive, but harness-private implementation details do not become portable history.
 
+## Move a live session
+
+Use **Move…** from the session action menu when a live session should continue
+with another profile, target, or both. Move is one daemon-owned operation: it
+prepares and checks the destination, interrupts the active turn only after you
+confirm, captures a verified checkpoint, tears down the source, and restores
+the same logical session on a fresh destination.
+
+The web viewer and terminal confirmation show both source and destination. If
+the profile changes harness, the destination receives the same bounded
+transcript handoff used by cross-harness resume. A move does not migrate a
+running process, installed packages, container layers, or files outside the
+declared workspace. Target choices obey the current resume compatibility rules;
+unsupported host/worktree combinations fail before the source is interrupted.
+
+Queued prompts and configuration commands are listed during confirmation.
+**Discard queued work** is the default and leaves the destination idle.
+**Run queued work** restores the entries in their original order only after the
+destination is ready. An interrupted active prompt is never replayed
+automatically.
+
+The viewer keeps the source workspace's resource sizing and attached
+directories fixed. It offers one explicit confirmation to clear inherited
+resource sizing and use destination defaults; use the terminal Move wizard
+when you need to change attached resources.
+
+If destination launch fails, the session remains stopped with its verified
+checkpoint and the UI offers retry or resume with the previous settings. If
+queue admission fails after the destination is ready, the live destination is
+kept so accepted commands are not replayed on another target. Closing the
+browser or terminal does not cancel a move; use the operation cancellation
+control explicitly.
+
 For Codex, the archive includes the primary thread and child-agent results surfaced in its canonical transcript, not child agents' private rollouts. A stopped child agent cannot receive a follow-up after resume.
 
 ## Import a native harness session
 
-The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native Claude Code, Codex, Kimi Code, and Grok Build sessions can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. DeepSeek native import is not available.
+The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native Claude Code, Codex, Kimi Code, and Grok Build sessions can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. DeepSeek and Muse native import are not available.
 
 For scripting, select a specific native UUID or the latest session:
 

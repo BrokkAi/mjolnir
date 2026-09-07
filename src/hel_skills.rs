@@ -37,7 +37,8 @@ pub fn synced_skill_dirs(kind: HarnessKind) -> &'static [&'static str] {
         | HarnessKind::Claude
         | HarnessKind::Kimi
         | HarnessKind::Grok
-        | HarnessKind::Deepseek => &["skills"],
+        | HarnessKind::Deepseek
+        | HarnessKind::Muse => &["skills"],
     }
 }
 

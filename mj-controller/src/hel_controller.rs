@@ -4,6 +4,7 @@ mod backend;
 mod checkpoint;
 mod git_cache;
 mod lifecycle;
+pub mod move_session;
 mod provisioning;
 mod readiness;
 mod recovery_scan;
@@ -531,12 +532,15 @@ impl Controller {
         if project_directory.is_none() && bundle.is_none() {
             bail!("unknown bundle {bundle_id:?}");
         }
-        if profile.kind == hel::hel_config::HarnessKind::Deepseek
-            && (!additional_mounts.is_empty()
-                || bundle.is_some_and(|bundle| bundle.repositories.len() > 1))
+        if matches!(
+            profile.kind,
+            hel::hel_config::HarnessKind::Deepseek | hel::hel_config::HarnessKind::Muse
+        ) && (!additional_mounts.is_empty()
+            || bundle.is_some_and(|bundle| bundle.repositories.len() > 1))
         {
             bail!(
-                "DeepSeek Harness ACP supports one workspace root; use a single-repository bundle without attached directories"
+                "{} ACP supports one workspace root; use a single-repository bundle without attached directories",
+                profile.kind.display_name()
             );
         }
         let dirty = bundle
@@ -948,7 +952,7 @@ fn target_profile_home(
     session_id: &str,
     profile: &hel::hel_config::HarnessProfile,
 ) -> String {
-    match locator {
+    let home = match locator {
         hel_targets::TargetLocator::LocalBare { .. } => profile.home.to_string_lossy().into_owned(),
         hel_targets::TargetLocator::LocalPodman { .. }
         | hel_targets::TargetLocator::LocalDocker { .. }
@@ -960,6 +964,18 @@ fn target_profile_home(
         hel_targets::TargetLocator::AwsEc2 { .. } | hel_targets::TargetLocator::SshBare { .. } => {
             format!(".local/share/hel/profiles/{session_id}")
         }
+    };
+    if profile.kind == hel::hel_config::HarnessKind::Muse {
+        let root = if matches!(locator, hel_targets::TargetLocator::LocalBare { .. }) {
+            hel::hel_config::data_dir()
+                .join("profiles")
+                .join(session_id)
+        } else {
+            PathBuf::from(home)
+        };
+        root.join("muse").to_string_lossy().into_owned()
+    } else {
+        home
     }
 }
 

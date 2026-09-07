@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-anvil-llm.workspace = true
+anvil-client.workspace = true
 bytes = "1"
 cpal = "0.16"
 serde = { version = "1", features = ["derive"] }

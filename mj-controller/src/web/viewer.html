@@ -91,6 +91,20 @@
         <p id="resume-error" role="alert"></p>
       </section>
 
+      <section id="move-page" class="page hidden">
+        <h2>Move session</h2>
+        <p id="move-progress" class="dim"></p>
+        <form id="move-form" class="card">
+          <div id="move-step"></div>
+          <div class="row">
+            <button type="button" id="move-back" class="secondary">Back</button>
+            <button id="move-next">Prepare move</button>
+            <button type="button" class="secondary" data-route="dashboard">Cancel</button>
+          </div>
+        </form>
+        <p id="move-error" role="alert"></p>
+      </section>
+
       <section id="targets-page" class="page hidden">
         <h2>Targets</h2>
         <div id="targets"></div>

@@ -118,6 +118,13 @@ impl ReviewConfig {
     /// Naming a profile while disabled is valid: it is what a one-off `/review`
     /// needs.
     fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
+        if let Some(profile) = self.profile.as_ref().and_then(|id| profiles.get(id))
+            && !profile.kind.supports_injected_mcp()
+        {
+            bail!(
+                "Muse Code cannot be a reviewer because muse-acp does not accept the required MCP tools"
+            );
+        }
         if self.enabled && self.profile.is_none() {
             bail!(
                 "[review] enabled = true needs `profile` naming the harness profile that reviews"
@@ -149,6 +156,7 @@ pub enum HarnessKind {
     Kimi,
     Grok,
     Deepseek,
+    Muse,
 }
 
 /// The target-level execution policy Hel applies independently of the selected
@@ -234,16 +242,52 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
         HarnessKind::Kimi => "credentials/kimi-code.json",
         HarnessKind::Grok => "auth.json",
         HarnessKind::Deepseek => ".credentials.yaml",
+        HarnessKind::Muse => "auth.json",
     })
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 5] = [
+    /// Translate a harness home into its process environment. Muse's config
+    /// directory must be named `muse`, as required by the XDG directory layout.
+    pub fn configure_home_environment(
+        self,
+        home: &Path,
+        environment: &mut BTreeMap<String, String>,
+    ) {
+        let config_root = if self == Self::Muse {
+            environment.insert(
+                "XDG_DATA_HOME".into(),
+                home.join(".data").to_string_lossy().into_owned(),
+            );
+            home.parent().unwrap_or(home)
+        } else {
+            home
+        };
+        environment.insert(
+            self.home_env().into(),
+            config_root.to_string_lossy().into_owned(),
+        );
+    }
+
+    pub fn home_from_environment(self, value: impl AsRef<Path>) -> PathBuf {
+        if self == Self::Muse {
+            value.as_ref().join("muse")
+        } else {
+            value.as_ref().to_path_buf()
+        }
+    }
+
+    pub const fn supports_injected_mcp(self) -> bool {
+        !matches!(self, Self::Muse)
+    }
+
+    pub const ALL: [Self; 6] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
         Self::Grok,
         Self::Deepseek,
+        Self::Muse,
     ];
 
     /// Environment variable used to isolate this harness's configuration.
@@ -254,6 +298,7 @@ impl HarnessKind {
             Self::Kimi => "KIMI_CODE_HOME",
             Self::Grok => "GROK_HOME",
             Self::Deepseek => "DSH_HOME",
+            Self::Muse => "XDG_CONFIG_HOME",
         }
     }
 
@@ -266,6 +311,7 @@ impl HarnessKind {
             Self::Kimi => ".kimi-code",
             Self::Grok => ".grok",
             Self::Deepseek => ".dsh",
+            Self::Muse => ".config/muse",
         }
     }
 
@@ -277,6 +323,7 @@ impl HarnessKind {
             Self::Kimi => "kimi",
             Self::Grok => "grok",
             Self::Deepseek => "deepseek",
+            Self::Muse => "muse",
         }
     }
 
@@ -288,6 +335,7 @@ impl HarnessKind {
             Self::Kimi => "Kimi Code",
             Self::Grok => "Grok Build",
             Self::Deepseek => "DSH",
+            Self::Muse => "Muse Code",
         }
     }
 
@@ -300,6 +348,12 @@ impl HarnessKind {
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
+            (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
+                label: "auto / sandbox-off",
+                acp_mode: Some("auto"),
+                launch_flag: None,
+                launch_environment: Some(("MUSE_APPROVAL_MODE", "auto")),
+            }),
             // TODO: Remove this Codex workaround once codex-acp preserves
             // configured sandbox permissions across turns:
             // https://github.com/agentclientprotocol/codex-acp/issues/477
@@ -346,6 +400,15 @@ impl HarnessKind {
         policy: ExecutionPolicy,
         environment: &mut BTreeMap<String, String>,
     ) {
+        if self == Self::Muse && policy == ExecutionPolicy::Unconstrained {
+            let args = environment.entry("MUSE_SERVE_ARGS".into()).or_default();
+            if !args
+                .split_whitespace()
+                .any(|arg| arg == "--disable-sandbox")
+            {
+                args.push_str(" --disable-sandbox");
+            }
+        }
         if let Some((key, value)) = self
             .execution_enforcement(policy)
             .and_then(ExecutionEnforcement::launch_environment)
@@ -355,7 +418,7 @@ impl HarnessKind {
     }
 
     pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(self, Self::Codex | Self::Claude | Self::Grok)
+        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
     }
 
     /// Shared warning for selecting a harness without guardian approvals on a
@@ -383,7 +446,7 @@ impl HarnessKind {
     pub fn bridge_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
         let flag = self.launch_flag_for(policy);
         match self {
-            Self::Codex | Self::Claude | Self::Deepseek => Vec::new(),
+            Self::Codex | Self::Claude | Self::Deepseek | Self::Muse => Vec::new(),
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
         }
@@ -426,6 +489,16 @@ impl HarnessProfile {
 
     fn validate(&self, id: &str) -> Result<()> {
         validate_id("profile", id)?;
+        if self.kind == HarnessKind::Muse {
+            if self.home.file_name().is_none_or(|name| name != "muse") {
+                bail!(
+                    "Muse profile {id:?} home must end in /muse (its XDG configuration directory)"
+                );
+            }
+            if self.environment.contains_key("XDG_DATA_HOME") {
+                bail!("Muse profile {id:?} must not override its managed XDG_DATA_HOME");
+            }
+        }
         if self.home.as_os_str().is_empty() {
             bail!("profile {id:?} has an empty home path");
         }
@@ -1501,6 +1574,49 @@ fn atomic_write_with_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
+        let home = Path::new("/private/session/muse");
+        let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
+        HarnessKind::Muse.configure_home_environment(home, &mut environment);
+        assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
+        assert_eq!(environment["XDG_DATA_HOME"], "/private/session/muse/.data");
+        assert_eq!(
+            HarnessKind::Muse.home_from_environment(&environment["XDG_CONFIG_HOME"]),
+            home
+        );
+        assert_eq!(
+            harness_authentication_marker(HarnessKind::Muse, home),
+            home.join("auth.json")
+        );
+    }
+
+    #[test]
+    fn muse_guardian_preserves_policy_and_unconstrained_launch_is_explicit() {
+        let original = BTreeMap::from([
+            ("MUSE_APPROVAL_MODE".into(), "ask".into()),
+            (
+                "MUSE_SERVE_ARGS".into(),
+                "--sandbox-network restricted".into(),
+            ),
+        ]);
+        let mut environment = original.clone();
+        HarnessKind::Muse.configure_execution_environment(
+            ExecutionPolicy::ConfiguredApprovals,
+            &mut environment,
+        );
+        assert_eq!(environment, original);
+        HarnessKind::Muse
+            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment);
+        HarnessKind::Muse
+            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment);
+        assert_eq!(environment["MUSE_APPROVAL_MODE"], "auto");
+        assert_eq!(
+            environment["MUSE_SERVE_ARGS"],
+            "--sandbox-network restricted --disable-sandbox"
+        );
+    }
 
     fn sample_config() -> HelConfig {
         HelConfig {

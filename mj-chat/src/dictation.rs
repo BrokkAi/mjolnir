@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anvil_llm::codex_auth::read_auth_dot_json_at;
+use anvil_client::codex_auth::read_auth_dot_json_at;
 use hel::hel_config::{HarnessKind, HelConfig};
 
 pub(crate) fn auth_paths(config: &HelConfig, preferred: &str) -> Vec<PathBuf> {

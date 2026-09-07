@@ -345,10 +345,9 @@ pub(crate) fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefres
         .iter()
         .map(|(id, profile)| {
             let mut environment = profile.environment.clone();
-            environment.insert(
-                profile.home_env().to_string(),
-                profile.home.to_string_lossy().into_owned(),
-            );
+            profile
+                .kind
+                .configure_home_environment(&profile.home, &mut environment);
             QuotaRefreshRequest {
                 profile_id: id.clone(),
                 harness: profile.kind,
@@ -1466,6 +1465,8 @@ pub(crate) struct RemoteDashboardWorkerPoller {
     pub(crate) control: SessionManagerControl,
     pub(crate) shutdown: SessionManagerShutdown,
     pub(crate) lifecycles: tokio::sync::watch::Receiver<Vec<daemon::RuntimeLifecycleView>>,
+    /// Durable Move intents, including retained failed/cancelled recovery.
+    pub(crate) moves: tokio::sync::watch::Receiver<Vec<hel::hel_state::MoveOperation>>,
     /// Reviews the daemon is running for this workspace's sessions.
     pub(crate) reviews:
         tokio::sync::watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>,
@@ -1798,6 +1799,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
         mut requests,
     } = channels;
     let (lifecycle_tx, lifecycle_rx) = tokio::sync::watch::channel(Vec::new());
+    let (moves_tx, moves_rx) = tokio::sync::watch::channel(Vec::new());
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
     let (config_tx, config_rx) = tokio::sync::watch::channel(hel::hel_config::HelConfig::default());
@@ -1823,6 +1825,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
                                 else { records.clone_from(&snapshot.records); true }
                             });
                             lifecycle_tx.send_replace(snapshot.lifecycles);
+                            moves_tx.send_replace(snapshot.moves);
                             reviews_tx.send_replace(snapshot.reviews);
                             notices_tx.send_replace(snapshot.notices);
                         }
@@ -1844,6 +1847,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
         control,
         shutdown,
         lifecycles: lifecycle_rx,
+        moves: moves_rx,
         reviews: reviews_rx,
         notices: notices_rx,
         config: config_rx,
@@ -2171,6 +2175,7 @@ pub(crate) enum LifecycleSuccess {
         profile_id: String,
         target_id: String,
     },
+    Moved(hel::hel_state::MoveOutcome),
     Closed,
     ForceStopped,
     DestroyedStopped,

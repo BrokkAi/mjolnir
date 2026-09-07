@@ -1,4 +1,4 @@
-use anvil_llm::{codex_client::CodexClient, transcribe::TranscribeRequest};
+use anvil_client::{codex_client::CodexClient, transcribe::TranscribeRequest};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use cpal::SampleFormat;

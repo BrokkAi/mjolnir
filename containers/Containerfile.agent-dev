@@ -181,6 +181,11 @@ RUN printf '%s\n' \
         > /etc/profile.d/10-cargo-path.sh \
     && bash -lc 'command -v cargo && command -v samply'
 
+COPY mj-worker/assets/muse/runtime.json /opt/mjolnir/muse-runtime.json
+COPY scripts/install-muse.py /opt/mjolnir/install-muse.py
+RUN python3 /opt/mjolnir/install-muse.py /opt/mjolnir/muse-runtime.json /usr/local/bin
+ENV MUSE_CLI=/usr/local/bin/muse
+
 RUN useradd --create-home --shell /bin/bash hel \
     && mkdir -p /workspace /var/lib/hel \
     && chown -R hel:hel /workspace /var/lib/hel \

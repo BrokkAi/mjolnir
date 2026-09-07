@@ -285,7 +285,7 @@ fn event_digest(value: u64) -> String {
     format!("{value:064x}")
 }
 
-fn session(id: &str, bundle: &str) -> SessionRecord {
+pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
@@ -569,7 +569,8 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_pane_sizes;
+            "DROP TABLE session_moves;
+             DROP TABLE workspace_pane_sizes;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
              DELETE FROM schema_migrations WHERE version > 21;
              PRAGMA user_version = 21;",
@@ -945,6 +946,11 @@ fn version_thirteen_restores_checkpointed_lost_sessions_to_recoverable_errors() 
 /// after it created. Re-running a migration over its own table fails, so a
 /// rewind has to undo the table as well as the version marker.
 fn rewind_schema_to(connection: &Connection, version: i64) {
+    if version < 26 {
+        connection
+            .execute_batch("DROP TABLE IF EXISTS session_moves;")
+            .unwrap();
+    }
     for table in [
         "turn_review_state",
         "second_opinion_reviews",
@@ -2032,6 +2038,75 @@ fn a_fresh_database_accepts_a_session_for_every_harness_kind() {
                 .get::<_, usize>(0))
             .unwrap(),
         HarnessKind::ALL.len()
+    );
+}
+
+#[test]
+fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    let connection = open(&database).unwrap();
+    connection.execute_batch("INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('existing','project','now');
+        INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at,draft_input)
+        VALUES ('existing','Existing','codex','codex','local','running','now','keep this draft');
+        INSERT INTO hidden_native_sessions VALUES ('claude','native-existing','now');
+        CREATE INDEX migration_fixture_index ON sessions(title);
+        PRAGMA writable_schema=ON;
+        UPDATE sqlite_schema SET sql=replace(sql, ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
+        PRAGMA writable_schema=OFF;
+        PRAGMA schema_version=1000;
+        DELETE FROM schema_migrations WHERE version=27;
+        PRAGMA user_version=26;").unwrap();
+    drop(connection);
+    let connection = open(&database).unwrap();
+    let draft: String = connection
+        .query_row(
+            "SELECT draft_input FROM sessions WHERE session_id='existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(draft, "keep this draft");
+    connection
+        .execute(
+            "UPDATE sessions SET harness_kind='muse' WHERE session_id='existing'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO hidden_native_sessions VALUES ('muse','native-muse','now')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM hidden_native_sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert!(
+        connection
+            .prepare("SELECT 1 FROM sqlite_schema WHERE name='migration_fixture_index'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    assert!(
+        !connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    drop(connection);
+    assert_eq!(
+        open(&database)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
     );
 }
 
@@ -3684,7 +3759,8 @@ fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_pane_sizes;
+            "DROP TABLE session_moves;
+             DROP TABLE workspace_pane_sizes;
              DELETE FROM schema_migrations WHERE version > 24;
              PRAGMA user_version = 24;",
         )
@@ -4095,7 +4171,8 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_pane_sizes;
+            "DROP TABLE session_moves;
+             DROP TABLE workspace_pane_sizes;
              DELETE FROM schema_migrations WHERE version > 20;
              PRAGMA user_version = 20;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
@@ -4214,6 +4291,7 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
     connection.execute_batch("PRAGMA writable_schema = ON;
         UPDATE sqlite_master SET sql = replace(replace(sql, ',''ssh-docker''', ''), '''ssh-podman'',''ssh-docker''', '''ssh-podman''') WHERE name = 'session_targets';
         PRAGMA writable_schema = OFF;
+        DROP TABLE session_moves;
         DROP TABLE workspace_pane_sizes;
         DELETE FROM schema_migrations WHERE version > 23;
         PRAGMA user_version = 23;").unwrap();

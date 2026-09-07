@@ -188,7 +188,7 @@ pub(crate) const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 /// A v1 snapshot is upgraded in place to the current schema on open (its stored
 /// frontier digests stay valid, since each is recomputed with the formula that
 /// matches the record's format).
-const RELAY_STATE_VERSION: u32 = 2;
+const RELAY_STATE_VERSION: u32 = 3;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -435,6 +435,13 @@ impl DurableRelay {
             snapshot
         };
 
+        let assigned_store_id = snapshot.store_id.is_none();
+        if assigned_store_id {
+            let mut random = [0u8; 16];
+            getrandom::fill(&mut random)
+                .map_err(|error| anyhow::anyhow!("generate worker store identity: {error}"))?;
+            snapshot.store_id = Some(format!("{:032x}", u128::from_le_bytes(random)));
+        }
         validate_relay_snapshot_frontiers(&snapshot)?;
         let retained_through = snapshot.retained_through();
         let retained_digest = snapshot.retained_digest().to_owned();
@@ -484,7 +491,7 @@ impl DurableRelay {
             relay.snapshot.idle_since_ms = None;
             relay.snapshot.activity_was_idle = Some(idle);
         }
-        if !state_path.exists() || replayed {
+        if !state_path.exists() || replayed || assigned_store_id {
             relay.persist_snapshot()?;
         }
         relay.adopt_unqueued_queue_commands()?;
@@ -2951,6 +2958,26 @@ mod tests {
         assert_eq!(relay.operational_state().idle_since_ms, idle_since);
         relay.record_session_update(tool_call_update()).unwrap();
         assert_eq!(relay.operational_state().idle_since_ms, None);
+    }
+
+    #[test]
+    fn relay_store_identity_survives_restart_but_distinguishes_a_fresh_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let relay = DurableRelay::open(&first, "session-one", "test").unwrap();
+        let identity = relay.operational_state().store_id.unwrap();
+        drop(relay);
+        let reopened = DurableRelay::open(&first, "session-one", "test").unwrap();
+        assert_eq!(
+            reopened.operational_state().store_id.as_deref(),
+            Some(identity.as_str())
+        );
+        let fresh =
+            DurableRelay::open(directory.path().join("fresh"), "session-one", "test").unwrap();
+        assert_ne!(
+            fresh.operational_state().store_id.as_deref(),
+            Some(identity.as_str())
+        );
     }
 
     #[test]

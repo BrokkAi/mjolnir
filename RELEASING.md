@@ -119,3 +119,8 @@ Confirm that:
    the shipped behavior.
 5. The release commit is merged and the tagged commit is the exact commit meant
    to be published.
+6. Publishing authorization is verified for every registry package using the
+   intended publisher. Check the exact repository, workflow, and environment
+   for each trusted-publisher configuration. Package existence, ownership of
+   sibling crates, green CI, and successful dry-runs do not establish this
+   authorization. Stop before tagging if any package's access is unverified.

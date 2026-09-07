@@ -1,0 +1,9 @@
+**
+!containers/
+!containers/Containerfile.agent-dev
+!scripts/
+!scripts/install-muse.py
+!mj-worker/
+!mj-worker/assets/
+!mj-worker/assets/muse/
+!mj-worker/assets/muse/runtime.json

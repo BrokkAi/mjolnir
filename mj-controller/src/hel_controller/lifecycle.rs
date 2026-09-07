@@ -32,7 +32,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if self
-            .close_session_controlled_with_manager(session_id, executor, None)
+            .close_session_controlled_with_manager(session_id, executor, None, None)
             .await?
         {
             self.cleanup_stopped_target(session_id, executor)?;
@@ -46,8 +46,25 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<bool> {
-        self.close_session_controlled_with_manager(session_id, executor, Some(manager))
+        self.close_session_controlled_with_manager(session_id, executor, Some(manager), None)
             .await
+    }
+
+    pub(super) async fn close_session_for_move(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+        operation: &mut hel::hel_state::MoveOperation,
+        preparation: Option<&hel::hel_state::MovePreparation>,
+    ) -> Result<bool> {
+        self.close_session_controlled_with_manager(
+            session_id,
+            executor,
+            Some(manager),
+            Some((operation, preparation)),
+        )
+        .await
     }
 
     async fn close_session_controlled_with_manager(
@@ -55,6 +72,10 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
+        move_intent: Option<(
+            &mut hel::hel_state::MoveOperation,
+            Option<&hel::hel_state::MovePreparation>,
+        )>,
     ) -> Result<bool> {
         let previous = self
             .state
@@ -110,6 +131,24 @@ impl Controller {
             &previous,
             "persist verified checkpoint and closing state before sealing the relay",
         )?;
+        if let Some((operation, preparation)) = move_intent {
+            // The source is still behind an unsealed barrier. A destination
+            // preflight error must release it and leave its processes alive.
+            if let Err(error) = self.validate_move_checkpoint(operation, preparation, executor) {
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.state = previous.state;
+                record.last_error = Some(format!("{error:#}"));
+                self.persist_session_transition_or_restore(
+                    session_id,
+                    &previous,
+                    "restore source after move preflight failure",
+                )?;
+                return Err(error);
+            }
+            operation.checkpoint = Some(artifact.metadata.clone());
+            operation.updated_at = now();
+            hel::hel_database::save_move_operation(operation)?;
+        }
         prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
         // A stopping session will not checkpoint again, so this is its last
         // chance to release what its checkpoint now covers.
@@ -206,7 +245,12 @@ impl Controller {
             RelayExecutionState::Idle | RelayExecutionState::Running => {
                 lease.release();
                 return self
-                    .close_session_controlled_with_manager(session_id, executor, Some(manager))
+                    .close_session_controlled_with_manager(
+                        session_id,
+                        executor,
+                        Some(manager),
+                        None,
+                    )
                     .await;
             }
         }

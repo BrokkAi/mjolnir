@@ -318,7 +318,7 @@ pub struct GrokImportRequest<'a> {
 pub fn harness_config_home(kind: HarnessKind) -> Result<PathBuf> {
     let name = kind.display_name();
     let home = std::env::var_os(kind.home_env())
-        .map(PathBuf::from)
+        .map(|path| kind.home_from_environment(path))
         .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
         .with_context(|| format!("cannot determine {name} home; set {}", kind.home_env()))?;
     ensure!(
@@ -379,6 +379,9 @@ pub fn locate_native_session(
     selection: &ClaudeSessionSelection,
 ) -> Result<LocatedNativeSession> {
     let (native_session_id, source_path) = match harness {
+        HarnessKind::Muse => bail!(
+            "Muse Code native import is unavailable; create and resume Muse sessions through Mjolnir"
+        ),
         HarnessKind::Codex => {
             let located = locate_codex_session(home, selection)?;
             (located.native_session_id, located.jsonl_path)
@@ -411,6 +414,7 @@ pub fn read_native_transcript(
     source_path: &Path,
 ) -> Result<ClaudeTranscript> {
     match harness {
+        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
         HarnessKind::Codex => read_codex_transcript(source_path),
         HarnessKind::Claude => read_claude_transcript(source_path),
         HarnessKind::Kimi => read_kimi_transcript(source_path),
@@ -435,6 +439,7 @@ pub fn scan_native_sessions(
         });
     };
     match harness {
+        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
         HarnessKind::Codex => scan_codex_sessions(home, |progress| {
             let session = progress.session.map(|session| NativeSessionListing {
                 unavailable_reason: session.history_mode.import_issue(),

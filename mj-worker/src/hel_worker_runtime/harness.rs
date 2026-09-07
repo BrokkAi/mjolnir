@@ -141,6 +141,12 @@ fn resolve_at(
     drop(install_lock);
 
     let mut launch_environment = BTreeMap::new();
+    if harness == HarnessKind::Muse {
+        launch_environment.insert(
+            "MUSE_CLI".into(),
+            install.join("bin/muse").to_string_lossy().into_owned(),
+        );
+    }
     if harness == HarnessKind::Codex {
         launch_environment.insert(
             "CODEX_PATH".to_owned(),
@@ -217,6 +223,7 @@ fn install_into(
         )?,
         HarnessKind::Kimi => install_kimi(staging.path(), environment)?,
         HarnessKind::Grok => install_grok(staging.path(), environment)?,
+        HarnessKind::Muse => install_muse(staging.path(), environment)?,
     }
     validate_entrypoint(staging.path(), selected, harness)?;
     open_lock(&staging.path().join(LEASE_FILE))?;
@@ -271,6 +278,82 @@ fn install_npm(
         .current_dir(staging);
     apply_path(&mut command, environment);
     run_checked(&mut command, "install exact managed npm harness")
+}
+
+fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    use hel::hel_harness_runtime::{MUSE_ACP_VERSION, MUSE_VERSION};
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../../assets/muse/runtime.json"))?;
+    anyhow::ensure!(
+        metadata["adapter_version"] == MUSE_ACP_VERSION && metadata["muse_version"] == MUSE_VERSION,
+        "Muse download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("Muse Code does not have a managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing Muse artifact field {name}"))
+    };
+    let bin = staging.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let archive = staging.join("muse-acp.tar.gz");
+    let adapter_target = field("adapter_target")?;
+    let url = format!(
+        "https://github.com/BrokkAi/muse-acp/releases/download/v{MUSE_ACP_VERSION}/muse-acp-v{MUSE_ACP_VERSION}-{adapter_target}.tar.gz"
+    );
+    download_verified(&url, &archive, field("adapter_sha256")?, environment)?;
+    let mut tar = Command::new("tar");
+    tar.arg("-xzf")
+        .arg(&archive)
+        .arg("--strip-components=1")
+        .arg("-C")
+        .arg(&bin);
+    apply_path(&mut tar, environment);
+    run_checked(&mut tar, "extract verified Muse ACP archive")?;
+    std::fs::remove_file(archive)?;
+    let muse_target = field("muse_target")?;
+    let url = format!(
+        "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version={MUSE_VERSION}&file=muse-{muse_target}"
+    );
+    let muse = bin.join("muse");
+    download_verified(&url, &muse, field("muse_sha256")?, environment)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&muse, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+fn download_verified(
+    url: &str,
+    destination: &Path,
+    expected: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut curl = Command::new("curl");
+    curl.args([
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "-fLsS",
+        "--connect-timeout",
+        "30",
+        "--max-time",
+        "600",
+        "-o",
+    ])
+    .arg(destination)
+    .arg(url);
+    apply_path(&mut curl, environment);
+    run_checked(&mut curl, "download pinned Muse runtime")?;
+    let actual = hel::hel_worker_launch::worker_executable_digest(destination)?;
+    anyhow::ensure!(
+        actual == expected,
+        "Muse runtime checksum mismatch for {}: expected {expected}, got {actual}",
+        destination.display()
+    );
+    Ok(())
 }
 
 fn require_node_22(environment: &BTreeMap<String, String>) -> Result<()> {
@@ -404,7 +487,8 @@ fn complete_install(path: &Path, harness: HarnessKind, selected: HarnessPin) -> 
     {
         return Ok(false);
     }
-    Ok(entrypoint_is_executable(&path.join(selected.entrypoint)))
+    Ok(entrypoint_is_executable(&path.join(selected.entrypoint))
+        && (harness != HarnessKind::Muse || entrypoint_is_executable(&path.join("bin/muse"))))
 }
 
 fn validate_entrypoint(path: &Path, selected: HarnessPin, harness: HarnessKind) -> Result<()> {
@@ -485,6 +569,93 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    #[test]
+    fn muse_download_rejects_corrupt_payload_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path().join("tools");
+        executable(
+            &tools.join("curl"),
+            "#!/bin/sh\nwhile [ \"$1\" != '-o' ]; do shift; done\nshift\nprintf corrupted > \"$1\"\n",
+        );
+        let environment = BTreeMap::from([("PATH".into(), tools.to_string_lossy().into_owned())]);
+        let output = temp.path().join("download");
+        let error = download_verified(
+            "https://example.invalid/muse",
+            &output,
+            &"0".repeat(64),
+            &environment,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        let cache = temp.path().join("cache");
+        let error = resolve_at(
+            &cache,
+            HarnessKind::Muse,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert!(
+            !cache
+                .join("muse")
+                .join(pin(HarnessKind::Muse).install_id)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn muse_incomplete_install_requires_both_executables() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = pin(HarnessKind::Muse);
+        complete_fake(
+            temp.path(),
+            HarnessKind::Muse,
+            selected.install_id,
+            selected.entrypoint,
+        );
+        let install = temp.path().join(selected.install_id);
+        assert!(!complete_install(&install, HarnessKind::Muse, selected).unwrap());
+        executable(&install.join("bin/muse"), "#!/bin/sh\nexit 0\n");
+        assert!(complete_install(&install, HarnessKind::Muse, selected).unwrap());
+    }
+
+    #[test]
+    #[ignore = "downloads the pinned Muse runtime and adapter from their publishers"]
+    fn muse_real_install_is_verified_concurrent_and_reusable() {
+        let parent =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/muse-integration-inspect");
+        std::fs::create_dir_all(&parent).unwrap();
+        let temp = tempfile::tempdir_in(parent).unwrap();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                resolve_at(
+                    temp.path(),
+                    HarnessKind::Muse,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+            });
+            let second = scope.spawn(|| {
+                resolve_at(
+                    temp.path(),
+                    HarnessKind::Muse,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &BTreeMap::new(),
+                )
+                .unwrap()
+            });
+            let first = first.join().unwrap();
+            let second = second.join().unwrap();
+            assert_eq!(first.command, second.command);
+            let mut muse = Command::new(&first.environment["MUSE_CLI"]);
+            muse.arg("--version");
+            run_checked(&mut muse, "verify installed Muse executable").unwrap();
+            assert!(entrypoint_is_executable(&first.command));
+        });
+    }
     use hel::hel_harness_runtime::{
         CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, CODEX_CLI_VERSION, DEEPSEEK_ACP_VERSION,
         DEEPSEEK_DSH_VERSION,
@@ -632,8 +803,10 @@ mod tests {
         assert!(root.join("old").exists());
 
         drop(old_lease);
-        gc_harness_root(&root, "current").unwrap();
-        assert!(!root.join("old").exists());
+        assert_lease_released(|| {
+            gc_harness_root(&root, "current").unwrap();
+            !root.join("old").exists()
+        });
         assert!(root.join("current").exists());
     }
 
@@ -667,7 +840,24 @@ mod tests {
             Err(std::fs::TryLockError::WouldBlock)
         ));
         drop(supervisor);
-        exclusive.try_lock().unwrap();
+        assert_lease_released(|| match exclusive.try_lock() {
+            Ok(()) => true,
+            Err(std::fs::TryLockError::WouldBlock) => false,
+            Err(std::fs::TryLockError::Error(error)) => panic!("lease lock failed: {error}"),
+        });
+    }
+
+    // Parallel process-spawning tests can briefly inherit CLOEXEC descriptors
+    // between fork and exec. Closing our copy need not release the lock yet.
+    fn assert_lease_released(mut released: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !released() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lease was not released"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

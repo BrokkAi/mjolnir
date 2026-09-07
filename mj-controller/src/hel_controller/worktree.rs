@@ -599,7 +599,7 @@ fn converted_raw_bundle(
 /// Where a checkout stands: its head commit and, unless detached, its branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CheckoutPosition {
-    head_commit: String,
+    pub(super) head_commit: String,
     branch: Option<String>,
 }
 

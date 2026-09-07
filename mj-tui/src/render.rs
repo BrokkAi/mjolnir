@@ -1508,7 +1508,9 @@ fn session_values(
 fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
     if matches!(
         operation.kind,
-        SessionOperationKind::Launching | SessionOperationKind::Resuming
+        SessionOperationKind::Launching
+            | SessionOperationKind::Resuming
+            | SessionOperationKind::Moving
     ) && !operation.active_stages.is_empty()
     {
         let label = operation

@@ -19,7 +19,8 @@ use ratatui::layout::Rect;
 
 use hel::hel_config::{HarnessKind, HelConfig, TargetTemplate as HelTargetTemplate};
 use hel::hel_state::{
-    HelState, ProjectSourceIdentity, SessionRecord, SessionResourceAllocation, SessionState,
+    HelState, MoveOperation, ProjectSourceIdentity, ResumeQueueDisposition, SessionRecord,
+    SessionResourceAllocation, SessionState,
 };
 use hel::hel_targets::AdditionalMount;
 use mj_chat::hel_chat::Notices;
@@ -192,6 +193,29 @@ pub enum DashboardAction {
         resource_allocation: Option<SessionResourceAllocation>,
         discard_queue: bool,
     },
+    /// Move a live session through one daemon-owned stop/resume operation.
+    /// The workspace is intentionally absent: it is fixed by the dashboard
+    /// attachment and never offered as a move selector.
+    MoveSession {
+        session_id: String,
+        profile_id: String,
+        target_template_id: String,
+        additional_mounts: Vec<AdditionalMount>,
+        resource_allocation: Option<SessionResourceAllocation>,
+        clear_resource_allocation: bool,
+        preparation_requested: bool,
+        queue: Option<ResumeQueueDisposition>,
+    },
+    /// Retry a retained Move checkpoint, using the exact failed destination
+    /// and queue disposition recorded by the daemon.
+    RetryMove {
+        operation: Box<MoveOperation>,
+    },
+    /// Resume a retained Move checkpoint with the source settings recorded
+    /// before interruption.
+    ResumeMove {
+        operation: Box<MoveOperation>,
+    },
     PreflightResumeRepositories {
         launch: Box<DashboardAction>,
     },
@@ -314,6 +338,7 @@ pub enum WebViewerAccess {
 pub enum SessionOperationKind {
     Launching,
     Resuming,
+    Moving,
     Stopping,
     Destroying,
     Connecting,
@@ -325,6 +350,7 @@ impl SessionOperationKind {
         match self {
             Self::Launching => "Launch",
             Self::Resuming => "Resuming",
+            Self::Moving => "Moving",
             Self::Stopping => "Stopping",
             Self::Destroying => "Destroying",
             Self::Connecting => "Connecting",
@@ -478,6 +504,9 @@ pub struct DashboardState {
     pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
     pub(crate) session_operations: BTreeMap<String, SessionOperationDisplay>,
+    /// Durable move intents retained by the daemon, including failed and
+    /// cancelled operations that still have an explicit recovery action.
+    pub(crate) move_operations: BTreeMap<String, MoveOperation>,
     pub(crate) capacity_details: BTreeMap<String, CapacityDetail>,
     /// Selection anchor for the Sessions pane, by id rather than position: the
     /// pane shows different row sets at different explicit sizes, so a
@@ -569,6 +598,7 @@ impl DashboardState {
             project_sources: BTreeMap::new(),
             checkpoint_archive_sizes: BTreeMap::new(),
             session_operations: BTreeMap::new(),
+            move_operations: BTreeMap::new(),
             capacity_details: BTreeMap::new(),
             selected_session_id: None,
             sessions_scroll: Cell::new(0),
@@ -842,14 +872,17 @@ impl DashboardState {
             return DashboardAction::PasteFromClipboard;
         }
         let text_focused = self.text_input_focused();
-        if text_focused && dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
+        let cancel_shortcut = key.code == KeyCode::Char('c')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || dashboard_accelerator(key.modifiers));
+        if text_focused && cancel_shortcut {
             self.cancel_modal();
             return DashboardAction::None;
         }
         // Ctrl-C belongs to the prompt or a text field. Everywhere else it is
         // intentionally inert, including modal controls that happen to use
         // the letter `c` for another purpose.
-        if dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
+        if cancel_shortcut {
             return DashboardAction::None;
         }
 
@@ -1126,6 +1159,23 @@ impl DashboardState {
                 "{} is in progress; press Alt-X to cancel it.",
                 operation.kind.label()
             ));
+            return DashboardAction::None;
+        }
+        if let Some(operation) = self
+            .move_operations
+            .get(&session.id)
+            .filter(|operation| {
+                matches!(
+                    operation.phase,
+                    hel::hel_state::MovePhase::Failed | hel::hel_state::MovePhase::Cancelled
+                ) && (operation.checkpoint.is_some()
+                    || (operation.queue_admission_started && !operation.queue_admission_finished))
+            })
+            .cloned()
+        {
+            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
+                operation: Box::new(operation),
+            }));
             return DashboardAction::None;
         }
         // A failed session has two reasonable answers - read what it did, or

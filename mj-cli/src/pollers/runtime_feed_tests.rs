@@ -60,6 +60,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         acknowledged_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
         recovery_floor_ordinal: 0,
         recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        store_id: None,
         native_session_id: None,
         acp_ready: None,
         agent_capabilities: None,
@@ -122,6 +123,7 @@ fn snapshot(
         records,
         sessions,
         lifecycles: Vec::new(),
+        moves: Vec::new(),
         reviews: Vec::new(),
         notices: Vec::new(),
     }

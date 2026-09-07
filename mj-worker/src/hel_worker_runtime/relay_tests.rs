@@ -728,6 +728,27 @@ fn installing_over_a_symlink_leaves_the_link_target_untouched() {
 }
 
 #[test]
+fn muse_relative_roots_resolve_before_credential_and_history_access() {
+    let mut config = launch_config("unused");
+    config.harness = hel::hel_config::HarnessKind::Muse;
+    config.environment.clear();
+    config
+        .harness
+        .configure_home_environment(Path::new("profiles/session/muse"), &mut config.environment);
+    resolve_relative_harness_home(&mut config, Path::new("/home/remote"));
+    let endpoint = credential_endpoint(&config).unwrap();
+    assert_eq!(
+        endpoint.home,
+        Path::new("/home/remote/profiles/session/muse")
+    );
+    assert_eq!(endpoint.marker, endpoint.home.join("auth.json"));
+    assert_eq!(
+        config.environment["XDG_DATA_HOME"],
+        "/home/remote/profiles/session/muse/.data"
+    );
+}
+
+#[test]
 fn a_launch_config_without_a_harness_home_cannot_serve_credentials() {
     let mut config = launch_config("/profile");
     config.environment.clear();

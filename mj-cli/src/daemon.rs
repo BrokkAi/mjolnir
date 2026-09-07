@@ -1,5 +1,10 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+mod session_move;
+use mj_controller::hel_controller::move_session::{
+    MoveMutationGuard, MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest,
+};
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -49,7 +54,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 9;
+pub(crate) const PROTOCOL_VERSION: u32 = 10;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -173,6 +178,8 @@ pub(crate) struct RuntimeNotice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeSnapshot {
+    #[serde(default)]
+    pub moves: Vec<hel::hel_state::MoveOperation>,
     pub revision: u64,
     pub config: HelConfig,
     pub records: Vec<SessionRecord>,
@@ -192,6 +199,7 @@ pub(crate) enum RuntimeLifecycleKind {
     Create,
     Close,
     Resume,
+    Move,
     ForceStop,
     DestroyStopped,
     ForceDestroy,
@@ -416,6 +424,8 @@ enum DaemonAction {
         session_id: String,
     },
     ResumeSession(ResumeSessionRequest),
+    PrepareMoveSession(MoveSelection),
+    MoveSession(MoveSessionRequest),
     ForceStopSession {
         session_id: String,
     },
@@ -464,6 +474,8 @@ enum DaemonReply {
     Snapshot(WorkspaceSnapshot),
     RuntimeSnapshot(Box<RuntimeSnapshot>),
     RegisteredSession(Box<RegisteredSession>),
+    MovePreparation(Box<MovePreparation>),
+    MoveOutcome(MoveOutcome),
     Ordinal(u64),
     Text(String),
     OptionalSessionState(Option<SessionState>),
@@ -642,6 +654,7 @@ enum LifecycleKind {
     Create,
     Close,
     Resume,
+    Move,
     ForceStop,
     DestroyStopped,
     ForceDestroy,
@@ -653,7 +666,19 @@ enum LifecycleKind {
 /// relay lease through checkpointing and sealing; once the durable state says
 /// `Destroying`, that lease has been released and target teardown is exclusive.
 fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    kind != LifecycleKind::Close || state == Some(SessionState::Destroying)
+    match kind {
+        LifecycleKind::Close => state == Some(SessionState::Destroying),
+        LifecycleKind::Move => !matches!(
+            state,
+            Some(
+                SessionState::Running
+                    | SessionState::Disconnected
+                    | SessionState::Checkpointing
+                    | SessionState::Closing
+            )
+        ),
+        _ => true,
+    }
 }
 
 struct ActiveLifecycle {
@@ -666,6 +691,9 @@ struct ActiveLifecycle {
     resume_workspace_id: Option<String>,
     resume_destination: Option<(String, String)>,
     notice: Option<String>,
+    request_key: Option<String>,
+    _move_guard: Option<MoveMutationGuard>,
+    move_source_closed: bool,
     result:
         tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
 }
@@ -674,6 +702,7 @@ struct ActiveLifecycle {
 enum DaemonLifecycleResult {
     Done,
     DeferredCleanup,
+    Move(MoveOutcome),
 }
 
 impl From<LifecycleKind> for RuntimeLifecycleKind {
@@ -682,6 +711,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::Create => Self::Create,
             LifecycleKind::Close => Self::Close,
             LifecycleKind::Resume => Self::Resume,
+            LifecycleKind::Move => Self::Move,
             LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped => Self::DestroyStopped,
             LifecycleKind::ForceDestroy => Self::ForceDestroy,
@@ -810,14 +840,15 @@ impl RuntimeState {
             .iter()
             .filter(|(session_id, active)| {
                 active.result.borrow().is_none()
-                    && lifecycle_owns_worker_target(
-                        active.kind,
-                        controller
-                            .state
-                            .sessions
-                            .get(*session_id)
-                            .map(|session| session.state),
-                    )
+                    && (active.move_source_closed
+                        || lifecycle_owns_worker_target(
+                            active.kind,
+                            controller
+                                .state
+                                .sessions
+                                .get(*session_id)
+                                .map(|session| session.state),
+                        ))
             })
             .map(|(session_id, _)| session_id.clone())
             .collect()
@@ -943,6 +974,7 @@ impl RuntimeState {
             let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
         }
         let revision = self.revisions.current();
+        let moves = blocking(hel::hel_database::load_move_operations).await?;
         let session_ids = blocking({
             let workspace_id = workspace_id.to_owned();
             move || hel::hel_database::session_ids_for_workspace(&workspace_id)
@@ -1001,6 +1033,10 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner);
         let records = runtime_records_for_workspace(&controller, &session_ids);
         Ok(RuntimeSnapshot {
+            moves: moves
+                .into_iter()
+                .filter(|operation| session_ids.contains(&operation.selection.session_id))
+                .collect(),
             revision,
             config: controller.config.clone(),
             records,
@@ -1039,7 +1075,31 @@ impl RuntimeState {
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
+        self.start_or_join_lifecycle_with_key(session_id, kind, resume_workspace_id, None, work)
+    }
+
+    fn start_or_join_lifecycle_with_key<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        resume_workspace_id: Option<String>,
+        request_key: Option<String>,
+        work: F,
+    ) -> Result<
+        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
+    >
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
         let mut work = Some(work);
+        ensure!(
+            matches!(kind, LifecycleKind::Move | LifecycleKind::ForceDestroy)
+                || !mj_controller::hel_controller::move_session::move_has_pending_queue(
+                    &session_id
+                ),
+            "Move queue admission is incomplete; retry Move on the same destination before another lifecycle operation"
+        );
         let result = {
             let mut lifecycle = self
                 .lifecycle
@@ -1052,6 +1112,10 @@ impl RuntimeState {
                 lifecycle.remove(&session_id);
             }
             if let Some(active) = lifecycle.get(&session_id) {
+                ensure!(
+                    active.request_key == request_key,
+                    "another lifecycle request with different selections is already running for session {session_id}"
+                );
                 ensure!(
                     active.kind == kind,
                     "another lifecycle operation is already running for session {session_id}"
@@ -1075,6 +1139,11 @@ impl RuntimeState {
                         resume_workspace_id,
                         resume_destination: None,
                         notice: None,
+                        request_key,
+                        move_source_closed: false,
+                        _move_guard: (kind == LifecycleKind::Move)
+                            .then(|| MoveMutationGuard::reserve(&session_id))
+                            .transpose()?,
                         result: result_rx.clone(),
                     },
                 );
@@ -1082,11 +1151,18 @@ impl RuntimeState {
                 let state = Arc::clone(self);
                 let operation_session_id = session_id.clone();
                 let operation = work.take().expect("new lifecycle operation has work");
+                let completed_channel = result_rx.clone();
                 tokio::spawn(async move {
-                    let mut result =
-                        operation(state.clone(), operation_session_id.clone(), cancelled)
-                            .await
-                            .map_err(|error| format!("{error:#}"));
+                    let operation_state = state.clone();
+                    let operation_id = operation_session_id.clone();
+                    let mut result = match tokio::spawn(async move {
+                        operation(operation_state, operation_id, cancelled).await
+                    })
+                    .await
+                    {
+                        Ok(result) => result.map_err(|error| format!("{error:#}")),
+                        Err(error) => Err(format!("daemon lifecycle task failed: {error}")),
+                    };
                     if let Err(error) = state.reload_controller().await {
                         let reload_error = format!(
                             "reload daemon state after lifecycle operation for {operation_session_id}: {error:#}"
@@ -1107,6 +1183,18 @@ impl RuntimeState {
                         result = Err(format!("test lifecycle publication hook failed: {error:#}"));
                     }
                     result_tx.send_replace(Some(result));
+                    // Completion must release transient mutation ownership even
+                    // when every requesting client has disconnected. Durable
+                    // partial queue admission has its own independent hold.
+                    if let Some(active) = state
+                        .lifecycle
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_mut(&operation_session_id)
+                        && active.result.same_channel(&completed_channel)
+                    {
+                        active._move_guard.take();
+                    }
                     state.publish_revision();
                 });
                 result_rx
@@ -1249,6 +1337,7 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match outcome? {
             DaemonLifecycleResult::Done => Ok(()),
+            DaemonLifecycleResult::Move(_) => unreachable!("cleanup cannot return a move outcome"),
             DaemonLifecycleResult::DeferredCleanup => {
                 unreachable!("session creation cannot schedule target cleanup")
             }
@@ -1375,6 +1464,9 @@ impl RuntimeState {
             .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
         for session_id in session_ids {
+            if mj_controller::hel_controller::move_session::move_owns_session(&session_id) {
+                continue;
+            }
             if let Err(error) = self.start_deferred_cleanup(session_id.clone()) {
                 tracing::warn!(%session_id, error = format!("{error:#}"), "could not resume deferred Podman cleanup");
                 self.push_notice(
@@ -1423,6 +1515,7 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match outcome? {
             DaemonLifecycleResult::Done => Ok(()),
+            DaemonLifecycleResult::Move(_) => unreachable!("cleanup cannot return a move outcome"),
             DaemonLifecycleResult::DeferredCleanup => {
                 unreachable!("cleanup cannot schedule another cleanup")
             }
@@ -1487,9 +1580,12 @@ impl RuntimeState {
                     }
                 })
                 .await?;
-                let mut controller = tokio::task::spawn_blocking(Controller::load)
-                    .await
-                    .context("load controller for daemon resume task")??;
+                let restore_request = request.clone();
+                let mut controller = tokio::task::spawn_blocking(move || {
+                    session_move::load_controller_for_resume(&restore_request)
+                })
+                .await
+                .context("load controller for daemon resume task")??;
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
                     state.clone(),
@@ -1526,10 +1622,25 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match result? {
             DaemonLifecycleResult::Done => {}
+            DaemonLifecycleResult::Move(_) => unreachable!("resume cannot return a move outcome"),
             DaemonLifecycleResult::DeferredCleanup => {
                 unreachable!("session resume cannot schedule target cleanup")
             }
         }
+        blocking(move || {
+            if let Some(mut operation) =
+                hel::hel_database::load_move_operation(&operation_session_id)?
+                && !operation.queue_admission_started
+            {
+                operation.phase = hel::hel_state::MovePhase::Cancelled;
+                operation.queue_admission_finished = true;
+                operation.updated_at = chrono::Utc::now().to_rfc3339();
+                operation.error = Some("Recovered through an explicit Resume operation".into());
+                hel::hel_database::save_move_operation(&operation)?;
+            }
+            Ok(())
+        })
+        .await?;
         Ok(())
     }
 
@@ -1679,6 +1790,9 @@ impl RuntimeState {
                             session_id.clone(),
                         );
                         controller.force_destroy_session(&session_id, &executor)?;
+                        mj_controller::hel_controller::move_session::release_move_queue_hold(
+                            &session_id,
+                        );
                         Ok(DaemonLifecycleResult::Done)
                     }
                 })
@@ -1961,6 +2075,9 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .get_mut(session_id)
         {
+            if active.kind == LifecycleKind::Move && notice == "Preparing destination" {
+                active.move_source_closed = true;
+            }
             active.notice = Some(notice.to_owned());
             self.publish_revision();
         }
@@ -3287,6 +3404,8 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
         worker_upgrades.observer(),
         workspaces,
     ));
+    let move_operations = blocking(hel::hel_database::load_move_operations).await?;
+    let move_owned = state.recover_moves(move_operations)?;
     state.resume_retained_cleanups();
     let cancellation = hel::termination::Coordinator::install().token();
     let target_refresh = spawn_manager_target_refresher(
@@ -3310,6 +3429,9 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
     let mut interrupted_close_cancellations = Vec::new();
     let mut interrupted_close_tasks = Vec::new();
     for session_id in interrupted_close_session_ids(&controller) {
+        if move_owned.contains(&session_id) {
+            continue;
+        }
         let interrupted_cancellation = Arc::new(AtomicBool::new(false));
         let interrupted_close_task = spawn_interrupted_close_recovery(
             session_id,
@@ -3747,7 +3869,7 @@ async fn forward_in_process_session_request(
             }
             let result = async {
                 manager
-                    .session(session_id)
+                    .wait_for_session(&session_id, Duration::from_secs(5))
                     .await?
                     .submit(command_id, command)
                     .await
@@ -4143,6 +4265,10 @@ async fn handle_action(
             mounts,
             mount_history,
         } => {
+            ensure!(
+                !mj_controller::hel_controller::move_session::move_owns_session(&session_id),
+                "session is moving; change container settings after Move finishes"
+            );
             blocking(move || {
                 Controller::load()?.update_session_container_settings(
                     &session_id,
@@ -4286,7 +4412,14 @@ async fn handle_action(
             } else {
                 None
             };
-            let session = state.session_manager.session(session_id).await?;
+            // A completed restore is ready before the background target feed
+            // has necessarily installed its new actor. Match local control
+            // surfaces by awaiting that bounded handoff, not losing the first
+            // command immediately after Move/Resume.
+            let session = state
+                .session_manager
+                .wait_for_session(&session_id, Duration::from_secs(5))
+                .await?;
             let session_id = session.session_id().to_owned();
             let ordinal = session.submit(command_id, command).await?;
             if let Some((bundle_id, text)) = history
@@ -4367,6 +4500,12 @@ async fn handle_action(
             state.resume_session(request).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::PrepareMoveSession(selection) => Ok(DaemonReply::MovePreparation(Box::new(
+            state.prepare_move_session(selection).await?,
+        ))),
+        DaemonAction::MoveSession(request) => {
+            Ok(DaemonReply::MoveOutcome(state.move_session(request).await?))
+        }
         DaemonAction::ForceStopSession { session_id } => {
             state.force_stop_session(session_id).await?;
             Ok(DaemonReply::Done)
@@ -4384,6 +4523,11 @@ async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::CancelLifecycle { session_id } => {
+            blocking({
+                let session_id = session_id.clone();
+                move || hel::hel_database::request_move_cancellation(&session_id)
+            })
+            .await?;
             state.cancel_lifecycle(&session_id)?;
             Ok(DaemonReply::Done)
         }
@@ -5186,7 +5330,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
-        assert_eq!(PROTOCOL_VERSION, 9);
+        assert_eq!(PROTOCOL_VERSION, 10);
         let state = test_runtime_state();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -5509,6 +5653,100 @@ mod tests {
 
         release.notify_one();
         RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn move_joins_only_matching_selections_and_runs_other_sessions_concurrently() {
+        let state = test_runtime_state();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first = state
+            .start_or_join_lifecycle_with_key(
+                "move-join-one".into(),
+                LifecycleKind::Move,
+                None,
+                Some("profile-a/target-a/discard".into()),
+                {
+                    let release = release.clone();
+                    move |_, _, _| async move {
+                        release.notified().await;
+                        Ok(DaemonLifecycleResult::Done)
+                    }
+                },
+            )
+            .unwrap();
+        assert!(mj_controller::hel_controller::move_session::move_owns_session("move-join-one"));
+        let duplicate = state
+            .start_or_join_lifecycle_with_key(
+                "move-join-one".into(),
+                LifecycleKind::Move,
+                None,
+                Some("profile-a/target-a/discard".into()),
+                |_, _, _| async move { panic!("duplicate move launched a second writer") },
+            )
+            .unwrap();
+        assert!(
+            state
+                .start_or_join_lifecycle_with_key(
+                    "move-join-one".into(),
+                    LifecycleKind::Move,
+                    None,
+                    Some("profile-b/target-a/discard".into()),
+                    |_, _, _| async move { Ok(DaemonLifecycleResult::Done) },
+                )
+                .is_err()
+        );
+        let unrelated = state
+            .start_or_join_lifecycle_with_key(
+                "move-join-two".into(),
+                LifecycleKind::Move,
+                None,
+                Some("profile-b/target-b/start".into()),
+                |_, _, _| async move { Ok(DaemonLifecycleResult::Done) },
+            )
+            .unwrap();
+        let unrelated_channel = unrelated.clone();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            RuntimeState::wait_lifecycle_result(unrelated),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        state.remove_completed_lifecycle(&unrelated_channel);
+        assert!(!mj_controller::hel_controller::move_session::move_owns_session("move-join-two"));
+        drop(first); // An initiating client can disappear without cancelling.
+        release.notify_one();
+        let channel = duplicate.clone();
+        RuntimeState::wait_lifecycle_result(duplicate)
+            .await
+            .unwrap();
+        state.remove_completed_lifecycle(&channel);
+        assert!(!mj_controller::hel_controller::move_session::move_owns_session("move-join-one"));
+    }
+
+    #[tokio::test]
+    async fn move_task_panic_reports_failure_and_releases_mutation_hold() {
+        let state = test_runtime_state();
+        let result = state
+            .start_or_join_lifecycle_with_key(
+                "move-panics".into(),
+                LifecycleKind::Move,
+                None,
+                Some("destination".into()),
+                |_, _, _| async move { panic!("injected move task panic") },
+            )
+            .unwrap();
+        let channel = result.clone();
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            RuntimeState::wait_lifecycle_result(result),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("daemon lifecycle task failed"));
+        state.remove_completed_lifecycle(&channel);
+        assert!(!mj_controller::hel_controller::move_session::move_owns_session("move-panics"));
     }
 
     #[tokio::test]

@@ -76,7 +76,7 @@ customize the image or to work offline:
 podman build --pull=always \
   --file containers/Containerfile.agent-dev \
   --tag localhost/mjolnir/agent-dev:latest \
-  containers
+  .
 ```
 
 ## Run `mj setup`

@@ -42,6 +42,7 @@ pub(crate) const fn lifecycle_kind(kind: RuntimeLifecycleKind) -> SessionOperati
             SessionOperationKind::Stopping
         }
         RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
+        RuntimeLifecycleKind::Move => SessionOperationKind::Moving,
         RuntimeLifecycleKind::DestroyStopped
         | RuntimeLifecycleKind::ForceDestroy
         | RuntimeLifecycleKind::Cleanup => SessionOperationKind::Destroying,
@@ -166,6 +167,7 @@ mod tests {
             acknowledged_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
             recovery_floor_ordinal: 0,
             recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            store_id: None,
             native_session_id: None,
             acp_ready: None,
             agent_capabilities: None,

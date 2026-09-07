@@ -200,10 +200,11 @@ impl ChatState {
         for command in self.acp_surface.agent_commands() {
             let name = command.name.trim();
             if name.is_empty()
-                || matches!(
+                || (matches!(
                     name.to_ascii_lowercase().as_str(),
                     "fast" | "plan" | "implement"
-                )
+                ) && !(name.eq_ignore_ascii_case("plan")
+                    && self.acp_surface.forwards_plan_command()))
                 || commands
                     .iter()
                     .any(|existing| existing.name.eq_ignore_ascii_case(name))

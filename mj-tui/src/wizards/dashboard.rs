@@ -86,6 +86,13 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
     }
 }
 
+fn invalidate_move_preparation(wizard: &mut ResumeWizard) {
+    if wizard.moving {
+        wizard.preparation = None;
+        wizard.preparing = false;
+    }
+}
+
 fn declare_resume_controls(dashboard: &DashboardState, wizard: &ResumeWizard) {
     let mut form = wizard.form.borrow_mut();
     let previous = form.focused();
@@ -448,14 +455,19 @@ impl DashboardState {
                 DashboardAction::None
             }
             Interaction::Edit(id, edit) => {
+                invalidate_move_preparation(&mut wizard);
                 self.apply_resume_field_edit(&mut wizard, id, edit);
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
             Interaction::Select(id, selected) => {
                 match id {
-                    WizardControl::ProfileList => wizard.profile = selected,
+                    WizardControl::ProfileList => {
+                        invalidate_move_preparation(&mut wizard);
+                        wizard.profile = selected;
+                    }
                     WizardControl::TargetList => {
+                        invalidate_move_preparation(&mut wizard);
                         let target_id = nth_key(&self.config.targets, selected);
                         wizard.target = selected;
                         if self
@@ -478,6 +490,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             Interaction::Toggle(WizardControl::MountReadOnly) => {
+                invalidate_move_preparation(&mut wizard);
                 wizard.mounts.toggle_read_only();
                 wizard.mounts.focus = MountFocus::ReadOnly;
                 self.mode = Mode::Resume(wizard);
@@ -781,6 +794,9 @@ impl DashboardState {
         mut wizard: ResumeWizard,
         id: WizardControl,
     ) -> DashboardAction {
+        if matches!(id, WizardControl::ReviewAttachments | WizardControl::Add) {
+            invalidate_move_preparation(&mut wizard);
+        }
         match id {
             WizardControl::Cancel => {
                 self.cancel_modal();
@@ -1786,6 +1802,7 @@ impl DashboardState {
                     | KeyCode::Char('m')
             )
         {
+            invalidate_move_preparation(&mut wizard);
             self.adjust_resume_resources(&mut wizard, code);
             self.mode = Mode::Resume(wizard);
             return DashboardAction::None;
@@ -1803,6 +1820,7 @@ impl DashboardState {
         };
         if wizard.focus == WizardFocus::Content && matches!(code, KeyCode::Up | KeyCode::Char('k'))
         {
+            invalidate_move_preparation(&mut wizard);
             move_index(wizard.active_index_mut(), len, -1);
             let action = if wizard.step == WizardStep::Target {
                 self.prepare_resume_target(&mut wizard)
@@ -1815,6 +1833,7 @@ impl DashboardState {
         if wizard.focus == WizardFocus::Content
             && matches!(code, KeyCode::Down | KeyCode::Char('j'))
         {
+            invalidate_move_preparation(&mut wizard);
             move_index(wizard.active_index_mut(), len, 1);
             let action = if wizard.step == WizardStep::Target {
                 self.prepare_resume_target(&mut wizard)
@@ -2189,6 +2208,34 @@ impl DashboardState {
     ) -> DashboardAction {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let mounts = wizard.mounts.mounts.clone();
+        if wizard.moving {
+            let clear_resource_allocation = matches!(
+                self.config.targets.get(&target_template_id),
+                Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
+            );
+            if wizard.preparing {
+                self.mode = Mode::Resume(wizard);
+                return DashboardAction::None;
+            }
+            let mut wizard = wizard;
+            wizard.preparing = wizard.preparation.is_none();
+            let action = DashboardAction::MoveSession {
+                session_id: wizard.session_id.clone(),
+                profile_id,
+                target_template_id,
+                additional_mounts: mounts,
+                resource_allocation: wizard.resource_allocation.clone(),
+                clear_resource_allocation,
+                preparation_requested: wizard.preparation.is_none(),
+                queue: Some(if wizard.discard_queue {
+                    ResumeQueueDisposition::Discard
+                } else {
+                    ResumeQueueDisposition::Start
+                }),
+            };
+            self.mode = Mode::Resume(wizard);
+            return action;
+        }
         let launch = DashboardAction::ResumeSession {
             session_id: wizard.session_id.clone(),
             profile_id,
@@ -2210,6 +2257,45 @@ impl DashboardState {
                 launch: Box::new(preflight),
             }
         }
+    }
+
+    pub fn apply_move_preparation(&mut self, preparation: hel::hel_state::MovePreparation) {
+        let session_id = preparation.selection.session_id.clone();
+        let Mode::Resume(wizard) = &mut self.mode else {
+            return;
+        };
+        if !wizard.moving || wizard.session_id != session_id {
+            return;
+        }
+        wizard.resource_allocation = preparation.selection.resource_allocation.clone();
+        wizard.preparation = Some(preparation);
+        wizard.preparing = false;
+    }
+
+    pub fn set_move_preparation_failed(&mut self, session_id: &str, error: String) {
+        let message = format!("Move preparation failed: {error}");
+        let Mode::Resume(wizard) = &mut self.mode else {
+            self.set_failure_notice(message);
+            return;
+        };
+        if !wizard.moving || wizard.session_id != session_id {
+            self.set_failure_notice(message);
+            return;
+        }
+        wizard.preparing = false;
+        self.set_failure_notice(message);
+    }
+
+    pub fn take_move_preparation(
+        &mut self,
+        session_id: &str,
+    ) -> Option<hel::hel_state::MovePreparation> {
+        let Mode::Resume(wizard) = &mut self.mode else {
+            return None;
+        };
+        (wizard.moving && wizard.session_id == session_id)
+            .then(|| wizard.preparation.take())
+            .flatten()
     }
 
     pub fn apply_session_mount_preflight_failure(&mut self, source: &str, error: String) {
@@ -2333,6 +2419,9 @@ impl DashboardState {
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
             session_id: session.id.clone(),
+            moving: false,
+            preparation: None,
+            preparing: false,
             step: WizardStep::Profile,
             focus: WizardFocus::Content,
             profile,
@@ -2346,6 +2435,132 @@ impl DashboardState {
             form: std::cell::RefCell::new(mj_chat::components::Form::default()),
         });
         self.resolve_all_aws_resource_options_action()
+    }
+
+    /// Open the resume controls for an active session as a Move operation.
+    /// The source workspace and session identity are fixed; only the
+    /// destination profile, target, sizing, and attachments are editable.
+    pub(crate) fn begin_move(&mut self) -> DashboardAction {
+        let Some(session) = self.selected_session().cloned() else {
+            return DashboardAction::None;
+        };
+        if !session.state.is_active() {
+            self.notices
+                .set("Move is available for active sessions only.");
+            return DashboardAction::None;
+        }
+        if self.session_operation_kind(&session.id).is_some() {
+            self.notices
+                .set("This session already has an operation in progress.");
+            return DashboardAction::None;
+        }
+        if self.compatible_profiles(&session.id).is_empty() || self.config.targets.is_empty() {
+            self.notices
+                .set("Move needs a profile and a target template.");
+            return DashboardAction::None;
+        }
+        let profile = self
+            .compatible_profiles(&session.id)
+            .iter()
+            .position(|(profile_id, _)| profile_id.as_str() == session.last_profile)
+            .unwrap_or(0);
+        let target = self
+            .config
+            .targets
+            .keys()
+            .position(|target_id| target_id == &session.target_template_id)
+            .unwrap_or(0);
+        self.mode = Mode::Resume(ResumeWizard {
+            session_id: session.id,
+            moving: true,
+            preparation: None,
+            preparing: false,
+            step: WizardStep::Profile,
+            focus: WizardFocus::Content,
+            profile,
+            target,
+            mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts),
+            review_focus: ReviewFocus::Submit,
+            resource_allocation: session.resource_allocation,
+            aws_options: BTreeMap::new(),
+            sizing_error: None,
+            // Move's safe default is to leave pending work idle. The review
+            // checkbox can explicitly opt into starting it after readiness.
+            discard_queue: true,
+            form: std::cell::RefCell::new(mj_chat::components::Form::default()),
+        });
+        self.resolve_all_aws_resource_options_action()
+    }
+
+    /// Open the Move wizard for a retained failure while the source is still
+    /// live. The failed destination is prefilled so the user can inspect the
+    /// exact interruption and queue choice before retrying it.
+    pub fn begin_move_recovery(&mut self, operation: MoveOperation) {
+        let Some(session) = self
+            .state
+            .sessions
+            .get(&operation.selection.session_id)
+            .cloned()
+        else {
+            self.set_failure_notice("Move recovery session is no longer available.");
+            return;
+        };
+        if !session.state.is_active() {
+            self.set_failure_notice(
+                "Move source is stopped; use Resume with previous settings or retry the retained destination.",
+            );
+            return;
+        }
+        let Some(profile_id) = operation.selection.profile_id.as_deref() else {
+            self.set_failure_notice("Move recovery has no retained destination profile.");
+            return;
+        };
+        let Some(target_id) = operation.selection.target_template_id.as_deref() else {
+            self.set_failure_notice("Move recovery has no retained destination target.");
+            return;
+        };
+        let Some(profile) = self
+            .compatible_profiles(&session.id)
+            .iter()
+            .position(|(id, _)| id.as_str() == profile_id)
+        else {
+            self.set_failure_notice(format!(
+                "Move profile {profile_id} is no longer configured."
+            ));
+            return;
+        };
+        let Some(target) = self.config.targets.keys().position(|id| id == target_id) else {
+            self.set_failure_notice(format!("Move target {target_id} is no longer configured."));
+            return;
+        };
+        self.mode = Mode::Resume(ResumeWizard {
+            session_id: session.id,
+            moving: true,
+            preparation: None,
+            preparing: false,
+            step: WizardStep::Profile,
+            focus: WizardFocus::Content,
+            profile,
+            target,
+            mounts: MountWizard::with_mounts(
+                Vec::new(),
+                operation
+                    .selection
+                    .additional_mounts
+                    .clone()
+                    .unwrap_or_else(|| session.additional_mounts.clone()),
+            ),
+            review_focus: ReviewFocus::Submit,
+            resource_allocation: operation
+                .selection
+                .resource_allocation
+                .clone()
+                .or(session.resource_allocation),
+            aws_options: BTreeMap::new(),
+            sizing_error: None,
+            discard_queue: operation.queue == ResumeQueueDisposition::Discard,
+            form: std::cell::RefCell::new(mj_chat::components::Form::default()),
+        });
     }
 
     fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {

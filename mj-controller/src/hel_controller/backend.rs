@@ -714,6 +714,9 @@ pub(super) fn validate_resource_allocation(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
 ) -> Result<()> {
+    if let Some(allocation) = allocation {
+        allocation.validate()?;
+    }
     match (template, allocation) {
         (_, None)
         | (

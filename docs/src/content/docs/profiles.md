@@ -21,6 +21,7 @@ available choices can come from the provider's current catalog.
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | DeepSeek Harness | `deepseek` | `DSH_HOME` | `~/.dsh` | `.credentials.yaml` | no |
+| Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | yes |
 
 `mj setup` checks the home variable first and otherwise looks in the
 conventional location. A detected home becomes the explicit `home` path in
@@ -80,6 +81,13 @@ described below.
 
 ## Log in
 
+For Muse, configure `kind = "muse"` and a home ending in `muse`, for example
+`home = "/home/me/.config/muse"` or `/home/me/accounts/work/muse`. Discovery
+uses `$XDG_CONFIG_HOME/muse` when set. Mjolnir gives each session a private
+configuration copy and stores native history under that copy's `.data/muse/`
+tree, including on local-bare targets. Do not override `XDG_CONFIG_HOME` or
+`XDG_DATA_HOME` in the profile environment.
+
 Run:
 
 ```console
@@ -97,6 +105,7 @@ environment before starting the harness's interactive login:
 | Kimi Code | `kimi login` |
 | Grok Build | `grok login` |
 | DeepSeek Harness | `dsh web` |
+| Muse Code | `muse login` |
 
 The login command is always resolved from the controller's `PATH`. A profile
 selects credentials and environment, not another harness executable.
@@ -140,11 +149,13 @@ symbolic links:
 | Kimi Code | `credentials/`, `config.toml`, `device_id`, `AGENTS.md`, `SYSTEM.md`, `mcp.json`, `skills/`, `agents/`, `plugins/` |
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | DeepSeek Harness | `.credentials.yaml`, `settings.yaml`, `AGENTS.md`, `skills/`, `.agent-presets/` |
+| Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 
 History, caches, SSH and GPG keys, shell dotfiles, cloud configuration, editor
 state, and package-registry credentials are not copied merely because they sit
 under your user home. A raw local session uses the configured local harness home
-directly, so it does not gain this target boundary.
+directly, except for Muse's private copy. A private copy isolates agent state;
+it does not sandbox a raw local process.
 
 Credential bytes travel only in direct controller-to-worker messages. They are
 excluded from the durable event journal and recovery archives. Fingerprints and
@@ -191,15 +202,20 @@ sync.
 ## Harness runtimes
 
 Mjolnir talks to harnesses through the Agent Client Protocol (ACP). The
-published agent image already carries the supported bridge stack. Local bare
-and container targets retain that target-provided runtime behavior.
+published agent image already carries the supported bridge stack. Container
+targets use that target-provided runtime.
 
-Raw SSH and EC2 workers instead install the exact versions pinned by the
+Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned by the
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
 `PATH`. Codex, Claude, and DeepSeek require Node.js 22 or newer plus npm on the
 host. Kimi and Grok require curl and Bash for their official installers.
+Muse requires curl and tar; Mjolnir downloads the pinned native Muse binary and
+`muse-acp` adapter and verifies both SHA-256 checksums. Linux and macOS, on
+x86-64 and ARM64, are supported. The adapter's Apache-2.0 LICENSE and NOTICE
+are retained with the installation; the native Muse binary retains its own
+upstream terms.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;
 it does not invoke sudo or a system package manager.
 
@@ -223,6 +239,7 @@ profiles independently, so a slow provider does not delay the others. Press
 | Kimi Code | Usage windows returned by the configured Kimi service. |
 | Grok Build | The harness's ACP billing extension. |
 | DeepSeek Harness | `API`, because it is usage-priced rather than a subscription window. |
+| Muse Code | `Quota unavailable`; no quota API is integrated. |
 
 An unavailable reading is displayed as an error for that profile; it does not
 make the profile disappear. Quota is advisory rather than an admission-control
@@ -233,6 +250,21 @@ work such as transcript compaction when appropriate. It does not silently move
 the primary coding session to another profile.
 
 ## Harness limitations
+
+Muse supports streamed chat and tools, images, model and effort selectors,
+approval questions, cancellation, and native resume. `/plan` invokes Muse's
+advertised planning skill; it is not an approval-mode toggle. Guardian targets
+preserve Muse's configured sandbox and approval posture. On explicitly
+unconstrained targets Mjolnir uses auto approvals and `--disable-sandbox`.
+
+Muse accepts one workspace root, without attached directories. Resume must
+preserve the native workspace path: use the original target or a compatible
+container target. Native session archives include the selected session and
+its child streams, not other sessions or credentials. Importing sessions
+created outside Mjolnir is not supported yet. The adapter does not accept
+injected MCP servers, so Muse cannot act as a reviewer or use Mjolnir's
+project-memory tools. Another supported reviewer can still review a Muse
+primary session. Muse is not selected automatically for utility work.
 
 - DeepSeek Harness ACP supports exactly one workspace root. Use either a
   single-repository bundle or one bare project directory, with no attached

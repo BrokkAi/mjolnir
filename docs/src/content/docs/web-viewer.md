@@ -29,6 +29,8 @@ The viewer can:
 - queue prompts while an agent is busy and cancel agent or shell work;
 - stop a session, resume it from its checkpoint, and browse hidden or archived
   resume candidates;
+- prepare and confirm a move to another compatible target or profile while
+  keeping the same logical session; and
 - refresh target capacity and profile quota; and
 - keep a per-browser draft for the active conversation.
 
@@ -36,6 +38,31 @@ The terminal owns the richer launch workflow. Use it when you need per-session
 CPU or memory sizing, attached-directory setup, or quick bundle creation. The
 viewer also omits native-session import, force destruction, and configuration or
 secret editing.
+
+### Move confirmation
+
+Move is a two-step, authenticated flow. The viewer first asks the daemon for a
+read-only preparation that resolves the profile, target, compatibility, active
+state, and queued commands. Only the confirmation submits the fingerprinted
+preparation and interruption acknowledgement. The browser cannot implement a
+move by composing Stop and Resume, and a stale destination is rejected before
+the source is interrupted.
+
+The confirmation explains that a fresh environment is rebuilt. It warns before
+interrupting an active turn, lists queued prompts and configuration changes,
+and defaults to discarding that queue. Selecting **Run queued work** admits the
+original commands only after the destination is ready. The daemon keeps moving
+after a browser tab closes; the session row reports its current phase and
+recovery guidance on reconnect.
+
+Resource sizing is inherited and attached directories remain fixed to the
+workspace. The confirmation has an explicit **Clear inherited resource sizing**
+checkbox for returning to destination defaults. If a move fails or is
+cancelled after retaining its checkpoint, the dashboard offers **Retry move**
+with the recorded destination and **Resume with previous settings** using the
+source profile and target. Partial queue admission is pinned to its original
+destination and queue choice so a retry cannot replay accepted commands on a
+new target.
 
 The browser's Back button returns from a conversation to its workspace. A
 temporary network loss does not move session ownership into the browser: the

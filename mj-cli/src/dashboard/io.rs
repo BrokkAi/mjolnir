@@ -14,7 +14,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle};
 use hel::hel_state::{
-    HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord, SessionState,
+    HelState, MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord,
+    SessionState,
 };
 use hel::hel_targets::CancellableProcessExecutor;
 use hel_tui::{
@@ -122,6 +123,10 @@ pub(crate) enum DashboardIoUpdate {
     LifecycleCancellation {
         session_id: String,
         result: std::result::Result<(), String>,
+    },
+    MovePrepared {
+        session_id: String,
+        result: std::result::Result<MovePreparation, String>,
     },
     CheckpointArchiveSizes {
         generation: u64,
@@ -1523,6 +1528,18 @@ impl DashboardContext {
                     ));
                 }
             }
+            DashboardIoUpdate::MovePrepared { session_id, result } => match result {
+                Ok(preparation) => {
+                    self.dashboard.apply_move_preparation(preparation);
+                    self.dashboard.set_notice(format!(
+                        "Move prepared for {}; review the current activity and queued work, then press Move again to confirm",
+                        short_id(&session_id)
+                    ));
+                }
+                Err(error) => self
+                    .dashboard
+                    .set_move_preparation_failed(&session_id, error),
+            },
             DashboardIoUpdate::CheckpointArchiveSizes { generation, sizes } => {
                 if generation == self.checkpoint_archive_generation {
                     self.dashboard.apply_checkpoint_archive_sizes(sizes);
@@ -1730,6 +1747,26 @@ impl DashboardContext {
                     "Resumed {} with {profile_id} on {target_id}",
                     short_id(&session_id)
                 ));
+                self.request_quota_refresh();
+            }
+            Ok(LifecycleSuccess::Moved(outcome)) => {
+                self.request_transcript_tail_seed(&session_id);
+                self.dashboard.select_active_session(&session_id);
+                let destination = format!("{}/{}", outcome.profile_id, outcome.target_template_id);
+                self.dashboard
+                    .set_notice(if outcome.outcome == "unchanged" {
+                        format!(
+                            "Move of {} unchanged on {destination} (operation {})",
+                            short_id(&session_id),
+                            outcome.operation_id
+                        )
+                    } else {
+                        format!(
+                            "Moved {} to {destination}; ready and idle (operation {})",
+                            short_id(&session_id),
+                            outcome.operation_id
+                        )
+                    });
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Closed) => {

@@ -28,7 +28,10 @@ use crate::hel_workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 27;
+
+mod session_move;
+pub use session_move::*;
 
 /// A deterministic projection integrity violation. Retrying cannot fix it, so
 /// callers must report it separately from transport failures.
@@ -1882,7 +1885,30 @@ fn save_session_with_container_size_to(
             session.bundle_id
         );
     }
-    insert_session(&tx, session)?;
+    let mut session = session.clone();
+    let moving: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_moves WHERE session_id=?1
+         AND json_extract(operation_json, '$.phase') IN ('preparing','closing_source','resuming_destination','starting_queue'))",
+        [&session.id], |row| row.get(0),
+    )?;
+    if moving {
+        // A Move may provision for minutes while clients keep editing drafts
+        // and titles. Merge these independently owned fields in this same
+        // transaction rather than restoring the lifecycle's earlier copy.
+        let (draft, title, acp_title, viewed, archived) = tx.query_row(
+            "SELECT draft_input, session_title_override, acp_session_title, viewed_through_event_ordinal, archived
+             FROM sessions WHERE session_id=?1", [&session.id], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?,
+                row.get::<_, u64>(3)?, row.get::<_, bool>(4)?,
+            )),
+        )?;
+        session.draft_input = draft;
+        session.session_title_override = title;
+        session.acp_session_title = acp_title;
+        session.viewed_through_event_ordinal = viewed;
+        session.archived = archived;
+    }
+    insert_session(&tx, &session)?;
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
     }

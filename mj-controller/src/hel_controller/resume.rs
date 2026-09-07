@@ -2,12 +2,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::ContentBlock;
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::hel_session_manager::new_command_id;
 use hel::hel_archive::{
@@ -15,7 +16,9 @@ use hel::hel_archive::{
     checkpoint_bundle_prerequisites, read_checkpoint_repository_bundles, verify_archive_streaming,
 };
 use hel::hel_checkpoint::{CheckpointRestoreSpec, restore_command};
-use hel::hel_config::{HelConfig, ProjectRepository, mount_history_host};
+use hel::hel_config::{
+    HarnessKind, HelConfig, ProjectRepository, TargetTemplate, mount_history_host,
+};
 use hel::hel_projection::materialized_session_from_canonical;
 use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation, SessionState};
 use hel::hel_targets::{
@@ -73,7 +76,89 @@ struct ResumeRepositoryBundles {
     repositories: Vec<CheckpointRepositoryBundle>,
 }
 
+/// A small timing scope for the expensive resume phases. Target commands
+/// already trace their own durations; this covers controller-side work and
+/// lets an operator see where a slow resume spent its wall-clock budget.
+struct ResumePhaseTimer<'a> {
+    session_id: &'a str,
+    phase: &'static str,
+    started: Instant,
+}
+
+impl<'a> ResumePhaseTimer<'a> {
+    fn new(session_id: &'a str, phase: &'static str) -> Self {
+        Self {
+            session_id,
+            phase,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for ResumePhaseTimer<'_> {
+    fn drop(&mut self) {
+        tracing::debug!(
+            session_id = self.session_id,
+            phase = self.phase,
+            elapsed_ms = self.started.elapsed().as_millis(),
+            "resume phase completed"
+        );
+    }
+}
+
 impl Controller {
+    /// Muse MSP resumes the recorded workspace and cannot relocate it.
+    pub(super) fn validate_muse_resume_destination(
+        &self,
+        source: &SessionRecord,
+        destination_harness: HarnessKind,
+        target_id: &str,
+    ) -> Result<()> {
+        if destination_harness != HarnessKind::Muse {
+            return Ok(());
+        }
+        ensure!(
+            source.project_directory.is_some()
+                || self
+                    .config
+                    .bundles
+                    .get(&source.bundle_id)
+                    .is_none_or(|bundle| bundle.repositories.len() == 1),
+            "Muse Code ACP supports one workspace root; use a single-repository bundle"
+        );
+        if source.harness_kind != HarnessKind::Muse {
+            return Ok(());
+        }
+        let plan =
+            resume_compatibility(source, &self.config, target_id).map_err(anyhow::Error::msg)?;
+        let destination = self
+            .config
+            .targets
+            .get(target_id)
+            .context("unknown Muse destination target")?;
+        let source_target = self
+            .config
+            .targets
+            .get(&source.target_template_id)
+            .context("original Muse target is missing")?;
+        let container = |target: &TargetTemplate| {
+            matches!(
+                target,
+                TargetTemplate::LocalPodman { .. }
+                    | TargetTemplate::LocalDocker { .. }
+                    | TargetTemplate::AppleContainer { .. }
+                    | TargetTemplate::SshPodman { .. }
+                    | TargetTemplate::SshDocker { .. }
+            )
+        };
+        ensure!(
+            plan == ResumePlan::InPlace
+                && (target_id == source.target_template_id
+                    || (container(source_target) && container(destination))),
+            "Muse Code cannot relocate a native session's workspace; resume on its original target or a container with the same workspace path"
+        );
+        Ok(())
+    }
     /// Prove that each configured repository source still supplies the commit
     /// boundary its checkpoint bundle expects, before provisioning anything.
     pub fn preflight_resume_repository_sources(
@@ -613,17 +698,38 @@ impl Controller {
         if !repository_preflight
             .as_ref()
             .is_some_and(|receipt| self.repository_source_receipt_is_current(session_id, receipt))
-            && let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
-                self.preflight_resume_repository_sources(session_id, target_id, executor)?
         {
-            bail!(
-                "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
-                mismatch.missing_commit,
-                mismatch.configured_origin,
-                mismatch.repository_id,
-                mismatch.archived_origin,
-            );
+            let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
+            if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
+                self.preflight_resume_repository_sources(session_id, target_id, executor)?
+            {
+                bail!(
+                    "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
+                    mismatch.missing_commit,
+                    mismatch.configured_origin,
+                    mismatch.repository_id,
+                    mismatch.archived_origin,
+                );
+            }
         }
+        // Canonicalize before verification and keep this exact absolute path
+        // for the restore. A LocalBare worker shares the controller's
+        // filesystem, so it can consume the verified archive directly instead
+        // of copying a second large file into its worker root.
+        let archive_path = {
+            let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive");
+            checkpoint.archive_path.canonicalize().with_context(|| {
+                format!(
+                    "resolve checkpoint archive {}",
+                    checkpoint.archive_path.display()
+                )
+            })?
+        };
+        ensure!(
+            archive_path.is_absolute() && archive_path.is_file(),
+            "checkpoint archive path is not an absolute regular file: {}",
+            archive_path.display()
+        );
         // Take the snapshot out of the verified metadata and share it behind an
         // `Arc`: on a long session it is tens of megabytes, and resume reads it
         // from three places that used to hold private copies.
@@ -631,7 +737,10 @@ impl Controller {
             manifest: archive_manifest,
             canonical_session,
             archive_sha256,
-        } = verify_archive_streaming(&checkpoint.archive_path)?;
+        } = {
+            let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive contents");
+            verify_archive_streaming(&archive_path)?
+        };
         if archive_sha256 != checkpoint.sha256 || archive_manifest.session.id != session_id {
             bail!("persisted checkpoint verification failed");
         }
@@ -650,6 +759,11 @@ impl Controller {
             .clone();
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
+        self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
+        ensure!(
+            profile.kind != HarnessKind::Muse || previous.additional_mounts.is_empty(),
+            "Muse Code ACP supports one workspace root; attached directories are unsupported"
+        );
         let plan = resume_compatibility(&previous, &self.config, target_id)
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
         if plan == ResumePlan::InPlace
@@ -762,21 +876,10 @@ impl Controller {
         let context_bytes = profile
             .context_window_bytes
             .unwrap_or(crate::hel_compaction::DEFAULT_CONTEXT_BYTES);
-        let utility_handoff = if same_harness {
-            None
-        } else {
-            let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
-            Some(
-                utility_handoff_while_cancellable(
-                    &self.config,
-                    &canonical_session,
-                    context_bytes,
-                    executor,
-                )
-                .await
-                .context("compact the cross-harness handoff transcript")?,
-            )
-        };
+        // Cross-harness compaction is started alongside destination
+        // provisioning below. Clone only the configuration it reads so the
+        // controller can continue owning and mutating its session record.
+        let utility_config = (!same_harness).then(|| self.config.clone());
         let discard_queued_prompts = discard_queue || !same_harness;
         // When this controller archived the session, its durable projection is
         // already the archive's content. Reading one row decides that; a read
@@ -895,7 +998,7 @@ impl Controller {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
                 if recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
                     hel::hel_checkpoint::restore_single_repository_onto_branch(
-                        &checkpoint.archive_path,
+                        &archive_path,
                         &worktree.worktree_root,
                         &worktree.branch,
                         &SystemGit,
@@ -916,20 +1019,39 @@ impl Controller {
                     PrimaryCheckoutRequirement::Any,
                 )?;
                 hel::hel_checkpoint::restore_single_repository_onto_branch(
-                    &checkpoint.archive_path,
+                    &archive_path,
                     &conversion.worktree.worktree_root,
                     &conversion.worktree.branch,
                     &SystemGit,
                 )
                 .context("restore this session's checkout")?;
             }
-            self.provision_session_with_failure_disposition(
-                session_id,
-                executor,
-                github_token.as_deref(),
-                ProvisioningFailureDisposition::Preserve,
-            )
-            .await?;
+            let utility_handoff = {
+                let _provisioning = ResumePhaseTimer::new(session_id, "provision destination");
+                if let Some(config) = utility_config.as_ref() {
+                    Some(
+                        provision_with_cross_harness_handoff(
+                            self,
+                            session_id,
+                            executor,
+                            github_token.as_deref(),
+                            config,
+                            &canonical_session,
+                            context_bytes,
+                        )
+                        .context("prepare the cross-harness destination")?,
+                    )
+                } else {
+                    self.provision_session_with_failure_disposition(
+                        session_id,
+                        executor,
+                        github_token.as_deref(),
+                        ProvisioningFailureDisposition::Preserve,
+                    )
+                    .await?;
+                    None
+                }
+            };
             let (backend, worker_root) = self.worker_placement(session_id)?;
             let harness_home = target_profile_home(&backend, session_id, &profile);
             let workspace_root = if let Some(project_directory) = &resumed_project_directory {
@@ -962,7 +1084,11 @@ impl Controller {
             let remote_archive = format!("{worker_root}/restore.hel.zip");
             let remote_spec = format!("{worker_root}/restore-spec.json");
             let restore = CheckpointRestoreSpec {
-                archive_path: target_path(&remote_archive),
+                archive_path: restore_archive_path(
+                    &backend,
+                    &archive_path,
+                    &target_path(&remote_archive),
+                ),
                 workspace_root: target_path(&workspace_root),
                 relay_root: target_path(&worker_root),
                 harness_home: target_path(&harness_home),
@@ -1048,13 +1174,15 @@ impl Controller {
                 },
                 || {
                     let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    upload_checkpoint_spec(
-                        restoring,
-                        backend_ref,
-                        session_id,
-                        &checkpoint.archive_path,
-                        &remote_archive,
-                    )?;
+                    if should_upload_restore_archive(&backend) {
+                        upload_checkpoint_spec(
+                            restoring,
+                            backend_ref,
+                            session_id,
+                            &archive_path,
+                            &remote_archive,
+                        )?;
+                    }
                     upload_checkpoint_spec(
                         restoring,
                         backend_ref,
@@ -1266,7 +1394,7 @@ impl Controller {
         }
     }
 
-    fn rollback_failed_resume(
+    pub(super) fn rollback_failed_resume(
         &mut self,
         session_id: &str,
         previous: &SessionRecord,
@@ -1293,20 +1421,26 @@ impl Controller {
             })(),
             None => Ok(()),
         };
-        let worktree_cleanup = match (
-            current.managed_worktree.as_ref(),
-            previous.managed_worktree.as_ref(),
-        ) {
-            (_, Some(previous)) if recreated_managed_worktree => retire_managed_worktree(
-                &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
-                previous,
-            ),
-            (Some(current), Some(previous)) if current == previous => Ok(()),
-            (Some(worktree), _) => cleanup_managed_worktree(
-                &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
-                worktree,
-            ),
-            (None, _) => Ok(()),
+        // A failed target teardown may leave its harness writing. Keep its
+        // checkout intact until a later retry proves the process is stopped.
+        let worktree_cleanup = if cleanup.is_err() {
+            Ok(())
+        } else {
+            match (
+                current.managed_worktree.as_ref(),
+                previous.managed_worktree.as_ref(),
+            ) {
+                (_, Some(previous)) if recreated_managed_worktree => retire_managed_worktree(
+                    &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+                    previous,
+                ),
+                (Some(current), Some(previous)) if current == previous => Ok(()),
+                (Some(worktree), _) => cleanup_managed_worktree(
+                    &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+                    worktree,
+                ),
+                (None, _) => Ok(()),
+            }
         };
         let cleanup_error = [cleanup, worktree_cleanup]
             .into_iter()
@@ -1369,16 +1503,19 @@ pub(super) fn apply_failed_resume_rollback(
             let failure = format!(
                 "{original_error}; cleanup of the partial resume target failed: {cleanup_error}"
             );
-            // The target locator stays so the leftover resource can still be
-            // cleaned up, but the session's representation goes back: a resume
-            // that converted the record never moved the checkout it names.
-            current
-                .project_directory
-                .clone_from(&previous.project_directory);
-            current
-                .managed_worktree
-                .clone_from(&previous.managed_worktree);
-            current.bundle_id.clone_from(&previous.bundle_id);
+            // Keep the exact partial target and checkout ownership until
+            // cleanup succeeds; the harness may still be writing there.
+            // A container conversion has no new managed host checkout, so
+            // retain the original host checkout that it has not retired yet.
+            if current.managed_worktree.is_none() {
+                current
+                    .project_directory
+                    .clone_from(&previous.project_directory);
+                current
+                    .managed_worktree
+                    .clone_from(&previous.managed_worktree);
+                current.bundle_id.clone_from(&previous.bundle_id);
+            }
             current.state = SessionState::Error;
             current.updated_at = now();
             current.last_error = Some(format!("resume failed: {failure}"));
@@ -1402,19 +1539,208 @@ fn projection_rebuild_required(
     stored != Some((archive_frontier, archive_frontier_digest))
 }
 
+fn restore_archive_path(
+    backend: &hel_targets::TargetLocator,
+    verified_archive: &Path,
+    remote_archive: &Path,
+) -> PathBuf {
+    if matches!(backend, hel_targets::TargetLocator::LocalBare { .. }) {
+        verified_archive.to_path_buf()
+    } else {
+        remote_archive.to_path_buf()
+    }
+}
+
+fn should_upload_restore_archive(backend: &hel_targets::TargetLocator) -> bool {
+    !matches!(backend, hel_targets::TargetLocator::LocalBare { .. })
+}
+
+/// Provisioning currently performs its target plan synchronously inside an
+/// async function. Run the network-bound cross-harness handoff on a joined
+/// side runtime so it can make progress during that plan without borrowing
+/// the mutable controller or leaving work behind on failure.
+struct CrossHarnessProvisionExecutor<'a, E: CommandExecutor + ?Sized> {
+    inner: &'a E,
+    cancellation: CancellationToken,
+}
+
+impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecutor<'_, E> {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner.execute(command)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation.is_cancelled() || self.inner.cancellation_requested()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.inner.stage_started(stage);
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        self.inner.stage_finished(stage);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.inner.notify_notice(notice);
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner.execute_with_stdin(command, input)
+    }
+}
+
+fn provision_with_cross_harness_handoff(
+    controller: &mut Controller,
+    session_id: &str,
+    executor: &(impl CommandExecutor + Sync),
+    github_token: Option<&str>,
+    config: &HelConfig,
+    snapshot: &CanonicalSessionSnapshot,
+    context_bytes: usize,
+) -> Result<String> {
+    let (_provision, handoff) = execute_joined_cross_harness_work(
+        "cross-harness provisioning",
+        move |cancellation| {
+            let provision_executor = CrossHarnessProvisionExecutor {
+                inner: executor,
+                cancellation,
+            };
+            futures::executor::block_on(controller.provision_session_with_failure_disposition(
+                session_id,
+                &provision_executor,
+                github_token,
+                ProvisioningFailureDisposition::Preserve,
+            ))
+        },
+        "cross-harness handoff",
+        move |cancellation| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("create cross-harness handoff runtime")?;
+            runtime.block_on(utility_handoff_while_cancellable(
+                session_id,
+                config,
+                snapshot,
+                context_bytes,
+                executor,
+                cancellation,
+            ))
+        },
+    )?;
+    ensure!(
+        !executor.cancellation_requested(),
+        "operation cancelled while provisioning destination"
+    );
+    Ok(handoff)
+}
+
+/// Run the two independent cross-harness lanes together, cancelling and
+/// joining the peer as soon as either lane fails. The lane order is stable so
+/// diagnostics do not depend on which worker happened to finish first.
+fn execute_joined_cross_harness_work<A: Send, B: Send>(
+    first_name: &'static str,
+    first: impl FnOnce(CancellationToken) -> Result<A> + Send,
+    second_name: &'static str,
+    second: impl FnOnce(CancellationToken) -> Result<B> + Send,
+) -> Result<(A, B)> {
+    let cancellation = CancellationToken::new();
+    std::thread::scope(|scope| {
+        let first_cancel = cancellation.clone();
+        let mut first_handle = Some(scope.spawn(move || first(first_cancel)));
+        let second_cancel = cancellation.clone();
+        let mut second_handle = Some(scope.spawn(move || second(second_cancel)));
+        let mut first_result = None;
+        let mut second_result = None;
+
+        while first_result.is_none() || second_result.is_none() {
+            if first_result.is_none()
+                && first_handle
+                    .as_ref()
+                    .is_some_and(|handle| handle.is_finished())
+            {
+                let handle = first_handle.take().expect("first lane handle present");
+                first_result = Some(match handle.join() {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        cancellation.cancel();
+                        Err(anyhow::anyhow!(
+                            "{first_name} thread panicked: {}",
+                            hel_targets::command_thread_panic_message(panic.as_ref())
+                        ))
+                    }
+                });
+                if first_result.as_ref().is_some_and(Result::is_err) {
+                    cancellation.cancel();
+                }
+            }
+            if second_result.is_none()
+                && second_handle
+                    .as_ref()
+                    .is_some_and(|handle| handle.is_finished())
+            {
+                let handle = second_handle.take().expect("second lane handle present");
+                second_result = Some(match handle.join() {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        cancellation.cancel();
+                        Err(anyhow::anyhow!(
+                            "{second_name} thread panicked: {}",
+                            hel_targets::command_thread_panic_message(panic.as_ref())
+                        ))
+                    }
+                });
+                if second_result.as_ref().is_some_and(Result::is_err) {
+                    cancellation.cancel();
+                }
+            }
+            if first_result.is_none() || second_result.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        match (
+            first_result.expect("first lane result received after joined handle"),
+            second_result.expect("second lane result received after joined handle"),
+        ) {
+            (Err(first), Err(second)) => {
+                Err(first.context(format!("{second_name} lane also failed: {second:#}")))
+            }
+            (Err(error), Ok(_)) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(first), Ok(second)) => Ok((first, second)),
+        }
+    })
+}
+
 /// Discover a utility model and compact the cross-harness handoff while still
 /// watching for cancellation. Discovery and compaction can both make several
 /// network requests, so a cancelled resume must not wait them out.
 async fn utility_handoff_while_cancellable(
+    session_id: &str,
     config: &HelConfig,
     snapshot: &CanonicalSessionSnapshot,
     context_bytes: usize,
     executor: &impl CommandExecutor,
+    cancellation: CancellationToken,
 ) -> Result<String> {
+    let _phase = ResumePhaseTimer::new(session_id, "cross-harness handoff");
     if executor.cancellation_requested() {
         bail!("operation cancelled while compacting the cross-harness handoff");
     }
-    let cancel = tokio_util::sync::CancellationToken::new();
+    let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
+    let cancel = cancellation.child_token();
     let operation = async {
         let candidates = crate::hel_utility_llm::UtilityLlmRuntime::shared()
             .resolve(config, &cancel)
@@ -1435,6 +1761,10 @@ async fn utility_handoff_while_cancellable(
     loop {
         tokio::select! {
             context = &mut operation => return context,
+            _ = cancellation.cancelled() => {
+                cancel.cancel();
+                bail!("operation cancelled while compacting the cross-harness handoff");
+            }
             _ = tokio::time::sleep(super::readiness::CANCELLATION_POLL_INTERVAL) => {
                 if executor.cancellation_requested() {
                     cancel.cancel();
@@ -1474,6 +1804,40 @@ mod tests {
     const RESUME_ROLLBACK_TEST_CHILD: &str = "MJ_RESUME_ROLLBACK_TEST_CHILD";
     const RETIRED_WORKTREE_RESUME_TEST_CHILD: &str = "MJ_RETIRED_WORKTREE_RESUME_TEST_CHILD";
     const WORKER_PREFLIGHT_TEST_CHILD: &str = "MJ_WORKER_PREFLIGHT_TEST_CHILD";
+
+    #[test]
+    fn muse_resume_rejects_workspace_relocation_before_provisioning() {
+        let mut config = resume_compatibility_config();
+        config
+            .targets
+            .insert("other-container".into(), config.targets["podman"].clone());
+        let controller = Controller {
+            config,
+            state: HelState::default(),
+        };
+        let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
+        session.harness_kind = HarnessKind::Muse;
+        assert!(
+            controller
+                .validate_muse_resume_destination(&session, HarnessKind::Muse, "podman")
+                .is_ok()
+        );
+        assert!(
+            controller
+                .validate_muse_resume_destination(&session, HarnessKind::Muse, "other-container")
+                .is_ok()
+        );
+        let error = controller
+            .validate_muse_resume_destination(&session, HarnessKind::Muse, "ssh-bare")
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot relocate"));
+        assert!(
+            controller
+                .validate_muse_resume_destination(&session, HarnessKind::Codex, "ssh-bare")
+                .is_ok()
+        );
+        assert_eq!(session.state, SessionState::Running);
+    }
 
     /// Compaction costs minutes and paid model requests; resolving the worker
     /// binary is local and costs microseconds. A cross-harness resume that
@@ -2146,6 +2510,94 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.to_string(), "checkpoint upload failed");
     }
+
+    #[test]
+    fn cross_harness_lanes_prove_overlap_with_handshake_channels() {
+        let (provision_started_tx, provision_started_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (handoff_started_tx, handoff_started_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (provision_seen_handoff_tx, provision_seen_handoff_rx) =
+            std::sync::mpsc::sync_channel::<()>(1);
+        let (handoff_seen_provision_tx, handoff_seen_provision_rx) =
+            std::sync::mpsc::sync_channel::<()>(1);
+
+        execute_joined_cross_harness_work(
+            "provision",
+            move |_cancellation| -> Result<()> {
+                provision_started_tx
+                    .send(())
+                    .map_err(|error| anyhow::anyhow!("signal provisioning start: {error}"))?;
+                handoff_started_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| anyhow::anyhow!("wait for handoff start: {error}"))?;
+                provision_seen_handoff_tx
+                    .send(())
+                    .map_err(|error| anyhow::anyhow!("signal provisioning overlap: {error}"))?;
+                Ok(())
+            },
+            "handoff",
+            move |_cancellation| -> Result<()> {
+                handoff_started_tx
+                    .send(())
+                    .map_err(|error| anyhow::anyhow!("signal handoff start: {error}"))?;
+                provision_started_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| anyhow::anyhow!("wait for provisioning start: {error}"))?;
+                handoff_seen_provision_tx
+                    .send(())
+                    .map_err(|error| anyhow::anyhow!("signal handoff overlap: {error}"))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(provision_seen_handoff_rx.recv().is_ok());
+        assert!(handoff_seen_provision_rx.recv().is_ok());
+    }
+
+    #[test]
+    fn cross_harness_lane_failure_cancels_and_joins_the_peer() {
+        let (handoff_started_tx, handoff_started_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (handoff_joined_tx, handoff_joined_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+        let error = execute_joined_cross_harness_work(
+            "provision",
+            move |_cancellation| -> Result<()> {
+                handoff_started_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| anyhow::anyhow!("wait for handoff start: {error}"))?;
+                bail!("provisioning failed after handoff started");
+            },
+            "handoff",
+            move |cancellation| -> Result<()> {
+                handoff_started_tx
+                    .send(())
+                    .map_err(|error| anyhow::anyhow!("signal handoff start: {error}"))?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        anyhow::anyhow!("create cancellation test runtime: {error}")
+                    })?;
+                runtime
+                    .block_on(async {
+                        tokio::time::timeout(Duration::from_secs(2), cancellation.cancelled()).await
+                    })
+                    .map_err(|error| anyhow::anyhow!("peer was not cancelled: {error}"))?;
+                handoff_joined_tx
+                    .send(())
+                    .map_err(|error| anyhow::anyhow!("signal handoff join: {error}"))?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "provisioning failed after handoff started"
+        );
+        assert!(handoff_joined_rx.recv().is_ok());
+    }
+
     #[test]
     fn a_projection_standing_at_the_archived_frontier_is_reused() {
         let digest = "a".repeat(64);
@@ -2172,6 +2624,62 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn local_bare_restore_reuses_verified_absolute_archive_without_upload() {
+        let archive = Path::new("/var/lib/hel/archives/session.hel.zip");
+        let remote = Path::new("/var/lib/hel/workers/session/restore.hel.zip");
+        let local = hel_targets::TargetLocator::LocalBare {
+            worker_root: "/var/lib/hel/workers/session".into(),
+        };
+        let container = hel_targets::TargetLocator::LocalPodman {
+            container_id: "container".into(),
+            workspace_storage: Default::default(),
+        };
+
+        assert_eq!(restore_archive_path(&local, archive, remote), archive);
+        assert!(!should_upload_restore_archive(&local));
+        assert_eq!(restore_archive_path(&container, archive, remote), remote);
+        assert!(should_upload_restore_archive(&container));
+    }
+
+    #[test]
+    fn cross_harness_provision_cancellation_stops_the_next_command() {
+        struct RecordingExecutor {
+            commands: Mutex<Vec<String>>,
+        }
+
+        impl CommandExecutor for RecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.lock().unwrap().push(command.purpose.clone());
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let inner = RecordingExecutor {
+            commands: Mutex::new(Vec::new()),
+        };
+        let cancellation = CancellationToken::new();
+        let provision = CrossHarnessProvisionExecutor {
+            inner: &inner,
+            cancellation: cancellation.clone(),
+        };
+        let command = CommandSpec::new("hel", ["worker"]).purpose("provision target");
+        provision.execute(&command).unwrap();
+        cancellation.cancel();
+
+        let error = provision.execute(&command).unwrap_err();
+        assert!(error.to_string().contains("cancelled while provisioning"));
+        assert_eq!(
+            inner.commands.lock().unwrap().as_slice(),
+            ["provision target"]
+        );
+    }
+
     #[test]
     fn failed_resume_rolls_back_only_after_target_cleanup() {
         let previous = SessionRecord {
@@ -2227,6 +2735,11 @@ mod tests {
         cleanup_failed.state = SessionState::Error;
         cleanup_failed.last_profile = "codex-new".into();
         cleanup_failed.target = Some(partial_target.clone());
+        let partial_checkout = crate::hel_controller::test_support::managed_raw_session(
+            hel::hel_state::ManagedWorktreeTarget::Local,
+        );
+        cleanup_failed.project_directory = partial_checkout.project_directory.clone();
+        cleanup_failed.managed_worktree = partial_checkout.managed_worktree.clone();
 
         let failure = apply_failed_resume_rollback(
             &mut cleanup_failed,
@@ -2238,6 +2751,14 @@ mod tests {
         assert_eq!(cleanup_failed.state, SessionState::Error);
         assert_eq!(cleanup_failed.last_profile, "codex-new");
         assert_eq!(cleanup_failed.target, Some(partial_target));
+        assert_eq!(
+            cleanup_failed.project_directory,
+            partial_checkout.project_directory
+        );
+        assert_eq!(
+            cleanup_failed.managed_worktree,
+            partial_checkout.managed_worktree
+        );
         assert!(failure.to_string().contains("cleanup"));
     }
     #[test]

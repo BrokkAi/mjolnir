@@ -126,6 +126,11 @@ impl AcpSessionSurface {
             .any(|command| command.name == name)
     }
 
+    /// Muse's /plan is a host skill, not its approval-mode selector.
+    pub fn forwards_plan_command(&self) -> bool {
+        self.harness_kind == Some(HarnessKind::Muse) && self.advertises_command("plan")
+    }
+
     pub fn current_model(&self) -> Option<&str> {
         self.current_model.as_deref()
     }
@@ -174,6 +179,7 @@ impl AcpSessionSurface {
         let value = if active { "plan" } else { "default" };
         match self.harness_kind {
             Some(HarnessKind::Deepseek) => Err(PlanControlError::DeepseekUnsupported),
+            Some(HarnessKind::Muse) => Err(PlanControlError::Incompatible),
             Some(HarnessKind::Codex) => self
                 .exact_config_has_plan_pair("collaboration_mode")
                 .then(|| PlanControl::SetConfig {

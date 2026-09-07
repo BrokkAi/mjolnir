@@ -25,6 +25,7 @@ pub enum CommandId {
     RenameSession,
     ContainerSettings,
     StopSession,
+    MoveSession,
     ForceDestroySession,
     MarkAllRead,
     CancelOperation,
@@ -224,18 +225,43 @@ fn session_idle(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.selected_session() else {
         return Availability::Hidden;
     };
+    if dashboard.move_queue_admission_incomplete(&session.id) {
+        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
+    }
     match dashboard.session_operation_kind(&session.id) {
         Some(_) => Availability::Blocked("an operation is in progress"),
         None => Availability::Ready,
     }
 }
 
-fn container_session(dashboard: &DashboardState) -> Availability {
-    if dashboard.selected_container_session().is_some() {
-        Availability::Ready
-    } else {
-        Availability::Hidden
+fn stop_session_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.selected_session() else {
+        return Availability::Hidden;
+    };
+    if dashboard.move_queue_admission_incomplete(&session.id) {
+        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
     }
+    Availability::Ready
+}
+
+fn move_session_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.selected_session() else {
+        return Availability::Hidden;
+    };
+    if !session.state.is_active() {
+        return Availability::Hidden;
+    }
+    session_idle(dashboard)
+}
+
+fn container_session(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.selected_container_session() else {
+        return Availability::Hidden;
+    };
+    if dashboard.move_queue_admission_incomplete(&session.id) {
+        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
+    }
+    Availability::Ready
 }
 
 fn config_present(dashboard: &DashboardState) -> Availability {
@@ -394,7 +420,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: selected_session_ready,
+        available: stop_session_available,
+    },
+    CommandSpec {
+        id: CommandId::MoveSession,
+        label: "Move session…",
+        description: "Restore the selected session on another profile and/or target.",
+        scope: Scope::Session,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: move_session_available,
     },
     CommandSpec {
         id: CommandId::ForceDestroySession,
@@ -731,6 +768,7 @@ impl DashboardState {
                 self.begin_container_edit();
                 DashboardAction::None
             }
+            CommandId::MoveSession => self.begin_move(),
             CommandId::StopSession => {
                 let Some(session_id) = self.selected_session().map(|session| session.id.clone())
                 else {
@@ -901,5 +939,55 @@ mod tests {
             available(&dashboard, None).contains(&CommandId::ForceDestroySession),
             "force destruction exists to preempt a wedged operation"
         );
+    }
+
+    #[test]
+    fn move_command_opens_the_fixed_workspace_resume_controls() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(available(&dashboard, None).contains(&CommandId::MoveSession));
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::MoveSession),
+            DashboardAction::None
+        );
+        let crate::Mode::Resume(wizard) = &dashboard.mode else {
+            panic!("move opens the shared resume wizard");
+        };
+        assert!(wizard.moving);
+        assert_eq!(wizard.session_id, "session-1");
+        assert!(
+            wizard.discard_queue,
+            "move defaults to discarding queued work"
+        );
+    }
+
+    #[test]
+    fn prepared_move_is_retained_for_the_explicit_confirmation_submit() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        let _ = dashboard.dispatch_command(CommandId::MoveSession);
+        let preparation = hel::hel_state::MovePreparation {
+            selection: hel::hel_state::MoveSelection {
+                session_id: "session-1".into(),
+                profile_id: Some("codex-1".into()),
+                target_template_id: Some("podman".into()),
+                additional_mounts: Some(Vec::new()),
+                resource_allocation: None,
+                clear_resource_allocation: false,
+            },
+            source_profile_id: "codex-1".into(),
+            source_target_template_id: "podman".into(),
+            cross_harness: false,
+            active: true,
+            queued_commands: Vec::new(),
+            fingerprint: "fingerprint".into(),
+            operation_id: "move-1".into(),
+        };
+        dashboard.apply_move_preparation(preparation.clone());
+        let crate::Mode::Resume(wizard) = &dashboard.mode else {
+            panic!("move remains in its confirmation wizard");
+        };
+        assert_eq!(wizard.preparation.as_ref(), Some(&preparation));
+        assert!(!wizard.preparing);
     }
 }

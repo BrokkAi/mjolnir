@@ -84,6 +84,11 @@ impl Controller {
             .profiles
             .get(profile_id)
             .with_context(|| format!("unknown profile {profile_id:?}"))?;
+        if !profile.kind.supports_injected_mcp() {
+            bail!(
+                "Muse Code cannot be a reviewer: muse-acp does not accept the required MCP tools. Select another reviewer profile."
+            );
+        }
         let session = self
             .state
             .sessions

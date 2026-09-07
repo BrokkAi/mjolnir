@@ -216,7 +216,7 @@ fn create_owner_only_directory(directory: &Path) -> Result<()> {
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
-    if kind == HarnessKind::Deepseek {
+    if matches!(kind, HarnessKind::Deepseek | HarnessKind::Muse) {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -243,6 +243,7 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
             })
             .max(),
         HarnessKind::Deepseek => unreachable!("handled before JSON parsing"),
+        HarnessKind::Muse => unreachable!("handled before JSON parsing"),
     }
 }
 
@@ -257,7 +258,10 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
-    if matches!(kind, HarnessKind::Grok | HarnessKind::Deepseek) {
+    if matches!(
+        kind,
+        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse
+    ) {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -270,7 +274,9 @@ pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
             .get("expires_at")?
             .as_i64()
             .and_then(|seconds| seconds.checked_mul(1000)),
-        HarnessKind::Grok | HarnessKind::Deepseek => unreachable!("handled before JSON parsing"),
+        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse => {
+            unreachable!("handled before JSON parsing")
+        }
     }
 }
 
@@ -653,6 +659,7 @@ pub fn login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
         HarnessKind::Kimi => ("kimi".to_owned(), vec!["login".to_owned()]),
         HarnessKind::Grok => ("grok".to_owned(), vec!["login".to_owned()]),
         HarnessKind::Deepseek => ("dsh".to_owned(), vec!["web".to_owned()]),
+        HarnessKind::Muse => ("muse".to_owned(), vec!["login".to_owned()]),
     }
 }
 
@@ -996,7 +1003,7 @@ mod tests {
         ];
         for kind in HarnessKind::ALL
             .into_iter()
-            .filter(|kind| *kind != HarnessKind::Deepseek)
+            .filter(|kind| !matches!(kind, HarnessKind::Deepseek | HarnessKind::Muse))
         {
             let (_, bytes) = fixtures
                 .iter()
@@ -1033,6 +1040,7 @@ mod tests {
                 None,
             ),
             (HarnessKind::Deepseek, b"version: 1\n".to_vec(), None),
+            (HarnessKind::Muse, b"{}".to_vec(), None),
         ];
         for kind in HarnessKind::ALL {
             let (_, bytes, expected) = fixtures

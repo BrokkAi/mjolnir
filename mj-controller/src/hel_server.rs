@@ -34,7 +34,16 @@ use tokio_util::sync::CancellationToken;
 
 use hel::hel_config::{HelConfig, TargetTemplate, project_history_host, validate_id};
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
-use hel::hel_state::{HelState, ProjectSourceIdentity, SessionState};
+use hel::hel_state::{
+    HelState, MoveOperation, MovePhase, MovePreparation, MoveSelection, MoveSessionRequest,
+    ProjectSourceIdentity, SessionResourceAllocation, SessionState,
+};
+use hel::hel_targets::AdditionalMount;
+
+// Keep all control surfaces on the same queue vocabulary. The resume flow
+// used to define a private copy here, which made a move request impossible to
+// pass through the web and daemon boundaries without lossy conversion.
+pub use hel::hel_state::ResumeQueueDisposition;
 
 /// Select the process-wide rustls provider before any TLS configuration is built.
 ///
@@ -180,6 +189,7 @@ pub struct ServerOptions {
     pub bundle_tx: mpsc::Sender<BundleRequest>,
     pub receipt_tx: mpsc::Sender<ReadReceiptRequest>,
     pub preflight_tx: mpsc::Sender<PreflightRequest>,
+    pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
     pub shutdown: CancellationToken,
     pub session_ttl: Duration,
@@ -198,6 +208,7 @@ pub struct ServerRequests {
     pub bundle_tx: mpsc::Sender<BundleRequest>,
     pub receipt_tx: mpsc::Sender<ReadReceiptRequest>,
     pub preflight_tx: mpsc::Sender<PreflightRequest>,
+    pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
 }
 
@@ -216,6 +227,7 @@ impl ServerOptions {
             bundle_tx: requests.bundle_tx,
             receipt_tx: requests.receipt_tx,
             preflight_tx: requests.preflight_tx,
+            move_preparation_tx: requests.move_preparation_tx,
             client_state_tx: requests.client_state_tx,
             shutdown: CancellationToken::new(),
             session_ttl: DEFAULT_SESSION_TTL,
@@ -389,6 +401,7 @@ impl ViewerSnapshot {
                     activity_details: None,
                     activity: String::new(),
                     operation: None,
+                    move_recovery: None,
                     chat_phase: ViewerChatPhase::default(),
                     is_idle: false,
                     config_options: Vec::new(),
@@ -407,6 +420,7 @@ impl ViewerSnapshot {
                         stop: lifecycle.is_dashboard_visible(),
                         rename: true,
                         resume: !lifecycle.is_dashboard_visible(),
+                        move_session: false,
                         set_config: false,
                         set_plan_mode: false,
                     },
@@ -569,6 +583,11 @@ pub struct ViewerSession {
     pub activity_details: Option<ViewerActivityDetails>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<ViewerOperation>,
+    /// Safe recovery choices for a failed or cancelled Move. Diagnostics and
+    /// checkpoint paths remain on the controller; this contains only the
+    /// settings a person may choose again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_recovery: Option<ViewerMoveRecovery>,
     #[serde(default)]
     pub chat_phase: ViewerChatPhase,
     /// Known live activity is idle: no foreground turn, tool, or background work.
@@ -595,6 +614,84 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_commands: Vec<ViewerMjCommand>,
     pub capabilities: ViewerSessionCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerMoveRecovery {
+    pub operation_id: String,
+    pub source_profile_id: String,
+    pub source_target_template_id: String,
+    pub destination_profile_id: String,
+    pub destination_target_template_id: String,
+    pub phase: String,
+    pub queue: String,
+    pub clear_resource_allocation: bool,
+    /// The source settings are retained so Resume cannot silently inherit a
+    /// partially converted destination record after a failed Move.
+    #[serde(default)]
+    pub source_additional_mounts: Vec<AdditionalMount>,
+    #[serde(default)]
+    pub source_resource_allocation: Option<SessionResourceAllocation>,
+    /// The exact destination settings are needed when a queue admission
+    /// checkpoint pins retry to the already-provisioned destination.
+    #[serde(default)]
+    pub destination_additional_mounts: Vec<AdditionalMount>,
+    #[serde(default)]
+    pub destination_resource_allocation: Option<SessionResourceAllocation>,
+    pub checkpoint_retained: bool,
+    pub destination_ready: bool,
+    pub queue_admission_started: bool,
+    pub queue_admission_finished: bool,
+}
+
+impl ViewerMoveRecovery {
+    #[must_use]
+    pub fn from_operation(operation: &MoveOperation) -> Option<Self> {
+        if matches!(operation.phase, MovePhase::Completed) {
+            return None;
+        }
+        Some(Self {
+            operation_id: operation.operation_id.clone(),
+            source_profile_id: operation.source_profile_id.clone(),
+            source_target_template_id: operation.source_target_template_id.clone(),
+            destination_profile_id: operation.selection.profile_id.clone().unwrap_or_default(),
+            destination_target_template_id: operation
+                .selection
+                .target_template_id
+                .clone()
+                .unwrap_or_default(),
+            phase: match operation.phase {
+                MovePhase::Preparing => "preparing",
+                MovePhase::ClosingSource => "closing_source",
+                MovePhase::ResumingDestination => "resuming_destination",
+                MovePhase::StartingQueue => "starting_queue",
+                MovePhase::Completed => "completed",
+                MovePhase::Failed => "failed",
+                MovePhase::Cancelled => "cancelled",
+            }
+            .into(),
+            queue: match operation.queue {
+                ResumeQueueDisposition::Start => "start",
+                ResumeQueueDisposition::Discard => "discard",
+            }
+            .into(),
+            clear_resource_allocation: operation.selection.clear_resource_allocation,
+            source_additional_mounts: operation.source_additional_mounts.clone(),
+            source_resource_allocation: operation.source_resource_allocation.clone(),
+            destination_additional_mounts: operation
+                .selection
+                .additional_mounts
+                .clone()
+                .unwrap_or_default(),
+            destination_resource_allocation: operation.selection.resource_allocation.clone(),
+            checkpoint_retained: operation.checkpoint.is_some(),
+            destination_ready: operation.destination_target.is_some()
+                && operation.destination_native_session_id.is_some(),
+            queue_admission_started: operation.queue_admission_started,
+            queue_admission_finished: operation.queue_admission_finished,
+        })
+    }
 }
 
 impl ViewerSession {
@@ -917,6 +1014,10 @@ pub struct ViewerSessionCapabilities {
     pub stop: bool,
     pub rename: bool,
     pub resume: bool,
+    /// Prepare and confirm a daemon-owned move to a compatible profile or
+    /// target. The browser must never compose Stop and Resume itself.
+    #[serde(default)]
+    pub move_session: bool,
     pub set_config: bool,
     pub set_plan_mode: bool,
 }
@@ -964,6 +1065,7 @@ impl ViewerLifecycleCategory {
 pub enum ViewerOperationKind {
     Create,
     Resume,
+    Move,
     Stop,
     Checkpoint,
 }
@@ -1097,6 +1199,19 @@ pub enum ControllerAction {
         profile_id: String,
         target_id: String,
         queue: ResumeQueueDisposition,
+        /// A failed Move supplies the settings recorded before source
+        /// teardown. Ordinary Resume requests leave these absent and retain
+        /// the historical inheritance behavior.
+        #[serde(default)]
+        additional_mounts: Option<Vec<AdditionalMount>>,
+        #[serde(default)]
+        resource_allocation: Option<SessionResourceAllocation>,
+    },
+    /// Confirm a previously prepared move. Preparation is a separate
+    /// authenticated request so changing the destination cannot be smuggled
+    /// into a confirmation from an older browser form.
+    Move {
+        request: MoveSessionRequest,
     },
     Open {
         session_id: String,
@@ -1154,13 +1269,6 @@ pub struct ViewerPromptImage {
     pub mime_type: String,
     pub width: u32,
     pub height: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ResumeQueueDisposition {
-    Start,
-    Discard,
 }
 
 /// The controller's answer to one phone action.
@@ -1261,6 +1369,15 @@ pub struct PreflightRequest {
     pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
 }
 
+/// A move preparation is intentionally separate from action admission. It
+/// performs read-only compatibility checks and returns the exact fingerprint
+/// the later confirmation must echo; it never interrupts the source session.
+#[derive(Debug)]
+pub struct MovePreparationRequest {
+    pub selection: MoveSelection,
+    pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, String>>,
+}
+
 /// A preflight can fail because the requested bare directory is unusable, or
 /// because the controller-side check itself could not complete. The HTTP
 /// surface keeps those outcomes distinct without carrying filesystem, Git, or
@@ -1346,6 +1463,7 @@ struct ServerState {
     bundle_tx: mpsc::Sender<BundleRequest>,
     receipt_tx: mpsc::Sender<ReadReceiptRequest>,
     preflight_tx: mpsc::Sender<PreflightRequest>,
+    move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     client_state_tx: mpsc::Sender<ClientStateRequest>,
     viewer_code: Arc<str>,
     login_token: Arc<str>,
@@ -1414,6 +1532,7 @@ fn router(options: ServerOptions) -> Router {
         bundle_tx: options.bundle_tx,
         receipt_tx: options.receipt_tx,
         preflight_tx: options.preflight_tx,
+        move_preparation_tx: options.move_preparation_tx,
         client_state_tx: options.client_state_tx,
         viewer_code: options.viewer_code.into(),
         login_token: options.login_token.into(),
@@ -1432,6 +1551,7 @@ fn router(options: ServerOptions) -> Router {
         .route("/api/events", get(events))
         .route("/api/bundles", post(create_bundle))
         .route("/api/preflight/new", post(preflight_new))
+        .route("/api/moves/prepare", post(prepare_move))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(
             "/api/sessions/{session_id}/draft",
@@ -1779,6 +1899,58 @@ async fn preflight_new(
         })
 }
 
+/// Prepare a move without changing the source session. The returned
+/// preparation is an expiring, fingerprinted capability: the confirmation
+/// action must send it back verbatim, and the daemon rechecks it immediately
+/// before interrupting work.
+async fn prepare_move(
+    State(state): State<ServerState>,
+    Json(selection): Json<MoveSelection>,
+) -> Result<Json<MovePreparation>, ApiError> {
+    validate_move_selection(&selection, &state.snapshot_rx.borrow())?;
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .move_preparation_tx
+        .send(MovePreparationRequest { selection, reply })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    let preparation = result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map_err(|error| {
+            tracing::debug!(error = %error, "move preparation was rejected");
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "move preparation was rejected; refresh and try again",
+            )
+        })?;
+    Ok(Json(inspector_move_preparation(preparation)))
+}
+
+/// Queued image bytes are replayed from the verified archive after readiness;
+/// they are not needed by a browser confirmation. Replace them at this
+/// boundary even if an older daemon did not already make the preparation an
+/// inspector-only value.
+fn inspector_move_preparation(mut preparation: MovePreparation) -> MovePreparation {
+    for command in &mut preparation.queued_commands {
+        for block in &mut command.content {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+                continue;
+            }
+            let mime = block
+                .get("mimeType")
+                .or_else(|| block.get("mime_type"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("image");
+            *block = serde_json::json!({
+                "type": "text",
+                "text": format!("[Image attachment: {mime}]")
+            });
+        }
+    }
+    preparation
+}
+
 /// Ask the state channel one thing and wait for its answer.
 async fn ask_client_state<T>(
     state: &ServerState,
@@ -1998,6 +2170,130 @@ fn validate_prompt_images(images: &[ViewerPromptImage]) -> Result<(), ApiError> 
     Ok(())
 }
 
+const MAX_MOVE_QUEUE_ITEMS: usize = 256;
+const MAX_MOVE_MOUNTS: usize = 32;
+
+fn validate_move_selection(
+    selection: &MoveSelection,
+    snapshot: &ViewerSnapshot,
+) -> Result<(), ApiError> {
+    validate_public_id(&selection.session_id)?;
+    if selection.profile_id.is_none() && selection.target_template_id.is_none() {
+        return Err(ApiError::bad_request(
+            "move must select a profile, a target, or both",
+        ));
+    }
+    if selection.clear_resource_allocation && selection.resource_allocation.is_some() {
+        return Err(ApiError::bad_request(
+            "clear resource sizing cannot be combined with an explicit allocation",
+        ));
+    }
+    if let Some(profile_id) = selection.profile_id.as_deref() {
+        validate_public_id(profile_id)?;
+        require_profile(snapshot, profile_id)?;
+    }
+    if let Some(target_id) = selection.target_template_id.as_deref() {
+        validate_public_id(target_id)?;
+        require_target(snapshot, target_id)?;
+        let session = require_session_record(snapshot, &selection.session_id)?;
+        if session
+            .incompatible_resume_targets
+            .iter()
+            .any(|id| id == target_id)
+        {
+            return Err(ApiError::bad_request(
+                "this session cannot resume on that target",
+            ));
+        }
+    } else {
+        require_session_record(snapshot, &selection.session_id)?;
+    }
+    if let Some(mounts) = &selection.additional_mounts {
+        validate_move_mounts(mounts)?;
+    }
+    let session = require_session_record(snapshot, &selection.session_id)?;
+    let retryable_move = session
+        .move_recovery
+        .as_ref()
+        .is_some_and(|recovery| recovery.checkpoint_retained);
+    if !session.capabilities.move_session && !retryable_move {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this session cannot be moved now",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_move_mounts(mounts: &[AdditionalMount]) -> Result<(), ApiError> {
+    if mounts.len() > MAX_MOVE_MOUNTS {
+        return Err(ApiError::bad_request("a move may carry at most 32 mounts"));
+    }
+    for mount in mounts {
+        for path in [&mount.source, &mount.destination] {
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| component == Component::ParentDir)
+            {
+                return Err(ApiError::bad_request(
+                    "move mount paths must be absolute and must not contain '..'",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_resume_settings(
+    additional_mounts: Option<&Vec<AdditionalMount>>,
+    resource_allocation: Option<&SessionResourceAllocation>,
+) -> Result<(), ApiError> {
+    if let Some(mounts) = additional_mounts {
+        validate_move_mounts(mounts)?;
+    }
+    if let Some(allocation) = resource_allocation {
+        allocation
+            .validate()
+            .map_err(|_| ApiError::bad_request("resource allocation is invalid"))?;
+    }
+    Ok(())
+}
+
+fn validate_move_request(
+    request: &MoveSessionRequest,
+    snapshot: &ViewerSnapshot,
+) -> Result<(), ApiError> {
+    let preparation = &request.preparation;
+    validate_move_selection(&preparation.selection, snapshot)?;
+    let session = require_session_record(snapshot, &preparation.selection.session_id)?;
+    if preparation.operation_id.trim().is_empty() || preparation.fingerprint.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "move confirmation is missing its preparation identity",
+        ));
+    }
+    if preparation.queued_commands.len() > MAX_MOVE_QUEUE_ITEMS {
+        return Err(ApiError::bad_request(
+            "move queue is too large; prepare again",
+        ));
+    }
+    let active_now = preparation.active
+        || session.chat_phase == ViewerChatPhase::Running
+        || !session.active_user_shells.is_empty();
+    if active_now && !request.acknowledge_interruption {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "confirm that the active turn may be interrupted",
+        ));
+    }
+    if !preparation.queued_commands.is_empty() && request.queue.is_none() {
+        return Err(ApiError::bad_request(
+            "choose whether queued work is discarded or started after the move",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Result<(), ApiError> {
     match action {
         ControllerAction::New {
@@ -2054,6 +2350,8 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
             workspace_id,
             profile_id,
             target_id,
+            additional_mounts,
+            resource_allocation,
             ..
         } => {
             validate_public_id(session_id)?;
@@ -2073,7 +2371,9 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
                     "this session cannot resume on that target",
                 ));
             }
+            validate_resume_settings(additional_mounts.as_ref(), resource_allocation.as_ref())?;
         }
+        ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
         | ControllerAction::Close { session_id }
         | ControllerAction::Cancel { session_id }
@@ -2904,6 +3204,32 @@ mod tests {
         app_with_conversations(BTreeMap::new())
     }
 
+    fn app_with_move_receiver() -> (Router, mpsc::Receiver<MovePreparationRequest>) {
+        let (config, state) = sample_config_state();
+        let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        snapshot.sessions[0].capabilities.move_session = true;
+        let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+        let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+        let (action_tx, _action_rx) = mpsc::channel(8);
+        let (bundle_tx, _bundle_rx) = mpsc::channel(8);
+        let (receipt_tx, _receipt_rx) = mpsc::channel(8);
+        let (preflight_tx, _preflight_rx) = mpsc::channel(8);
+        let (move_preparation_tx, move_preparation_rx) = mpsc::channel(8);
+        let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+        let options = test_options(
+            snapshot_rx,
+            conversation_rx,
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            move_preparation_tx,
+            client_state_tx,
+        )
+        .with_test_credentials("123456", b"01234567890123456789012345678901");
+        (router(options), move_preparation_rx)
+    }
+
     fn app_with_conversations(conversations: BTreeMap<String, BrowserTranscript>) -> TestServer {
         app_with(conversations, |_| {})
     }
@@ -2925,6 +3251,7 @@ mod tests {
         let (bundle_tx, _bundle_rx) = mpsc::channel(8);
         let (receipt_tx, receipt_rx) = mpsc::channel(8);
         let (preflight_tx, preflight_rx) = mpsc::channel(8);
+        let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
         let (client_state_tx, client_state_rx) = mpsc::channel(8);
         let options = test_options(
             snapshot_rx,
@@ -2933,6 +3260,7 @@ mod tests {
             bundle_tx,
             receipt_tx,
             preflight_tx,
+            move_preparation_tx,
             client_state_tx,
         )
         .with_test_credentials("123456", b"01234567890123456789012345678901");
@@ -2954,6 +3282,7 @@ mod tests {
         let (bundle_tx, bundle_rx) = mpsc::channel(8);
         let (receipt_tx, _receipt_rx) = mpsc::channel(8);
         let (preflight_tx, _preflight_rx) = mpsc::channel(8);
+        let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
         let (client_state_tx, _client_state_rx) = mpsc::channel(8);
         let options = test_options(
             snapshot_rx,
@@ -2962,12 +3291,16 @@ mod tests {
             bundle_tx,
             receipt_tx,
             preflight_tx,
+            move_preparation_tx,
             client_state_tx,
         )
         .with_test_credentials("123456", b"01234567890123456789012345678901");
         (router(options), bundle_rx)
     }
 
+    // Keep this test factory's arguments aligned with `ServerRequests`; each
+    // channel is asserted independently by the HTTP behavior tests below.
+    #[allow(clippy::too_many_arguments)]
     fn test_options(
         snapshot_rx: watch::Receiver<ViewerSnapshot>,
         conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
@@ -2975,6 +3308,7 @@ mod tests {
         bundle_tx: mpsc::Sender<BundleRequest>,
         receipt_tx: mpsc::Sender<ReadReceiptRequest>,
         preflight_tx: mpsc::Sender<PreflightRequest>,
+        move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
         client_state_tx: mpsc::Sender<ClientStateRequest>,
     ) -> ServerOptions {
         ServerOptions::new(
@@ -2986,6 +3320,7 @@ mod tests {
                 bundle_tx,
                 receipt_tx,
                 preflight_tx,
+                move_preparation_tx,
                 client_state_tx,
             },
         )
@@ -3001,6 +3336,7 @@ mod tests {
         let (bundle_tx, _bundle_rx) = mpsc::channel(1);
         let (receipt_tx, _receipt_rx) = mpsc::channel(1);
         let (preflight_tx, _preflight_rx) = mpsc::channel(1);
+        let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(1);
         let (client_state_tx, _client_state_rx) = mpsc::channel(1);
         test_options(
             snapshot_rx,
@@ -3009,6 +3345,7 @@ mod tests {
             bundle_tx,
             receipt_tx,
             preflight_tx,
+            move_preparation_tx,
             client_state_tx,
         )
     }
@@ -4810,6 +5147,93 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
     }
 
     #[tokio::test]
+    async fn move_preparation_is_read_only_and_returns_the_daemon_fingerprint() {
+        let (app, mut preparations) = app_with_move_receiver();
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/moves/prepare")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"session_id":"session-1","profile_id":"codex-1","target_template_id":"podman","clear_resource_allocation":false,"additional_mounts":null,"resource_allocation":null}"#,
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let request = preparations
+            .recv()
+            .await
+            .expect("preparation reached daemon");
+        assert_eq!(request.selection.session_id, "session-1");
+        assert_eq!(request.selection.profile_id.as_deref(), Some("codex-1"));
+        assert_eq!(
+            request.selection.target_template_id.as_deref(),
+            Some("podman")
+        );
+        request
+            .reply
+            .send(Ok(MovePreparation {
+                selection: request.selection,
+                source_profile_id: "codex-1".into(),
+                source_target_template_id: "podman".into(),
+                cross_harness: false,
+                active: true,
+                queued_commands: vec![hel::hel_state::MaterializedQueuedPrompt {
+                    command_id: "queued-1".into(),
+                    kind: hel::hel_state::QueuedCommandKind::Prompt,
+                    content: vec![serde_json::json!({
+                        "type": "image",
+                        "mimeType": "image/png",
+                        "data": "secret-image-bytes"
+                    })],
+                    queued_at_ms: 1,
+                }],
+                fingerprint: "fingerprint".into(),
+                operation_id: "move-1".into(),
+            }))
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["operation_id"], "move-1");
+        assert_eq!(body["active"], true);
+        assert_eq!(
+            body["queued_commands"][0]["content"][0]["text"],
+            "[Image attachment: image/png]"
+        );
+        assert!(body.to_string().contains("[Image attachment: image/png]"));
+        assert!(!body.to_string().contains("secret-image-bytes"));
+    }
+
+    #[tokio::test]
+    async fn confirmed_move_action_forwards_the_fingerprinted_request() {
+        let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
+            snapshot.sessions[0].capabilities.move_session = true;
+        });
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/actions")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"action":"move","request":{"preparation":{"selection":{"session_id":"session-1","profile_id":"codex-1","target_template_id":"podman","clear_resource_allocation":false,"additional_mounts":null,"resource_allocation":null},"source_profile_id":"codex-1","source_target_template_id":"podman","cross_harness":false,"active":false,"queued_commands":[],"fingerprint":"fingerprint","operation_id":"move-1"},"queue":null,"acknowledge_interruption":false}}"#,
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let action = actions.recv().await.expect("move action reached daemon");
+        assert!(matches!(action.action, ControllerAction::Move { .. }));
+        action.reply.send(ActionOutcome::Accepted).unwrap();
+        assert_eq!(
+            response.await.unwrap().unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test]
     async fn shell_action_is_typed_and_forwarded() {
         let (app, mut actions, _, _, _) = app();
         let cookie = login_cookie(&app).await;
@@ -5024,6 +5448,8 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 profile_id: "claude-1".into(),
                 target_id: "podman".into(),
                 queue: ResumeQueueDisposition::Start,
+                additional_mounts: None,
+                resource_allocation: None,
             },
             &snapshot,
         )
@@ -5036,6 +5462,8 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 profile_id: "claude-1".into(),
                 target_id: "podman".into(),
                 queue: ResumeQueueDisposition::Start,
+                additional_mounts: None,
+                resource_allocation: None,
             },
             &snapshot,
         )
@@ -5209,12 +5637,78 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 profile_id: "codex-1".into(),
                 target_id: "raw".into(),
                 queue: ResumeQueueDisposition::Start,
+                additional_mounts: None,
+                resource_allocation: None,
             },
             &snapshot,
         )
         .unwrap_err();
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
+        let (config, state) = sample_config_state();
+        let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        snapshot.sessions[0].capabilities.move_session = true;
+        let selection = MoveSelection {
+            clear_resource_allocation: false,
+            session_id: "session-1".into(),
+            profile_id: Some("codex-1".into()),
+            target_template_id: Some("podman".into()),
+            additional_mounts: None,
+            resource_allocation: None,
+        };
+        let preparation = MovePreparation {
+            selection,
+            source_profile_id: "codex-1".into(),
+            source_target_template_id: "podman".into(),
+            cross_harness: false,
+            active: true,
+            queued_commands: vec![hel::hel_state::MaterializedQueuedPrompt {
+                command_id: "command-1".into(),
+                kind: hel::hel_state::QueuedCommandKind::Prompt,
+                content: vec![serde_json::json!({"type": "text", "text": "continue"})],
+                queued_at_ms: 1,
+            }],
+            fingerprint: "fingerprint".into(),
+            operation_id: "move-1".into(),
+        };
+        let request = |queue, acknowledge_interruption| MoveSessionRequest {
+            preparation: preparation.clone(),
+            queue,
+            acknowledge_interruption,
+        };
+        assert_eq!(
+            validate_action(
+                &ControllerAction::Move {
+                    request: request(Some(ResumeQueueDisposition::Discard), false),
+                },
+                &snapshot,
+            )
+            .unwrap_err()
+            .status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            validate_action(
+                &ControllerAction::Move {
+                    request: request(None, true),
+                },
+                &snapshot,
+            )
+            .unwrap_err()
+            .status,
+            StatusCode::BAD_REQUEST
+        );
+        validate_action(
+            &ControllerAction::Move {
+                request: request(Some(ResumeQueueDisposition::Discard), true),
+            },
+            &snapshot,
+        )
+        .unwrap();
     }
 
     #[tokio::test]
