@@ -11,8 +11,9 @@ Alt-G promises a compact dashboard, but minimized Sessions currently switches to
 - [x] (2026-09-07 17:20Z) Traced the Alt-G state change and the minimized grid rendering path.
 - [x] (2026-09-07 17:31Z) Replaced minimized grid rendering with one-line vertical session rows and updated behavior tests and README.
 - [x] (2026-09-07 18:05Z) Passed all 350 TUI tests and diagnosed the existing macOS CI failure as a canonical-path assertion bug.
-- [ ] Run full tests, Clippy, release builds, license checks, and release-version checks.
-- [ ] Commit the behavior change, prepare and commit v2.1.3, push master, verify CI, tag, and verify the release workflow.
+- [x] (2026-09-07 18:31Z) Passed full tests, Clippy with warnings denied, the host release build, and the repaired reliability smoke with zero leaks.
+- [x] (2026-09-07 18:36Z) Synchronized workspace manifests and lockfile to v2.1.3, regenerated licenses, and passed the release-version check.
+- [ ] Commit v2.1.3, push master, verify green CI, tag, and verify the release and publishing workflows.
 
 ## Surprises & Discoveries
 
