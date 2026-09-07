@@ -1335,7 +1335,7 @@ impl DashboardContext {
                 }
                 match *result {
                     Ok(chat) => {
-                        let mut chat = chat.open();
+                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
                         // The old warm chat continued receiving feed updates
                         // while this attach was in flight. Capture its latest
                         // local form state just before replacing it.

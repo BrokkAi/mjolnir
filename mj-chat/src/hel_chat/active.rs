@@ -453,6 +453,18 @@ impl PreparedChat {
     pub fn open(self) -> ActiveChat {
         ActiveChat::from_prepared(self)
     }
+
+    /// A same-session handoff keeps the latest local composer, not the saved
+    /// draft captured before asynchronous preparation. Other sessions retain
+    /// their own saved drafts.
+    pub fn open_replacing(mut self, previous: Option<&ActiveChat>) -> ActiveChat {
+        if let Some(previous) = previous
+            && previous.session_id() == self.session.session_id()
+        {
+            self.draft = previous.draft();
+        }
+        self.open()
+    }
 }
 
 impl ActiveChat {
@@ -2886,6 +2898,36 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Position, Rect};
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn replacement_chat_preserves_the_latest_same_session_draft_even_when_cleared() {
+        fn prepare(id: &str, draft: &str) -> PreparedChat {
+            let fixture =
+                mj_controller::hel_session_manager::replacement_session_test_fixture(id, 89);
+            ActiveChat::prepare_with_persistence(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                draft.into(),
+                Notices::default(),
+                None,
+            )
+        }
+        let mut previous = prepare("moving", "saved before preparation").open();
+        let pending = prepare("moving", "stale saved draft");
+        previous.state.set_input("edited during preparation".into());
+        let mut replacement = pending.open_replacing(Some(&previous));
+        assert_eq!(replacement.draft(), "edited during preparation");
+
+        replacement.state.clear_input();
+        let replacement =
+            prepare("moving", "stale draft must not return").open_replacing(Some(&replacement));
+        assert!(replacement.draft().is_empty());
+        let different = prepare("other", "other session draft").open_replacing(Some(&previous));
+        assert_eq!(different.draft(), "other session draft");
+    }
 
     fn managed_view(session: MaterializedSession) -> ManagedSessionView {
         let session_id = session.session_id.clone();
