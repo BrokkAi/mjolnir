@@ -369,10 +369,9 @@ impl CompactionBackend for UtilityCompactionBackend {
 
 fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequest {
     let mut environment = profile.environment.clone();
-    environment.insert(
-        profile.home_env().to_string(),
-        profile.home.to_string_lossy().into_owned(),
-    );
+    profile
+        .kind
+        .configure_home_environment(&profile.home, &mut environment);
     QuotaRefreshRequest {
         profile_id: profile_id.to_string(),
         harness: profile.kind,
@@ -413,7 +412,7 @@ fn utility_precedence(kind: HarnessKind) -> Option<u8> {
         HarnessKind::Grok => Some(3),
         HarnessKind::Kimi => Some(2),
         HarnessKind::Deepseek => Some(1),
-        HarnessKind::Claude => None,
+        HarnessKind::Claude | HarnessKind::Muse => None,
     }
 }
 
@@ -448,7 +447,7 @@ fn family_matches(kind: HarnessKind, id: &str) -> bool {
                     .is_some_and(|character| character.is_ascii_digit())
         }
         HarnessKind::Deepseek => id.starts_with("deepseek-") && id.contains("flash"),
-        HarnessKind::Claude => false,
+        HarnessKind::Claude | HarnessKind::Muse => false,
     }
 }
 
@@ -519,7 +518,7 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
                 )) as Arc<dyn LlmBackend>
             }))
         }
-        HarnessKind::Claude => Ok(None),
+        HarnessKind::Claude | HarnessKind::Muse => Ok(None),
     }
 }
 

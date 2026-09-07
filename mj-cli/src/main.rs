@@ -968,10 +968,13 @@ async fn login(args: LoginArgs) -> Result<()> {
         arguments.join(" "),
         profile.home.display()
     );
+    let mut environment = profile.environment.clone();
+    profile
+        .kind
+        .configure_home_environment(&profile.home, &mut environment);
     let status = tokio::process::Command::new(&program)
         .args(&arguments)
-        .envs(&profile.environment)
-        .env(profile.home_env(), &profile.home)
+        .envs(&environment)
         .status()
         .await
         .with_context(|| {

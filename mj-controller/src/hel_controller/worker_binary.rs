@@ -103,7 +103,9 @@ impl Controller {
         }
         .write(&ownership_path)?;
         let profile_stage = staging.path().join("profile");
-        if !matches!(backend, hel_targets::TargetLocator::LocalBare { .. }) {
+        if !matches!(backend, hel_targets::TargetLocator::LocalBare { .. })
+            || profile.kind == hel::hel_config::HarnessKind::Muse
+        {
             let started = Instant::now();
             let result = stage_profile(profile, &profile_stage);
             tracing::debug!(
@@ -307,15 +309,21 @@ fn worker_launch_config(
             .iter()
             .map(|resource| resource.destination.clone()),
     );
-    if profile.kind == hel::hel_config::HarnessKind::Deepseek && !additional_directories.is_empty()
+    if matches!(
+        profile.kind,
+        hel::hel_config::HarnessKind::Deepseek | hel::hel_config::HarnessKind::Muse
+    ) && !additional_directories.is_empty()
     {
         bail!(
-            "DeepSeek Harness ACP does not support multiple workspace roots; use a single-repository bundle"
+            "{} ACP does not support multiple workspace roots; use a single-repository bundle",
+            profile.kind.display_name()
         );
     }
     let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
     let mut environment = profile.environment.clone();
-    environment.insert(profile.home_env().into(), target_profile_home.clone());
+    profile
+        .kind
+        .configure_home_environment(Path::new(&target_profile_home), &mut environment);
     profile
         .kind
         .configure_execution_environment(execution_policy, &mut environment);
@@ -345,7 +353,10 @@ fn worker_launch_config(
             cwd: PathBuf::from(&workspace.0),
             additional_directories,
             native_session_id: session.native_session_id.clone(),
-            project_memory: Some(project_memory.clone()),
+            project_memory: profile
+                .kind
+                .supports_injected_mcp()
+                .then(|| project_memory.clone()),
             execution_policy,
         },
         project_memory,
@@ -1096,7 +1107,11 @@ fn workspace_paths(
 pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage {
     if matches!(
         profile.kind,
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Grok
+        HarnessKind::Codex
+            | HarnessKind::Claude
+            | HarnessKind::Kimi
+            | HarnessKind::Grok
+            | HarnessKind::Muse
     ) {
         ProvisionStage::Installing(profile.kind)
     } else {
@@ -1109,6 +1124,7 @@ pub(super) fn bridge_launch(
     policy: hel::hel_config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
     match harness {
+        hel::hel_config::HarnessKind::Muse => ("muse-acp".into(), Vec::new()),
         hel::hel_config::HarnessKind::Codex => (
             "sh".into(),
             vec![
@@ -1178,6 +1194,14 @@ pub(super) fn stage_profile(
     let source = profile.home.as_path();
     std::fs::create_dir_all(destination)?;
     let allowlist: &[&str] = match harness {
+        hel::hel_config::HarnessKind::Muse => &[
+            "auth.json",
+            "settings.json",
+            "trust.json",
+            "AGENTS.md",
+            "skills",
+            "rules",
+        ],
         hel::hel_config::HarnessKind::Codex => &[
             "auth.json",
             "config.toml",
@@ -1258,6 +1282,7 @@ fn append_hel_target_environment(
         hel::hel_config::HarnessKind::Kimi => "AGENTS.md",
         hel::hel_config::HarnessKind::Grok => "AGENTS.md",
         hel::hel_config::HarnessKind::Deepseek => "AGENTS.md",
+        hel::hel_config::HarnessKind::Muse => "AGENTS.md",
     };
     let path = destination.join(instructions);
     let separator = match std::fs::read_to_string(&path) {
@@ -1342,6 +1367,16 @@ fn install_worker_files(
 ) -> Result<()> {
     match locator {
         hel_targets::TargetLocator::LocalBare { .. } => {
+            if profile_stage.is_dir() {
+                std::fs::create_dir_all(profile_home).context("create isolated local profile")?;
+                for entry in std::fs::read_dir(profile_stage)? {
+                    let entry = entry?;
+                    copy_profile_entry(
+                        &entry.path(),
+                        &Path::new(profile_home).join(entry.file_name()),
+                    )?;
+                }
+            }
             for command in [
                 CommandSpec::new("mkdir", ["-p", worker_root])
                     .purpose("create local bare worker directory"),
@@ -3895,6 +3930,7 @@ mod tests {
             (hel::hel_config::HarnessKind::Kimi, "AGENTS.md"),
             (hel::hel_config::HarnessKind::Grok, "AGENTS.md"),
             (hel::hel_config::HarnessKind::Deepseek, "AGENTS.md"),
+            (hel::hel_config::HarnessKind::Muse, "AGENTS.md"),
         ] {
             let home = tempfile::tempdir().unwrap();
             let original = "# Controller instructions\n\nKeep this source unchanged.\n";

@@ -28,7 +28,7 @@ use crate::hel_workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 
 mod session_move;
 pub use session_move::*;

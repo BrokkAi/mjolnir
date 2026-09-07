@@ -673,6 +673,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 27 {
+        migrate_muse_harness_kind(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1117,6 +1120,53 @@ fn migrate_stopped_session_state(connection: &Connection) -> Result<()> {
     if statement.exists([])? {
         bail!("foreign key violation after migrating the stopped session state");
     }
+    Ok(())
+}
+
+/// Preserve existing data and dependent indexes while admitting Muse sessions.
+fn migrate_muse_harness_kind(connection: &Connection) -> Result<()> {
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        for table in ["sessions", "hidden_native_sessions"] {
+            let sql: String = transaction.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            let (_, definition) = sql
+                .split_once('(')
+                .context("missing harness table definition")?;
+            if definition.contains("'deepseek','muse')") {
+                continue;
+            }
+            ensure!(
+                definition.contains("'deepseek')"),
+                "unexpected {table} harness constraint"
+            );
+            let definition = definition.replace("'deepseek')", "'deepseek','muse')");
+            let objects: Vec<String> = transaction.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name=?1 AND type IN ('index','trigger') AND sql IS NOT NULL")?
+                .query_map([table], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            transaction.execute_batch(&format!(
+                "CREATE TABLE {table}_muse_v27 ({definition}; INSERT INTO {table}_muse_v27 SELECT * FROM {table}; DROP TABLE {table}; ALTER TABLE {table}_muse_v27 RENAME TO {table};"
+            ))?;
+            for object in objects {
+                transaction.execute_batch(&object)?;
+            }
+        }
+        ensure!(
+            !transaction
+                .prepare("PRAGMA foreign_key_check")?
+                .exists([])?,
+            "foreign key violation in Muse migration"
+        );
+        transaction.execute_batch("INSERT INTO schema_migrations(version, applied_at) VALUES (27, strftime('%Y-%m-%dT%H:%M:%fZ','now')); PRAGMA user_version = 27;")?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration.context("migrate Muse harness constraints")?;
+    restored.context("restore foreign key enforcement after Muse migration")?;
     Ok(())
 }
 

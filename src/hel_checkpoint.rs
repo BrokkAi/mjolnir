@@ -519,7 +519,9 @@ fn restored_native_relative_path(
             rewritten.extend(components);
             Ok(rewritten)
         }
-        HarnessKind::Codex | HarnessKind::Deepseek => Ok(relative_path.to_path_buf()),
+        HarnessKind::Codex | HarnessKind::Deepseek | HarnessKind::Muse => {
+            Ok(relative_path.to_path_buf())
+        }
     }
 }
 
@@ -1689,6 +1691,7 @@ fn collect_native_artifacts_cached(
         HarnessKind::Codex => &["sessions", "archived_sessions"],
         HarnessKind::Claude => &["projects", "session-env", "file-history"],
         HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Deepseek => &["sessions"],
+        HarnessKind::Muse => &[".data/muse/sessions"],
     };
     let mut probe = match harness {
         HarnessKind::Codex => CodexProbeContext {
@@ -2006,6 +2009,7 @@ fn collect_native_tree(
         HarnessKind::Kimi => inside && kimi_session_artifact(relative, session_id),
         HarnessKind::Grok => inside && grok_session_artifact(relative, session_id),
         HarnessKind::Deepseek => inside && name.starts_with("session.jsonl"),
+        HarnessKind::Muse => inside,
     };
     if !selected || is_secret_like_path(relative) {
         return Ok(());
@@ -3190,6 +3194,52 @@ mod tests {
             PathBuf::from(format!(
                 "sessions/--workspace-app--/{NATIVE}/session.jsonl.zstd"
             ))
+        );
+    }
+
+    #[test]
+    fn muse_checkpoint_keeps_selected_child_streams_without_credentials_or_other_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".data/muse/sessions/2026/09/07");
+        let selected = root.join(NATIVE);
+        fs::create_dir_all(selected.join("subagent/child")).unwrap();
+        fs::create_dir_all(root.join("other")).unwrap();
+        fs::write(selected.join("session.jsonl"), vec![b'x'; 128 * 1024]).unwrap();
+        fs::write(
+            selected.join("subagent/child/session.jsonl"),
+            b"child history",
+        )
+        .unwrap();
+        fs::write(root.join("other/session.jsonl"), b"unrelated").unwrap();
+        fs::write(temp.path().join("auth.json"), b"secret").unwrap();
+        let artifacts =
+            collect_native_artifacts(HarnessKind::Muse, temp.path(), NATIVE, false).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.data.len() == 128 * 1024)
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.data == b"child history")
+        );
+        let restored = tempfile::tempdir().unwrap();
+        for artifact in artifacts {
+            let path = restored.path().join(&artifact.relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, &artifact.data).unwrap();
+        }
+        assert_eq!(
+            collect_native_artifacts(HarnessKind::Muse, restored.path(), NATIVE, false)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!restored.path().join("auth.json").exists());
+        assert!(
+            collect_native_artifacts(HarnessKind::Muse, restored.path(), "missing", false).is_err()
         );
     }
 

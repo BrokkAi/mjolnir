@@ -1630,6 +1630,9 @@ impl ChatState {
                     }
                 }
                 LocalCommand::Plan => {
+                    if self.acp_surface.forwards_plan_command() {
+                        return self.submit_prompt_with_history(prompt.clone(), prompt);
+                    }
                     let (requested, followup) = match args.to_ascii_lowercase().as_str() {
                         "" => (!self.plan_mode_active(), None),
                         "on" => (true, None),
@@ -3944,6 +3947,19 @@ mod tests {
         chat.set_config_options(&options);
 
         assert!(chat.plan_mode_active());
+    }
+
+    #[test]
+    fn muse_plan_forwards_the_advertised_skill_without_changing_approvals() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_harness_kind(HarnessKind::Muse);
+        advertise(&mut chat, 1, &["plan"]);
+        chat.set_input("/plan the migration".into());
+        assert_eq!(
+            chat.submit_input(),
+            ChatAction::Prompt("/plan the migration".into())
+        );
+        assert!(!chat.plan_command_pending);
     }
 
     #[test]

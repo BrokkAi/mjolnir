@@ -67,6 +67,12 @@ pub async fn discover_review_settings(
     if !controller.config.profiles.contains_key(&request.profile) {
         return Err(format!("Unknown reviewer profile {:?}", request.profile));
     }
+    if !controller.config.profiles[&request.profile]
+        .kind
+        .supports_injected_mcp()
+    {
+        return Err("Muse Code cannot be a reviewer because muse-acp does not accept the required MCP tools".into());
+    }
 
     let Some((session_id, handle)) = select_worker(
         &control,

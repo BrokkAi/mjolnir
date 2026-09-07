@@ -167,7 +167,7 @@ pub fn run_setup_dialog(config_path: &Path) -> Result<SetupOutcome> {
 pub fn discover_current(executor: &impl CommandExecutor) -> SetupDiscovery {
     let home = dirs::home_dir();
     let overrides = HarnessKind::ALL.into_iter().filter_map(|kind| {
-        std::env::var_os(kind.home_env()).map(|path| (kind, PathBuf::from(path)))
+        std::env::var_os(kind.home_env()).map(|path| (kind, kind.home_from_environment(path)))
     });
     let homes = discover_harness_homes_with_executor(home.as_deref(), overrides, executor);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

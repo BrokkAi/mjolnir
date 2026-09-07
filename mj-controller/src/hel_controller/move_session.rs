@@ -310,6 +310,7 @@ impl Controller {
             .targets
             .get(target_id)
             .context("unknown destination target")?;
+        self.validate_muse_resume_destination(source, profile.kind, target_id)?;
         super::worktree::resume_compatibility(source, &self.config, target_id)
             .map_err(anyhow::Error::msg)?;
         super::backend::validate_resource_allocation(
@@ -317,6 +318,10 @@ impl Controller {
             selection.resource_allocation.as_ref(),
         )?;
         let mounts = selection.additional_mounts.as_deref().unwrap_or_default();
+        ensure!(
+            profile.kind != hel::hel_config::HarnessKind::Muse || mounts.is_empty(),
+            "Muse Code ACP supports one workspace root; attached directories are unsupported"
+        );
         ensure!(
             mounts.is_empty() || hel::hel_config::mount_history_host(target).is_some(),
             "attached resources are unsupported for this target; select compatible resources explicitly"

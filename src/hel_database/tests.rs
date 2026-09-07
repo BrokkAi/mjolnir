@@ -2042,6 +2042,75 @@ fn a_fresh_database_accepts_a_session_for_every_harness_kind() {
 }
 
 #[test]
+fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    let connection = open(&database).unwrap();
+    connection.execute_batch("INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('existing','project','now');
+        INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at,draft_input)
+        VALUES ('existing','Existing','codex','codex','local','running','now','keep this draft');
+        INSERT INTO hidden_native_sessions VALUES ('claude','native-existing','now');
+        CREATE INDEX migration_fixture_index ON sessions(title);
+        PRAGMA writable_schema=ON;
+        UPDATE sqlite_schema SET sql=replace(sql, ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
+        PRAGMA writable_schema=OFF;
+        PRAGMA schema_version=1000;
+        DELETE FROM schema_migrations WHERE version=27;
+        PRAGMA user_version=26;").unwrap();
+    drop(connection);
+    let connection = open(&database).unwrap();
+    let draft: String = connection
+        .query_row(
+            "SELECT draft_input FROM sessions WHERE session_id='existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(draft, "keep this draft");
+    connection
+        .execute(
+            "UPDATE sessions SET harness_kind='muse' WHERE session_id='existing'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO hidden_native_sessions VALUES ('muse','native-muse','now')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM hidden_native_sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert!(
+        connection
+            .prepare("SELECT 1 FROM sqlite_schema WHERE name='migration_fixture_index'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    assert!(
+        !connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    drop(connection);
+    assert_eq!(
+        open(&database)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn master_version_six_database_converges_to_the_relay_schema() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

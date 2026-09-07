@@ -31,11 +31,12 @@ controls:
 | Kimi Code | `auto` |
 | Grok Build | always approve with its sandbox disabled |
 | DeepSeek Harness | `danger-full-access` |
+| Muse Code | `auto` approvals and `--disable-sandbox` |
 
 Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.
 
-Codex, Claude Code, and Grok Build can preserve guardian-style approvals on a
+Codex, Claude Code, Grok Build, and Muse Code can preserve guardian-style approvals on a
 raw target. Kimi Code and DeepSeek Harness cannot. Mjolnir warns when a harness
 without guardian support is paired with a raw target, but a warning is not a
 sandbox—choose a container or instance instead.

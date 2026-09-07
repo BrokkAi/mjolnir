@@ -108,12 +108,14 @@ const fn import_label(harness: HarnessKind) -> &'static str {
         HarnessKind::Kimi => "Kimi",
         HarnessKind::Grok => "Grok Build",
         HarnessKind::Deepseek => "DeepSeek Harness",
+        HarnessKind::Muse => "Muse Code",
     }
 }
 
 /// Where a harness keeps the sessions Mjolnir may read. Never modified.
 fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
     match harness {
+        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
         HarnessKind::Claude => claude_config_home(),
         HarnessKind::Codex => codex_config_home(),
         HarnessKind::Kimi => kimi_config_home(),
@@ -151,6 +153,7 @@ fn locate_for_import(
 ) -> Result<LocatedImport> {
     let archives = sessions_dir();
     Ok(match harness {
+        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
         HarnessKind::Claude => {
             let source = locate_claude_session(&home, selection)?;
             LocatedImport {

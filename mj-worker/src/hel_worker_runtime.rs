@@ -100,18 +100,22 @@ fn credential_endpoint(
     let home = config.environment.get(key).ok_or_else(|| {
         format!("worker launch config has no {key} entry, so it cannot locate harness credentials")
     })?;
+    let home = config.harness.home_from_environment(home);
     Ok(CredentialEndpoint {
         harness: config.harness,
-        home: PathBuf::from(home.as_str()),
-        marker: hel::hel_config::harness_authentication_marker(
-            config.harness,
-            Path::new(home.as_str()),
-        ),
+        home: home.clone(),
+        marker: hel::hel_config::harness_authentication_marker(config.harness, &home),
     })
 }
 
 #[cfg(unix)]
 fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
+    if config.harness == hel::hel_config::HarnessKind::Muse
+        && let Some(value) = config.environment.get_mut("XDG_DATA_HOME")
+        && Path::new(value).is_relative()
+    {
+        *value = base.join(&*value).to_string_lossy().into_owned();
+    }
     let key = config.harness.home_env();
     if let Some(value) = config.environment.get_mut(key) {
         let path = Path::new(value);

@@ -96,7 +96,13 @@ pub(crate) struct ReviewSettingsDialog {
 impl ReviewSettingsDialog {
     fn new(config: &HelConfig) -> Self {
         let mut profiles = vec![None];
-        profiles.extend(config.profiles.keys().cloned().map(Some));
+        profiles.extend(
+            config
+                .profiles
+                .iter()
+                .filter(|(_, profile)| profile.kind.supports_injected_mcp())
+                .map(|(id, _)| Some(id.clone())),
+        );
         let dialog = Self {
             review: config.review.clone(),
             profiles,

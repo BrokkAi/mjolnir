@@ -345,10 +345,9 @@ pub(crate) fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefres
         .iter()
         .map(|(id, profile)| {
             let mut environment = profile.environment.clone();
-            environment.insert(
-                profile.home_env().to_string(),
-                profile.home.to_string_lossy().into_owned(),
-            );
+            profile
+                .kind
+                .configure_home_environment(&profile.home, &mut environment);
             QuotaRefreshRequest {
                 profile_id: id.clone(),
                 harness: profile.kind,

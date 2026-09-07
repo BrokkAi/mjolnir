@@ -9,7 +9,7 @@ A Mjolnir session is a durable conversation plus the target on which its coding 
 
 Press `Alt+N` anywhere in the terminal dashboard. The wizard resolves four things:
 
-1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, or DeepSeek Harness and the credentials to use.
+1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, DeepSeek Harness, or Muse Code and the credentials to use.
 2. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
 3. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
@@ -122,7 +122,7 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native Claude Code, Codex, Kimi Code, and Grok Build sessions can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. DeepSeek native import is not available.
+The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native Claude Code, Codex, Kimi Code, and Grok Build sessions can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. DeepSeek and Muse native import are not available.
 
 For scripting, select a specific native UUID or the latest session:
 

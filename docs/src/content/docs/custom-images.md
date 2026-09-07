@@ -60,6 +60,14 @@ presets from `DSH_HOME`. DeepSeek's adapter currently accepts one workspace
 root, so a DeepSeek profile cannot launch a multi-repository bundle or a
 session with additional mounted directories.
 
+Muse Code requires both `muse-acp` on `PATH` and the native `muse` executable.
+Set `MUSE_CLI` to the native binary's absolute path. The reference image uses
+`scripts/install-muse.py` with `mj-worker/assets/muse/runtime.json` to install
+the same checksum-verified versions as managed workers. Copy both files into
+your image build and run the installer with the manifest path and destination
+bin directory. It needs Python 3.11 or newer, curl, and tar. Keep the installed
+adapter LICENSE and NOTICE files under `share/licenses/muse-acp`.
+
 ## Workspace and Mjolnir's own files
 
 Sessions work under `/workspace`. Separately, Mjolnir writes its own session

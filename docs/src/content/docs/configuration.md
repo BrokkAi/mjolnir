@@ -123,7 +123,7 @@ home = "/home/me/.codex-work"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, or `deepseek`. |
+| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `deepseek`, or `muse`. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
@@ -492,6 +492,7 @@ written:
 | Kimi Code | `KIMI_CODE_HOME` | `~/.kimi-code` |
 | Grok Build | `GROK_HOME` | `~/.grok` |
 | DeepSeek Harness | `DSH_HOME` | `~/.dsh` |
+| Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
 
 The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over
 `INSTALL_DIR`), `MJOLNIR_GITHUB_OWNER`, `MJOLNIR_VERSION`, `GITHUB_TOKEN`, and
