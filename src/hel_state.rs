@@ -1781,6 +1781,7 @@ mod tests {
             newer_config_version: None,
             phone: Default::default(),
             review: Default::default(),
+            startup: Default::default(),
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {

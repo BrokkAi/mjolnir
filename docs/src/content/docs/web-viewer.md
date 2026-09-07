@@ -20,6 +20,10 @@ HTTP-only session cookie. The viewer exposes the workspaces attached to this
 daemon, live and resumable sessions, the conversation and prompt composer,
 target capacity, profile quota, and the new-session flow.
 
+On a workstation, the dashboard arranges sessions in columns and conversations
+use a wider reading area with the composer kept in view. On phones, sessions
+remain in a single column with touch controls.
+
 The viewer can:
 
 - create a session by choosing its profile, target, project or bundle, and

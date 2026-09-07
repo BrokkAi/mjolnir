@@ -457,7 +457,8 @@ pub(crate) async fn apply_dashboard_action(
                 move |result| DashboardIoUpdate::ProjectValidation { directory, result },
             );
         }
-        action @ DashboardAction::CreateSession { .. } => start_session_launch(context, action),
+        action @ (DashboardAction::CreateSession { .. }
+        | DashboardAction::CreateStartupSession { .. }) => start_session_launch(context, action),
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
         }
@@ -830,7 +831,8 @@ fn start_session_launch_with_repository_preflight(
     repository_preflight: Option<ResumeRepositorySourceReceipt>,
 ) {
     match action {
-        action @ DashboardAction::CreateSession { .. } => {
+        action @ (DashboardAction::CreateSession { .. }
+        | DashboardAction::CreateStartupSession { .. }) => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
             spawn_dashboard_create_session(

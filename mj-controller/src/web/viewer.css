@@ -1,8 +1,8 @@
-/* Mjolnir's phone viewer, in the terminal surface's visual language.
+/* Mjolnir's web viewer, in the terminal surface's visual language.
  *
  * The terminal is monospace, flat, and bordered, and it says what state a
  * thing is in with one colour drawn from a small semantic set. This stylesheet
- * follows it, so that reading a session on a phone and reading it in `mj`
+ * follows it, so that reading a session in a browser and reading it in `mj`
  * feel like the same product rather than two products that share a name.
  *
  * Two rules the content-security policy imposes, and which no rule here may
@@ -1325,6 +1325,80 @@ body[data-connection='reconnecting'] .connection {
 
 body[data-connection='reconnecting'] .connection::before {
   font-size: 16px;
+}
+
+/* ---- desktop ----
+ * The dashboard uses the available width for sessions; forms keep a readable
+ * measure. A conversation sizes its scrolling transcript from the actual
+ * remaining height, including the header and any connection banner.
+ */
+
+@media (min-width: 1024px) {
+  body {
+    max-width: 1600px;
+    padding-inline: 32px;
+  }
+
+  #login,
+  #new-page,
+  #move-page {
+    max-width: 760px;
+    margin-inline: auto;
+  }
+
+  .project-sessions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+    gap: 12px;
+    align-items: start;
+  }
+
+  .project-sessions .session {
+    margin: 0;
+  }
+
+  body:has(#conversation:not(.hidden)) {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - var(--keyboard-inset));
+  }
+
+  body:has(#conversation:not(.hidden)) > #shell-header,
+  body:has(#conversation:not(.hidden)) > #connection {
+    flex-shrink: 0;
+  }
+
+  #app:has(#conversation:not(.hidden)) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .conversation {
+    flex: 1;
+    min-height: 0;
+    height: auto;
+    width: 100%;
+    max-width: 1200px;
+    margin-inline: auto;
+  }
+
+  .conversation-scroll {
+    min-height: 0;
+  }
+
+  #conversation-side {
+    max-height: 25dvh;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+
+  .conversation-header,
+  .composer {
+    flex-shrink: 0;
+  }
 }
 
 /* ---- narrow phones ----

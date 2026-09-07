@@ -72,7 +72,7 @@ pub use resume::{
 };
 pub use worker_binary::{WorkerBinaryAvailability, worker_binary_prerequisite_for_arch};
 pub use worker_restart::WorkerUpgradeOutcome;
-pub use worktree::{ResumePlan, resume_compatibility};
+pub use worktree::{ResumePlan, local_project_repository, resume_compatibility};
 
 pub struct Controller {
     pub config: HelConfig,
@@ -680,6 +680,9 @@ impl Controller {
                 .remove(old_id)
                 .expect("profile was checked in the transaction");
             config.profiles.insert(new_id.to_owned(), profile);
+            if config.startup.profile.as_deref() == Some(old_id) {
+                config.startup.profile = Some(new_id.to_owned());
+            }
             Ok(())
         }) {
             Ok(result) => result,
@@ -702,6 +705,9 @@ impl Controller {
                     "cannot restore profile rename: both {old_id:?} and {new_id:?} exist"
                 );
                 config.profiles.insert(old_id.to_owned(), profile);
+                if config.startup.profile.as_deref() == Some(new_id) {
+                    config.startup.profile = Some(old_id.to_owned());
+                }
                 Ok(())
             });
             let restored = match restore {
@@ -758,6 +764,9 @@ impl Controller {
                 .remove(old_id)
                 .expect("target was checked in the transaction");
             config.targets.insert(new_id.to_owned(), target);
+            if config.startup.target.as_deref() == Some(old_id) {
+                config.startup.target = Some(new_id.to_owned());
+            }
             Ok(())
         }) {
             Ok(result) => result,
@@ -780,6 +789,9 @@ impl Controller {
                     "cannot restore target rename: both {old_id:?} and {new_id:?} exist"
                 );
                 config.targets.insert(old_id.to_owned(), target);
+                if config.startup.target.as_deref() == Some(new_id) {
+                    config.startup.target = Some(old_id.to_owned());
+                }
                 Ok(())
             });
             let restored = match restore {
@@ -1272,6 +1284,8 @@ mod tests {
             config: registration_config(),
             state: HelState::default(),
         };
+        controller.config.startup.profile = Some("codex".into());
+        controller.config.startup.target = Some("podman".into());
         controller.config.save().unwrap();
         let session_id = controller
             .register_session_with_resources(
@@ -1296,6 +1310,14 @@ mod tests {
         assert_eq!(session.target_template_id, "podman-renamed");
         assert!(loaded.config.profiles.contains_key("codex-renamed"));
         assert!(loaded.config.targets.contains_key("podman-renamed"));
+        assert_eq!(
+            loaded.config.startup.profile.as_deref(),
+            Some("codex-renamed")
+        );
+        assert_eq!(
+            loaded.config.startup.target.as_deref(),
+            Some("podman-renamed")
+        );
         assert!(!config_rename_journal_path().exists());
     }
 

@@ -14,11 +14,24 @@ cd path/to/your/repository
 mj
 ```
 
-## 1. Complete first-run setup
+## 1. Open your first prompt
 
-On first launch, Mjolnir opens a terminal setup dialog and creates a named workspace. It looks for supported harness homes and existing credentials, detects the current GitHub repository when possible, and proposes every usable local container runtime as a target.
+When no workspace exists, Mjolnir creates one using the current directory's
+name. An empty workspace starts a session automatically and focuses the prompt.
+On Linux and macOS, a fresh configuration uses your Codex home (`CODEX_HOME` or
+`~/.codex`). If you already have profiles, Codex is preferred; otherwise Mjolnir
+uses the first configured profile.
 
-Review the detected profiles and targets before confirming. Mjolnir writes the result to your per-user `config.toml` in the operating system's configuration directory; on a typical Linux installation it is `~/.config/mjolnir/config.toml`. Nothing is provisioned remotely during this discovery step.
+Startup checks for usable Podman, then Docker, and finally uses a local directory
+session. Containers start from your current Git repository, including its
+uncommitted contents. Plain directories use the local target. You can change the
+agent and target with `[startup] profile` and `target` in
+[configuration](/configuration/#first-session-defaults-startup).
+
+Launch progress and failures appear on the dashboard. Once ready, type a prompt
+and press `Enter`. Existing workspace selection and live-session startup retain
+their current behavior. Windows retains guided setup for its supported targets.
+Use `mj setup` explicitly when you want guided discovery of other environments.
 
 The normal dashboard then opens. Its session list, Conversation and Prompt regions, target capacity, and profile quota stay visible together.
 
@@ -31,9 +44,9 @@ The normal dashboard then opens. Its session list, Conversation and Prompt regio
 
 You can revise every generated value later. See [configuration](/configuration/) for the file location and schema, [profiles](/profiles/) for harness credentials, and [targets](/targets/) for execution environments.
 
-## 2. Check the installation
+## 2. Resolve any missing prerequisites
 
-Exit or detach from the dashboard with `Alt+Q`, then run:
+If the first session reports a prerequisite failure, detach with `Alt+Q`, then run:
 
 ```sh
 mj doctor
@@ -59,9 +72,9 @@ mj login --profile <profile-id> --setup-token
 
 The login command is profile-aware: it runs the correct harness authentication flow and stores credentials in that profile's home. See [profiles](/profiles/) for isolation and authentication details, or [troubleshooting](/troubleshooting/) if `doctor` still reports a failure.
 
-## 3. Create a session
+## 3. Create a custom session (optional)
 
-Launch `mj` again and press `Alt+N` from anywhere on the dashboard. The new-session wizard walks through:
+For another agent, project, or target, press `Alt+N` from anywhere on the dashboard. The new-session wizard walks through:
 
 1. A harness profile.
 2. A target on which the session will run, including its resource size when that target is resizable.

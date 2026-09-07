@@ -71,6 +71,7 @@ pub(crate) enum DashboardIoUpdate {
         message: String,
     },
     CreateSession(Box<DashboardCreateSessionUpdate>),
+    StartupConfig(HelConfig),
     RenameSession {
         session_id: String,
         title: String,
@@ -1050,6 +1051,36 @@ pub(crate) fn spawn_dashboard_create_session(
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("creating session", cancelled.clone());
     tokio::task::spawn_blocking(move || {
+        let prepared = match action {
+            DashboardAction::CreateStartupSession {
+                profile_id,
+                target_template_id,
+                project_directory,
+            } => super::startup::prepare_session_launch(
+                profile_id,
+                target_template_id,
+                project_directory,
+                &cancelled,
+            )
+            .and_then(|(config, action)| {
+                updates
+                    .send(DashboardIoUpdate::StartupConfig(config))
+                    .context("dashboard closed during startup preparation")?;
+                Ok(action)
+            }),
+            action => Ok(action),
+        };
+        let action = match prepared {
+            Ok(action) => action,
+            Err(error) => {
+                if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
+                    DashboardCreateSessionUpdate::Failed(format!("{error:#}")),
+                ))) {
+                    tracing::debug!(%error, "startup preparation result dropped after dashboard shutdown");
+                }
+                return;
+            }
+        };
         let DashboardAction::CreateSession {
             profile_id,
             bundle_id,
@@ -1165,6 +1196,10 @@ impl DashboardContext {
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
         match update {
+            DashboardIoUpdate::StartupConfig(config) => {
+                self.controller.config = config.clone();
+                self.dashboard.set_config(config);
+            }
             DashboardIoUpdate::ReviewRefused {
                 session_id,
                 message,
@@ -1787,10 +1822,8 @@ impl DashboardContext {
         match update.result {
             Ok(LifecycleSuccess::Created) => {
                 self.dashboard.select_active_session(&session_id);
-                self.dashboard.set_notice(format!(
-                    "Session {} is ready; press Enter to open it",
-                    short_id(&session_id)
-                ));
+                self.dashboard
+                    .set_notice(format!("Session {} is ready", short_id(&session_id)));
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Resumed {

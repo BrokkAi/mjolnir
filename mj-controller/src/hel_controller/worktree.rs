@@ -35,6 +35,9 @@ impl Controller {
                     directory.is_dir(),
                     "project directory does not exist or is not a directory"
                 );
+                if local_project_repository(directory, executor)?.is_none() {
+                    return Ok(());
+                }
                 let output = executor.execute(
                     &CommandSpec::new(
                         "git",
@@ -200,6 +203,11 @@ impl Controller {
             .get(&session.target_template_id)
             .context("raw session target template disappeared during provisioning")?;
         let target = managed_worktree_target(template)?;
+        if matches!(target, ManagedWorktreeTarget::Local)
+            && local_project_repository(selected, executor)?.is_none()
+        {
+            return Ok(false);
+        }
         let inspection = inspect_raw_project(executor, &target, selected)?;
         if !inspection.primary_checkout {
             return Ok(false);
@@ -422,6 +430,15 @@ fn resolve_git_root(
         return Ok(Some(main_root.to_path_buf()));
     }
     Ok(Some(root))
+}
+
+/// Inspect a local launch directory using the same Git error handling and
+/// linked-worktree identity as existing sessions.
+pub fn local_project_repository(
+    directory: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<Option<PathBuf>> {
+    resolve_git_root(&ManagedWorktreeTarget::Local, directory, executor)
 }
 
 /// Which checkout each still-empty target repository is seeded from, or `None`
@@ -1444,22 +1461,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_bare_project_validation_runs_git_in_the_selected_directory() {
-        struct GitExecutor {
-            commands: RefCell<Vec<CommandSpec>>,
-        }
-        impl CommandExecutor for GitExecutor {
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                self.commands.borrow_mut().push(command.clone());
-                Ok(CommandOutput {
-                    status: 0,
-                    stdout: b"true\n".to_vec(),
-                    stderr: Vec::new(),
-                })
-            }
-        }
-
-        let project = tempfile::tempdir().unwrap();
+    fn local_bare_validation_accepts_projects_and_plain_directories_but_rejects_missing_paths() {
+        let project = committed_repository();
+        let plain = tempfile::tempdir().unwrap();
         let mut config = HelConfig::default();
         config
             .targets
@@ -1468,19 +1472,48 @@ mod tests {
             config,
             state: HelState::default(),
         };
-        let executor = GitExecutor {
-            commands: RefCell::new(Vec::new()),
-        };
-
         controller
-            .validate_project_directory("localhost", project.path(), &executor)
+            .validate_project_directory("localhost", project.path(), &ProcessExecutor)
             .unwrap();
-        let commands = executor.commands.borrow();
-        assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].program, "git");
-        assert_eq!(commands[0].args[0], "-C");
-        assert_eq!(commands[0].args[1], project.path().to_string_lossy());
-        assert_eq!(commands[0].args[2..], ["rev-parse", "--verify", "HEAD"]);
+        controller
+            .validate_project_directory("localhost", plain.path(), &ProcessExecutor)
+            .unwrap();
+        assert!(
+            controller
+                .validate_project_directory(
+                    "localhost",
+                    &plain.path().join("missing"),
+                    &ProcessExecutor
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_plain_local_directory_starts_without_creating_a_git_worktree() {
+        let plain = tempfile::tempdir().unwrap();
+        let session = raw_session_on("localhost", plain.path().to_str().unwrap());
+        let session_id = session.id.clone();
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        let mut controller = Controller {
+            config,
+            state: HelState {
+                sessions: [(session_id.clone(), session)].into_iter().collect(),
+                ..HelState::default()
+            },
+        };
+        assert!(
+            !controller
+                .prepare_managed_raw_worktree(&session_id, &ProcessExecutor)
+                .unwrap()
+        );
+        let session = &controller.state.sessions[&session_id];
+        assert_eq!(session.project_directory.as_deref(), Some(plain.path()));
+        assert!(session.managed_worktree.is_none());
+        assert!(!plain.path().join(".git").exists());
     }
 
     #[test]

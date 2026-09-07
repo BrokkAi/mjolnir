@@ -2213,7 +2213,9 @@ mod tests {
     use hel::hel_state::{
         CheckpointMetadata, HelState, ManagedSessionSnapshot, MaterializedSession, SessionState,
     };
-    use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec, ProvisionStage};
+    #[cfg(unix)]
+    use hel::hel_targets::ProvisionStage;
+    use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec};
     #[cfg(unix)]
     use hel::hel_worker::RelayCommandOutcome;
     use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
