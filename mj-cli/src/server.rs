@@ -27,7 +27,7 @@ use mj_controller::hel_session_manager::{
 use mj_controller::hel_tailscale::TailscaleTls;
 use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 
-use crate::daemon::{ResumeSessionRequest, RuntimeState, WebViewerStatus};
+use crate::daemon::{ResumeSessionRequest, RuntimeState};
 use crate::dashboard::io::config_only_controller;
 use crate::pollers::{
     CredentialSyncNotices, CredentialSyncSignalTracker, QUOTA_STALE_AFTER, QuotaRefreshBatch,
@@ -710,7 +710,6 @@ impl PhoneActionControl {
 pub(crate) async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
-    report_status: impl FnOnce(WebViewerStatus),
     worker: SessionManagerChannels,
     daemon_runtime: Arc<RuntimeState>,
     mut workspace_updates: tokio::sync::watch::Receiver<Vec<WorkspaceRecord>>,
@@ -847,14 +846,16 @@ pub(crate) async fn run_server(
     } else {
         None
     };
-    report_status(WebViewerStatus::Ready {
+    let ready = mj_controller::hel_server::WebViewerAccess::Ready {
         viewer_url: resolved.viewer_url,
         viewer_code: options.viewer_code().to_owned(),
         qr_login_url,
         fallback_reason,
-    });
+    };
 
-    let serve = mj_controller::hel_server::run_server(options);
+    let serve = crate::web_viewer::serve(options, ready, &daemon_runtime.web_viewer, |access| {
+        daemon_runtime.publish_web_access(access);
+    });
     let conversation_projection_shutdown = termination.child_token();
     let control = async {
         let mut credential_tick = tokio::time::interval(Duration::from_millis(250));

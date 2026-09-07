@@ -2290,12 +2290,16 @@ impl DashboardState {
         &mut self,
         session_id: &str,
     ) -> Option<hel::hel_state::MovePreparation> {
-        let Mode::Resume(wizard) = &mut self.mode else {
-            return None;
+        let preparation = match &mut self.mode {
+            Mode::Resume(wizard) if wizard.moving && wizard.session_id == session_id => {
+                wizard.preparation.take()
+            }
+            _ => None,
         };
-        (wizard.moving && wizard.session_id == session_id)
-            .then(|| wizard.preparation.take())
-            .flatten()
+        if preparation.is_some() {
+            self.cancel_modal();
+        }
+        preparation
     }
 
     pub fn apply_session_mount_preflight_failure(&mut self, source: &str, error: String) {

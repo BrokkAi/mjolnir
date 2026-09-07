@@ -54,7 +54,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 10;
+pub(crate) const PROTOCOL_VERSION: u32 = 11;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -273,6 +273,9 @@ pub(crate) struct DraftPreview {
 enum DaemonAction {
     Ping,
     Status,
+    WebViewerAccess,
+    RecoverWebViewer(mj_controller::hel_server::WebViewerRecovery),
+    InspectWebListener,
     ListWorkspaces,
     CreateWorkspace {
         name: String,
@@ -469,6 +472,8 @@ struct ResponseEnvelope {
 enum DaemonReply {
     Pong,
     Status(DaemonStatus),
+    WebViewerAccess(mj_controller::hel_server::WebViewerAccess),
+    WebListeners(Vec<mj_controller::hel_server::WebListenerProcess>),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
@@ -570,6 +575,7 @@ struct Attachment {
 pub(crate) struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
+    pub(crate) web_viewer: crate::web_viewer::ViewerControl,
     ever_attached: AtomicBool,
     sessions: Mutex<BTreeMap<String, RuntimeSessionView>>,
     revisions: RuntimeRevisions,
@@ -773,6 +779,7 @@ impl RuntimeState {
         Self {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
+            web_viewer: crate::web_viewer::ViewerControl::new(),
             ever_attached: AtomicBool::new(false),
             sessions: Mutex::new(BTreeMap::new()),
             revisions,
@@ -813,6 +820,34 @@ impl RuntimeState {
     fn prune_dead_clients(&self) {
         self.attachments()
             .retain(|_, attachment| process_is_alive(attachment.pid));
+    }
+
+    pub(crate) fn publish_web_access(&self, access: mj_controller::hel_server::WebViewerAccess) {
+        use mj_controller::hel_server::WebViewerAccess;
+        let status = match &access {
+            WebViewerAccess::Starting => WebViewerStatus::Starting,
+            WebViewerAccess::Ready {
+                viewer_url,
+                viewer_code,
+                qr_login_url,
+                fallback_reason,
+            } => WebViewerStatus::Ready {
+                viewer_url: viewer_url.clone(),
+                viewer_code: viewer_code.clone(),
+                qr_login_url: qr_login_url.clone(),
+                fallback_reason: fallback_reason.clone(),
+            },
+            WebViewerAccess::Failed {
+                address, message, ..
+            } => WebViewerStatus::Error {
+                message: format!("{message} Address: {address}"),
+            },
+            WebViewerAccess::Unavailable(message) => WebViewerStatus::Error {
+                message: message.clone(),
+            },
+        };
+        self.web_viewer.publish(access);
+        self.set_phone_status(status);
     }
 
     fn set_phone_status(&self, status: WebViewerStatus) {
@@ -2468,6 +2503,34 @@ impl DaemonClient {
         }
     }
 
+    pub(crate) async fn web_access(
+        &mut self,
+    ) -> Result<mj_controller::hel_server::WebViewerAccess> {
+        match self.request(DaemonAction::WebViewerAccess).await? {
+            DaemonReply::WebViewerAccess(access) => Ok(access),
+            reply => bail!("unexpected web viewer reply {reply:?}"),
+        }
+    }
+
+    pub(crate) async fn recover_web_viewer(
+        &mut self,
+        action: mj_controller::hel_server::WebViewerRecovery,
+    ) -> Result<()> {
+        match self.request(DaemonAction::RecoverWebViewer(action)).await? {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected web viewer recovery reply {reply:?}"),
+        }
+    }
+
+    pub(crate) async fn inspect_web_listener(
+        &mut self,
+    ) -> Result<Vec<mj_controller::hel_server::WebListenerProcess>> {
+        match self.request(DaemonAction::InspectWebListener).await? {
+            DaemonReply::WebListeners(processes) => Ok(processes),
+            reply => bail!("unexpected listener inspection reply {reply:?}"),
+        }
+    }
+
     pub(crate) async fn list_workspaces(&mut self) -> Result<Vec<WorkspaceListing>> {
         match self.request(DaemonAction::ListWorkspaces).await? {
             DaemonReply::Workspaces(workspaces) => Ok(workspaces),
@@ -3552,6 +3615,7 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
         ));
     } else {
         state.set_phone_status(WebViewerStatus::Disabled);
+        state.web_viewer.publish(mj_controller::hel_server::WebViewerAccess::Unavailable("Web access is disabled. Enable [phone].enabled in your configuration, then restart the daemon.".into()));
     }
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
@@ -3889,14 +3953,9 @@ fn spawn_phone_server(
     state.set_phone_status(WebViewerStatus::Starting);
     let workspaces = state.workspaces();
     tokio::spawn(async move {
-        let reporter = {
-            let state = state.clone();
-            move |status| state.set_phone_status(status)
-        };
         match crate::server::run_server(
             (&config).into(),
             cancellation.clone(),
-            reporter,
             worker,
             state.clone(),
             workspaces,
@@ -3904,12 +3963,15 @@ fn spawn_phone_server(
         .await
         {
             Ok(()) if cancellation.is_cancelled() => {}
-            Ok(()) => state.set_phone_status(WebViewerStatus::Stopped),
+            Ok(()) => {
+                state.set_phone_status(WebViewerStatus::Stopped);
+                state.web_viewer.publish(mj_controller::hel_server::WebViewerAccess::Unavailable("The web viewer stopped unexpectedly. Restart the daemon to restore web access.".into()));
+            }
             Err(error) => {
                 tracing::warn!(error = format!("{error:#}"), "phone server stopped");
-                state.set_phone_status(WebViewerStatus::Error {
-                    message: format!("{error:#}"),
-                });
+                state.publish_web_access(mj_controller::hel_server::WebViewerAccess::Unavailable(
+                    format!("Could not start the web viewer: {error:#}"),
+                ));
             }
         }
     })
@@ -4138,6 +4200,22 @@ async fn handle_action(
                 attached_clients: state.attachments().len(),
                 phone_status: state.phone_status(),
             }))
+        }
+        DaemonAction::WebViewerAccess => {
+            Ok(DaemonReply::WebViewerAccess(state.web_viewer.access()))
+        }
+        DaemonAction::RecoverWebViewer(action) => {
+            state.web_viewer.recover(action)?;
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::InspectWebListener => {
+            let address = state.web_viewer.conflict_address()?;
+            let processes = blocking(move || crate::web_viewer::inspect_listener(address)).await?;
+            ensure!(
+                state.web_viewer.conflict_address()? == address,
+                "The viewer address changed. Inspect again."
+            );
+            Ok(DaemonReply::WebListeners(processes))
         }
         DaemonAction::ListWorkspaces => {
             state.prune_dead_clients();
@@ -5434,7 +5512,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
-        assert_eq!(PROTOCOL_VERSION, 10);
+        assert_eq!(PROTOCOL_VERSION, 11);
         let state = test_runtime_state();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -5631,6 +5709,15 @@ mod tests {
                 responses: [
                     r#"{"protocol_version":4,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"0.4.1","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                     r#"{"protocol_version":4,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+                ],
+            },
+            ProtocolTranscript {
+                protocol_version: 11,
+                daemon_build: "2.1.0",
+                expected_requests: requests(11),
+                responses: [
+                    r#"{"protocol_version":11,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.1.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                    r#"{"protocol_version":11,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
                 ],
             },
         ]
