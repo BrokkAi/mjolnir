@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
 use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
 use anyhow::Result;
 
@@ -12,16 +13,21 @@ use crate::hel_controller::test_support::{
     checkpoint_test_session, committed_repository, local_bundle, managed_raw_session,
     raw_session_on, resume_compatibility_config, ssh_worktree_target,
 };
+#[cfg(unix)]
 use hel::hel_archive::{
     ArchiveInput, BundleManifest, CanonicalExecutionState, CanonicalQueuedCommandKind,
     CanonicalQueuedPrompt, CanonicalSessionSnapshot, CanonicalSessionState, SessionManifest,
     TargetManifest, write_archive_atomic,
 };
 use hel::hel_config::{HarnessKind, HarnessProfile, HelConfig};
+#[cfg(unix)]
 use hel::hel_state::{
-    CheckpointMetadata, HelState, MaterializedExecutionState, MaterializedQueuedPrompt,
-    MaterializedSession, MoveOperation, MovePhase, MoveSelection, QueuedCommandKind,
-    ResumeQueueDisposition, SessionResourceAllocation, SessionState, TargetLocator,
+    CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
+    TargetLocator,
+};
+use hel::hel_state::{
+    HelState, MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession,
+    QueuedCommandKind, SessionResourceAllocation, SessionState,
 };
 use hel::hel_targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
 use hel::hel_worker::{
@@ -30,6 +36,7 @@ use hel::hel_worker::{
 
 const PREPARE_PREFLIGHT_CHILD: &str = "MJ_MOVE_PREPARE_PREFLIGHT_CHILD";
 const PREPARATION_SNAPSHOT_CHILD: &str = "MJ_MOVE_PREPARATION_SNAPSHOT_CHILD";
+#[cfg(unix)]
 const RECOVERY_TERMINAL_CHILD: &str = "MJ_MOVE_RECOVERY_TERMINAL_CHILD";
 const MOVE_QUEUE_RELAY_ROOT: &str = "MJ_MOVE_QUEUE_RELAY_ROOT";
 const MOVE_QUEUE_RELAY_MARKER: &str = "MJ_MOVE_QUEUE_RELAY_MARKER";

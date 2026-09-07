@@ -13,10 +13,10 @@ include = [
     "src/**/testdata/**/*.jsonl",
     "Cargo.toml",
     "Cargo.lock",
-    "README.md",
+    "/README.md",
     "docs/DOCKER.md",
     "docs/PODMAN.md",
-    "LICENSE",
+    "/LICENSE",
     "licenses/THIRD_PARTY_LICENSES.html",
     "licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt",
 ]

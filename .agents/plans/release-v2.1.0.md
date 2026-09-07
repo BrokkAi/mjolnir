@@ -18,6 +18,8 @@ Publish the current master work, including Muse Code support and durable session
 
 The image workflow still used containers/ as its build context, but Muse installation now copies its script and manifest from the repository root. Change the context to the repository root and include both new inputs in path triggers before publishing. Local full-image validation already used that correct root context.
 
+Packaging from the developer checkout exposed recursive README/LICENSE glob matches that included ignored node_modules files. Anchor those two allowlist entries to the crate root; all eight workspace archives then package successfully. The previous master CI run also had a real macOS Ctrl-C cancellation failure and Unix-only test imports/constants compiled unused on Windows. Keep Ctrl-C cancellation platform-independent while retaining the existing dashboard accelerator, and gate only the Unix-only test helpers. The previous voice failure was a registry download error; current voice CI passes. The Muse-enabled agent image is already published for amd64 and arm64 by workflow 34108118216.
+
 ## Decision Log
 
 Use a minor version because Muse support adds functionality. Keep all work on current master. The user's release request authorizes pushing Mjolnir and its release tag and the normal automatic registry/image publication workflows. Do not tag until the release commit passes required local checks and master CI.

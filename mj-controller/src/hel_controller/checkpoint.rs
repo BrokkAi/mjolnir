@@ -2133,7 +2133,9 @@ mod tests {
         CheckpointMetadata, HelState, ManagedSessionSnapshot, MaterializedSession, SessionState,
     };
     use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec};
-    use hel::hel_worker::{RelayCommand, RelayCommandOutcome, RelayCursor, RelayExecutionState};
+    #[cfg(unix)]
+    use hel::hel_worker::RelayCommandOutcome;
+    use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
 
     use super::*;
 
@@ -2890,6 +2892,7 @@ mod tests {
     const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
     const LATCH_RELAY_STARTS: &str = "MJ_TEST_LATCH_RELAY_STARTS";
     const LATCH_RELAY_REJECT_RELEASE: &str = "MJ_TEST_LATCH_REJECT_RELEASE";
+    #[cfg(unix)]
     const LATCH_RELAY_RUNNING: &str = "MJ_TEST_LATCH_RELAY_RUNNING";
     #[cfg(unix)]
     const LATCH_TEST_CHILD: &str = "MJ_TEST_LATCH_CHILD";

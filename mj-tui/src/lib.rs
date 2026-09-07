@@ -872,14 +872,17 @@ impl DashboardState {
             return DashboardAction::PasteFromClipboard;
         }
         let text_focused = self.text_input_focused();
-        if text_focused && dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
+        let cancel_shortcut = key.code == KeyCode::Char('c')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || dashboard_accelerator(key.modifiers));
+        if text_focused && cancel_shortcut {
             self.cancel_modal();
             return DashboardAction::None;
         }
         // Ctrl-C belongs to the prompt or a text field. Everywhere else it is
         // intentionally inert, including modal controls that happen to use
         // the letter `c` for another purpose.
-        if dashboard_accelerator(key.modifiers) && key.code == KeyCode::Char('c') {
+        if cancel_shortcut {
             return DashboardAction::None;
         }
 
