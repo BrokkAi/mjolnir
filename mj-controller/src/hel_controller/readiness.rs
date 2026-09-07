@@ -40,10 +40,15 @@ pub(super) trait NativeSessionProbe {
 impl NativeSessionProbe for StandaloneSession {
     async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
         let snapshot = self.sync().await?;
-        if let Some(native_session_id) = snapshot.operational.native_session_id {
-            Ok(NativeSessionReadiness::Ready(native_session_id))
-        } else if snapshot.operational.execution == RelayExecutionState::Closed {
+        if snapshot.operational.execution == RelayExecutionState::Closed {
             Ok(NativeSessionReadiness::Closed)
+        } else if snapshot.operational.native_session_is_ready() {
+            Ok(NativeSessionReadiness::Ready(
+                snapshot
+                    .operational
+                    .native_session_id
+                    .expect("ready native session"),
+            ))
         } else {
             Ok(NativeSessionReadiness::Waiting)
         }

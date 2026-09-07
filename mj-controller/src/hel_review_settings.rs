@@ -464,6 +464,7 @@ mod tests {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             native_session_id: Some(session_id.to_owned()),
+            acp_ready: None,
             agent_capabilities: None,
             agent_info: None,
             config_options: Vec::new(),

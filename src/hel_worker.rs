@@ -266,6 +266,8 @@ pub struct DurableRelay {
     /// apart, and a controller has to know whether the worker it is talking to
     /// is the binary it would install today.
     worker_build: Option<String>,
+    /// Current ACP process readiness; never recovered from the journal.
+    acp_ready: bool,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -454,6 +456,7 @@ impl DurableRelay {
             root,
             relay_version: relay_version.into(),
             worker_build: None,
+            acp_ready: false,
             snapshot,
             journal_spans,
             hot_events,
@@ -552,6 +555,7 @@ impl DurableRelay {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
+        state.acp_ready = Some(self.acp_ready);
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
         state.foreground_tool_started_at_ms = self
@@ -562,6 +566,11 @@ impl DurableRelay {
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.background_commands = self.background_commands();
         state
+    }
+
+    /// A stopped bridge cannot become ready again until its replacement configures.
+    pub fn clear_acp_readiness(&mut self) {
+        self.acp_ready = false;
     }
 
     fn activity_is_idle(&self) -> bool {
@@ -1750,6 +1759,14 @@ impl DurableRelay {
     }
 
     pub fn record_observation(&mut self, observation: RelayObservation) -> Result<u64> {
+        let acp_ready = match &observation {
+            RelayObservation::SessionConfigured { .. } => Some(true),
+            RelayObservation::AgentInitialized { .. }
+            | RelayObservation::SessionRestarted
+            | RelayObservation::Closing
+            | RelayObservation::Closed => Some(false),
+            _ => None,
+        };
         // A restart or a close ends the harness process that owned whatever it
         // had left running, so nothing it reported is still alive.
         if matches!(
@@ -1763,7 +1780,11 @@ impl DurableRelay {
             self.claude_background_tasks.clear();
             self.foreground_tools.clear();
         }
-        self.append_relay_event(None, observation)
+        let ordinal = self.append_relay_event(None, observation)?;
+        if let Some(ready) = acp_ready {
+            self.acp_ready = ready;
+        }
+        Ok(ordinal)
     }
 
     pub fn record_session_update(&mut self, mut update: SessionUpdate) -> Result<u64> {
@@ -2863,6 +2884,48 @@ mod tests {
 
         let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         assert_eq!(reopened.operational_state().last_acp_activity_at_ms, None);
+    }
+
+    #[test]
+    fn restored_native_identity_waits_for_current_acp_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "native-session".into(),
+                resumed: false,
+            })
+            .unwrap();
+        assert!(!relay.operational_state().native_session_is_ready());
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        assert!(relay.operational_state().native_session_is_ready());
+        drop(relay);
+
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert_eq!(
+            relay.operational_state().native_session_id.as_deref(),
+            Some("native-session")
+        );
+        assert_eq!(relay.operational_state().acp_ready, Some(false));
+        assert!(!relay.operational_state().native_session_is_ready());
+        for transition in [
+            RelayObservation::SessionRestarted,
+            RelayObservation::Closing,
+            RelayObservation::Closed,
+        ] {
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .unwrap();
+            assert_eq!(relay.operational_state().acp_ready, Some(true));
+            relay.record_observation(transition).unwrap();
+            assert_eq!(relay.operational_state().acp_ready, Some(false));
+        }
     }
 
     #[test]
@@ -4166,6 +4229,11 @@ mod tests {
         for outcome in ["completed", "rejected", "interrupted"] {
             let temp = tempfile::tempdir().unwrap();
             let mut relay = claude_relay(temp.path());
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .unwrap();
             submit_relay(
                 &mut relay,
                 "review-prompt",
@@ -4227,6 +4295,11 @@ mod tests {
     fn claude_background_levels_do_not_open_turns_or_enter_the_transcript() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         let ordinal = relay.snapshot.latest_ordinal;
         relay
             .claude_background_tasks_changed(vec![claude_task("workflow", "Design reviews")])
@@ -4680,6 +4753,11 @@ mod tests {
     fn cancel_turn_is_harmless_when_the_relay_is_idle() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         submit_relay(&mut relay, "cancel-idle", RelayCommand::CancelTurn);
         let claimed = relay.claim_pending_commands(true).unwrap();
         assert_eq!(claimed.len(), 1);

@@ -276,7 +276,8 @@ async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Durati
     loop {
         let snapshot = relay.sync().await?;
         let ordinal = snapshot.operational.latest_ordinal;
-        let idle = snapshot.operational.execution == RelayExecutionState::Idle;
+        let idle = snapshot.operational.native_session_is_ready()
+            && snapshot.operational.execution == RelayExecutionState::Idle;
         if idle && last_ordinal == Some(ordinal) {
             stable_polls = stable_polls.saturating_add(1);
             if stable_polls >= 3 {

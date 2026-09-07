@@ -32,6 +32,7 @@ use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec, Proces
 use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
 
 use super::backend::backend_locator;
+use super::readiness::wait_for_native_session_in_stage;
 use super::worker_restart::{InstalledWorkerRestart, RESTART_FOR_CHECKPOINT};
 use super::{
     Controller, execute_checked, now, persist_session_record_transition_or_restore,
@@ -748,6 +749,24 @@ impl Controller {
             )
             .await?;
         let (barrier, barrier_command_id) = loop {
+            // Restored native identity is not current-process readiness.
+            // Startup gets its own cancellable budget; its timeout must not
+            // enter the wedged-checkpoint worker-restart path below.
+            wait_for_native_session_in_stage(
+                relay.connection_mut(),
+                executor,
+                hel_targets::ProvisionStage::Starting,
+            )
+            .await?;
+            if exclusivity == LatchExclusivity::ReleaseAfterLatch
+                && relay.connection_mut().sync().await?.operational.execution
+                    == RelayExecutionState::Running
+            {
+                // A routine recovery copy must not open a barrier just to
+                // abandon it as soon as it observes the active turn.
+                relay.release();
+                return Err(CheckpointDeferred::harness_busy().into());
+            }
             let barrier_command_id = new_command_id("checkpoint")?;
             let timeout = if restarted_worker {
                 CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART
@@ -2153,6 +2172,7 @@ mod tests {
             latest_credential_sync_signal: None,
             worker_build: None,
             operational: hel::hel_worker::RelayOperationalState {
+                acp_ready: None,
                 idle_since_ms: None,
                 session_id: "session-1".into(),
                 execution: RelayExecutionState::Idle,
@@ -2848,6 +2868,7 @@ mod tests {
     const LEGACY_RELEASE_TEST_CHILD: &str = "MJ_TEST_LEGACY_RELEASE_LATCH_CHILD";
     #[cfg(unix)]
     const REUSE_TEST_CHILD: &str = "MJ_TEST_REUSE_LATCH_CHILD";
+    const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
     const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
     /// Whether the scripted relay understands the early checkpoint release.
     #[cfg(unix)]
@@ -2887,6 +2908,21 @@ mod tests {
         let mut relay =
             hel::hel_worker::DurableRelay::open(Path::new(&root), LATCH_RELAY_SESSION, "1.0.0")
                 .expect("open the test relay journal");
+        if relay.operational_state().native_session_id.is_none() {
+            relay
+                .record_observation(hel::hel_worker::RelayObservation::SessionOpened {
+                    native_session_id: "native-session".into(),
+                    resumed: true,
+                })
+                .unwrap();
+        }
+        let ready_at = Instant::now()
+            + Duration::from_millis(
+                std::env::var(LATCH_RELAY_STARTUP_DELAY_MS)
+                    .ok()
+                    .map(|value| value.parse::<u64>().unwrap())
+                    .unwrap_or(0),
+            );
         let reject_release = std::env::var_os(LATCH_RELAY_REJECT_RELEASE).is_some();
         #[cfg(unix)]
         let running = std::env::var_os(LATCH_RELAY_RUNNING).is_some();
@@ -2916,9 +2952,30 @@ mod tests {
         }
         let mut reader = std::io::stdin().lock();
         let mut writer = std::io::stdout().lock();
+        let mut configured = false;
         while let Some(request) =
             hel::hel_worker::read_relay_frame(&mut reader).expect("read a relay request")
         {
+            if !configured && Instant::now() >= ready_at {
+                relay
+                    .record_observation(hel::hel_worker::RelayObservation::SessionConfigured {
+                        config_options: Vec::new(),
+                    })
+                    .unwrap();
+                configured = true;
+            }
+            if matches!(
+                &request.request,
+                hel::hel_worker::RelayRequest::Submit {
+                    command: RelayCommand::BeginCheckpoint { .. },
+                    ..
+                }
+            ) {
+                assert!(
+                    relay.operational_state().native_session_is_ready(),
+                    "checkpoint submitted before current ACP startup finished"
+                );
+            }
             let response = if reject_release && requests_checkpoint_release(&request) {
                 unparseable_request_response(&request)
             } else {
@@ -2937,7 +2994,13 @@ mod tests {
                             .expect("report the checkpoint barrier ready");
                     }
                     #[cfg(unix)]
-                    RelayCommand::CancelTurn if running => {
+                    RelayCommand::CancelTurn => {
+                        let prompt_id = relay
+                            .operational_state()
+                            .active_prompt
+                            .as_ref()
+                            .map(|prompt| prompt.command_id.clone())
+                            .expect("a prompt to cancel");
                         relay
                             .record_command_completed(
                                 &claimed.command_id,
@@ -2946,7 +3009,7 @@ mod tests {
                             .expect("complete the cancellation");
                         relay
                             .record_command_completed(
-                                "seed-running-prompt",
+                                &prompt_id,
                                 RelayCommandOutcome::Prompt {
                                     stop_reason: "cancelled".into(),
                                 },
@@ -3556,6 +3619,9 @@ mod tests {
             let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &test_name, "--nocapture"])
                 .env(REUSE_TEST_CHILD, "1")
+                // Longer than the normal checkpoint barrier deadline. The
+                // controller must wait for startup rather than restart it.
+                .env(LATCH_RELAY_STARTUP_DELAY_MS, "31000")
                 .env("MJ_DATA_DIR", directory.path())
                 .output()
                 .unwrap();
@@ -3619,8 +3685,9 @@ mod tests {
         for directory in [&relay_root, &profile_home, &archive_directory] {
             std::fs::create_dir_all(directory).unwrap();
         }
-        // A frontier of 1 is behind every barrier this relay can latch.
-        let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 1);
+        // The archive covers the fake runtime's SessionOpened and
+        // SessionConfigured events, before any checkpoint bookkeeping.
+        let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
 
         let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
         session.target_template_id = "local".into();
@@ -3699,12 +3766,76 @@ mod tests {
         );
         assert_eq!(latched.artifact.metadata, checkpoint);
         assert!(checkpoint.archive_path.exists());
+
         // The cursor close seals is ahead of the reused archive by this
         // checkpoint's own bookkeeping.
         assert!(latched.cursor.ordinal > checkpoint.event_frontier);
         let cursor = latched.cursor.clone();
         latched.complete().await.unwrap();
         wait_until_the_actor_serves_again(&handle).await;
+
+        // An ordinary recovery copy during a turn must defer before it
+        // journals BeginCheckpoint, so no disconnect-cancellation message is
+        // produced for a routine busy observation.
+        handle
+            .submit(
+                new_command_id("busy-prompt").unwrap(),
+                RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::Text(TextContent::new("keep working"))],
+                },
+            )
+            .await
+            .unwrap();
+        let mut connection = handle.lease_connection().await.unwrap();
+        let before = connection.connection_mut().sync().await.unwrap();
+        assert_eq!(before.operational.execution, RelayExecutionState::Running);
+        connection.release();
+        let deferred = controller
+            .checkpoint_session_latched(
+                LATCH_RELAY_SESSION,
+                &executor,
+                Some(&channels.control),
+                LatchExclusivity::ReleaseAfterLatch,
+                CheckpointExportPolicy::ReuseUnchangedArchive,
+            )
+            .await;
+        assert!(
+            matches!(deferred, Err(ref error) if error.downcast_ref::<CheckpointDeferred>().is_some())
+        );
+        wait_until_the_actor_serves_again(&handle).await;
+        let mut connection = handle.lease_connection().await.unwrap();
+        let after = connection.connection_mut().sync().await.unwrap();
+        assert_eq!(after.operational.execution, RelayExecutionState::Running);
+        assert!(after.operational.checkpoint_barrier.is_none());
+        let journal =
+            std::fs::read_to_string(relay_root.join("relay-journal/active.jsonl")).unwrap();
+        for line in journal.lines() {
+            let event: hel::hel_worker::RelayEvent = serde_json::from_str(line).unwrap();
+            if event.ordinal > before.operational.latest_ordinal {
+                assert!(
+                    !matches!(
+                        event.observation,
+                        hel::hel_worker::RelayObservation::CommandQueued {
+                            command: RelayCommand::BeginCheckpoint { .. },
+                            ..
+                        } | hel::hel_worker::RelayObservation::CommandInterrupted {
+                            command: hel::hel_worker::RelayCommandKind::BeginCheckpoint,
+                            ..
+                        }
+                    ),
+                    "busy deferral journaled checkpoint activity: {event:?}"
+                );
+            }
+        }
+        connection.release();
+        handle
+            .submit(
+                new_command_id("finish-busy-prompt").unwrap(),
+                RelayCommand::CancelTurn,
+            )
+            .await
+            .unwrap();
+        handle.sync_now().await.unwrap();
 
         // Real session content, and the same policy has to export again.
         handle

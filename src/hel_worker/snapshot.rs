@@ -364,6 +364,10 @@ pub struct RelayOperationalState {
     pub recovery_floor_ordinal: u64,
     pub recovery_floor_digest: String,
     pub native_session_id: Option<String>,
+    /// Whether the current worker process has finished opening its ACP
+    /// session. Older workers omit this field and are treated as ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_ready: Option<bool>,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
     pub config_options: Vec<SessionConfigOption>,
@@ -411,6 +415,17 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Whether this worker has a usable native ACP session.
+    ///
+    /// Workers predating `acp_ready` are treated as ready for compatibility;
+    /// a current worker that explicitly reports not ready is authoritative.
+    #[must_use]
+    pub fn native_session_is_ready(&self) -> bool {
+        self.execution != RelayExecutionState::Closed
+            && self.native_session_id.is_some()
+            && self.acp_ready.unwrap_or(true)
+    }
+
     /// Whether nothing the worker owns would be destroyed by killing it now.
     ///
     /// Stopping a worker tears down the ACP bridge with it, so any operation
@@ -423,6 +438,7 @@ impl RelayOperationalState {
     #[must_use]
     pub fn is_quiet(&self) -> bool {
         self.execution == RelayExecutionState::Idle
+            && self.acp_ready != Some(false)
             && self.active_prompt.is_none()
             && self.harness_turn.is_none()
             && self.queued_prompts.is_empty()
@@ -760,6 +776,9 @@ impl RelaySnapshot {
             recovery_floor_ordinal: self.recovery_floor_ordinal,
             recovery_floor_digest: self.recovery_floor_digest.clone(),
             native_session_id: self.native_session_id.clone(),
+            // Readiness belongs to the current worker process, so durable
+            // snapshots must never carry it across a restart.
+            acp_ready: None,
             agent_capabilities: self.agent_capabilities.clone(),
             agent_info: self.agent_info.clone(),
             config_options: self.config_options.clone(),
@@ -1821,8 +1840,13 @@ mod tests {
     fn a_session_is_quiet_only_when_nothing_it_owns_is_in_flight() {
         let temp = tempfile::tempdir().unwrap();
         let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        let quiet = relay.operational_state();
-        assert!(quiet.is_quiet(), "a fresh relay owns nothing: {quiet:?}");
+        let mut quiet = relay.operational_state();
+        assert!(!quiet.is_quiet(), "startup is still in flight");
+        quiet.acp_ready = Some(true);
+        assert!(
+            quiet.is_quiet(),
+            "a ready idle relay owns nothing: {quiet:?}"
+        );
 
         type MakeBusy = fn(&mut RelayOperationalState);
         let busy: Vec<(&str, MakeBusy)> = vec![
@@ -1962,6 +1986,42 @@ mod tests {
         let restored: RelaySnapshot = serde_json::from_value(encoded).unwrap();
 
         assert_eq!(restored.modes, None);
+    }
+
+    #[test]
+    fn native_session_readiness_requires_current_acp_session() {
+        let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
+        state.native_session_id = Some("restored-native-session".into());
+        state.acp_ready = Some(false);
+        assert!(!state.native_session_is_ready());
+
+        state.acp_ready = Some(true);
+        assert!(state.native_session_is_ready());
+
+        state.execution = RelayExecutionState::Closed;
+        assert!(!state.native_session_is_ready());
+    }
+
+    #[test]
+    fn legacy_operational_state_without_acp_readiness_is_ready() {
+        let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
+        state.native_session_id = Some("legacy-native-session".into());
+        assert_eq!(state.acp_ready, None);
+        let mut encoded = serde_json::to_value(state).unwrap();
+        encoded.as_object_mut().unwrap().remove("acp_ready");
+
+        let restored: RelayOperationalState = serde_json::from_value(encoded).unwrap();
+
+        assert_eq!(restored.acp_ready, None);
+        assert!(restored.native_session_is_ready());
+    }
+
+    #[test]
+    fn initializing_operational_state_is_not_quiet() {
+        let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
+        state.acp_ready = Some(false);
+
+        assert!(!state.is_quiet());
     }
 
     /// Transcript observations skip the staged snapshot copy and its budget

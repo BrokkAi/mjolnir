@@ -61,6 +61,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         recovery_floor_ordinal: 0,
         recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
         native_session_id: None,
+        acp_ready: None,
         agent_capabilities: None,
         agent_info: None,
         config_options: Vec::new(),

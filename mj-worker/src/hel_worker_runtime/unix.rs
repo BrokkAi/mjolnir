@@ -975,6 +975,7 @@ pub(super) fn record_runtime_event(
                 .record_command_completed(&request_id, RelayCommandOutcome::UserShell { result })?;
         }
         RuntimeEvent::Stopped => {
+            relay.clear_acp_readiness();
             relay.clear_agent_terminals()?;
             relay.record_observation(RelayObservation::ElicitationsCleared)?;
             if relay.operational_state().execution != hel::hel_worker::RelayExecutionState::Closed {
