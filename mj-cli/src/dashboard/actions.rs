@@ -108,37 +108,14 @@ pub(crate) async fn apply_dashboard_action(
             context.request_capacity_refresh();
             context.dashboard.set_notice(QUOTA_REFRESH_NOTICE);
         }
-        DashboardAction::LoadWebAccess => {
-            let updates = context.dashboard_io_tx.clone();
-            tokio::spawn(async move {
-                let access = match async {
-                    let mut daemon = daemon::connect_existing().await?;
-                    daemon.status().await
-                }
-                .await
-                {
-                    Ok(status) => match status.phone_status {
-                        daemon::WebViewerStatus::Ready {
-                            viewer_url,
-                            viewer_code,
-                            qr_login_url,
-                            fallback_reason,
-                        } => WebViewerAccess::Ready {
-                            viewer_url,
-                            viewer_code,
-                            qr_login_url,
-                            fallback_reason,
-                        },
-                        other => WebViewerAccess::Unavailable(other.to_string()),
-                    },
-                    Err(error) => WebViewerAccess::Unavailable(format!(
-                        "Could not load web viewer access: {error:#}"
-                    )),
-                };
-                if let Err(error) = updates.send(DashboardIoUpdate::WebAccess(access)) {
-                    tracing::debug!(%error, "web viewer access result dropped after dashboard shutdown");
-                }
-            });
+        action @ (DashboardAction::LoadWebAccess
+        | DashboardAction::RecoverWebViewer(_)
+        | DashboardAction::InspectWebListener) => {
+            spawn_web_request(context, action);
+        }
+        DashboardAction::CancelWebAccess => {
+            context.web_request_cancel = None;
+            context.web_request_generation = context.web_request_generation.wrapping_add(1);
         }
         DashboardAction::TestTarget { target_id } => {
             let config = context.controller.config.clone();
@@ -971,6 +948,79 @@ impl DashboardContext {
             }
         }
     }
+}
+
+/// Own each dialog request, cancel stale polling, and observe background task failures.
+fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
+    context.web_request_cancel = None;
+    context.web_request_generation = context.web_request_generation.wrapping_add(1);
+    let generation = context.web_request_generation;
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    context.web_request_cancel = Some(cancellation.clone().drop_guard());
+    let updates = context.dashboard_io_tx.clone();
+    let task_updates = updates.clone();
+    let inspecting = matches!(action, DashboardAction::InspectWebListener);
+    let mut task = tokio::spawn(async move {
+        let mut daemon = daemon::connect_existing().await?;
+        match action {
+            DashboardAction::RecoverWebViewer(recovery) => {
+                if let Err(error) = daemon.recover_web_viewer(recovery).await {
+                    // Another client may have recovered it since this dialog loaded.
+                    let access = daemon.web_access().await?;
+                    if matches!(access, WebViewerAccess::Failed { .. }) {
+                        return Err(error);
+                    }
+                }
+            }
+            DashboardAction::InspectWebListener => {
+                let result = daemon
+                    .inspect_web_listener()
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                task_updates.send(DashboardIoUpdate::WebListeners { generation, result })?;
+                return Ok::<(), anyhow::Error>(());
+            }
+            _ => {}
+        }
+        loop {
+            let access = daemon.web_access().await?;
+            let starting = matches!(access, WebViewerAccess::Starting);
+            task_updates.send(DashboardIoUpdate::WebAccess { generation, access })?;
+            if !starting {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+    tokio::spawn(async move {
+        let result = tokio::select! {
+            result = &mut task => result.context("web viewer request task failed").and_then(std::convert::identity),
+            _ = cancellation.cancelled() => {
+                task.abort();
+                match task.await {
+                    Ok(Err(error)) => tracing::warn!(%error, "web viewer request failed during cancellation"),
+                    Err(error) if !error.is_cancelled() => tracing::warn!(%error, "web viewer request task failed during cancellation"),
+                    _ => {},
+                }
+                return;
+            }
+        };
+        if let Err(error) = result {
+            let error = format!("Could not complete the web viewer request: {error:#}");
+            tracing::warn!(%error, "web viewer request failed");
+            let update = if inspecting {
+                DashboardIoUpdate::WebListeners {
+                    generation,
+                    result: Err(error),
+                }
+            } else {
+                DashboardIoUpdate::WebAccessError { generation, error }
+            };
+            if let Err(error) = updates.send(update) {
+                tracing::debug!(%error, "web viewer result dropped after dashboard shutdown");
+            }
+        }
+    });
 }
 
 #[cfg(test)]

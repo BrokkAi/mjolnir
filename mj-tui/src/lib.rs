@@ -267,6 +267,9 @@ pub enum DashboardAction {
     },
     CancelTargetTest,
     LoadWebAccess,
+    RecoverWebViewer(WebViewerRecovery),
+    InspectWebListener,
+    CancelWebAccess,
     /// Read the system clipboard on a worker before applying its contents.
     /// Clipboard providers may perform IPC and must never run on the TUI loop.
     PasteFromClipboard,
@@ -323,16 +326,7 @@ pub enum DashboardAction {
     QuitDetach,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WebViewerAccess {
-    Ready {
-        viewer_url: String,
-        viewer_code: String,
-        qr_login_url: Option<String>,
-        fallback_reason: Option<String>,
-    },
-    Unavailable(String),
-}
+pub use mj_controller::hel_server::{WebListenerProcess, WebViewerAccess, WebViewerRecovery};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionOperationKind {

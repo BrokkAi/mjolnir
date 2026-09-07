@@ -476,6 +476,8 @@ pub(crate) struct DashboardContext {
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
+    pub(crate) web_request_generation: u64,
+    pub(crate) web_request_cancel: Option<tokio_util::sync::DropGuard>,
     materialized_projection_permits: Arc<tokio::sync::Semaphore>,
     materialized_projections_in_flight: BTreeSet<String>,
     pending_materialized_projections: BTreeMap<String, (MaterializedSession, u64)>,
@@ -829,6 +831,8 @@ impl DashboardContext {
             return;
         }
         self.shutdown_requested = true;
+        self.web_request_cancel = None;
+        self.web_request_generation = self.web_request_generation.wrapping_add(1);
         self.quit_detached = detached;
         self.cancel_background_work();
         self.refresh_shutdown_notice();
@@ -1106,6 +1110,8 @@ impl DashboardContext {
             selection_text: None,
             dashboard_io_tx,
             dashboard_io: Feed::new(dashboard_io_rx),
+            web_request_generation: 0,
+            web_request_cancel: None,
             materialized_projection_permits: Arc::new(tokio::sync::Semaphore::new(2)),
             materialized_projections_in_flight: BTreeSet::new(),
             pending_materialized_projections: BTreeMap::new(),

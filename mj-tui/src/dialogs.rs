@@ -32,7 +32,9 @@ use crate::widgets::{
     centered_modal, centered_modal_fixed, modal_area, popup_height, truncate_text,
 };
 use crate::wizards::read_only_marker;
-use crate::{DashboardAction, DashboardState, Mode, WebViewerAccess};
+use crate::{
+    DashboardAction, DashboardState, Mode, WebListenerProcess, WebViewerAccess, WebViewerRecovery,
+};
 
 pub(crate) const FORCE_STOP_CONFIRMATION: &str = "STOP";
 
@@ -58,6 +60,13 @@ pub(crate) enum DialogControl {
     ImportCancel,
     ImportContinue,
     WebClose,
+    WebRetry,
+    WebAnotherPort,
+    WebInspect,
+    WebNextProcess,
+    WebStop,
+    WebConfirmStop,
+    WebCancelStop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +143,13 @@ pub(crate) struct WebDialog {
     pub(crate) fallback_reason: Option<String>,
     pub(crate) message: Option<String>,
     pub(crate) qr: Option<String>,
+    pub(crate) failed_address: Option<std::net::SocketAddr>,
+    pub(crate) port_conflict: bool,
+    pub(crate) inspecting: bool,
+    pub(crate) listeners: Vec<WebListenerProcess>,
+    pub(crate) listener_index: usize,
+    pub(crate) inspection_message: Option<String>,
+    pub(crate) confirm_stop: Option<WebListenerProcess>,
     pub(crate) form: RefCell<Form<DialogControl>>,
 }
 
@@ -146,8 +162,72 @@ impl WebDialog {
             fallback_reason: None,
             message: None,
             qr: None,
+            failed_address: None,
+            port_conflict: false,
+            inspecting: false,
+            listeners: Vec::new(),
+            listener_index: 0,
+            inspection_message: None,
+            confirm_stop: None,
             form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
         }
+    }
+}
+
+impl WebDialog {
+    fn button_rows(&self) -> Vec<Vec<(DialogControl, &'static str, bool)>> {
+        use DialogControl::*;
+        if self.confirm_stop.is_some() {
+            return vec![vec![
+                (WebCancelStop, "Cancel", true),
+                (WebConfirmStop, "Stop and retry", true),
+            ]];
+        }
+        if self.loading || self.failed_address.is_none() {
+            return vec![vec![(WebClose, "Close", true)]];
+        }
+        let mut rows = vec![vec![
+            (WebAnotherPort, "Use another port", !self.inspecting),
+            (WebRetry, "Retry", !self.inspecting),
+        ]];
+        if let Some(process) = self.listeners.get(self.listener_index) {
+            let mut buttons = vec![(
+                WebStop,
+                "Stop server…",
+                process.stop_disabled_reason.is_none(),
+            )];
+            if self.listeners.len() > 1 {
+                buttons.push((WebNextProcess, "Next process", true));
+            }
+            rows.push(buttons);
+        }
+        let mut footer = Vec::new();
+        if self.port_conflict {
+            footer.push((WebInspect, "Inspect port", !self.inspecting));
+        }
+        footer.push((WebClose, "Close", true));
+        rows.push(footer);
+        rows
+    }
+
+    fn default_control(&self) -> DialogControl {
+        if self.confirm_stop.is_some() {
+            DialogControl::WebCancelStop
+        } else if self.failed_address.is_some() && !self.loading && !self.inspecting {
+            DialogControl::WebAnotherPort
+        } else {
+            DialogControl::WebClose
+        }
+    }
+
+    fn reset_form(&mut self) {
+        let controls = self
+            .button_rows()
+            .into_iter()
+            .flatten()
+            .map(|(id, _, _)| id)
+            .collect::<Vec<_>>();
+        self.form = dialog_form(&controls, self.default_control());
     }
 }
 
@@ -799,7 +879,6 @@ pub(crate) fn render_web_dialog(
     dialog: &WebDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    const FOOTER: &str = "Close";
     // Text that names the natural body width. The box hugs the QR, and longer
     // URLs wrap beneath it rather than stretching the dialog across the screen.
     const MIN_INNER_WIDTH: usize = 40;
@@ -822,17 +901,62 @@ pub(crate) fn render_web_dialog(
 
     let mut inner_width = MIN_INNER_WIDTH;
     let mut lines = Vec::new();
-    if dialog.loading {
+    if let Some(process) = &dialog.confirm_stop {
+        inner_width = 60;
         lines.push(Line::styled(
-            "Loading web viewer access…",
+            "Stop this Mjolnir server?",
+            Style::default().fg(Color::Yellow),
+        ));
+        lines.push(Line::raw(format!("{} · PID {}", process.name, process.pid)));
+        lines.push(Line::raw(process.executable.display().to_string()));
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Other viewers and dashboards using that server will be disconnected. Mjolnir will request a graceful stop, then retry this port."));
+    } else if dialog.loading {
+        lines.push(Line::styled(
+            "Starting web viewer…",
             Style::default().fg(Color::Yellow),
         ));
     } else if let Some(message) = &dialog.message {
-        inner_width = inner_width.max(message.chars().count());
-        lines.push(Line::styled(
-            message.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
+        inner_width = 60;
+        lines.extend(
+            message
+                .lines()
+                .map(|line| Line::styled(line.to_owned(), Style::default().fg(Color::Yellow))),
+        );
+        if let Some(address) = dialog.failed_address {
+            lines.push(Line::raw(format!("Address: {address}")));
+            lines.push(Line::raw(""));
+            lines.push(Line::raw("Use another port to get connected now. The new port lasts until the daemon restarts."));
+            if dialog.port_conflict {
+                lines.push(Line::raw(
+                    "Inspect the port to see which process is using it.",
+                ));
+            }
+        }
+        if dialog.inspecting {
+            lines.push(Line::styled(
+                "Inspecting listener…",
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        if let Some(message) = &dialog.inspection_message {
+            lines.push(Line::raw(""));
+            lines.extend(message.lines().map(|line| Line::raw(line.to_owned())));
+        }
+        if let Some(process) = dialog.listeners.get(dialog.listener_index) {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(format!(
+                "Process {} of {}: {} (PID {})",
+                dialog.listener_index + 1,
+                dialog.listeners.len(),
+                process.name,
+                process.pid
+            )));
+            lines.push(Line::raw(process.executable.display().to_string()));
+            if let Some(reason) = &process.stop_disabled_reason {
+                lines.push(Line::raw(reason.clone()));
+            }
+        }
     } else {
         if show_qr {
             inner_width = inner_width.max(qr_width.unwrap_or(0));
@@ -880,7 +1004,11 @@ pub(crate) fn render_web_dialog(
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let wrapped =
         u16::try_from(paragraph.line_count(box_width.saturating_sub(2))).unwrap_or(u16::MAX);
-    let box_height = wrapped.saturating_add(3).min(inner_area.height);
+    let button_rows = dialog.button_rows();
+    let footer_height = u16::try_from(button_rows.len()).unwrap_or(u16::MAX);
+    let box_height = wrapped
+        .saturating_add(2 + footer_height)
+        .min(inner_area.height);
     let popup = centered_modal_fixed(frame, surfaces, box_width, box_height, area);
     frame.render_widget(
         Block::default().borders(Borders::ALL).title(" Web viewer "),
@@ -898,21 +1026,22 @@ pub(crate) fn render_web_dialog(
         inner.x,
         inner.y,
         inner.width,
-        inner.height.saturating_sub(1),
+        inner.height.saturating_sub(footer_height),
     );
     frame.render_widget(paragraph, body);
-    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
-    Button::render(
-        frame,
-        footer,
-        FOOTER,
-        true,
-        &mut form,
-        DialogControl::WebClose,
-    );
-    form.end_frame(DialogControl::WebClose);
+    let footer_top = inner.bottom().saturating_sub(footer_height).max(inner.y);
+    for (index, buttons) in button_rows.iter().enumerate() {
+        let y = footer_top.saturating_add(index as u16);
+        let footer = if y < inner.bottom() {
+            Rect::new(inner.x, y, inner.width, 1)
+        } else {
+            Rect::default()
+        };
+        ButtonRow::render(frame, footer, buttons, &mut form);
+    }
+    form.end_frame(dialog.default_control());
 }
 
 fn render_qr(data: &str) -> Result<String, String> {
@@ -1316,43 +1445,76 @@ pub(crate) fn render_confirmation(
 
 impl DashboardState {
     pub fn apply_web_access(&mut self, access: WebViewerAccess) {
-        let dialog = match access {
+        let Mode::Web(current) = &mut self.mode else {
+            return;
+        };
+        if matches!(access, WebViewerAccess::Starting) {
+            current.loading = true;
+            current.reset_form();
+            return;
+        }
+        let mut dialog = WebDialog::loading();
+        dialog.loading = false;
+        match access {
+            WebViewerAccess::Starting => unreachable!(),
             WebViewerAccess::Ready {
                 viewer_url,
                 viewer_code,
                 qr_login_url,
                 fallback_reason,
             } => {
-                let (qr, message) = match qr_login_url {
-                    Some(url) => match render_qr(&url) {
-                        Ok(qr) => (Some(qr), None),
-                        Err(error) => (None, Some(error)),
-                    },
-                    None => (None, None),
-                };
-                WebDialog {
-                    loading: false,
-                    viewer_url: Some(viewer_url),
-                    viewer_code: Some(viewer_code),
-                    fallback_reason,
-                    message,
-                    qr,
-                    form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
+                dialog.viewer_url = Some(viewer_url);
+                dialog.viewer_code = Some(viewer_code);
+                dialog.fallback_reason = fallback_reason;
+                if let Some(url) = qr_login_url {
+                    match render_qr(&url) {
+                        Ok(qr) => dialog.qr = Some(qr),
+                        Err(error) => dialog.fallback_reason = Some(error),
+                    }
                 }
             }
-            WebViewerAccess::Unavailable(message) => WebDialog {
-                loading: false,
-                viewer_url: None,
-                viewer_code: None,
-                fallback_reason: None,
-                message: Some(message),
-                qr: None,
-                form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
-            },
-        };
-        if matches!(self.mode, Mode::Web(_)) {
-            self.mode = Mode::Web(dialog);
+            WebViewerAccess::Failed {
+                address,
+                message,
+                port_conflict,
+            } => {
+                dialog.failed_address = Some(address);
+                dialog.port_conflict = port_conflict;
+                dialog.message = Some(message);
+            }
+            WebViewerAccess::Unavailable(message) => dialog.message = Some(message),
         }
+        dialog.reset_form();
+        self.mode = Mode::Web(dialog);
+    }
+
+    pub fn apply_web_listeners(&mut self, result: Result<Vec<WebListenerProcess>, String>) {
+        let Mode::Web(dialog) = &mut self.mode else {
+            return;
+        };
+        dialog.inspecting = false;
+        match result {
+            Ok(processes) => {
+                dialog.inspection_message = processes.is_empty().then(|| "No visible listener was found. It may have exited, or your account may not have permission to inspect it. Retry or use another port.".into());
+                dialog.listeners = processes;
+                dialog.listener_index = 0;
+            }
+            Err(error) => dialog.inspection_message = Some(error),
+        }
+        dialog.reset_form();
+    }
+
+    pub fn apply_web_error(&mut self, error: String) {
+        let Mode::Web(dialog) = &mut self.mode else {
+            return;
+        };
+        dialog.loading = false;
+        dialog.confirm_stop = None;
+        dialog.inspection_message = Some(error.clone());
+        if dialog.failed_address.is_none() {
+            dialog.message = Some(error);
+        }
+        dialog.reset_form();
     }
 
     pub(crate) fn handle_web_event(
@@ -1361,13 +1523,61 @@ impl DashboardState {
         mut dialog: WebDialog,
     ) -> DashboardAction {
         let interaction = dialog.form.get_mut().handle(&event).action;
+        let mut action = DashboardAction::None;
         match interaction {
+            Some(Interaction::Cancel) if dialog.confirm_stop.is_some() => {
+                dialog.confirm_stop = None;
+                dialog.reset_form();
+            }
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::WebClose)) => {
                 self.cancel_modal();
+                return DashboardAction::CancelWebAccess;
             }
-            _ => self.mode = Mode::Web(dialog),
+            Some(Interaction::Activate(DialogControl::WebRetry)) if !dialog.loading => {
+                action = DashboardAction::RecoverWebViewer(WebViewerRecovery::Retry);
+            }
+            Some(Interaction::Activate(DialogControl::WebAnotherPort)) if !dialog.loading => {
+                action = DashboardAction::RecoverWebViewer(WebViewerRecovery::AnotherPort);
+            }
+            Some(Interaction::Activate(DialogControl::WebInspect)) if !dialog.inspecting => {
+                dialog.inspecting = true;
+                dialog.inspection_message = None;
+                dialog.listeners.clear();
+                dialog.reset_form();
+                action = DashboardAction::InspectWebListener;
+            }
+            Some(Interaction::Activate(DialogControl::WebNextProcess))
+                if !dialog.listeners.is_empty() =>
+            {
+                dialog.listener_index = (dialog.listener_index + 1) % dialog.listeners.len();
+            }
+            Some(Interaction::Activate(DialogControl::WebStop)) => {
+                if let Some(process) = dialog.listeners.get(dialog.listener_index)
+                    && process.stop_disabled_reason.is_none()
+                {
+                    dialog.confirm_stop = Some(process.clone());
+                    dialog.reset_form();
+                }
+            }
+            Some(Interaction::Activate(DialogControl::WebCancelStop)) => {
+                dialog.confirm_stop = None;
+                dialog.reset_form();
+            }
+            Some(Interaction::Activate(DialogControl::WebConfirmStop)) => {
+                if let Some(process) = dialog.confirm_stop.take() {
+                    action =
+                        DashboardAction::RecoverWebViewer(WebViewerRecovery::StopAndRetry(process));
+                }
+            }
+            _ => {}
         }
-        DashboardAction::None
+        if matches!(action, DashboardAction::RecoverWebViewer(_)) {
+            dialog.loading = true;
+            dialog.inspection_message = None;
+            dialog.reset_form();
+        }
+        self.mode = Mode::Web(dialog);
+        action
     }
 
     pub(crate) fn begin_profile_rename(&mut self) {
@@ -2030,7 +2240,7 @@ mod tests {
             fallback_reason: None,
             message: None,
             qr: Some(render_qr(url).unwrap()),
-            form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
+            ..WebDialog::loading()
         };
 
         let rendered = draw_web_dialog(&dialog, 60, 40);
@@ -2054,6 +2264,191 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Viewer code: 022160"))
         );
+    }
+
+    fn failed_web_dashboard() -> DashboardState {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.open_web_dialog();
+        dashboard.apply_web_access(WebViewerAccess::Failed {
+            address: "127.0.0.1:37650".parse().unwrap(),
+            message: "Port 37650 is already in use.".into(),
+            port_conflict: true,
+        });
+        dashboard
+    }
+
+    fn activate_web(dashboard: &mut DashboardState, control: DialogControl) -> DashboardAction {
+        let Mode::Web(mut dialog) = dashboard.mode.clone() else {
+            panic!("web dialog expected")
+        };
+        draw_web_dialog(&dialog, 80, 24);
+        dialog.form.get_mut().focus(control);
+        dashboard.handle_web_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            dialog,
+        )
+    }
+
+    #[test]
+    fn web_port_conflict_offers_recovery_and_keeps_the_address_and_close_visible() {
+        let dashboard = failed_web_dashboard();
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        for (width, height) in [(140, 40), (80, 24), (60, 20)] {
+            let rendered = draw_web_dialog(dialog, width, height);
+            let text = rendered.join("\n");
+            assert!(text.contains("Port 37650 is already in use."));
+            assert!(text.contains("Address: 127.0.0.1:37650"));
+            assert!(text.contains("[ Use another port ]"));
+            assert!(text.contains("[ Inspect port ]"));
+            assert!(text.contains("[ Retry ]"));
+            assert!(text.contains("[ Close ]"));
+            assert!(
+                rendered
+                    .iter()
+                    .all(|line| line.trim().chars().count() <= 62)
+            );
+        }
+    }
+
+    #[test]
+    fn web_recovery_enters_loading_immediately_and_close_cancels_status_polling() {
+        let mut dashboard = failed_web_dashboard();
+        assert_eq!(
+            activate_web(&mut dashboard, DialogControl::WebAnotherPort),
+            DashboardAction::RecoverWebViewer(WebViewerRecovery::AnotherPort)
+        );
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert!(dialog.loading);
+        let rendered = draw_web_dialog(dialog, 80, 24).join("\n");
+        assert!(rendered.contains("Starting web viewer"));
+        assert!(rendered.contains("[ Close ]"));
+        assert!(!rendered.contains("[ Use another port ]"));
+        assert_eq!(
+            activate_web(&mut dashboard, DialogControl::WebClose),
+            DashboardAction::CancelWebAccess
+        );
+        dashboard.apply_web_access(WebViewerAccess::Starting);
+        assert!(
+            !matches!(dashboard.mode, Mode::Web(_)),
+            "late results must not reopen the dialog"
+        );
+    }
+
+    #[test]
+    fn web_retry_and_inspection_dispatch_real_actions_and_inspection_can_fail_in_place() {
+        let mut dashboard = failed_web_dashboard();
+        assert_eq!(
+            activate_web(&mut dashboard, DialogControl::WebRetry),
+            DashboardAction::RecoverWebViewer(WebViewerRecovery::Retry)
+        );
+        dashboard = failed_web_dashboard();
+        assert_eq!(
+            activate_web(&mut dashboard, DialogControl::WebInspect),
+            DashboardAction::InspectWebListener
+        );
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert!(dialog.inspecting);
+        dashboard.apply_web_listeners(Err("Permission denied while inspecting listeners.".into()));
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert!(!dialog.inspecting);
+        let rendered = draw_web_dialog(dialog, 80, 24).join("\n");
+        assert!(rendered.contains("Permission denied"));
+        assert!(rendered.contains("[ Use another port ]"));
+    }
+
+    #[test]
+    fn stopping_a_web_listener_requires_a_separate_confirmation_with_cancel_selected() {
+        let mut dashboard = failed_web_dashboard();
+        let process = WebListenerProcess {
+            pid: 4242,
+            name: "mj".into(),
+            executable: "/opt/mj/bin/mj".into(),
+            started_at: 123,
+            stop_disabled_reason: None,
+        };
+        dashboard.apply_web_listeners(Ok(vec![process.clone()]));
+        assert_eq!(
+            activate_web(&mut dashboard, DialogControl::WebStop),
+            DashboardAction::None
+        );
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::WebCancelStop)
+        );
+        let rendered = draw_web_dialog(dialog, 80, 24).join("\n");
+        assert!(rendered.contains("PID 4242"));
+        assert!(rendered.contains("/opt/mj/bin/mj"));
+        assert!(rendered.contains("[ Stop and retry ]"));
+        assert_eq!(
+            activate_web(&mut dashboard, DialogControl::WebCancelStop),
+            DashboardAction::None
+        );
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert!(dialog.confirm_stop.is_none());
+        activate_web(&mut dashboard, DialogControl::WebStop);
+        assert_eq!(
+            activate_web(&mut dashboard, DialogControl::WebConfirmStop),
+            DashboardAction::RecoverWebViewer(WebViewerRecovery::StopAndRetry(process))
+        );
+    }
+
+    #[test]
+    fn an_unrelated_listener_has_no_enabled_stop_action() {
+        let mut dashboard = failed_web_dashboard();
+        dashboard.apply_web_listeners(Ok(vec![WebListenerProcess {
+            pid: 4242,
+            name: "other-server".into(),
+            executable: "/opt/other-server".into(),
+            started_at: 123,
+            stop_disabled_reason: Some("This is not an identified Mjolnir server.".into()),
+        }]));
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        let rendered = draw_web_dialog(dialog, 80, 24);
+        let (row, line) = rendered
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains("[ Stop server… ]"))
+            .unwrap();
+        let column = line.find("[ Stop server… ]").unwrap();
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            let Mode::Web(dialog) = dashboard.mode.clone() else {
+                unreachable!()
+            };
+            assert_eq!(
+                dashboard.handle_web_event(
+                    Event::Mouse(crossterm::event::MouseEvent {
+                        kind,
+                        column: column as u16 + 2,
+                        row: row as u16,
+                        modifiers: KeyModifiers::NONE
+                    }),
+                    dialog
+                ),
+                DashboardAction::None
+            );
+        }
+        let Mode::Web(dialog) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert!(dialog.confirm_stop.is_none());
     }
 
     fn dashboard_with_container_session() -> DashboardState {

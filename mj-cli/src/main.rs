@@ -13,6 +13,7 @@ mod logging;
 mod pollers;
 mod server;
 mod session_presentation;
+mod web_viewer;
 mod workspace_selector;
 
 use std::io::{self, Write};

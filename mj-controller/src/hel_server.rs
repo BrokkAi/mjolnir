@@ -181,6 +181,7 @@ pub fn load_or_create_cookie_key(path: &std::path::Path) -> AnyResult<Vec<u8>> {
 /// restarts installs a persisted key with `set_cookie_key`, which
 /// `load_or_create_cookie_key` reads from its private Hel data directory. The
 /// key and viewer code are intentionally omitted from `Debug` output.
+#[derive(Clone)]
 pub struct ServerOptions {
     pub bind: SocketAddr,
     pub snapshot_rx: watch::Receiver<ViewerSnapshot>,
@@ -282,34 +283,114 @@ impl ServerOptions {
 /// target, or keep sessions alive: controller availability is required, just
 /// like MJ's explicit remote-viewer model.
 pub async fn run_server(options: ServerOptions) -> AnyResult<()> {
+    let listener = tokio::net::TcpListener::bind(options.bind)
+        .await
+        .with_context(|| format!("bind web viewer to {}", options.bind))?;
+    run_server_on_listener(options, listener).await
+}
+
+/// Serve a reserved socket so readiness and advertised ports reflect a real listener.
+pub async fn run_server_on_listener(
+    options: ServerOptions,
+    listener: tokio::net::TcpListener,
+) -> AnyResult<()> {
     let mut options = options;
-    let bind = options.bind;
+    let bind = listener.local_addr().context("read web viewer address")?;
     let shutdown = options.shutdown.clone();
     let viewer_code = options.viewer_code.clone();
     let tls_config = options.tls_config.take();
     let app = router(options);
     println!("Mjolnir viewer code: {viewer_code}");
-    if let Some(tls_config) = tls_config {
-        let handle = axum_server::Handle::new();
-        let shutdown_handle = handle.clone();
-        tokio::spawn(async move {
-            shutdown.cancelled().await;
+    let listener = listener.into_std().context("prepare web viewer listener")?;
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    let serve = async move {
+        if let Some(tls_config) = tls_config {
+            axum_server::from_tcp_rustls(listener, tls_config)
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await
+        } else {
+            axum_server::from_tcp(listener)
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await
+        }
+    };
+    tokio::pin!(serve);
+    tokio::select! {
+        result = &mut serve => result,
+        _ = shutdown.cancelled() => {
             shutdown_handle.graceful_shutdown(Some(Duration::from_secs(2)));
-        });
-        axum_server::bind_rustls(bind, tls_config)
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await
-            .with_context(|| format!("run Mjolnir HTTPS web viewer on {bind}"))
-    } else {
-        let listener = tokio::net::TcpListener::bind(bind)
-            .await
-            .with_context(|| format!("bind Mjolnir phone server to {bind}"))?;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown.cancelled_owned())
-            .await
-            .context("run Mjolnir HTTP phone server")
+            serve.await
+        }
     }
+    .with_context(|| format!("serve web viewer on {bind}"))
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WebViewerAccess {
+    Starting,
+    Ready {
+        viewer_url: String,
+        viewer_code: String,
+        qr_login_url: Option<String>,
+        fallback_reason: Option<String>,
+    },
+    Failed {
+        address: SocketAddr,
+        message: String,
+        port_conflict: bool,
+    },
+    Unavailable(String),
+}
+
+impl std::fmt::Debug for WebViewerAccess {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Starting => formatter.write_str("Starting"),
+            Self::Ready {
+                viewer_url,
+                fallback_reason,
+                ..
+            } => formatter
+                .debug_struct("Ready")
+                .field("viewer_url", viewer_url)
+                .field("credentials", &"[redacted]")
+                .field("fallback_reason", fallback_reason)
+                .finish(),
+            Self::Failed {
+                address,
+                message,
+                port_conflict,
+            } => formatter
+                .debug_struct("Failed")
+                .field("address", address)
+                .field("message", message)
+                .field("port_conflict", port_conflict)
+                .finish(),
+            Self::Unavailable(message) => {
+                formatter.debug_tuple("Unavailable").field(message).finish()
+            }
+        }
+    }
+}
+
+/// Identity shown before an explicit stop request and checked again before signalling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebListenerProcess {
+    pub pid: u32,
+    pub name: String,
+    pub executable: PathBuf,
+    pub started_at: u64,
+    pub stop_disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WebViewerRecovery {
+    Retry,
+    AnotherPort,
+    StopAndRetry(WebListenerProcess),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

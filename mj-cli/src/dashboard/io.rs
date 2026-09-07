@@ -88,7 +88,18 @@ pub(crate) enum DashboardIoUpdate {
         result: std::result::Result<Controller, String>,
     },
     ConfigReloaded(std::result::Result<Controller, String>),
-    WebAccess(WebViewerAccess),
+    WebAccess {
+        generation: u64,
+        access: WebViewerAccess,
+    },
+    WebListeners {
+        generation: u64,
+        result: Result<Vec<hel_tui::WebListenerProcess>, String>,
+    },
+    WebAccessError {
+        generation: u64,
+        error: String,
+    },
     SetupReloaded(std::result::Result<Controller, String>),
     ReviewSettingsDiscovered {
         generation: u64,
@@ -1385,7 +1396,21 @@ impl DashboardContext {
                         .set_notice(format!("Could not reload configuration: {error}")),
                 }
             }
-            DashboardIoUpdate::WebAccess(access) => self.dashboard.apply_web_access(access),
+            DashboardIoUpdate::WebAccess { generation, access } => {
+                if generation == self.web_request_generation {
+                    self.dashboard.apply_web_access(access);
+                }
+            }
+            DashboardIoUpdate::WebListeners { generation, result } => {
+                if generation == self.web_request_generation {
+                    self.dashboard.apply_web_listeners(result);
+                }
+            }
+            DashboardIoUpdate::WebAccessError { generation, error } => {
+                if generation == self.web_request_generation {
+                    self.dashboard.apply_web_error(error);
+                }
+            }
             DashboardIoUpdate::SetupReloaded(result) => match result {
                 Ok(controller) => {
                     self.controller = controller;

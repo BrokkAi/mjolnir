@@ -121,6 +121,36 @@ class ScenarioFailure(RuntimeError):
     pass
 
 
+def daemon_request(data: pathlib.Path, action: dict[str, object], request_id: int = 99) -> object:
+    """Send one authenticated request to a daemon in an isolated data directory."""
+    metadata = json.loads((data / "daemon.json").read_text())
+    envelope = {
+        "protocol_version": metadata["protocol_version"],
+        "request_id": request_id,
+        "token": metadata["token"],
+        "action": action,
+    }
+    body = json.dumps(envelope, separators=(",", ":")).encode()
+    host, port_text = str(metadata["address"]).rsplit(":", 1)
+    with socket.create_connection((host, int(port_text)), timeout=5) as stream:
+        stream.sendall(struct.pack(">I", len(body)) + body)
+        header = stream.recv(4)
+        if len(header) != 4:
+            raise ScenarioFailure("daemon closed before its response frame")
+        remaining = struct.unpack(">I", header)[0]
+        chunks = bytearray()
+        while len(chunks) < remaining:
+            chunk = stream.recv(remaining - len(chunks))
+            if not chunk:
+                raise ScenarioFailure("daemon response frame was truncated")
+            chunks.extend(chunk)
+    response = json.loads(chunks)
+    result = response.get("result")
+    if not isinstance(result, dict) or "Ok" not in result:
+        raise ScenarioFailure(f"daemon action failed: {response!r}")
+    return result["Ok"]
+
+
 class PtyClient:
     def __init__(self, name: str, command: list[str], env: dict[str, str], capture: pathlib.Path):
         master, slave = pty.openpty()
@@ -639,32 +669,7 @@ kind = "local-bare"
         raise ScenarioFailure(f"daemon/web viewer did not become ready: {last[-4000:]}")
 
     def daemon_request(self, action: dict[str, object], request_id: int = 99) -> object:
-        metadata = json.loads((self.data / "daemon.json").read_text())
-        envelope = {
-            "protocol_version": metadata["protocol_version"],
-            "request_id": request_id,
-            "token": metadata["token"],
-            "action": action,
-        }
-        body = json.dumps(envelope, separators=(",", ":")).encode()
-        host, port_text = str(metadata["address"]).rsplit(":", 1)
-        with socket.create_connection((host, int(port_text)), timeout=5) as stream:
-            stream.sendall(struct.pack(">I", len(body)) + body)
-            header = stream.recv(4)
-            if len(header) != 4:
-                raise ScenarioFailure("daemon closed before its response frame")
-            remaining = struct.unpack(">I", header)[0]
-            chunks = bytearray()
-            while len(chunks) < remaining:
-                chunk = stream.recv(remaining - len(chunks))
-                if not chunk:
-                    raise ScenarioFailure("daemon response frame was truncated")
-                chunks.extend(chunk)
-        response = json.loads(chunks)
-        result = response.get("result")
-        if not isinstance(result, dict) or "Ok" not in result:
-            raise ScenarioFailure(f"daemon action failed: {response!r}")
-        return result["Ok"]
+        return daemon_request(self.data, action, request_id)
 
     def request(self, method: str, path: str, body: object | None = None) -> tuple[int, object | None]:
         data = None if body is None else json.dumps(body).encode()

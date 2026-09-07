@@ -69,6 +69,24 @@ temporary network loss does not move session ownership into the browser: the
 daemon and target keep working, and the viewer reconnects to their current
 state.
 
+## Recover a port conflict
+
+Press **F4** in the terminal to open **Web viewer**. If its port is occupied,
+the dialog shows the address and offers **Use another port**, **Retry**, and
+**Inspect port**. Startup status updates automatically while the dialog is open.
+
+**Use another port** reserves an available port and shows the new URL and login
+code. It keeps the same HTTPS hostname and certificate when HTTPS is configured.
+The port applies until the daemon restarts; saved configuration is unchanged.
+
+**Inspect port** shows the listening process and its PID. On Linux, an identified
+Mjolnir daemon owned by your account can be stopped with **Stop server…** and a
+separate **Stop and retry** confirmation. Other clients using that daemon will
+disconnect. Mjolnir verifies the process identity again before requesting a
+graceful stop and does not escalate to a force kill. The current daemon and
+unrelated applications cannot be stopped through this dialog. On other platforms,
+stop the identified application yourself or use another port.
+
 ## Open the native desktop shell
 
 ```console
