@@ -8,8 +8,8 @@ use hel::hel_config::HelConfig;
 use hel::hel_elicitation::ElicitationRequest;
 use hel::hel_state::{
     HelState, MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary,
-    SessionRecord, SessionResourceAllocation, SessionState, TranscriptBody, TranscriptItem,
-    normalize_session_title,
+    MoveOperation, SessionRecord, SessionResourceAllocation, SessionState, TranscriptBody,
+    TranscriptItem, normalize_session_title,
 };
 use hel::hel_targets::{
     DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage, SessionResourceUsage,
@@ -516,6 +516,51 @@ impl DashboardState {
         self.clamp_selections();
     }
 
+    /// Replace the daemon's complete durable Move projection. Active intents
+    /// are projected into the Sessions pane immediately, even when the latest
+    /// session record is still stopped or provisioning; this keeps a moving
+    /// row visible while the normal lifecycle feed catches up. Retained failed
+    /// and cancelled intents stay attached to resume rows for explicit recovery.
+    pub fn set_move_operations(&mut self, operations: impl IntoIterator<Item = MoveOperation>) {
+        self.move_operations = operations
+            .into_iter()
+            .map(|operation| (operation.selection.session_id.clone(), operation))
+            .collect();
+        let active = self
+            .move_operations
+            .values()
+            .filter(|operation| operation.is_active())
+            .map(|operation| {
+                (
+                    operation.selection.session_id.clone(),
+                    operation.operation_id.clone(),
+                    operation.selection.profile_id.clone(),
+                    operation.selection.target_template_id.clone(),
+                    operation.created_at.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (session_id, _operation_id, profile_id, target_template_id, created_at) in active {
+            if self.session_operation_kind(&session_id).is_none() {
+                let started_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .ok()
+                    .map(|time| time.timestamp().max(0) as u64)
+                    .unwrap_or_default();
+                self.begin_session_operation_at(
+                    session_id.clone(),
+                    SessionOperationKind::Moving,
+                    None,
+                    started_at,
+                );
+            }
+            if let (Some(profile_id), Some(target_template_id)) = (profile_id, target_template_id) {
+                self.set_resume_destination(&session_id, profile_id, target_template_id);
+            }
+        }
+        self.rebuild_resume_rows();
+        self.clamp_selections();
+    }
+
     pub fn begin_session_operation(
         &mut self,
         session_id: String,
@@ -629,6 +674,17 @@ impl DashboardState {
             .map(|operation| operation.kind)
     }
 
+    /// Whether the daemon has a ready Move destination whose queue admission
+    /// is incomplete. The destination must be retried in place before normal
+    /// session mutations can safely be accepted.
+    pub fn move_queue_admission_incomplete(&self, session_id: &str) -> bool {
+        self.move_operations
+            .get(session_id)
+            .is_some_and(|operation| {
+                operation.queue_admission_started && !operation.queue_admission_finished
+            })
+    }
+
     fn apply_operation_projection(&mut self) {
         for (session_id, operation) in &self.session_operations {
             if let Some(placeholder) = &operation.placeholder {
@@ -641,6 +697,7 @@ impl DashboardState {
                 operation.kind,
                 SessionOperationKind::Launching
                     | SessionOperationKind::Resuming
+                    | SessionOperationKind::Moving
                     | SessionOperationKind::Importing
             ) && let Some(session) = self.state.sessions.get_mut(session_id)
             {

@@ -16,8 +16,8 @@ use hel::hel_config::{
     project_history_host,
 };
 use hel::hel_state::{
-    HelState, SessionRecord, SessionResourceAllocation, SessionState, allocation_cpus,
-    allocation_memory,
+    HelState, MaterializedQueuedPrompt, MoveOperation, MovePreparation, ResumeQueueDisposition,
+    SessionRecord, SessionResourceAllocation, SessionState, allocation_cpus, allocation_memory,
 };
 use hel::hel_targets::{AdditionalMount, default_mount_destination, path_completion};
 use mj_chat::components::{
@@ -281,6 +281,11 @@ impl ResumeWizard {
 #[derive(Debug, Clone)]
 pub(crate) struct ResumeWizard {
     pub(crate) session_id: String,
+    /// The resume form is also the move form. Move keeps the source workspace
+    /// fixed and submits a daemon Move request instead of a plain resume.
+    pub(crate) moving: bool,
+    pub(crate) preparation: Option<MovePreparation>,
+    pub(crate) preparing: bool,
     pub(crate) step: WizardStep,
     pub(crate) focus: WizardFocus,
     pub(crate) profile: usize,
@@ -297,6 +302,9 @@ pub(crate) struct ResumeWizard {
 impl PartialEq for ResumeWizard {
     fn eq(&self, other: &Self) -> bool {
         self.session_id == other.session_id
+            && self.moving == other.moving
+            && self.preparation == other.preparation
+            && self.preparing == other.preparing
             && self.step == other.step
             && self.focus == other.focus
             && self.profile == other.profile
@@ -787,7 +795,12 @@ pub(crate) fn render_new_wizard(
                 mounts: &wizard.mounts,
                 title: " New session · 4/4 review ",
                 submit_label: "Create",
+                moving: false,
+                active_interruption: false,
+                clear_resource_allocation: false,
                 queue: None,
+                queued_entries: &[],
+                prepared_entries: &[],
             },
             &mut form,
             surfaces,
@@ -1074,7 +1087,12 @@ struct ReviewWizardView<'a> {
     pub(crate) mounts: &'a MountWizard,
     pub(crate) title: &'a str,
     submit_label: &'a str,
+    moving: bool,
+    active_interruption: bool,
+    clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
+    queued_entries: &'a [hel::hel_worker::QueuedPrompt],
+    prepared_entries: &'a [MaterializedQueuedPrompt],
 }
 
 fn render_review_wizard(
@@ -1095,7 +1113,12 @@ fn render_review_wizard(
         mounts,
         title,
         submit_label,
+        moving,
+        active_interruption,
+        clear_resource_allocation,
         queue,
+        queued_entries,
+        prepared_entries,
     } = view;
     let target = &dashboard.config.targets[target_id];
     let can_attach = mount_history_host(target).is_some();
@@ -1108,6 +1131,18 @@ fn render_review_wizard(
             resource_allocation_label(allocation, None)
         )),
     ];
+    if moving && active_interruption {
+        lines.push(Line::styled(
+            "Active work will be interrupted; the session is restored into a fresh environment.",
+            Style::default().fg(Color::Yellow),
+        ));
+        if clear_resource_allocation {
+            lines.push(Line::styled(
+                "Fixed/default destination resources will replace the source sizing.",
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+    }
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
     if let Some(label) = &queue_label {
         lines.push(Line::raw(label.clone()));
@@ -1149,7 +1184,14 @@ fn render_review_wizard(
     } else {
         0
     };
-    let queue_height = u16::from(queue.is_some());
+    let queue_height = if queue.is_some() {
+        1_u16.saturating_add(
+            u16::try_from(queued_entries.len().saturating_add(prepared_entries.len()))
+                .unwrap_or(u16::MAX),
+        )
+    } else {
+        0
+    };
     let total_height = summary_height
         .saturating_add(list_height)
         .saturating_add(queue_height);
@@ -1218,14 +1260,74 @@ fn render_review_wizard(
             frame,
             queue_area,
             &format!(
-                "Discard {count} queued prompt{} on resume",
-                if count == 1 { "" } else { "s" }
+                "{} {count} queued command{} {}",
+                if discard { "Discard" } else { "Start" },
+                if count == 1 { "" } else { "s" },
+                if moving { "after move" } else { "on resume" },
             ),
             discard,
             true,
             form,
             WizardControl::DiscardQueue,
         );
+        for (index, entry) in queued_entries.iter().enumerate() {
+            let text = if entry.text.trim().is_empty() {
+                "[empty command]".to_owned()
+            } else {
+                entry.text.replace('\n', " ")
+            };
+            let attachment_count = entry.attachments.len();
+            let attachment_note = match attachment_count {
+                0 => String::new(),
+                1 => " · 1 attachment".to_owned(),
+                count => format!(" · {count} attachments"),
+            };
+            let text = crate::widgets::truncate_text(&text, inner.width.saturating_sub(4) as usize);
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    format!("  {}. {text}{attachment_note}", index + 1),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                viewport.row(
+                    summary_height
+                        .saturating_add(list_height)
+                        .saturating_add(1)
+                        .saturating_add(u16::try_from(index).unwrap_or(u16::MAX)),
+                    1,
+                ),
+            );
+        }
+        for (index, entry) in prepared_entries.iter().enumerate() {
+            let (kind, text) = match &entry.kind {
+                hel::hel_state::QueuedCommandKind::Prompt => (
+                    "prompt",
+                    hel::hel_transcript::materialized_content_text(&entry.content),
+                ),
+                hel::hel_state::QueuedCommandKind::SetConfig { key, value } => {
+                    ("config", hel::hel_state::config_command_text(key, value))
+                }
+            };
+            let text = if text.trim().is_empty() {
+                format!("[{kind}]")
+            } else {
+                format!("{kind}: {}", text.replace('\n', " "))
+            };
+            let text = crate::widgets::truncate_text(&text, inner.width.saturating_sub(4) as usize);
+            let row = queued_entries.len().saturating_add(index);
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    format!("  {}. {text}", row + 1),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                viewport.row(
+                    summary_height
+                        .saturating_add(list_height)
+                        .saturating_add(1)
+                        .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
+                    1,
+                ),
+            );
+        }
     }
     let button_y = inner.bottom().saturating_sub(1);
     let mut buttons = vec![
@@ -1513,14 +1615,60 @@ pub(crate) fn render_resume_wizard(
                 target_id: &target_id,
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
-                title: " Resume · 3/3 review ",
-                submit_label: "Resume",
-                queue: dashboard
-                    .session_details
-                    .get(&wizard.session_id)
-                    .map(|detail| detail.queued_prompts.len())
-                    .filter(|count| *count > 0)
-                    .map(|count| (count, wizard.discard_queue)),
+                title: if wizard.moving {
+                    " Move · 3/3 confirm "
+                } else {
+                    " Resume · 3/3 review "
+                },
+                submit_label: if wizard.moving { "Move" } else { "Resume" },
+                moving: wizard.moving,
+                active_interruption: wizard
+                    .preparation
+                    .as_ref()
+                    .map_or(wizard.moving, |preparation| preparation.active),
+                clear_resource_allocation: wizard.preparation.as_ref().map_or_else(
+                    || {
+                        wizard.moving
+                            && dashboard
+                                .state
+                                .sessions
+                                .get(&wizard.session_id)
+                                .is_some_and(|session| session.resource_allocation.is_some())
+                            && matches!(
+                                dashboard.config.targets.get(&target_id),
+                                Some(
+                                    hel::hel_config::TargetTemplate::LocalBare
+                                        | hel::hel_config::TargetTemplate::SshBare { .. }
+                                )
+                            )
+                    },
+                    |preparation| preparation.selection.clear_resource_allocation,
+                ),
+                queue: wizard.preparation.as_ref().map_or_else(
+                    || {
+                        dashboard
+                            .session_details
+                            .get(&wizard.session_id)
+                            .map(|detail| detail.queued_prompts.len())
+                            .filter(|count| *count > 0)
+                            .map(|count| (count, wizard.discard_queue))
+                    },
+                    |preparation| {
+                        (!preparation.queued_commands.is_empty())
+                            .then_some((preparation.queued_commands.len(), wizard.discard_queue))
+                    },
+                ),
+                queued_entries: if wizard.preparation.is_some() {
+                    &[][..]
+                } else {
+                    dashboard
+                        .session_details
+                        .get(&wizard.session_id)
+                        .map_or(&[][..], |detail| detail.queued_prompts.as_slice())
+                },
+                prepared_entries: wizard.preparation.as_ref().map_or(&[][..], |preparation| {
+                    preparation.queued_commands.as_slice()
+                }),
             },
             &mut form,
             surfaces,

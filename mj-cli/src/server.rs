@@ -16,9 +16,10 @@ use hel::hel_workspace::WorkspaceRecord;
 use mj_controller::hel_controller::{Controller, SessionLaunchOptions};
 use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_server::{
-    ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, PreflightFailure,
-    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerActivityDetails,
-    ViewerActivityKind, ViewerQueuedPrompt, ViewerQuota, ViewerSnapshot, ViewerUserShell,
+    ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, MovePreparationRequest,
+    PreflightFailure, ReadReceiptRequest, ResumeQueueDisposition, ServerOptions,
+    ViewerActivityDetails, ViewerActivityKind, ViewerMoveRecovery, ViewerQueuedPrompt, ViewerQuota,
+    ViewerSnapshot, ViewerUserShell,
 };
 use mj_controller::hel_session_manager::{
     SessionManagerChannels, SessionManagerControl, new_command_id,
@@ -536,6 +537,12 @@ struct BundleCreated {
     >,
 }
 
+struct MovePrepared {
+    result: std::result::Result<hel::hel_state::MovePreparation, String>,
+    reply:
+        tokio::sync::oneshot::Sender<std::result::Result<hel::hel_state::MovePreparation, String>>,
+}
+
 /// Loads durable controller state without occupying the phone control loop.
 /// The outer task observes blocking-task panics and reports a closed result
 /// channel instead of silently abandoning the refresh.
@@ -734,6 +741,10 @@ pub(crate) async fn run_server(
     let mut materialized_activity = load_materialized_activity(&controller).await?;
     let mut project_sources = PhoneProjectSources::default();
     let mut operations = std::collections::BTreeMap::new();
+    let mut move_recoveries = ViewerMoveRecoveries::new();
+    let (move_recovery_tx, mut move_recovery_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<ViewerMoveRecoveries, String>>();
+    let mut move_recovery_load_in_flight = false;
     let mut launch_failures = Vec::new();
     // What the capacity poller last said, per probe target. The projection is
     // built from this on every publish rather than being accumulated, so a
@@ -756,6 +767,7 @@ pub(crate) async fn run_server(
             materialized_activity: &materialized_activity,
             project_sources: &project_sources,
             operations: &operations,
+            move_recoveries: &move_recoveries,
             capacity: &viewer_capacity(&capacity_state),
             launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
@@ -767,6 +779,7 @@ pub(crate) async fn run_server(
     let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
     let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::channel(32);
     let (preflight_tx, mut preflight_rx) = tokio::sync::mpsc::channel(32);
+    let (move_preparation_tx, mut move_preparation_rx) = tokio::sync::mpsc::channel(32);
     let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
     let SessionManagerChannels {
         targets: worker_targets_tx,
@@ -792,6 +805,7 @@ pub(crate) async fn run_server(
             bundle_tx,
             receipt_tx,
             preflight_tx,
+            move_preparation_tx,
             client_state_tx,
         },
     )?;
@@ -862,7 +876,11 @@ pub(crate) async fn run_server(
             tokio::sync::mpsc::unbounded_channel::<ControllerReloaded>();
         let (bundle_done_tx, mut bundle_done_rx) =
             tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
+        let (move_prepared_tx, mut move_prepared_rx) =
+            tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut bundle_jobs = tokio::task::JoinSet::new();
+        let mut move_preparation_jobs = tokio::task::JoinSet::new();
+        let mut move_recovery_jobs = tokio::task::JoinSet::new();
         let mut controller_reload_in_flight = false;
         let mut controller_reload_requested = false;
         let mut controller_reload_invalidated = false;
@@ -884,6 +902,11 @@ pub(crate) async fn run_server(
         // exists to follow sessions, so losing that feed is a named failure
         // rather than a silent success.
         let mut failure: Option<anyhow::Error> = None;
+        request_move_recovery_reload(
+            &move_recovery_tx,
+            &mut move_recovery_load_in_flight,
+            &mut move_recovery_jobs,
+        );
         macro_rules! publish_snapshot {
             ($revision:expr) => {
                 if let Err(error) = snapshot_tx.send(viewer_snapshot(
@@ -900,6 +923,7 @@ pub(crate) async fn run_server(
                         materialized_activity: &materialized_activity,
                         project_sources: &project_sources,
                         operations: &operations,
+                        move_recoveries: &move_recoveries,
                         capacity: &viewer_capacity(&capacity_state),
                         launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
@@ -914,6 +938,24 @@ pub(crate) async fn run_server(
             project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
+                move_reloaded = move_recovery_rx.recv() => {
+                    let Some(result) = move_reloaded else {
+                        failure = feed_stopped(
+                            termination.is_cancelled(),
+                            "the Move recovery projection stopped while the phone server was running",
+                        );
+                        break;
+                    };
+                    move_recovery_load_in_flight = false;
+                    match result {
+                        Ok(recoveries) => {
+                            move_recoveries = recoveries;
+                            revision = daemon_runtime.allocate_revision();
+                            publish_snapshot!(revision);
+                        }
+                        Err(error) => tracing::warn!(%error, "could not refresh Move recovery projection"),
+                    }
+                }
                 resolved = project_sources.jobs.join_next(), if !project_sources.jobs.is_empty() => {
                     match resolved {
                         Some(Ok(resolved)) => project_sources.complete(resolved),
@@ -1389,6 +1431,47 @@ pub(crate) async fn run_server(
                         }
                     });
                 }
+                preparation = move_preparation_rx.recv() => {
+                    let Some(MovePreparationRequest { selection, reply }) = preparation else {
+                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering move preparation requests");
+                        break;
+                    };
+                    // Preparation can inspect archives, target prerequisites,
+                    // and harness capabilities. Keep it supervised and away
+                    // from this feed loop so another browser can still read
+                    // snapshots while a move form is open.
+                    let done = move_prepared_tx.clone();
+                    let daemon_runtime = daemon_runtime.clone();
+                    move_preparation_jobs.spawn(async move {
+                        let result = daemon_runtime
+                            .prepare_move_session(selection)
+                            .await
+                            .map_err(|error| format!("{error:#}"));
+                        if let Err(error) = done.send(MovePrepared { result, reply }) {
+                            tracing::debug!(%error, "move preparation finished after the server stopped");
+                        }
+                    });
+                }
+                prepared = move_prepared_rx.recv() => {
+                    let Some(MovePrepared { result, reply }) = prepared else {
+                        failure = feed_stopped(termination.is_cancelled(), "the move preparation pipeline stopped while the phone server was running");
+                        break;
+                    };
+                    if reply.send(result).is_err() {
+                        tracing::debug!("move preparation reply dropped after client disconnect");
+                    }
+                }
+                move_preparation_job = move_preparation_jobs.join_next(), if !move_preparation_jobs.is_empty() => {
+                    if let Some(Err(error)) = move_preparation_job {
+                        tracing::warn!(%error, "move preparation task failed");
+                    }
+                }
+                move_recovery_job = move_recovery_jobs.join_next(), if !move_recovery_jobs.is_empty() => {
+                    if let Some(Err(error)) = move_recovery_job {
+                        move_recovery_load_in_flight = false;
+                        tracing::warn!(%error, "Move recovery projection task failed");
+                    }
+                }
                 receipt = receipt_rx.recv() => {
                     let Some(ReadReceiptRequest { client_id, session_id, through, reply }) = receipt else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering read receipts");
@@ -1625,6 +1708,7 @@ pub(crate) async fn run_server(
                                 materialized_activity: &materialized_activity,
                                 project_sources: &project_sources,
                                 operations: &operations,
+                                move_recoveries: &move_recoveries,
                                 capacity: &viewer_capacity(&capacity_state),
                                 launch_failures: &launch_failures,
                                 reviews: &review_views(&daemon_runtime),
@@ -1694,6 +1778,11 @@ pub(crate) async fn run_server(
                         &mut controller_reload_in_flight,
                         &mut controller_reload_requested,
                         &controller_reload_tx,
+                    );
+                    request_move_recovery_reload(
+                        &move_recovery_tx,
+                        &mut move_recovery_load_in_flight,
+                        &mut move_recovery_jobs,
                     );
                     request_daemon_controller_reload(
                         daemon_runtime.clone(),
@@ -1767,6 +1856,11 @@ pub(crate) async fn run_server(
                                 .iter()
                                 .map(|view| (view.session_id.clone(), viewer_operation(view)))
                                 .collect();
+                            request_move_recovery_reload(
+                                &move_recovery_tx,
+                                &mut move_recovery_load_in_flight,
+                                &mut move_recovery_jobs,
+                            );
                             conversations.retain(|id, _| {
                                 controller.state.sessions.get(id).is_some_and(|session| session.state.is_active())
                             });
@@ -1799,6 +1893,10 @@ pub(crate) async fn run_server(
         // Bundle jobs are supervised so shutdown never leaves a detached
         // request task behind holding the config mutation lock.
         bundle_jobs.shutdown().await;
+        // Preparation tasks may be inspecting an archive or probing a target;
+        // abort and drain them before the HTTP server's channels disappear.
+        move_preparation_jobs.shutdown().await;
+        move_recovery_jobs.shutdown().await;
         // Every exit stops in-flight work, whether it was asked for or forced.
         for control in action_cancellations.values() {
             control.request_cancel();
@@ -1864,6 +1962,9 @@ fn controller_action_session_id(action: &ControllerAction) -> Option<String> {
         | ControllerAction::SetPlanMode { session_id, .. }
         | ControllerAction::StartReview { session_id }
         | ControllerAction::ResolveReview { session_id, .. } => Some(session_id.clone()),
+        ControllerAction::Move { request } => {
+            Some(request.preparation.selection.session_id.clone())
+        }
         // A refresh belongs to a profile or a target rather than a session, so
         // it takes no session slot and cannot be refused as session-busy.
         ControllerAction::RefreshQuota { .. } | ControllerAction::RefreshCapacity { .. } => None,
@@ -2196,6 +2297,8 @@ async fn apply_phone_action(
             profile_id,
             target_id,
             queue,
+            additional_mounts,
+            resource_allocation,
         } => services
             .daemon_runtime
             .resume_session(ResumeSessionRequest {
@@ -2203,13 +2306,31 @@ async fn apply_phone_action(
                 workspace_id,
                 profile_id,
                 target_template_id: target_id,
-                additional_mounts: None,
-                resource_allocation: None,
+                additional_mounts,
+                resource_allocation,
                 discard_queue: queue == ResumeQueueDisposition::Discard,
                 repository_preflight: None,
             })
             .await
             .map(|_| ()),
+        ControllerAction::Move { request } => {
+            let outcome = services.daemon_runtime.move_session(request).await?;
+            match outcome.outcome.as_str() {
+                "completed" | "unchanged" => Ok(()),
+                "cancelled" | "failed" => {
+                    // The daemon keeps detailed diagnostics in its durable
+                    // operation record. Only its safe recovery guidance is
+                    // copied into the phone action error, where the normal
+                    // failed-action path records a visible session error.
+                    let recovery = outcome.recovery.unwrap_or_else(|| {
+                        "Inspect the session and retry Move or Resume with previous settings."
+                            .into()
+                    });
+                    bail!("Move {}: {recovery}", outcome.outcome)
+                }
+                status => bail!("Move returned an unknown outcome: {status}"),
+            }
+        }
         ControllerAction::Open { .. } => Ok(()),
         ControllerAction::Cancel { .. } => {
             bail!("cancel actions must be handled by the phone control loop")
@@ -2506,6 +2627,8 @@ struct PhoneSessionViews<'a> {
     project_sources: &'a PhoneProjectSources,
     /// Lifecycle operations running now, keyed by session.
     operations: &'a std::collections::BTreeMap<String, mj_controller::hel_server::ViewerOperation>,
+    /// Durable Move records, projected without diagnostics or checkpoint paths.
+    move_recoveries: &'a std::collections::BTreeMap<String, ViewerMoveRecovery>,
     /// The most recent capacity reading per probe target.
     capacity: &'a [mj_controller::hel_server::ViewerTargetCapacity],
     launch_failures: &'a [mj_controller::hel_server::ViewerLaunchFailure],
@@ -2613,6 +2736,7 @@ fn viewer_operation(
         kind: match view.kind {
             crate::daemon::RuntimeLifecycleKind::Create => ViewerOperationKind::Create,
             crate::daemon::RuntimeLifecycleKind::Resume => ViewerOperationKind::Resume,
+            crate::daemon::RuntimeLifecycleKind::Move => ViewerOperationKind::Move,
             // A force stop and a destroy are both stops as far as a phone is
             // concerned: it watches one thing end, and the difference is in
             // how much the controller tears down behind it.
@@ -2654,23 +2778,34 @@ fn session_capabilities(
     // durable state says.
     let attached = operational.is_some();
     let busy = operation.is_some();
+    // A failed move can retain a live destination while queue admission is
+    // incomplete. The durable move hold owns all mutating session controls in
+    // that interval; retry Move is the one intentional exception.
+    let partial_move_queue = session.move_recovery.as_ref().is_some_and(|recovery| {
+        recovery.queue_admission_started && !recovery.queue_admission_finished
+    });
+    let mutation_busy = busy || partial_move_queue;
     let idle = operational
         .is_some_and(|state| state.execution == hel::hel_worker::RelayExecutionState::Idle);
     mj_controller::hel_server::ViewerSessionCapabilities {
         open: session.conversation_available,
-        prompt: live && attached,
-        run_shell: live && attached,
-        cancel_turn: live && operational.is_some_and(|state| state.active_prompt.is_some()),
+        prompt: live && attached && !mutation_busy,
+        run_shell: live && attached && !mutation_busy,
+        cancel_turn: live
+            && !mutation_busy
+            && operational.is_some_and(|state| state.active_prompt.is_some()),
         cancel_operation: busy,
         // Stopping a session that is already stopping asks for something that
         // is happening; resuming one that is running asks for a second copy.
-        stop: session.lifecycle.is_dashboard_visible() && !busy,
+        stop: session.lifecycle.is_dashboard_visible() && !mutation_busy,
         rename: true,
-        resume: !session.lifecycle.is_dashboard_visible() && !busy,
-        set_config: live && attached && facts.is_some(),
+        resume: !session.lifecycle.is_dashboard_visible() && !mutation_busy,
+        move_session: live && !busy,
+        set_config: live && attached && facts.is_some() && !mutation_busy,
         // Plan mode is a turn boundary: the terminal offers it only while the
         // agent is idle, and the phone must not be looser.
         set_plan_mode: live
+            && !mutation_busy
             && idle
             && facts.is_some_and(hel::hel_acp::AcpSessionFacts::supports_plan_mode),
     }
@@ -2843,6 +2978,47 @@ fn review_views(
         .collect()
 }
 
+type ViewerMoveRecoveries =
+    std::collections::BTreeMap<String, mj_controller::hel_server::ViewerMoveRecovery>;
+
+/// Refresh durable Move records away from the phone event loop. A Move can
+/// finish after its initiating request disconnects, so active lifecycle views
+/// alone are not enough to render Retry move or Resume with previous settings.
+fn request_move_recovery_reload(
+    completed: &tokio::sync::mpsc::UnboundedSender<Result<ViewerMoveRecoveries, String>>,
+    in_flight: &mut bool,
+    jobs: &mut tokio::task::JoinSet<()>,
+) {
+    if *in_flight {
+        return;
+    }
+    *in_flight = true;
+    let completed = completed.clone();
+    jobs.spawn(async move {
+        let result = match tokio::task::spawn_blocking(|| {
+            hel::hel_database::load_move_operations()
+                .map(|operations| {
+                    operations
+                        .into_iter()
+                        .filter_map(|operation| {
+                            mj_controller::hel_server::ViewerMoveRecovery::from_operation(
+                                &operation,
+                            )
+                            .map(|recovery| (operation.selection.session_id.clone(), recovery))
+                        })
+                        .collect()
+                })
+                .map_err(|error| format!("{error:#}"))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("move recovery projection task failed: {error}")),
+        };
+        let _ = completed.send(result);
+    });
+}
+
 fn viewer_snapshot(
     controller: &Controller,
     workspaces: &[hel::hel_workspace::WorkspaceRecord],
@@ -2861,6 +3037,7 @@ fn viewer_snapshot(
         materialized_activity,
         project_sources,
         operations,
+        move_recoveries,
         capacity,
         launch_failures,
     } = views;
@@ -2912,6 +3089,7 @@ fn viewer_snapshot(
         });
     }
     for session in &mut snapshot.sessions {
+        session.move_recovery = move_recoveries.get(&session.id).cloned();
         if let Some(record) = controller.state.sessions.get(&session.id)
             && let Some(source) = project_sources.source(record, &controller.config)
         {
@@ -3170,6 +3348,66 @@ mod tests {
     }
 
     #[test]
+    fn move_recovery_projection_exposes_safe_retry_settings_only() {
+        let operation = hel::hel_state::MoveOperation {
+            operation_id: "move-1".into(),
+            selection: hel::hel_state::MoveSelection {
+                clear_resource_allocation: true,
+                session_id: "session-1".into(),
+                profile_id: Some("destination-profile".into()),
+                target_template_id: Some("destination-target".into()),
+                additional_mounts: Some(vec![hel::hel_targets::AdditionalMount {
+                    source: "/destination/source".into(),
+                    destination: "/destination/target".into(),
+                    read_only: true,
+                }]),
+                resource_allocation: None,
+            },
+            source_profile_id: "source-profile".into(),
+            source_target_template_id: "source-target".into(),
+            source_target: None,
+            source_native_session_id: Some("private-native-id".into()),
+            source_additional_mounts: vec![hel::hel_targets::AdditionalMount {
+                source: "/source/source".into(),
+                destination: "/source/target".into(),
+                read_only: false,
+            }],
+            source_resource_allocation: Some(
+                hel::hel_state::SessionResourceAllocation::Container {
+                    cpus: 2,
+                    memory_bytes: 4096,
+                },
+            ),
+            destination_target: None,
+            destination_native_session_id: None,
+            destination_store_id: None,
+            configuration_fingerprint: "private-fingerprint".into(),
+            checkpoint: None,
+            recovery_session: None,
+            queue: hel::hel_state::ResumeQueueDisposition::Start,
+            phase: hel::hel_state::MovePhase::Cancelled,
+            queue_admission_started: false,
+            queue_admission_finished: false,
+            cancellation_requested: true,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            error: Some("private path and token".into()),
+        };
+        let recovery = ViewerMoveRecovery::from_operation(&operation).unwrap();
+        assert_eq!(recovery.phase, "cancelled");
+        assert_eq!(recovery.source_profile_id, "source-profile");
+        assert!(recovery.clear_resource_allocation);
+        assert_eq!(recovery.source_additional_mounts.len(), 1);
+        assert!(recovery.source_resource_allocation.is_some());
+        assert_eq!(recovery.destination_additional_mounts.len(), 1);
+        assert!(recovery.destination_resource_allocation.is_none());
+        let json = serde_json::to_string(&recovery).unwrap();
+        assert!(!json.contains("private-native-id"));
+        assert!(!json.contains("private-fingerprint"));
+        assert!(!json.contains("private path and token"));
+    }
+
+    #[test]
     fn new_preflight_rejects_a_bare_project_without_a_git_head() {
         let error = run_new_preflight(
             bare_preflight_config(),
@@ -3276,6 +3514,7 @@ mod tests {
 
         let operational = |agent_capabilities| RelayOperationalState {
             session_id: "session-1".into(),
+            store_id: None,
             idle_since_ms: None,
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
@@ -3335,6 +3574,7 @@ mod tests {
         controller.state.sessions.insert(record.id.clone(), record);
         let operational = RelayOperationalState {
             session_id: "session-1".into(),
+            store_id: None,
             idle_since_ms: None,
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
@@ -3393,6 +3633,7 @@ mod tests {
                     materialized_activity: &materialized_activity,
                     project_sources: &PhoneProjectSources::default(),
                     operations: &std::collections::BTreeMap::new(),
+                    move_recoveries: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
                     reviews: &std::collections::BTreeMap::new(),
@@ -3521,6 +3762,7 @@ mod tests {
                 materialized_activity: &Default::default(),
                 project_sources: sources,
                 operations: &Default::default(),
+                move_recoveries: &Default::default(),
                 capacity: &[],
                 launch_failures: &[],
                 reviews: &Default::default(),
@@ -3973,6 +4215,7 @@ mod tests {
                     materialized_activity: &std::collections::BTreeMap::new(),
                     project_sources: &PhoneProjectSources::default(),
                     operations: &std::collections::BTreeMap::new(),
+                    move_recoveries: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
                     reviews: &std::collections::BTreeMap::new(),
@@ -4050,6 +4293,7 @@ mod tests {
                 materialized_activity: &std::collections::BTreeMap::new(),
                 project_sources: &PhoneProjectSources::default(),
                 operations: &std::collections::BTreeMap::new(),
+                move_recoveries: &std::collections::BTreeMap::new(),
                 capacity: &[],
                 launch_failures: &failures,
                 reviews: &std::collections::BTreeMap::new(),

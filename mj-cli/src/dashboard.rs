@@ -26,7 +26,9 @@ use crossterm::event::{
 };
 use hel::hel_config::{HelConfig, config_path};
 use hel::hel_credentials::CredentialSyncHandle;
-use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation, SessionState};
+use hel::hel_state::{
+    MaterializedSession, MoveOperation, SessionRecord, SessionResourceAllocation, SessionState,
+};
 use hel::hel_targets::DeploymentCapacityTarget;
 use hel_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption,
@@ -412,6 +414,7 @@ pub(crate) struct DashboardContext {
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
     runtime_lifecycles: Feed<watch::Receiver<Vec<crate::daemon::RuntimeLifecycleView>>>,
+    runtime_moves: Feed<watch::Receiver<Vec<MoveOperation>>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
     runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>>,
@@ -679,6 +682,10 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             update = context.runtime_lifecycles.wait(), if context.runtime_lifecycles.is_open() => {
                 let woke = context.runtime_lifecycles.accept(update);
+                context.dirty |= woke;
+            }
+            update = context.runtime_moves.wait(), if context.runtime_moves.is_open() => {
+                let woke = context.runtime_moves.accept(update);
                 context.dirty |= woke;
             }
             update = context.runtime_reviews.wait(), if context.runtime_reviews.is_open() => {
@@ -969,6 +976,8 @@ impl DashboardContext {
         let worker_commands_tx = remote_worker.control;
         let worker_shutdown = remote_worker.shutdown;
         let runtime_lifecycles_rx = remote_worker.lifecycles;
+        let runtime_moves_rx = remote_worker.moves;
+        dashboard.set_move_operations(runtime_moves_rx.borrow().clone());
         let runtime_reviews_rx = remote_worker.reviews;
         let runtime_review_views: BTreeMap<
             String,
@@ -1056,6 +1065,7 @@ impl DashboardContext {
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_lifecycles: Feed::new(runtime_lifecycles_rx),
+            runtime_moves: Feed::new(runtime_moves_rx),
             runtime_reviews: Feed::new(runtime_reviews_rx),
             runtime_notices: Feed::new(runtime_notices_rx),
             reported_notice_id,
@@ -1870,6 +1880,7 @@ impl DashboardContext {
         self.drain_runtime_records();
         self.drain_worker_updates();
         self.drain_runtime_lifecycles();
+        self.drain_runtime_moves();
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
         self.drain_runtime_config();
@@ -2103,6 +2114,18 @@ impl DashboardContext {
         self.controller_changed = true;
     }
 
+    fn drain_runtime_moves(&mut self) {
+        let mut latest = None;
+        while let Some(moves) = self.runtime_moves.next_ready() {
+            latest = Some(moves);
+        }
+        let Some(moves) = latest else {
+            return;
+        };
+        self.dashboard.set_move_operations(moves);
+        self.controller_changed = true;
+    }
+
     /// Hands the open conversation the surface's current view of the config
     /// and its own session record. The chat snapshots both when it opens, so
     /// without this a long-lived chat would keep offering reviewer profiles
@@ -2195,7 +2218,11 @@ impl DashboardContext {
             let retiring = !feed_expected
                 || matches!(
                     self.dashboard.session_operation_kind(chat.session_id()),
-                    Some(SessionOperationKind::Stopping | SessionOperationKind::Destroying)
+                    Some(
+                        SessionOperationKind::Stopping
+                            | SessionOperationKind::Destroying
+                            | SessionOperationKind::Moving,
+                    )
                 );
             chat.set_session_retiring(retiring);
             // Order matters: an expected feed clears the retiring flag.
@@ -2511,7 +2538,9 @@ fn mark_active_chat_retiring_for_remote_lifecycle(
 ) {
     if matches!(
         kind,
-        SessionOperationKind::Stopping | SessionOperationKind::Destroying
+        SessionOperationKind::Stopping
+            | SessionOperationKind::Destroying
+            | SessionOperationKind::Moving
     ) {
         actions::mark_active_chat_retiring(active_chat, session_id);
     }
@@ -2536,17 +2565,19 @@ fn remote_lifecycle_settled(kind: SessionOperationKind, state: Option<SessionSta
                 )
             })
         }
-        SessionOperationKind::Resuming => state.is_none_or(|state| {
-            matches!(
-                state,
-                SessionState::Running
-                    | SessionState::Disconnected
-                    | SessionState::Stopped
-                    | SessionState::Lost
-                    | SessionState::Error
-                    | SessionState::DestroyedWithDataLoss
-            )
-        }),
+        SessionOperationKind::Resuming | SessionOperationKind::Moving => {
+            state.is_none_or(|state| {
+                matches!(
+                    state,
+                    SessionState::Running
+                        | SessionState::Disconnected
+                        | SessionState::Stopped
+                        | SessionState::Lost
+                        | SessionState::Error
+                        | SessionState::DestroyedWithDataLoss
+                )
+            })
+        }
         SessionOperationKind::Connecting => state.is_some_and(|state| {
             matches!(
                 state,

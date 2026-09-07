@@ -1109,6 +1109,10 @@ impl HostState {
         manual: bool,
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     ) {
+        if crate::hel_controller::move_session::move_owns_session(&session_id) {
+            answer(reply, Err(StartRefusal("session is moving".to_owned())));
+            return;
+        }
         if let Some(refusal) = self.refuse_start(&session_id) {
             answer(reply, Err(refusal));
             return;

@@ -127,6 +127,27 @@ archive, restages current credentials, and reconnects the logical session. You
 may select a different compatible target and profile. The resume flow asks
 whether archived queued work should be started or discarded.
 
+**Move** combines a verified interruption, checkpoint, source teardown, and
+resume under one daemon-owned operation. It is available for a live session
+when changing its target, profile, or both. Preparation checks compatibility
+before the active turn is interrupted, and confirmation explicitly acknowledges
+that interruption. Move rebuilds a fresh environment; it does not preserve
+running process memory, installed packages, container layers, or arbitrary
+files outside the declared workspace. The same target/profile compatibility
+rules used by resume still apply.
+
+The move confirmation lists queued prompts and configuration commands. Discard
+is the default and restores the destination idle. If you choose Start, the
+daemon waits for verified destination readiness before admitting the retained
+commands in order. An interrupted active prompt is never replayed.
+
+Resource sizing is inherited from the source unless the caller explicitly
+clears it; attached directories remain fixed to the workspace. A cancelled or
+failed Move that retains a checkpoint is shown with Retry move and Resume with
+previous settings. If queue admission already began, recovery keeps the same
+durable destination and queue choice, and refuses replay on a replacement
+relay.
+
 When the same harness is selected, Mjolnir restores its allowlisted native
 session state and verifies that the expected native session opened. When the
 harness changes, Mjolnir starts a new native session and generates a

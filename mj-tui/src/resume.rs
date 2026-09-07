@@ -26,7 +26,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use hel::hel_config::{HarnessKind, HelConfig};
-use hel::hel_state::{HelState, SessionRecord, SessionState};
+use hel::hel_state::{HelState, MoveOperation, SessionRecord, SessionState};
 use mj_chat::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 use mj_chat::hel_text_input::TextInput;
 
@@ -138,6 +138,9 @@ pub(crate) struct ResumeRow {
     /// Hidden by the harness itself. Hel cannot clear this.
     pub(crate) natively_archived: bool,
     pub(crate) unavailable_reason: Option<String>,
+    /// A retained failed/cancelled Move for this record, when recovery is
+    /// possible. The dialog turns Enter into an explicit recovery choice.
+    pub(crate) move_recovery: Option<MoveOperation>,
 }
 
 impl ResumeRow {
@@ -357,6 +360,7 @@ pub(crate) fn merged_resume_rows(
             archived: session.archived,
             natively_archived: false,
             unavailable_reason: None,
+            move_recovery: None,
         });
     }
     for profile in profiles {
@@ -376,6 +380,7 @@ pub(crate) fn merged_resume_rows(
                 archived: hidden_native.contains(&key),
                 natively_archived: native.natively_archived,
                 unavailable_reason: native.unavailable_reason.clone(),
+                move_recovery: None,
             });
         }
     }
@@ -451,6 +456,20 @@ impl DashboardState {
             &self.checkpoint_archive_sizes,
             &chrono::Local::now(),
         );
+        for row in &mut self.resume_rows {
+            row.move_recovery = row
+                .session_id()
+                .and_then(|session_id| self.move_operations.get(session_id))
+                .filter(|operation| {
+                    matches!(
+                        operation.phase,
+                        hel::hel_state::MovePhase::Failed | hel::hel_state::MovePhase::Cancelled
+                    ) && (operation.checkpoint.is_some()
+                        || (operation.queue_admission_started
+                            && !operation.queue_admission_finished))
+                })
+                .cloned();
+        }
         dialog.prepare(&self.resume_rows);
         // Background state and archive updates can remove the selected row.
         // Repair the key and index together so the form never points outside
@@ -759,6 +778,12 @@ impl DashboardState {
         }
         match row.key {
             ResumeRowKey::Hel(session_id) => {
+                if let Some(operation) = row.move_recovery {
+                    self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
+                        operation: Box::new(operation),
+                    }));
+                    return DashboardAction::None;
+                }
                 self.cancel_modal();
                 self.begin_resume_for(&session_id)
             }
@@ -1110,6 +1135,13 @@ where
     if row.unavailable_reason.is_some() {
         marks.push_str("  [unavailable]");
     }
+    if let Some(operation) = &row.move_recovery {
+        if operation.queue_admission_started && !operation.queue_admission_finished {
+            marks.push_str("  [move queue needs retry]");
+        } else {
+            marks.push_str("  [move needs recovery]");
+        }
+    }
     Line::from(vec![
         Span::styled(
             padded_cell(&row.profile_id, layout.profile),
@@ -1199,6 +1231,40 @@ mod tests {
         }
     }
 
+    fn incomplete_move() -> MoveOperation {
+        MoveOperation {
+            operation_id: "move-1".into(),
+            selection: hel::hel_state::MoveSelection {
+                clear_resource_allocation: false,
+                session_id: "session-1".into(),
+                profile_id: Some("codex-1".into()),
+                target_template_id: Some("target-1".into()),
+                additional_mounts: None,
+                resource_allocation: None,
+            },
+            source_profile_id: "codex-1".into(),
+            source_target_template_id: "target-1".into(),
+            source_target: None,
+            source_native_session_id: None,
+            source_additional_mounts: Vec::new(),
+            source_resource_allocation: None,
+            destination_target: None,
+            destination_native_session_id: None,
+            destination_store_id: None,
+            configuration_fingerprint: "fingerprint".into(),
+            checkpoint: None,
+            recovery_session: None,
+            queue: hel::hel_state::ResumeQueueDisposition::Start,
+            phase: hel::hel_state::MovePhase::Cancelled,
+            queue_admission_started: true,
+            queue_admission_finished: false,
+            cancellation_requested: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            error: Some("queue admission interrupted".into()),
+        }
+    }
+
     fn rows(dashboard: &DashboardState) -> Vec<ResumeRow> {
         assert!(
             matches!(dashboard.mode, Mode::ResumeDialog(_)),
@@ -1209,6 +1275,41 @@ mod tests {
 
     fn titles(rows: &[ResumeRow]) -> Vec<&str> {
         rows.iter().map(|row| row.title.as_str()).collect()
+    }
+
+    #[test]
+    fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.set_move_operations([incomplete_move()]);
+        dashboard.show_resume_dialog(1, Vec::new());
+
+        let row = dashboard
+            .resume_rows()
+            .iter()
+            .find(|row| row.session_id() == Some("session-1"))
+            .expect("stopped session remains in resume rows");
+        assert!(row.move_recovery.is_some());
+        assert_eq!(
+            crate::dialogs::confirmation_buttons(&Confirmation::RecoverMove {
+                operation: Box::new(incomplete_move()),
+            }),
+            &["Cancel", "Open transcript", "Retry move"]
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(matches!(
+            dashboard.mode,
+            Mode::Confirm(ConfirmDialog {
+                confirmation: Confirmation::RecoverMove { .. },
+                ..
+            })
+        ));
     }
 
     fn replace_search(dashboard: &mut DashboardState, search: &str) {

@@ -285,7 +285,7 @@ fn event_digest(value: u64) -> String {
     format!("{value:064x}")
 }
 
-fn session(id: &str, bundle: &str) -> SessionRecord {
+pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
@@ -569,7 +569,8 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_pane_sizes;
+            "DROP TABLE session_moves;
+             DROP TABLE workspace_pane_sizes;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
              DELETE FROM schema_migrations WHERE version > 21;
              PRAGMA user_version = 21;",
@@ -945,6 +946,11 @@ fn version_thirteen_restores_checkpointed_lost_sessions_to_recoverable_errors() 
 /// after it created. Re-running a migration over its own table fails, so a
 /// rewind has to undo the table as well as the version marker.
 fn rewind_schema_to(connection: &Connection, version: i64) {
+    if version < 26 {
+        connection
+            .execute_batch("DROP TABLE IF EXISTS session_moves;")
+            .unwrap();
+    }
     for table in [
         "turn_review_state",
         "second_opinion_reviews",
@@ -3684,7 +3690,8 @@ fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_pane_sizes;
+            "DROP TABLE session_moves;
+             DROP TABLE workspace_pane_sizes;
              DELETE FROM schema_migrations WHERE version > 24;
              PRAGMA user_version = 24;",
         )
@@ -4095,7 +4102,8 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE workspace_pane_sizes;
+            "DROP TABLE session_moves;
+             DROP TABLE workspace_pane_sizes;
              DELETE FROM schema_migrations WHERE version > 20;
              PRAGMA user_version = 20;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
@@ -4214,6 +4222,7 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
     connection.execute_batch("PRAGMA writable_schema = ON;
         UPDATE sqlite_master SET sql = replace(replace(sql, ',''ssh-docker''', ''), '''ssh-podman'',''ssh-docker''', '''ssh-podman''') WHERE name = 'session_targets';
         PRAGMA writable_schema = OFF;
+        DROP TABLE session_moves;
         DROP TABLE workspace_pane_sizes;
         DELETE FROM schema_migrations WHERE version > 23;
         PRAGMA user_version = 23;").unwrap();

@@ -2,7 +2,7 @@
 
 This ExecPlan is a living document maintained in accordance with `.agents/PLANS.md`. Keep `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` current throughout implementation. All paths below are relative to `/home/jonathan/Projects/hel2`.
 
-This revision records an agreed design only. The user requested the ExecPlan and explicitly said not to implement yet. Do not interpret creation of this document as authorization to execute its implementation milestones.
+The user authorized implementation on 2026-09-06 and subsequently requested a push. Implement and validate on the current branch, commit only the feature's files, then push to the branch's upstream.
 
 ## Purpose / Big Picture
 
@@ -22,9 +22,11 @@ The observable success case is a session that changes its displayed target/profi
 - [x] (2026-09-06) Agreed on verified stop/resume, interruption confirmation, cross-harness profile changes, all three control surfaces, and bounded performance improvements.
 - [x] (2026-09-06) Resolved queue behavior: discard or run choice, default discard; no persistent paused-queue feature.
 - [x] (2026-09-06) Wrote this implementation-ready planning artifact; no implementation performed.
-- [ ] Implement and validate controller orchestration, durable operation state, and recovery.
-- [ ] Implement and validate daemon/API integration, CLI, TUI, and web controls.
-- [ ] Implement and validate bounded performance improvements.
+- [x] Implement controller orchestration, durable operation state, and recovery; focused database, relay replay, and interrupted-close tests pass.
+- [x] (2026-09-06) Started implementation on the clean current branch; established shared Move preparation, request, outcome, and durable operation types. Assigned independent restore optimization, CLI/TUI, and web/documentation work to Luna agents.
+- [x] Validate schema 26 migrations and cancellation persistence; verify original command-ID replay after an acknowledged-command crash and reject replacement relay storage.
+- [x] Implement and validate daemon/API integration, CLI, TUI, and web controls, including exact prepared confirmation, queue inspection, cancellation, and durable recovery controls.
+- [x] Implement and validate bounded performance improvements: direct verified LocalBare archive reads and joined, cancellation-aware cross-harness provisioning/handoff overlap.
 - [ ] Complete integrated validation, user documentation, and commits on the current branch.
 
 ## Surprises & Discoveries
@@ -42,7 +44,13 @@ Current resume can begin executing a restored queue during worker startup. Move'
 
 Target compatibility is narrower than arbitrary host-to-host copying. `resume_compatibility` in `mj-controller/src/hel_controller/worktree.rs` supports specific raw-checkout/workspace conversions and restricts raw SSH worktrees to their existing host. Move must present these existing rules honestly rather than broaden them implicitly.
 
-The inspected database schema version is 23. Follow the schema migration machinery in `src/hel_database/schema.rs`; determine the next version from the current tree when implementation begins.
+The implementation tree uses database schema version 25, including workspace pane sizes. Move adds schema version 26 through `src/hel_database/schema.rs` and the existing guarded writer.
+
+Implementation discoveries (2026-09-06): the relay needs a persisted store identity in addition to the native session ID, because a recreated worker directory can reuse the same path and native identity but lose command deduplication. Worker snapshot version 3 adds that identity. Partial queue admission also retains a mutation hold after a failed/cancelled attempt and across daemon restart, and blocks checkpoint-floor advancement until admission finishes.
+
+The real local-bare acceptance run exposed an existing data-preservation bug: managed raw worktrees were captured as metadata-only although Stop retires them. Their checkpoints now capture dirty/untracked state relative to the retained local branch's commit, without requiring an origin remote. Unmanaged raw checkouts still remain in place and use metadata-only capture. The acceptance harness checks committed, staged, unstaged, and greater-than-64-KiB untracked content across repeated moves.
+
+Review found that terminal failed/cancelled Move operations can still have a Closing/Destroying source after cleanup failure. Restart recovery now finishes that source teardown independent of the stored Move phase, including deferred target cleanup, before presenting retry. Lifecycle task panics now produce a result and release transient mutation ownership even when clients disconnect.
 
 ## Decision Log
 
@@ -66,7 +74,9 @@ Decision (2026-09-06, design): admit retained queued commands only after verifie
 ## Outcomes & Retrospective
 
 
-Planning is complete and the document is written. No application code, schema, protocol, UI, or runtime behavior has changed. Performance benefits are proposed and unmeasured. Record implementation results, measured phase timings, live backend coverage, and any deviations here when the work is authorized and executed.
+Implementation is complete. Move is one daemon-owned operation with durable intent, verified source teardown, ready-before-queue destination admission, same-store command deduplication on retry, and CLI/TUI/web confirmation and recovery. Source settings, workspace, draft/title, history, native identity for same-harness moves, and recoverable Git state are retained. Interrupted turns are never replayed. Final checks and the requested commit/push are recorded below.
+
+The implementation reused normal Stop/Resume behavior but corrected managed raw-worktree capture and the ready-worker-to-session-actor handoff uncovered by the real-worker test. Managed worktrees deliberately bypass relay-frontier-only archive reuse: host Git edits do not advance that frontier, and older metadata-only archives must not be reused before deleting a checkout. No container reuse or new inference service was introduced.
 
 ## Context and Orientation
 
@@ -147,12 +157,12 @@ Validate overlap with deterministic synchronization tests, not fragile elapsed-t
 
 Exercise target-only, profile-only, combined, and cross-harness moves through the common operation, including changing between supported bare/workspace representations. Update human documentation under `docs/src/content/docs/`, including session lifecycle, durability, CLI reference, and relevant terminal/web descriptions. State that Move rebuilds the environment and obeys current resume compatibility; do not claim arbitrary host migration or preservation of installed packages.
 
-Finish required Rust and web checks, record limitations of any untested live target, and commit each coherent validated checkpoint on the current branch. Do not create a branch or push. Stage only files changed for this feature. The primary implementer should own persistence, concurrency, orchestration, and final integration. Once shared interfaces are settled, substantial independent UI work may be delegated to Luna with explicit file ownership under the repository delegation rules; subagents must not delegate further.
+Finish required Rust and web checks, record limitations of any untested live target, and commit each coherent validated checkpoint on the current branch. Do not create a branch. Push to upstream after validation, as explicitly requested by the user. Stage only files changed for this feature. The primary implementer owns persistence, concurrency, orchestration, and final integration. Once shared interfaces are settled, substantial independent UI work may be delegated to Luna with explicit file ownership under the repository delegation rules; subagents must not delegate further.
 
 ## Concrete Steps
 
 
-Implementation begins only after the user authorizes it. Start from the current branch and inspect uncommitted changes; preserve unrelated work. Re-read this living plan and the relevant `AGENTS.md` instructions before changing code. Run all commands from `/home/jonathan/Projects/hel2`.
+Implementation was authorized; the initial current-branch worktree was clean. Preserve unrelated work and run repository commands from `/home/jonathan/Projects/hel2`.
 
 Useful grounding commands are:
 
@@ -162,7 +172,7 @@ Useful grounding commands are:
     rg -n 'resume_session_controlled|utility_handoff|discard_queue' mj-controller/src/hel_controller/resume.rs
     rg -n 'resume_compatibility' mj-controller/src/hel_controller/worktree.rs
 
-After each milestone run focused behavior tests for the affected packages. Package names come from the workspace manifests; the relevant ones are `brokk-mj-core`, `brokk-mj-controller`, `brokk-mj-tui`, `brokk-mj-chat`, and `brokk-mj-cli`. Every `cargo test` invocation must run with elevated permissions outside the restricted sandbox, because socket-based tests are invalid inside it. Do not redirect Cargo build output into `/tmp`.
+After each milestone run focused behavior tests for the affected packages. Package names come from the workspace manifests; the relevant ones are `brokk-mj-core`, `brokk-mj-controller`, `brokk-mj-tui`, `brokk-mj-chat`, and `brokk-mjolnir` (the CLI). Every `cargo test` invocation must run with elevated permissions outside the restricted sandbox, because socket-based tests are invalid inside it. Do not redirect Cargo build output into `/tmp`.
 
 For final validation run:
 
@@ -194,7 +204,7 @@ Cancellation tests cover preflight, interruption/checkpoint capture, source seal
 
 Concurrency tests include two unrelated sessions moving simultaneously, an identical duplicate request, a conflicting destination request, automatic checkpoint contention, and a disconnecting initiating client. Use existing test hooks/fakes and real Git repositories where relevant. For archive/pipe streaming paths use fixtures exceeding 64 KiB so pipe-buffer deadlocks and truncation are observable.
 
-Final acceptance requires all required checks to pass, meaningful TUI and web behavior coverage, and a recorded live container/local-bare scenario where the environment supports it. Do not run a real EC2 provisioning test without an explicitly authorized test target and cost context; report its live coverage separately from deterministic backend tests. No feature implementation or validation runs have been performed while writing this plan.
+Final acceptance requires all required checks to pass, meaningful TUI and web behavior coverage, and a recorded live container/local-bare scenario where the environment supports it. Do not run a real EC2 provisioning test without an explicitly authorized test target and cost context; report its live coverage separately from deterministic backend tests.
 
 ## Idempotence and Recovery
 
@@ -210,7 +220,17 @@ Use the existing schema migration and guarded writer. Store no access tokens, re
 ## Artifacts and Notes
 
 
-The only artifact produced at planning time is this file. During implementation, add concise test outputs, failure-recovery observations, and phase timings here. Preserve enough evidence to distinguish simulated backend coverage from real container, local-bare, SSH, or EC2 runs.
+Validation evidence (2026-09-06 implementation session; artifact timestamps use UTC 2026-09-07):
+
+- `python3 tests/e2e/session_move.py --hel target/debug/mj` passed. Artifacts: `target/reliability-artifacts/session-move-seed-1-2523228/trace.json` and adjacent controller/worker logs. This uses real local-bare workers, daemon IPC, authenticated web prompt submission, actual Git repositories, and a deterministic fake ACP executable—not real-provider credentials.
+- The live scenario preserves session/workspace/native identity and committed, staged, unstaged, and 126,976-byte untracked content through combined, profile-only, queue-start, and target-only moves. It verifies default discard, original queued prompts executed exactly once, unchanged-selection no-op, final Stop, database integrity, and no surviving owned worker processes. Successful Move durations were 5.501, 7.244, 7.795, and 7.071 seconds under concurrent build load. These are supporting observations, not an ordinary-resume comparison or a speedup claim.
+- Focused tests cover durable migration/reopen, cancellation persistence against stale writes, draft/title preservation, configuration-fingerprint invalidation, incompatible destination rejection, mutation exclusion, matching-request joining, independent session progress, task panic reporting, failed/cancelled source cleanup recovery, and queue replay after an acknowledged-command crash. The queue fixture includes a greater-than-64-KiB image and configuration command and rejects a replacement worker store.
+- Deterministic channel-handshake tests prove concurrent handoff/provisioning start and cancellation followed by joining the peer. LocalBare restore uses the verified absolute archive directly; container restore still transfers it.
+- `npm run build` in `docs/` passed and checked 1,688 internal links across 24 pages. `node --check mj-controller/src/web/viewer.js` passed. Final full Rust test/lint results are recorded at completion.
+- Live Podman/Docker/Apple Container, SSH, EC2, and real-provider cross-harness moves were not run. Existing backend/restore tests and new deterministic concurrency tests pass, but are not represented as live backend or provider coverage.
+- Parallel full runs hit transient `ETXTBSY` in an existing worker-stop shell fixture and `WouldBlock` in an existing supervisor-lease test. Both isolated tests passed. The final full run serializes test cases; the new concurrency tests still exercise their own parallel workers. No host mount changes or production fallback was added.
+- Standalone `brokk-mj-worker` test compilation also passed, ensuring persisted worker-store identity does not depend on the controller-only state module.
+- `cargo test -q -- --test-threads=1` passed across the workspace. Final rollback review additionally preserves a partial destination's managed checkout until target teardown succeeds; retry restores the recorded source identity only after bounded cleanup. The affected controller suite is rerun for that correction.
 
 Proposed human success text is: `Moved SESSION from OLD_PROFILE / OLD_TARGET to NEW_PROFILE / NEW_TARGET; ready and idle.` For Run, report that queued work was accepted, not that all queued tasks completed. Failure text must name whether the source remains available, the session is stopped with a checkpoint, or the destination is live with queue admission incomplete, and identify the applicable retry action.
 
@@ -224,3 +244,5 @@ Required public additions are the `mj move` command; one validated Move request 
 Extend archive retention/reconciliation to honor operation-owned checkpoints and add durable move state through the standard database migration. Preserve normal Stop/Resume semantics while sharing their internal phases. Destination queue admission uses existing `RelayCommand::Prompt` and `RelayCommand::SetConfig` with durable command IDs; it does not require a new paused mode.
 
 Revision note (2026-09-06): created from the agreed conversational plan, including the user's final Discard/Run queue choice and safe-overlap performance scope. Earlier proposals for automatic continuation, a durable paused queue, and retaining the source until destination readiness are not part of this plan.
+
+Revision note (2026-09-06, implementation): recorded implementation and push authorization, schema 26, completed design adjustments, regression coverage, live local-bare acceptance, timings, and explicit backend/provider coverage limits.

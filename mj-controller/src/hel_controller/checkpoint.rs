@@ -55,7 +55,20 @@ const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration = Duration::from_secs(3
 /// database transaction committed. Call this only while holding the
 /// machine-wide controller-store guard and before starting background work.
 pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
-    let state = HelState::load()?;
+    let mut state = HelState::load()?;
+    // Include operation-owned recovery copies even after a ready destination
+    // installs a newer ordinary checkpoint.
+    for operation in hel::hel_database::load_move_operations()? {
+        if operation.retains_checkpoint()
+            && let Some(checkpoint) = operation.checkpoint
+            && let Some(mut session) = state.sessions.get(&operation.selection.session_id).cloned()
+        {
+            session.checkpoint = Some(checkpoint);
+            state
+                .sessions
+                .insert(format!("move:{}", operation.operation_id), session);
+        }
+    }
     reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state)
 }
 
@@ -575,6 +588,16 @@ impl Controller {
         exclusivity: LatchExclusivity,
         export_policy: CheckpointExportPolicy,
     ) -> Result<LatchedCheckpoint> {
+        if let Some(operation) = hel::hel_database::load_move_operation(session_id)?
+            && operation.queue_admission_started
+            && !operation.queue_admission_finished
+        {
+            // Advancing the recovery floor can prune terminal command IDs.
+            // Keep them until a retained Move queue has been fully admitted.
+            bail!(
+                "move queue admission is incomplete; retry Move before checkpointing this destination"
+            );
+        }
         let session = self
             .state
             .sessions
@@ -617,7 +640,24 @@ impl Controller {
                     vec![CheckpointRepositorySpec {
                         id: "project".into(),
                         relative_destination: PathBuf::from(destination),
-                        capture: CheckpointRepositoryCapture::MetadataOnly,
+                        // Managed worktrees are retired on Stop, so their
+                        // dirty/untracked state must travel in the archive.
+                        // Their branch and objects remain in the owning Git
+                        // repository; no remote origin is required. Unmanaged
+                        // raw checkouts remain in place.
+                        capture: if session.managed_worktree.is_some() {
+                            CheckpointRepositoryCapture::DeltaFrom {
+                                base_commit: super::worktree::raw_checkout_position(
+                                    &session,
+                                    &self.config,
+                                    project_directory,
+                                    executor,
+                                )?
+                                .head_commit,
+                            }
+                        } else {
+                            CheckpointRepositoryCapture::MetadataOnly
+                        },
                         origin_override: None,
                     }],
                 )
@@ -845,6 +885,10 @@ impl Controller {
         // bookkeeping events, and only by those; resume rolls the controller's
         // projection back to the archived record.
         if export_policy == CheckpointExportPolicy::ReuseUnchangedArchive
+            // Host worktree edits do not advance the relay frontier. Always
+            // recapture before retiring one, including archives written by
+            // older workers that only recorded its Git metadata.
+            && session.managed_worktree.is_none()
             && let Some(artifact) = reusable_installed_checkpoint(
                 session_id,
                 session.checkpoint.as_ref(),
@@ -2032,6 +2076,14 @@ pub(super) fn prune_replaced_checkpoint(
     let Some(previous) = previous.filter(|old| old.archive_path != current.archive_path) else {
         return;
     };
+    match hel::hel_database::move_checkpoint_is_retained(&previous.archive_path) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, "could not check move retention; keeping superseded checkpoint");
+            return;
+        }
+    }
     if let Err(error) = std::fs::remove_file(&previous.archive_path)
         && error.kind() != std::io::ErrorKind::NotFound
     {
@@ -2153,6 +2205,7 @@ mod tests {
             latest_credential_sync_signal: None,
             worker_build: None,
             operational: hel::hel_worker::RelayOperationalState {
+                store_id: None,
                 idle_since_ms: None,
                 session_id: "session-1".into(),
                 execution: RelayExecutionState::Idle,

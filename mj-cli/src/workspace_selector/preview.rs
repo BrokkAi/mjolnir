@@ -163,6 +163,7 @@ impl WorkspacePreview {
                             Some(
                                 hel_tui::SessionOperationKind::Launching
                                     | hel_tui::SessionOperationKind::Resuming
+                                    | hel_tui::SessionOperationKind::Moving
                                     | hel_tui::SessionOperationKind::Importing
                             )
                         )
@@ -303,6 +304,7 @@ impl WorkspacePreview {
         // Remove old overlays before applying durable records; otherwise a
         // completed resume would turn Running back into Provisioning here.
         self.dashboard.set_state(self.controller.state.clone());
+        self.dashboard.set_move_operations(snapshot.moves);
         for lifecycle in &snapshot.lifecycles {
             if self
                 .controller
@@ -613,6 +615,7 @@ mod tests {
             records,
             sessions: Vec::new(),
             lifecycles: Vec::new(),
+            moves: Vec::new(),
             reviews: Vec::new(),
             notices: Vec::new(),
         }

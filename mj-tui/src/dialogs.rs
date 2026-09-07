@@ -20,6 +20,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::path::PathBuf;
 
 use hel::hel_config::{HarnessKind, mount_history_host};
+use hel::hel_state::{MoveOperation, MovePhase, ResumeQueueDisposition};
 use hel::hel_targets::{AdditionalMount, default_mount_destination, validate_additional_mounts};
 use mj_chat::components::{
     Button, ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, Outcome, TextField,
@@ -211,6 +212,12 @@ pub(crate) enum Confirmation {
         /// there is nothing to recover and only the transcript is on offer.
         recoverable: bool,
     },
+    /// A Move left a verified checkpoint or a ready destination that needs an
+    /// explicit same-destination retry. Resume with the source settings is
+    /// deliberately hidden while queue admission may already have run.
+    RecoverMove {
+        operation: Box<MoveOperation>,
+    },
 }
 
 /// A confirmation dialog and its persistent standard-control state.
@@ -363,7 +370,7 @@ fn confirmation_has_typed_field(confirmation: &Confirmation) -> bool {
 /// Button labels for a confirmation dialog, ordered Cancel first and the primary
 /// action last. This is the single declaration used by both key handling and
 /// rendering.
-fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
+pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
         Confirmation::DirtyLocal { .. } => &["Cancel", "Continue"],
         Confirmation::Close { .. } => &["Cancel", "Stop"],
@@ -373,6 +380,17 @@ fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] 
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
         Confirmation::RecoverFailed { .. } => &["Cancel", "Open transcript"],
+        Confirmation::RecoverMove { operation }
+            if operation.queue_admission_started && !operation.queue_admission_finished =>
+        {
+            &["Cancel", "Open transcript", "Retry move"]
+        }
+        Confirmation::RecoverMove { .. } => &[
+            "Cancel",
+            "Open transcript",
+            "Retry move",
+            "Resume previous settings",
+        ],
         Confirmation::ForceStop { .. } => &["Cancel", "Force stop"],
         Confirmation::ForceDestroy { .. } => &["Cancel", "Force destroy"],
     }
@@ -1124,6 +1142,61 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             }
             (" Session failed ", lines)
         }
+        Confirmation::RecoverMove { operation } => {
+            let mut lines = vec![
+                Line::raw(format!("Session: {}", operation.selection.session_id)),
+                Line::raw(""),
+                Line::styled(
+                    format!(
+                        "Move {} at destination {} / {}.",
+                        match operation.phase {
+                            MovePhase::Failed => "failed",
+                            MovePhase::Cancelled => "was cancelled",
+                            _ => "needs recovery",
+                        },
+                        operation
+                            .selection
+                            .profile_id
+                            .as_deref()
+                            .unwrap_or("current profile"),
+                        operation
+                            .selection
+                            .target_template_id
+                            .as_deref()
+                            .unwrap_or("current target")
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ];
+            if let Some(error) = &operation.error {
+                lines.push(Line::styled(
+                    format!("Error: {error}"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            lines.push(Line::raw(""));
+            if operation.queue_admission_started && !operation.queue_admission_finished {
+                lines.push(Line::raw(
+                    "Some queued work may already have been accepted; only retry on this exact destination.",
+                ));
+                lines.push(Line::raw(
+                    "Resume with previous settings is unavailable until queue admission finishes.",
+                ));
+            } else {
+                lines.push(Line::raw(
+                    "Retry move keeps the failed destination and queue choice.",
+                ));
+                lines.push(Line::raw(
+                    "Resume with previous settings restores the source configuration instead.",
+                ));
+            }
+            if operation.queue == ResumeQueueDisposition::Start {
+                lines.push(Line::raw("Queued work was selected to run after the move."));
+            } else {
+                lines.push(Line::raw("Queued work was selected for discard."));
+            }
+            (" Move recovery ", lines)
+        }
         Confirmation::ForceStop { session_id, .. } => (
             " FORCE STOP · RECENT WORK MAY BE LOST ",
             vec![
@@ -1170,6 +1243,7 @@ pub(crate) fn render_confirmation(
         } => 13,
         Confirmation::Close { .. } | Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
+        Confirmation::RecoverMove { .. } => 14,
         Confirmation::ForceStop { .. } => 10,
         Confirmation::ForceDestroy { .. } => 11,
     };
@@ -1857,6 +1931,14 @@ impl DashboardState {
             (Confirmation::RecoverFailed { session_id, .. }, 2) => {
                 self.cancel_modal();
                 self.begin_resume_for(&session_id)
+            }
+            (Confirmation::RecoverMove { operation }, 2) => {
+                self.cancel_modal();
+                DashboardAction::RetryMove { operation }
+            }
+            (Confirmation::RecoverMove { operation }, 3) => {
+                self.cancel_modal();
+                DashboardAction::ResumeMove { operation }
             }
             (Confirmation::DestroyStopped { reopen, .. }, _) => {
                 self.restore_after_confirmation(reopen);

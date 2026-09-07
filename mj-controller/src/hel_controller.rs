@@ -4,6 +4,7 @@ mod backend;
 mod checkpoint;
 mod git_cache;
 mod lifecycle;
+pub mod move_session;
 mod provisioning;
 mod readiness;
 mod recovery_scan;

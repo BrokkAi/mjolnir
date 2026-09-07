@@ -2887,6 +2887,7 @@ mod tests {
                 latest_credential_sync_signal: None,
                 worker_build: None,
                 operational: hel::hel_worker::RelayOperationalState {
+                    store_id: None,
                     idle_since_ms: None,
                     session_id,
                     execution: hel::hel_worker::RelayExecutionState::Idle,

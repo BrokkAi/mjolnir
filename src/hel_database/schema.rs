@@ -659,6 +659,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 26 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE session_moves (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 operation_id TEXT NOT NULL UNIQUE,
+                 operation_json TEXT NOT NULL CHECK(json_valid(operation_json))
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (26, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 26;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

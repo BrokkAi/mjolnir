@@ -1830,6 +1830,10 @@ async fn run_session_actor(
                         admission,
                         reply,
                     } => {
+                        if crate::hel_controller::move_session::move_refuses_command(&target.session_id, &command) {
+                            let _ = reply.send(Err("session is moving; keep the draft and retry after Move finishes".into()));
+                            continue;
+                        }
                         // A turn under review holds its session's prompts. The
                         // sole exception is a capability issued by the review
                         // host for this exact corrective command; ordinary
@@ -1938,7 +1942,7 @@ async fn run_session_actor(
                         action,
                         reply,
                     } => {
-                        if lifecycle.is_leased() {
+                        if lifecycle.is_leased() || crate::hel_controller::move_session::move_owns_session(&target.session_id) {
                             // A lifecycle operation owns the connection, and a
                             // reviewer action is not worth deferring: the user
                             // is waiting on its answer now.
@@ -2207,6 +2211,12 @@ async fn deliver_submit(
         admission,
         reply,
     } = submission;
+    if crate::hel_controller::move_session::move_refuses_command(&target.session_id, &command) {
+        let _ = reply.send(Err(
+            "session is moving; keep the draft and retry after Move finishes".into(),
+        ));
+        return;
+    }
     if let Some(admission) = admission.as_ref()
         && (!matches!(&command, RelayCommand::Prompt { .. })
             || admission.command_id() != command_id
@@ -3803,6 +3813,7 @@ mod tests {
                 window: hel::hel_state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: RelayOperationalState {
+                    store_id: None,
                     idle_since_ms: None,
                     session_id: "session-1".into(),
                     execution: hel::hel_worker::RelayExecutionState::Idle,

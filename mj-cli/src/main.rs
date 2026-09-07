@@ -15,11 +15,11 @@ mod server;
 mod session_presentation;
 mod workspace_selector;
 
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -30,6 +30,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use hel::hel_config::{HelConfig, config_path};
+use hel::hel_state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 #[cfg(test)]
 use hel::hel_targets::ProcessExecutor;
 use mj_controller::hel_controller::Controller;
@@ -77,6 +78,8 @@ enum Command {
     Recover(RecoverArgs),
     /// Create a verified recovery copy for an active session.
     Checkpoint(CheckpointArgs),
+    /// Move a session to another configured profile and/or target.
+    Move(MoveArgs),
     /// Run a harness login for a profile so live sessions pick up fresh credentials.
     Login(LoginArgs),
 }
@@ -101,6 +104,52 @@ enum DaemonCommand {
 struct CheckpointArgs {
     #[arg(long)]
     session: String,
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("destination")
+        .args(["target", "profile"])
+        .required(true)
+        .multiple(true)
+))]
+struct MoveArgs {
+    /// Session to move. The session identity is retained by the operation.
+    #[arg(long)]
+    session: String,
+    /// Destination target template. Omit to retain the current target.
+    #[arg(long)]
+    target: Option<String>,
+    /// Destination profile. Omit to retain the current profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// What to do with prompts/configuration commands already queued.
+    #[arg(long, value_enum)]
+    queue: Option<MoveQueue>,
+    /// Confirm interruption and run without an interactive prompt.
+    #[arg(long)]
+    yes: bool,
+    /// Print exactly one structured outcome to stdout.
+    #[arg(long)]
+    json: bool,
+    /// Explicitly remove inherited container sizing when moving to a fixed host.
+    #[arg(long)]
+    clear_resources: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum MoveQueue {
+    Discard,
+    Start,
+}
+
+impl From<MoveQueue> for ResumeQueueDisposition {
+    fn from(queue: MoveQueue) -> Self {
+        match queue {
+            MoveQueue::Discard => Self::Discard,
+            MoveQueue::Start => Self::Start,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -257,6 +306,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Import(_)) => "import",
         Some(Command::Recover(_)) => "recover",
         Some(Command::Checkpoint(_)) => "checkpoint",
+        Some(Command::Move(_)) => "move",
         Some(Command::Login(_)) => "login",
         Some(Command::Broker(_)) => "broker",
     }
@@ -309,7 +359,335 @@ async fn run_command(
             );
             Ok(DashboardExit::Normal)
         }
+        Some(Command::Move(args)) => move_session(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
+    }
+}
+
+/// Run the daemon-owned move operation from the one-shot CLI.
+///
+/// Preparation is deliberately a separate request: it lets unattended callers
+/// prove that a queue choice is explicit and lets interactive callers show the
+/// interruption warning before the source is stopped. Once admitted, a lost
+/// CLI connection does not cancel the daemon operation; only an explicit
+/// Ctrl-C does.
+async fn move_session(args: MoveArgs) -> Result<()> {
+    if !args.yes
+        && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || !std::io::IsTerminal::is_terminal(&std::io::stdout()))
+    {
+        let error = anyhow::anyhow!("non-interactive moves require --yes");
+        if args.json {
+            print_move_json(&hel::hel_state::MoveOutcome {
+                operation_id: String::new(),
+                session_id: args.session.clone(),
+                profile_id: args.profile.clone().unwrap_or_default(),
+                target_template_id: args.target.clone().unwrap_or_default(),
+                outcome: "failed".to_owned(),
+                error: Some(error.to_string()),
+                recovery: None,
+            })?;
+        }
+        return Err(error);
+    }
+    let mut daemon = match daemon::connect_or_start().await {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            if args.json {
+                print_move_json(&hel::hel_state::MoveOutcome {
+                    operation_id: String::new(),
+                    session_id: args.session.clone(),
+                    profile_id: args.profile.clone().unwrap_or_default(),
+                    target_template_id: args.target.clone().unwrap_or_default(),
+                    outcome: "failed".to_owned(),
+                    error: Some(format!("{error:#}")),
+                    recovery: None,
+                })?;
+            }
+            return Err(error).context("connect to move daemon");
+        }
+    };
+    let selection = MoveSelection {
+        session_id: args.session.clone(),
+        profile_id: args.profile.clone(),
+        target_template_id: args.target.clone(),
+        additional_mounts: None,
+        resource_allocation: None,
+        clear_resource_allocation: args.clear_resources,
+    };
+    let preparation = match daemon.prepare_move_session(selection).await {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            if args.json {
+                print_move_json(&hel::hel_state::MoveOutcome {
+                    operation_id: String::new(),
+                    session_id: args.session.clone(),
+                    profile_id: args.profile.clone().unwrap_or_default(),
+                    target_template_id: args.target.clone().unwrap_or_default(),
+                    outcome: "failed".to_owned(),
+                    error: Some(format!("{error:#}")),
+                    recovery: None,
+                })?;
+            }
+            return Err(error).context("prepare move");
+        }
+    };
+    let pending = preparation.queued_commands.len();
+    let queue = match (args.queue, pending, args.yes) {
+        (Some(queue), _, _) => Some(queue.into()),
+        (None, 0, _) => None,
+        (None, _, true) => {
+            let error = anyhow::anyhow!(
+                "{pending} queued command{} require an explicit --queue discard|start with --yes",
+                if pending == 1 { "" } else { "s" }
+            );
+            if args.json {
+                print_move_json(&move_error_outcome(&preparation, error.to_string()))?;
+            }
+            return Err(error);
+        }
+        (None, _, false) => Some(prompt_queue_choice(pending).await?),
+    };
+
+    if args.yes {
+        // --yes acknowledges interruption, but intentionally does not choose
+        // what happens to queued work; that choice was handled above.
+    } else if !prompt_move_confirmation(&preparation, queue).await? {
+        let error = anyhow::anyhow!("move cancelled before interruption");
+        if args.json {
+            print_move_json(&move_error_outcome(&preparation, error.to_string()))?;
+        }
+        return Err(error);
+    }
+
+    if !args.json {
+        eprintln!(
+            "Moving {} to {}/{} (operation {})…",
+            preparation.selection.session_id,
+            preparation
+                .selection
+                .profile_id
+                .as_deref()
+                .unwrap_or(&preparation.source_profile_id),
+            preparation
+                .selection
+                .target_template_id
+                .as_deref()
+                .unwrap_or(&preparation.source_target_template_id),
+            preparation.operation_id
+        );
+    }
+    let request = MoveSessionRequest {
+        preparation: preparation.clone(),
+        queue,
+        acknowledge_interruption: true,
+    };
+    let mut operation = Box::pin(daemon.move_session(request));
+    let outcome = tokio::select! {
+        result = &mut operation => result?,
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("listen for Ctrl-C while moving session")?;
+            // Dropping the request future only detaches this client. Ask the
+            // daemon explicitly, then bound the wait so a wedged target does
+            // not make Ctrl-C appear ineffective.
+            drop(operation);
+            let cancel = async {
+                let mut client = daemon::connect_or_start().await?;
+                client.cancel_lifecycle(args.session.clone()).await
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(10), cancel).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(error = format!("{error:#}"), "move cancellation request failed"),
+                Err(_) => tracing::warn!("timed out requesting move cancellation"),
+            }
+            let error = anyhow::anyhow!("move cancellation requested for {}", args.session);
+            let cancelled = hel::hel_state::MoveOutcome {
+                operation_id: preparation.operation_id.clone(),
+                session_id: preparation.selection.session_id.clone(),
+                profile_id: preparation.selection.profile_id.clone().unwrap_or_else(|| preparation.source_profile_id.clone()),
+                target_template_id: preparation.selection.target_template_id.clone().unwrap_or_else(|| preparation.source_target_template_id.clone()),
+                outcome: "cancelled".to_owned(),
+                error: Some(error.to_string()),
+                recovery: Some("Reconnect to observe the daemon-owned move operation.".to_owned()),
+            };
+            if args.json {
+                print_move_json(&cancelled)?;
+            } else {
+                print_move_human(&cancelled);
+            }
+            return Err(error);
+        }
+    };
+    if args.json {
+        print_move_json(&outcome)?;
+    } else {
+        print_move_human(&outcome);
+    }
+    if matches!(outcome.outcome.as_str(), "failed" | "cancelled") {
+        bail!(
+            "move {}: {}",
+            outcome.outcome,
+            outcome.error.as_deref().unwrap_or("no further details")
+        );
+    }
+    Ok(())
+}
+
+async fn prompt_queue_choice(pending: usize) -> Result<ResumeQueueDisposition> {
+    let answer = tokio::task::spawn_blocking(move || {
+        eprint!(
+            "{pending} queued command{} found. [D]iscard queued work (default) or [S]tart after move? ",
+            if pending == 1 { "" } else { "s" }
+        );
+        io::stderr().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        Ok::<_, io::Error>(line)
+    })
+    .await
+    .context("queue choice prompt task failed")??;
+    Ok(if answer.trim().eq_ignore_ascii_case("s") {
+        ResumeQueueDisposition::Start
+    } else {
+        ResumeQueueDisposition::Discard
+    })
+}
+
+async fn prompt_move_confirmation(
+    preparation: &hel::hel_state::MovePreparation,
+    queue: Option<ResumeQueueDisposition>,
+) -> Result<bool> {
+    let active = preparation.active;
+    let source_profile = preparation.source_profile_id.clone();
+    let source_target = preparation.source_target_template_id.clone();
+    let profile = preparation
+        .selection
+        .profile_id
+        .clone()
+        .unwrap_or_else(|| source_profile.clone());
+    let target = preparation
+        .selection
+        .target_template_id
+        .clone()
+        .unwrap_or_else(|| source_target.clone());
+    let cross_harness = preparation.cross_harness;
+    let clear_resource_allocation = preparation.selection.clear_resource_allocation;
+    let queued_commands = preparation.queued_commands.clone();
+    let session_id = preparation.selection.session_id.clone();
+    tokio::task::spawn_blocking(move || {
+        eprintln!(
+            "Move session {} from {source_profile}/{source_target} to {profile}/{target}.",
+            session_id
+        );
+        if cross_harness {
+            eprintln!("This changes harnesses; the transcript handoff is text-only.");
+        }
+        if active {
+            eprintln!("Active work will be interrupted and restored into a fresh environment.");
+        }
+        if clear_resource_allocation {
+            eprintln!(
+                "Destination uses fixed/default resources; inherited sizing will be removed."
+            );
+        }
+        if let Some(queue) = queue {
+            if !queued_commands.is_empty() {
+                eprintln!(
+                    "Queued work ({} command{}):",
+                    queued_commands.len(),
+                    if queued_commands.len() == 1 { "" } else { "s" }
+                );
+                for (index, command) in queued_commands.iter().enumerate() {
+                    let (kind, text) = match &command.kind {
+                        hel::hel_state::QueuedCommandKind::Prompt => (
+                            "prompt",
+                            hel::hel_transcript::materialized_content_text(&command.content),
+                        ),
+                        hel::hel_state::QueuedCommandKind::SetConfig { key, value } => {
+                            ("config", hel::hel_state::config_command_text(key, value))
+                        }
+                    };
+                    let text = text.replace('\n', " ");
+                    let text = if text.chars().count() > 180 {
+                        format!("{}…", text.chars().take(179).collect::<String>())
+                    } else {
+                        text
+                    };
+                    eprintln!("  {}. {kind}: {text}", index + 1);
+                }
+            }
+            eprintln!(
+                "Queued work will {} after destination readiness.",
+                match queue {
+                    ResumeQueueDisposition::Discard => "be discarded",
+                    ResumeQueueDisposition::Start => "start",
+                }
+            );
+        }
+        eprint!("Continue? [y/N] ");
+        io::stderr().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        Ok::<_, io::Error>(line.trim().eq_ignore_ascii_case("y"))
+    })
+    .await
+    .context("move confirmation prompt task failed")?
+    .map_err(Into::into)
+}
+
+fn move_error_outcome(
+    preparation: &hel::hel_state::MovePreparation,
+    error: String,
+) -> hel::hel_state::MoveOutcome {
+    hel::hel_state::MoveOutcome {
+        operation_id: preparation.operation_id.clone(),
+        session_id: preparation.selection.session_id.clone(),
+        profile_id: preparation
+            .selection
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| preparation.source_profile_id.clone()),
+        target_template_id: preparation
+            .selection
+            .target_template_id
+            .clone()
+            .unwrap_or_else(|| preparation.source_target_template_id.clone()),
+        outcome: "failed".to_owned(),
+        error: Some(error),
+        recovery: None,
+    }
+}
+
+fn print_move_json(outcome: &hel::hel_state::MoveOutcome) -> Result<()> {
+    println!("{}", serde_json::to_string(outcome)?);
+    Ok(())
+}
+
+fn print_move_human(outcome: &hel::hel_state::MoveOutcome) {
+    let destination = format!("{}/{}", outcome.profile_id, outcome.target_template_id);
+    match outcome.outcome.as_str() {
+        "completed" => println!(
+            "Moved {} to {destination}; ready and idle. (operation {})",
+            outcome.session_id, outcome.operation_id
+        ),
+        "unchanged" => println!(
+            "{} is already on {destination}; unchanged. (operation {})",
+            outcome.session_id, outcome.operation_id
+        ),
+        other => println!(
+            "Move {} for {} (operation {}){}{}",
+            other,
+            outcome.session_id,
+            outcome.operation_id,
+            outcome
+                .error
+                .as_deref()
+                .map_or(String::new(), |error| format!(": {error}")),
+            outcome
+                .recovery
+                .as_deref()
+                .map_or(String::new(), |recovery| format!(" Recovery: {recovery}")),
+        ),
     }
 }
 
@@ -1148,6 +1526,56 @@ mod tests {
                 })
             }))
         ));
+    }
+
+    #[test]
+    fn move_cli_requires_a_destination_selector_and_preserves_optional_choices() {
+        assert!(Cli::try_parse_from(["mj", "move", "--session", "s1"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "move",
+            "--session",
+            "s1",
+            "--target",
+            "remote",
+            "--queue",
+            "start",
+            "--yes",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Move(args)) = cli.command else {
+            panic!("expected move command");
+        };
+        assert_eq!(args.session, "s1");
+        assert_eq!(args.target.as_deref(), Some("remote"));
+        assert_eq!(args.profile, None);
+        assert!(matches!(args.queue, Some(MoveQueue::Start)));
+        assert!(args.yes);
+        assert!(args.json);
+    }
+
+    #[test]
+    fn move_cli_accepts_target_only_profile_only_and_combined_destinations() {
+        for (extra, expected_profile, expected_target) in [
+            (vec!["--target", "remote"], None, Some("remote")),
+            (vec!["--profile", "claude"], Some("claude"), None),
+            (
+                vec!["--profile", "claude", "--target", "remote"],
+                Some("claude"),
+                Some("remote"),
+            ),
+        ] {
+            let mut argv = vec!["mj", "move", "--session", "s1"];
+            argv.extend(extra);
+            let cli = Cli::try_parse_from(argv).expect("destination selector parses");
+            let Some(Command::Move(args)) = cli.command else {
+                panic!("expected move command");
+            };
+            assert_eq!(args.profile.as_deref(), expected_profile);
+            assert_eq!(args.target.as_deref(), expected_target);
+        }
     }
 
     #[test]

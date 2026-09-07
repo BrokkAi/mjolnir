@@ -106,6 +106,39 @@ mj checkpoint --session <session-id>
 
 Creates and verifies a recovery copy for an active session. It waits for a safe dispatch boundary, then lets normal work continue while the archive is packaged where supported. Mjolnir also checkpoints completed idle turns automatically, throttled to roughly one checkpoint per ten minutes.
 
+## Move a live session
+
+```text
+mj move --session <id> [--target <target-id>] [--profile <profile-id>]
+        [--queue discard|start] [--clear-resources] [--yes] [--json]
+```
+
+Move keeps the logical session, workspace, transcript, and recoverable
+repository state while rebuilding its execution environment. At least one of
+`--target` or `--profile` is required; an omitted selector keeps its current
+value. The destination must satisfy the same compatibility checks as resume.
+Moving between harnesses creates a bounded transcript handoff rather than
+copying harness-private process state.
+
+Move inherits the source resource sizing and attached directories by default.
+`--clear-resources` explicitly removes inherited sizing so the destination
+uses its configured defaults; attached directories remain part of the fixed
+workspace selection.
+
+An interactive invocation prepares the destination and asks for confirmation.
+`--yes` confirms the interruption for unattended use, but it does not choose
+what to do with queued work. If commands are pending, unattended use must pass
+`--queue discard` or `--queue start`; discard is the default only in an
+interactive confirmation. For `start`, commands are accepted in their
+original order after destination readiness. The interrupted active prompt is
+never replayed.
+
+Human output reports the operation ID and phase progress. `--json` suppresses
+progress on stdout and emits one final object containing the operation ID,
+session ID, resolved profile and target, outcome, and any recovery guidance.
+Failures return a nonzero status. Ctrl-C requests cancellation from the daemon;
+disconnecting a client does not cancel a detached move.
+
 ## Recover untracked resources
 
 ```text

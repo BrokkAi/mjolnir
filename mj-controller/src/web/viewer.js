@@ -38,6 +38,12 @@ const login = document.querySelector('#login'),
   newBackButton = document.querySelector('#new-back'),
   newNextButton = document.querySelector('#new-next'),
   newError = document.querySelector('#new-error'),
+  moveForm = document.querySelector('#move-form'),
+  moveStep = document.querySelector('#move-step'),
+  moveProgress = document.querySelector('#move-progress'),
+  moveBackButton = document.querySelector('#move-back'),
+  moveNextButton = document.querySelector('#move-next'),
+  moveError = document.querySelector('#move-error'),
   actionError = document.querySelector('#action-error'),
   resumeError = document.querySelector('#resume-error'),
   feed = document.querySelector('#conversation-feed'),
@@ -64,6 +70,7 @@ const PAGES = {
   dashboard: document.querySelector('#dashboard'),
   new: document.querySelector('#new-page'),
   resume: document.querySelector('#resume-page'),
+  move: document.querySelector('#move-page'),
   targets: document.querySelector('#targets-page'),
   quota: document.querySelector('#quota-page'),
   conversation: document.querySelector('#conversation'),
@@ -75,6 +82,7 @@ const entryNodes = new Map();
 let snapshot,
   route = { name: 'dashboard' },
   currentSession,
+  moveDraft,
   cursor = 0,
   acknowledged = 0,
   eventSource;
@@ -124,6 +132,7 @@ const ID = '[A-Za-z0-9_-]+';
 const ROUTE_PATTERNS = [
   [new RegExp(`^#workspace/(${ID})/new$`), ([id]) => ({ name: 'new', workspaceId: id })],
   [new RegExp(`^#workspace/(${ID})/resume$`), ([id]) => ({ name: 'resume', workspaceId: id })],
+  [new RegExp(`^#workspace/(${ID})/move/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'move', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})$`), ([id]) => ({ name: 'dashboard', workspaceId: id })],
   [new RegExp(`^#conversation/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id })],
   [/^#targets$/, () => ({ name: 'targets' })],
@@ -144,6 +153,8 @@ function routeHash(next) {
       return `#workspace/${next.workspaceId}/new`;
     case 'resume':
       return `#workspace/${next.workspaceId}/resume`;
+    case 'move':
+      return `#workspace/${next.workspaceId}/move/${next.sessionId}`;
     case 'conversation':
       return `#conversation/${next.sessionId}`;
     case 'targets':
@@ -177,6 +188,7 @@ function selectedWorkspaceId() {
     const session = snapshot?.sessions.find(s => s.id === route.sessionId);
     if (session?.workspace_id) return session.workspace_id;
   }
+
   return workspaces[0]?.id;
 }
 
@@ -207,6 +219,16 @@ function applyRoute() {
     }
   }
 
+  if (route.name === 'move') {
+    const session = snapshot.sessions.find(s => s.id === route.sessionId);
+    if (!session?.capabilities?.move_session
+      && session?.operation?.kind !== 'move'
+      && !session?.move_recovery?.checkpoint_retained) {
+      navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
+      return;
+    }
+  }
+
   const name = PAGES[route.name] ? route.name : 'dashboard';
   for (const [key, page] of Object.entries(PAGES)) page.classList.toggle('hidden', key !== name);
   workspaceStrip.classList.toggle('hidden', name === 'conversation');
@@ -215,6 +237,7 @@ function applyRoute() {
     {
       new: 'New session',
       resume: 'Resume',
+      move: 'Move session',
       targets: 'Targets',
       quota: 'Quota',
       conversation: 'Conversation',
@@ -228,6 +251,7 @@ function applyRoute() {
   // Arriving at the wizard starts it over; leaving it discards what was
   // half-answered rather than keeping it to surprise the next visit.
   if (name !== 'new') newDraft = null;
+  if (name !== 'move') moveDraft = null;
   renderRoute();
   // A screen reader should land at the top of the page it just moved to
   // rather than wherever it happened to be.
@@ -247,6 +271,9 @@ function renderRoute() {
       break;
     case 'resume':
       renderResumable();
+      break;
+    case 'move':
+      renderMoveForm();
       break;
     case 'targets':
       renderTargets();
@@ -271,7 +298,7 @@ function renderLaunchFailures() {
   const notices = (snapshot.launch_failures || []).filter(
     failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
   );
-  document.querySelector('#launch-failures').replaceChildren(...notices.map(failure => {
+  const failureCards = notices.map(failure => {
     const card = el('div', 'card');
     card.append(el('p', '', 'A session could not be started. Check the project and target, then retry. Details are in the daemon logs.'));
     const dismiss = el('button', 'secondary', 'Dismiss launch error');
@@ -281,7 +308,64 @@ function renderLaunchFailures() {
     };
     card.append(dismiss);
     return card;
-  }));
+  });
+  if (route.name === 'dashboard') {
+    const moveFailures = (snapshot.sessions || []).filter(session =>
+      session.workspace_id === selectedWorkspaceId() &&
+      session.move_recovery?.checkpoint_retained &&
+      ['failed', 'cancelled'].includes(session.move_recovery.phase),
+    );
+    failureCards.push(...moveFailures.map(session => {
+      const recovery = session.move_recovery;
+      const card = el('article', 'card move-recovery');
+      const phase = recovery.phase === 'cancelled' ? 'cancelled' : 'failed';
+      card.append(el('p', '', `Move of “${session.title || session.id}” was ${phase}. The verified checkpoint is retained.`));
+      if (recovery.destination_ready && recovery.queue_admission_started) {
+        card.append(el('p', 'dim', 'The destination is retained. Retry uses the same destination and queue choice so already accepted work is not replayed elsewhere.'));
+      } else {
+        card.append(el('p', 'dim', 'Retry the move with the recorded destination, or resume with the source settings.'));
+      }
+      const row = el('div', 'row');
+      if (recovery.checkpoint_retained) {
+        const retry = button('Retry move', 'secondary', { action: 'move', id: session.id });
+        retry.onclick = () => navigate({
+          name: 'move',
+          workspaceId: session.workspace_id || selectedWorkspaceId(),
+          sessionId: session.id,
+        });
+        row.append(retry);
+      }
+      const queuePinned = recovery.queue_admission_started && !recovery.queue_admission_finished;
+      if (recovery.checkpoint_retained && !queuePinned && session.capabilities?.resume) {
+        const resume = button('Resume with previous settings', 'secondary', { action: 'resume', id: session.id });
+        resume.dataset.profile = recovery.source_profile_id;
+        resume.dataset.target = recovery.source_target_template_id;
+        resume.onclick = () => navigate({
+          name: 'resume',
+          workspaceId: session.workspace_id || selectedWorkspaceId(),
+        });
+        row.append(resume);
+      }
+      card.append(row);
+      return card;
+    }));
+    const failedSessions = (snapshot.sessions || []).filter(session =>
+      session.workspace_id === selectedWorkspaceId() &&
+      session.has_error &&
+      !session.capabilities?.open &&
+      session.operation?.kind !== 'move' &&
+      !session.move_recovery?.checkpoint_retained,
+    );
+    failureCards.push(...failedSessions.map(session => {
+      const card = el('div', 'card');
+      card.append(el('p', '', `Session “${session.title || session.id}” needs recovery. Its verified checkpoint is retained when available.`));
+      const resume = button('Open resume', 'secondary');
+      resume.onclick = () => navigate({ name: 'resume', workspaceId: session.workspace_id || selectedWorkspaceId() });
+      card.append(resume);
+      return card;
+    }));
+  }
+  document.querySelector('#launch-failures').replaceChildren(...failureCards);
 }
 
 function renderWorkspaces() {
@@ -424,7 +508,7 @@ function liveSessions() {
   return (snapshot.sessions || []).filter(
     session =>
       session.workspace_id === workspaceId &&
-      ['live', 'starting', 'stopping'].includes(session.lifecycle),
+      (['live', 'starting', 'stopping'].includes(session.lifecycle) || session.operation?.kind === 'move'),
   );
 }
 
@@ -540,6 +624,7 @@ function sessionCard(session) {
 
 function attentionParts(session) {
   const parts = [];
+  if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   if (session.has_error) parts.push(['!', 'Error']);
   if (session.pending_elicitations?.length) parts.push(['?', 'Input needed']);
   const queued = (session.queued_prompts || []).length;
@@ -554,6 +639,7 @@ function sessionMenuActions(session) {
   if (can.cancel_operation) actions.push(['Cancel operation', 'danger', 'cancel']);
   if (can.stop) actions.push(['Stop session', 'danger', 'close']);
   if (can.resume) actions.push(['Resume', '', 'resume']);
+  if (can.move_session) actions.push(['Move…', '', 'move']);
   return actions;
 }
 
@@ -1350,9 +1436,22 @@ function renderResumable() {
 
 function resumableCard(session) {
   const card = el('article', 'card session');
+  const recovery = session.move_recovery;
+  const sourceProfile = recovery?.source_profile_id || session.profile_id;
+  const sourceTarget = recovery?.source_target_template_id || session.target_id;
   card.dataset.sessionId = session.id;
   card.append(el('h3', '', session.title));
-  card.append(el('p', 'dim', `${sessionLifecycleLabel(session)} · ${session.profile_id}`));
+  card.append(el('p', 'dim', `${sessionLifecycleLabel(session)} · ${sourceProfile}`));
+  if (session.has_error) {
+    card.append(el('p', '', 'The previous operation failed. The verified checkpoint remains available; resume with the source settings or retry the move from the dashboard recovery card.'));
+  }
+  if (recovery) {
+    card.append(el('p', 'dim', `Previous Move source: ${sourceProfile} / ${sourceTarget}. The recovery controls use these settings and do not promise to revive the old process.`));
+    if (recovery.queue_admission_started && !recovery.queue_admission_finished) {
+      card.append(el('p', 'dim', 'Queued work already began on the destination; retry Move there before considering any other recovery.'));
+      return card;
+    }
+  }
 
   if (!session.compatible_resume_targets?.length) {
     card.append(
@@ -1365,14 +1464,14 @@ function resumableCard(session) {
     return card;
   }
 
-  const profilePicker = pickerField('Profile', `resume-profile-${session.id}`, snapshot.profiles, session.profile_id, () => {});
+  const profilePicker = pickerField('Profile', `resume-profile-${session.id}`, snapshot.profiles, sourceProfile, () => {});
   profilePicker.dataset.role = 'resume-profile';
   card.append(profilePicker);
 
   const targetPicker = pickerField(
     'Target', `resume-target-${session.id}`,
     session.compatible_resume_targets.map(id => ({ id })),
-    session.compatible_resume_targets.includes(session.target_id) ? session.target_id : session.compatible_resume_targets[0],
+    session.compatible_resume_targets.includes(sourceTarget) ? sourceTarget : session.compatible_resume_targets[0],
     () => {},
   );
   targetPicker.dataset.role = 'resume-target';
@@ -1394,16 +1493,245 @@ function resumableCard(session) {
   }
 
   const row = el('div', 'row');
-  row.append(
-    action('Resume', '', {
-      action: 'resume',
-      id: session.id,
-      profile: session.profile_id,
-      target: session.target_id,
-    }),
-  );
+  const resume = action('Resume', '', {
+    action: 'resume',
+    id: session.id,
+    profile: sourceProfile,
+    target: sourceTarget,
+  });
+  // Keep the recorded source settings with this authenticated action. They
+  // are user-selected mounts/resource sizing, not diagnostics; the server
+  // still validates them before handing them to the daemon.
+  resume._resumeRecovery = recovery;
+  row.append(resume);
   card.append(row);
   return card;
+}
+
+// ---------------------------------------------------------------------------
+// Move confirmation
+// ---------------------------------------------------------------------------
+//
+// Moving is deliberately a two-step route. The first request is read-only and
+// returns a fingerprinted preparation from the daemon; only the second request
+// can interrupt the source. Keeping the preparation in this route also makes a
+// browser reconnect harmless: it cannot accidentally submit a changed target
+// under an old confirmation.
+
+function freshMoveDraft(session) {
+  const compatible = session.compatible_resume_targets || [];
+  const recovery = session.move_recovery;
+  const recoveryTarget = recovery?.destination_target_template_id;
+  return {
+    workspaceId: session.workspace_id || selectedWorkspaceId(),
+    sessionId: session.id,
+    profileId: recovery?.destination_profile_id || session.profile_id || snapshot.profiles[0]?.id || '',
+    targetId: compatible.includes(recoveryTarget)
+      ? recoveryTarget
+      : compatible.includes(session.target_id) ? session.target_id : compatible[0] || '',
+    clearResourceAllocation: recovery?.clear_resource_allocation === true,
+    destinationAdditionalMounts: recovery ? (recovery.destination_additional_mounts || []) : null,
+    destinationResourceAllocation: recovery ? (recovery.destination_resource_allocation ?? null) : null,
+    queueLocked: recovery?.queue_admission_started === true && recovery?.queue_admission_finished !== true,
+    preparation: null,
+    preparing: false,
+    committing: false,
+    acknowledge: false,
+    queue: recovery?.queue || 'discard',
+  };
+}
+
+function moveQueueItemText(item) {
+  if (item?.kind && typeof item.kind === 'object') {
+    const [kind, details] = Object.entries(item.kind)[0] || [];
+    if (kind === 'set_config') return `/${details?.key || 'config'} ${details?.value || ''}`.trim();
+  }
+  const content = Array.isArray(item?.content) ? item.content : [];
+  const text = content.find(block => block?.type === 'text')?.text;
+  const image = content.find(block => block?.type === 'image');
+  if (typeof text === 'string' && text) {
+    if (image) return `${text} [Image attachment: ${image.mimeType || image.mime_type || 'image'}]`;
+    return text;
+  }
+  if (image) return `[Image attachment: ${image.mimeType || image.mime_type || 'image'}]`;
+  try {
+    return JSON.stringify(item?.content || item).slice(0, 400);
+  } catch (_) {
+    return 'Queued command';
+  }
+}
+
+function renderMoveForm() {
+  if (!moveStep || route.name !== 'move') return;
+  const session = snapshot.sessions.find(item => item.id === route.sessionId);
+  if (!session) return;
+  const recoveryTarget = session.move_recovery?.destination_target_template_id;
+  if (!moveDraft || moveDraft.sessionId !== session.id) moveDraft = freshMoveDraft(session);
+  const draft = moveDraft;
+  const preparation = draft.preparation;
+  moveProgress.textContent = preparation ? 'Review the destination and confirm the interruption.' : 'Choose a compatible destination. The source is not changed during preparation.';
+  moveStep.replaceChildren();
+
+  if (!preparation) {
+    moveStep.append(el('p', '', `Move “${session.title || session.id}” while keeping its session identity, transcript, and recoverable workspace state.`));
+    const profilePicker = pickerField('Profile', `move-profile-${session.id}`, snapshot.profiles, draft.profileId, value => {
+      if (draft.queueLocked) return;
+      draft.profileId = value;
+      draft.preparation = null;
+    });
+    moveStep.append(profilePicker);
+    const targetIds = [...new Set([
+      ...(session.compatible_resume_targets || []),
+      recoveryTarget,
+    ].filter(Boolean))];
+    const targets = targetIds.map(id => snapshot.targets.find(target => target.id === id) || { id });
+    const targetPicker = pickerField('Target', `move-target-${session.id}`, targets, draft.targetId, value => {
+      if (draft.queueLocked) return;
+      draft.targetId = value;
+      draft.preparation = null;
+    });
+    if (draft.queueLocked) {
+      for (const input of [...profilePicker.querySelectorAll('input'), ...targetPicker.querySelectorAll('input')]) {
+        input.disabled = true;
+      }
+    }
+    moveStep.append(targetPicker);
+    moveStep.append(el('p', 'dim', 'Move rebuilds a fresh environment. Existing resource sizing and attached directories are retained. Installed packages and files outside the declared workspace are not migrated.'));
+    const clearResources = el('label', 'field-inline');
+    const clearResourcesInput = document.createElement('input');
+    clearResourcesInput.type = 'checkbox';
+    clearResourcesInput.checked = draft.clearResourceAllocation;
+    clearResourcesInput.disabled = draft.queueLocked;
+    clearResourcesInput.onchange = () => {
+      draft.clearResourceAllocation = clearResourcesInput.checked;
+      draft.preparation = null;
+    };
+    clearResources.append(clearResourcesInput, el('span', '', 'Clear inherited resource sizing and use destination defaults'));
+    moveStep.append(clearResources);
+    if (draft.queueLocked) {
+      moveStep.append(el('p', 'dim', 'The destination and resource settings are locked to the existing destination because queue admission already began.'));
+    }
+    moveStep.append(el('p', 'dim', 'Use this only when intentionally removing the current container or host sizing. Attached directories stay fixed to this workspace in the web viewer.'));
+    moveNextButton.textContent = 'Prepare move';
+  } else {
+    const target = snapshot.targets.find(item => item.id === (preparation.selection.target_template_id || session.target_id));
+    const profile = snapshot.profiles.find(item => item.id === (preparation.selection.profile_id || session.profile_id));
+    moveStep.append(el('p', '', `From ${preparation.source_profile_id} / ${preparation.source_target_template_id} to ${profile?.id || preparation.selection.profile_id || session.profile_id} / ${target?.id || preparation.selection.target_template_id || session.target_id}.`));
+    moveStep.append(el('p', 'dim', preparation.selection.clear_resource_allocation
+      ? 'Resource sizing: use destination defaults. Attached directories remain fixed to this workspace.'
+      : 'Resource sizing and attached directories: retain the source workspace settings.'));
+    moveStep.append(el('p', 'dim', preparation.cross_harness ? 'This is a cross-harness handoff. Harness-private state is rebuilt from the canonical transcript.' : 'The same harness session state will be restored when supported.'));
+    if (preparation.active) {
+      const warning = el('label', 'move-warning');
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.checked = draft.acknowledge;
+      check.onchange = () => {
+        draft.acknowledge = check.checked;
+        renderMoveForm();
+      };
+      warning.append(check, el('span', '', 'Interrupt the active turn and checkpoint the session before rebuilding it.'));
+      moveStep.append(warning);
+    }
+    const queued = preparation.queued_commands || [];
+    if (queued.length) {
+      moveStep.append(el('h3', '', `${queued.length} queued command${queued.length === 1 ? '' : 's'}`));
+      const list = el('div', 'move-queue');
+      list.append(...queued.map((item, index) => el('div', 'queue-item', `${index + 1}. ${moveQueueItemText(item)}`)));
+      moveStep.append(list);
+      const queuePicker = choiceControl({
+        label: 'After the destination is ready',
+        options: draft.queueLocked
+          ? [{
+            value: draft.queue,
+            title: draft.queue === 'start' ? 'Continue queued work on this destination' : 'Keep queued work discarded',
+            description: 'The previous destination already admitted this choice; retrying with another choice could replay work.',
+          }]
+          : [
+            { value: 'discard', title: 'Discard queued work', description: 'Start idle on the destination (default).' },
+            { value: 'start', title: 'Run queued work', description: 'Accept the existing commands in order after readiness.' },
+          ],
+        values: [draft.queue],
+        onChange: () => {
+          draft.queue = queuePicker.querySelector('input:checked')?.value || 'discard';
+        },
+      });
+      moveStep.append(queuePicker);
+    } else {
+      moveStep.append(el('p', 'dim', draft.queueLocked
+        ? `Queue admission already began with “${draft.queue}”; retrying must use the same choice on this destination.`
+        : 'No queued work is waiting; the destination will open idle.'));
+    }
+    moveNextButton.textContent = 'Confirm move';
+  }
+  const busy = draft.preparing || draft.committing;
+  moveNextButton.disabled = busy || (preparation?.active === true && !draft.acknowledge);
+  moveBackButton.disabled = busy;
+  for (const input of moveStep.querySelectorAll('input, select, button')) input.disabled = busy;
+}
+
+async function prepareMove() {
+  const draft = moveDraft;
+  if (!draft || draft.preparing) return;
+  if (!draft.profileId && !draft.targetId) {
+    moveError.textContent = 'Choose a profile, a target, or both.';
+    return;
+  }
+  draft.preparing = true;
+  moveError.textContent = '';
+  renderMoveForm();
+  try {
+    draft.preparation = await request('/api/moves/prepare', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: draft.sessionId,
+        profile_id: draft.profileId || null,
+        target_template_id: draft.targetId || null,
+        clear_resource_allocation: draft.clearResourceAllocation,
+        additional_mounts: draft.destinationAdditionalMounts,
+        resource_allocation: draft.destinationResourceAllocation,
+      }),
+    });
+  } catch (error) {
+    moveError.textContent = error.message;
+  } finally {
+    draft.preparing = false;
+    if (moveDraft === draft) renderMoveForm();
+  }
+}
+
+async function commitMove() {
+  const draft = moveDraft;
+  if (!draft || !draft.preparation || draft.committing) return;
+  draft.committing = true;
+  moveError.textContent = '';
+  renderMoveForm();
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'move',
+        request: {
+          preparation: draft.preparation,
+          queue: (draft.preparation.queued_commands || []).length || draft.queueLocked ? draft.queue : null,
+          acknowledge_interruption: draft.acknowledge,
+        },
+      }),
+    });
+    await refresh();
+    announce(`Moving ${draft.sessionId}`);
+    navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
+  } catch (error) {
+    moveError.textContent = error.message;
+  } finally {
+    draft.committing = false;
+    if (moveDraft === draft) renderMoveForm();
+  }
+}
+
+async function advanceMove() {
+  if (!moveDraft?.preparation) return prepareMove();
+  return commitMove();
 }
 
 /// Bytes as a person reads them.
@@ -3233,6 +3561,24 @@ newForm.onsubmit = async event => {
   }
 };
 
+moveBackButton.onclick = () => {
+  if (!moveDraft) return;
+  if (moveDraft.preparation) {
+    moveDraft.preparation = null;
+    moveDraft.acknowledge = false;
+    moveDraft.queue = 'discard';
+    moveError.textContent = '';
+    renderMoveForm();
+  } else {
+    navigate({ name: 'dashboard', workspaceId: moveDraft.workspaceId });
+  }
+};
+
+moveForm.onsubmit = async event => {
+  event.preventDefault();
+  await advanceMove();
+};
+
 /// One session action, from the row that carries it.
 ///
 /// The pending set is checked at entry and released in a `finally`, so a
@@ -3242,6 +3588,17 @@ async function runSessionAction(dataset, errorNode, extra) {
   if (pendingActions.has(key)) return;
   if (dataset.action === 'open') {
     navigate({ name: 'conversation', sessionId: dataset.id });
+    return;
+  }
+  if (dataset.action === 'move') {
+    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    if (!session) return;
+    closeSessionMenu();
+    navigate({
+      name: 'move',
+      workspaceId: session.workspace_id || selectedWorkspaceId(),
+      sessionId: session.id,
+    });
     return;
   }
   if (dataset.action === 'close') {
@@ -3266,6 +3623,10 @@ async function runSessionAction(dataset, errorNode, extra) {
     body.target_id = extra?.target_id || dataset.target;
     body.workspace_id = selectedWorkspaceId();
     body.queue = extra?.queue || 'start';
+    if (extra && Object.prototype.hasOwnProperty.call(extra, 'additional_mounts')) {
+      body.additional_mounts = extra.additional_mounts;
+      body.resource_allocation = extra.resource_allocation ?? null;
+    }
   }
   pendingActions.add(key);
   renderRoute();
@@ -3320,10 +3681,16 @@ resumable.onclick = async e => {
   if (!target) return;
   const card = target.closest('.session');
   const pick = role => card?.querySelector(`[data-role="${role}"] input:checked`)?.value;
+  const recovery = target._resumeRecovery;
+  const settings = recovery ? {
+    additional_mounts: recovery.source_additional_mounts || [],
+    resource_allocation: recovery.source_resource_allocation ?? null,
+  } : {};
   await runSessionAction(target.dataset, resumeError, {
     target_id: pick('resume-target'),
     profile_id: pick('resume-profile'),
     queue: pick('resume-queue'),
+    ...settings,
   });
 };
 

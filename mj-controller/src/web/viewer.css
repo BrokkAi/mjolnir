@@ -142,6 +142,37 @@ h3 {
   align-items: center;
 }
 
+.move-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-left: 3px solid var(--failed);
+  padding: 8px 10px;
+  margin: 12px 0;
+}
+
+.move-warning input {
+  min-height: 24px;
+  margin-top: 2px;
+}
+
+.move-queue {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  margin: 8px 0 12px;
+}
+
+.move-queue .queue-item {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.move-queue .queue-item:last-child {
+  border-bottom: 0;
+}
+
 /* Wide content scrolls inside its own box. The page never scrolls sideways. */
 .scroll-x {
   overflow-x: auto;

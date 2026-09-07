@@ -21,6 +21,9 @@ use crate::hel_worker::{
 
 pub const STATE_VERSION: u32 = 1;
 
+mod session_move;
+pub use session_move::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionState {
@@ -85,7 +88,7 @@ pub fn config_command_text(key: &str, value: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterializedQueuedPrompt {
     pub command_id: String,
@@ -775,7 +778,7 @@ pub enum SessionResourceAllocation {
 }
 
 impl SessionResourceAllocation {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         match self {
             Self::Container { cpus, memory_bytes } if *cpus == 0 || *memory_bytes == 0 => {
                 bail!("container resource allocation must have non-zero CPU and memory")
