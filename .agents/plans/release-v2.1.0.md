@@ -15,9 +15,11 @@ Publish the current master work, including Muse Code support and durable session
 - [x] Publish brokk-anvil-client 0.28.1 under foundev ownership, configure its trusted publisher, and replace every old-package consumer with the registry dependency.
 - [x] Read back and verify the exact trusted publisher for all three Anvil and all eight Mjolnir release crates.
 - [x] Pass full workspace tests, workspace/all-target Clippy, formatting, version and license checks against the published replacement.
-- [ ] Finish release builds and extracted-package verification; push the final candidate and await CI.
-- [ ] Wait for master CI on the final release commit; workflow 34108548549 for 75be7e68 remains in progress, with voice and three-client checks successful.
-- [ ] Create/push annotated v2.1.0 tag after validations pass; monitor release and publication workflows.
+- [x] Finish release and portable worker builds, extracted voice-package verification, all eight package archives, and workspace/all-target checks; push final candidate 80bbeb5e440b159c1808de00da805183ebfd7e8c.
+- [x] Pass master CI 34117354460 on the exact final release commit.
+- [x] Check the clean release commit with the release-version script, then create and push annotated v2.1.0 after pushing source first.
+- [x] Complete GitHub release workflow 34119539334 and npm publication 34121876134; all three platform archives and checksums are public and npm installation/voice smoke checks passed.
+- [x] Publish all eight 2.1.0 crates in workflow 34121867758; confirm the final brokk-mjolnir version in the registry.
 
 ## Surprises & Discoveries
 
@@ -55,10 +57,14 @@ Regenerate files safely and preserve unrelated changes. Never move an already-pu
 
 ## Outcomes & Retrospective
 
-Mjolnir v2.1.0 preparation and implementation fixes are pushed. No v2.1.0 tag or GitHub release has been created. The replacement package is published with foundev ownership and verified trusted publishing. Mjolnir validation against that registry version is in progress; final candidate commit, CI, tagging, and release publication remain.
+Mjolnir v2.1.0 is released at validated and pushed commit 80bbeb5e440b159c1808de00da805183ebfd7e8c. GitHub has all three platform archives and checksums, npm publication succeeded, and all eight 2.1.0 crates are published. Voice stays enabled and included; release builds compiled it for every platform and the npm installation smoke test checked the executable. The replacement package is published with foundev ownership and verified trusted publishing. Extracted voice-package compilation and all local and master CI validations passed against the registry dependency. Anvil v0.28.1 also completed GitHub, crates.io, npm, PyPI, documentation, and CI workflows successfully.
 
 Revision note: recorded the completed local validation and pushed checkpoints, and the experimentally confirmed dependency publication blocker so release work can resume without repeating discovery.
 
 Revision note: recorded the explicit package-replacement decision, retained voice support, and the ownership/publication gates learned from the failed Anvil publication.
 
 Revision note: recorded actual replacement publication, ownership/invitations, and verified publisher configurations; the registry access blocker is resolved.
+
+Revision note: recorded the successful final validation and exact-commit CI, pushed tag, and active release workflow so publication can be monitored without repeating preparation.
+
+Revision note: recorded successful platform and registry publication for both releases, retaining voice and leaving old package versions/tags untouched.
