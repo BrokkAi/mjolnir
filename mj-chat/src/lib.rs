@@ -4,6 +4,8 @@
 pub mod components;
 mod dictation;
 pub mod speech;
+pub mod spinner;
+pub mod theme;
 pub mod usage_format;
 
 pub mod hel_chat;

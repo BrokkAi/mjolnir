@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
@@ -10,10 +10,14 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{ControlKind, Form};
 use crate::hel_text_input::TextInput;
+use crate::theme;
 
-const FOCUS_STYLE: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
-const NORMAL_STYLE: Style = Style::new().fg(Color::White);
-const DISABLED_STYLE: Style = Style::new().fg(Color::DarkGray);
+const FOCUS_STYLE: Style = Style::new()
+    .fg(theme::BACKGROUND)
+    .bg(theme::ACCENT)
+    .add_modifier(Modifier::BOLD);
+const NORMAL_STYLE: Style = Style::new().fg(theme::TEXT).bg(theme::SURFACE_RAISED);
+const DISABLED_STYLE: Style = Style::new().fg(theme::MUTED).bg(theme::SURFACE_RAISED);
 
 fn control_style<K: Copy + Eq>(form: &Form<K>, id: K, enabled: bool) -> Style {
     if !enabled {
@@ -39,7 +43,7 @@ impl Button {
         id: K,
     ) {
         form.register(id, ControlKind::Button, area, enabled);
-        let paragraph = Paragraph::new(Line::from(Span::raw(format!("[ {label} ]"))))
+        let paragraph = Paragraph::new(Line::from(Span::raw(format!("  {label}  "))))
             .style(control_style(form, id, enabled))
             .alignment(ratatui::layout::Alignment::Center);
         frame.render_widget(paragraph, area);
@@ -191,7 +195,11 @@ impl TextField {
         } else {
             form.register_with_cursor_map(id, ControlKind::TextField, area, true, cursor_map);
         }
-        let style = control_style(form, id, true);
+        let style = if focused && form.is_focused(id) {
+            NORMAL_STYLE.add_modifier(Modifier::UNDERLINED)
+        } else {
+            NORMAL_STYLE
+        };
         frame.render_widget(Paragraph::new(visible).style(style), area);
         if focused && form.is_focused(id) && content.width > 0 && content.height > 0 {
             let cursor = cursor_width.saturating_sub(scroll);
@@ -223,7 +231,7 @@ impl Checkbox {
         id: K,
     ) {
         form.register(id, ControlKind::Checkbox, area, enabled);
-        let mark = if checked { 'x' } else { ' ' };
+        let mark = if checked { '✓' } else { ' ' };
         frame.render_widget(
             Paragraph::new(format!("[{mark}] {label}")).style(control_style(form, id, enabled)),
             area,
@@ -350,9 +358,9 @@ impl ChoiceList {
             List::new(items).highlight_style(if selected_row.is_some_and(|row| !enabled[row]) {
                 DISABLED_STYLE
             } else if form.is_focused(id) {
-                FOCUS_STYLE
+                theme::selection(true)
             } else {
-                Style::default().bg(Color::DarkGray)
+                theme::selection(false)
             }),
             area,
             &mut state,

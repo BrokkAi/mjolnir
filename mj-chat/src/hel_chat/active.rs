@@ -6,13 +6,14 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::theme;
 use anyhow::Result;
 use crossterm::event::Event;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Padding, Paragraph, Wrap};
 
 use crate::components::ControlKind;
 use crate::hel_selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
@@ -598,6 +599,7 @@ impl ActiveChat {
             }
             if let Some(context) = context.as_ref() {
                 state.set_review_config(context.config.review.clone());
+                state.set_spinner_style(context.config.spinner);
             }
             state.set_session_modes(
                 snapshot
@@ -884,6 +886,7 @@ impl ActiveChat {
         self.state.set_header_summary(target, profile);
         self.state.set_harness_kind(harness_kind);
         self.state.set_review_config(config.review.clone());
+        self.state.set_spinner_style(config.spinner);
         self.refresh_voice_availability();
     }
 
@@ -895,6 +898,11 @@ impl ActiveChat {
 
     pub fn latest_event_ordinal(&self) -> u64 {
         self.state.latest_seq()
+    }
+
+    /// Whether visible background activity needs animation frames.
+    pub fn needs_animation(&self) -> bool {
+        self.state.needs_animation()
     }
 
     /// Waits for the next background message, applies it, and drains whatever
@@ -2259,7 +2267,7 @@ impl ActiveChat {
     /// Rows the composer wants at `width`: the wrapped input, up to three
     /// queued-prompt previews, and the block's own border rows.
     pub fn desired_prompt_height(&self, width: u16) -> u16 {
-        let content_width = usize::from(width.saturating_sub(2)).max(1);
+        let content_width = prompt_content_width(width);
         let input_rows =
             u16::try_from(input_visual_rows(&self.state.input, content_width)).unwrap_or(u16::MAX);
         let queued = u16::try_from(self.state.queued_prompts.len().min(3)).unwrap_or(3);
@@ -2270,7 +2278,7 @@ impl ActiveChat {
     /// owns the rest of the frame.
     ///
     /// `prompt_focused` says whether the composer owns the keyboard; only then
-    /// does it draw a cursor and a double border. `transcript_selected` says
+    /// does it draw a cursor and an accent border. `transcript_selected` says
     /// the selection engine still owns a selection on the transcript, so its
     /// row space has to stay frozen for this frame.
     pub fn draw_in(
@@ -2398,7 +2406,7 @@ pub(super) fn render_full_frame(
     transcript_selected: bool,
 ) {
     let inner = frame.area();
-    let prompt_width = usize::from(inner.width.saturating_sub(2)).max(1);
+    let prompt_width = prompt_content_width(inner.width);
     let visible_queued = chat.queued_prompts.len().min(3) as u16;
     let input_rows = input_visual_rows(&chat.input, prompt_width) as u16;
     let prompt_height = input_rows
@@ -2431,7 +2439,7 @@ pub(super) fn render_full_frame(
 /// Draws the transcript and the composer into `regions`.
 ///
 /// `prompt_focused` says whether the composer owns the keyboard; only then
-/// does it draw a cursor and a double border. `transcript_selected` says the
+/// does it draw a cursor and an accent border. `transcript_selected` says the
 /// selection engine still owns a selection on the transcript, so its row
 /// space has to stay frozen for this frame.
 pub(super) fn render_in(
@@ -2452,14 +2460,7 @@ pub(super) fn render_in(
     let inner = regions.overlay;
     let transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
-    let prompt_width = usize::from(prompt_area.width.saturating_sub(2)).max(1);
-    // Focus shows as a double border on whichever pane owns the keyboard, so
-    // the split stays obvious without the eye following a moving band.
-    let prompt_border = if prompt_focused {
-        BorderType::Double
-    } else {
-        BorderType::Plain
-    };
+    let prompt_width = prompt_content_width(prompt_area.width);
     // The button lives on the prompt's bottom border, so it is not part of
     // the selectable prompt interior. Clear the hitbox first because a split
     // view or modal may replace the composer for this frame.
@@ -2541,10 +2542,20 @@ pub(super) fn render_in(
         chat.turn_review_action_areas.clear();
         let queued = chat.queued_prompts.len();
         let prompt_title = prompt_title(chat, queued);
-        let prompt_block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(prompt_border)
+        let mut prompt_block = theme::panel(prompt_focused)
+            .padding(Padding::horizontal(1))
             .title(prompt_title);
+        if prompt_focused && prompt_area.width >= 56 {
+            prompt_block = prompt_block.title_bottom(
+                Line::from(vec![
+                    Span::styled(" Enter ", theme::selection(false)),
+                    Span::styled(" send  ", theme::muted()),
+                    Span::styled(" / ", theme::selection(false)),
+                    Span::styled(" commands ", theme::muted()),
+                ])
+                .right_aligned(),
+            );
+        }
         let prompt_inner = prompt_block.inner(prompt_area);
         chat.voice_button_area = voice_button_area(prompt_area);
         let mut prompt_lines = chat
@@ -2565,13 +2576,22 @@ pub(super) fn render_in(
                         ),
                         usize::from(prompt_inner.width),
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::MUTED),
                 ))
             })
             .collect::<Vec<_>>();
         let queue_rows = prompt_lines.len();
         prompt_lines.extend(if let Some(search) = chat.history_search.as_ref() {
             highlighted_input_lines(&chat.input, &search.query)
+        } else if chat.input.is_empty() {
+            vec![Line::from(Span::styled(
+                if chat.phase == WorkerPhase::Running {
+                    "Add a follow-up while the agent works…"
+                } else {
+                    "What would you like to build?"
+                },
+                theme::muted(),
+            ))]
         } else {
             chat.input
                 .split('\n')
@@ -2585,6 +2605,7 @@ pub(super) fn render_in(
         let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
         frame.render_widget(
             Paragraph::new(prompt_lines)
+                .style(Style::default().fg(theme::TEXT))
                 .wrap(Wrap { trim: false })
                 .scroll((input_scroll as u16, 0))
                 .block(prompt_block),
@@ -2716,15 +2737,19 @@ pub(super) fn render_chat_footer(
         .as_deref()
         .or(notice.as_deref())
         .unwrap_or(&default_footer);
-    // The shared notice bar is yellow wherever it shows; a search prompt or
-    // the default hotkey hints stay the quieter dark gray.
+    // Notices keep a warm accent; navigation hints remain quiet.
     let footer_color = if search_footer.is_none() && notice.is_some() {
-        Color::Yellow
+        theme::WARNING
     } else {
-        Color::DarkGray
+        theme::MUTED
+    };
+    let line = if search_footer.is_none() && notice.is_none() {
+        theme::hints(footer)
+    } else {
+        Line::raw(footer)
     };
     frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(footer_color)),
+        Paragraph::new(line).style(theme::base().fg(footer_color)),
         footer_area,
     );
     if let Some(search) = chat.history_search.as_ref()
@@ -2740,27 +2765,16 @@ pub(super) fn render_chat_footer(
     }
 }
 
-/// The composer's footer row, narrowed to `width` by the dashboard's rule:
-/// whole hints go from the composer's own group first, then from the chords,
-/// and the function keys are never taken, because they are the way to the
-/// palette and the key reference that can name whatever the row dropped.
+/// Fit the composer's hints with the dashboard's shared priority rules.
 fn fit_footer(composer_keys: &str, chords: &[&str], functions: &str, width: u16) -> String {
-    const HINT: &str = " \u{b7} ";
-    const GROUP: &str = " \u{2502} ";
-    let mut pane = composer_keys.split(HINT).collect::<Vec<_>>();
-    let mut chords = chords.to_vec();
-    loop {
-        let text = [pane.join(HINT), chords.join(HINT), functions.to_owned()]
-            .into_iter()
-            .filter(|group| !group.is_empty())
-            .collect::<Vec<_>>()
-            .join(GROUP);
-        if text.chars().count() <= usize::from(width)
-            || (pane.pop().is_none() && chords.pop().is_none())
-        {
-            return text;
-        }
-    }
+    theme::fit_footer(
+        &composer_keys
+            .split(theme::FOOTER_SEPARATOR)
+            .collect::<Vec<_>>(),
+        chords,
+        &functions.split(theme::FOOTER_SEPARATOR).collect::<Vec<_>>(),
+        width,
+    )
 }
 
 /// A remembered configuration value, or `None` when it stands for the
@@ -2834,6 +2848,11 @@ fn prompt_title(chat: &ChatState, queued: usize) -> String {
     format!(" {} ", parts.join(" · "))
 }
 
+/// The composer keeps one cell of space between its text and each border.
+fn prompt_content_width(width: u16) -> usize {
+    usize::from(width.saturating_sub(4)).max(1)
+}
+
 enum VoiceUpdate {
     Availability(
         Vec<std::path::PathBuf>,
@@ -2898,6 +2917,95 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Position, Rect};
     use std::collections::BTreeMap;
+
+    /// Captures the real conversation renderer for visual review. The caller
+    /// chooses an artifact path; ordinary test runs never write screenshots.
+    #[test]
+    #[ignore = "writes a terminal-cell capture to MJ_CHAT_CAPTURE_PATH"]
+    fn capture_chat_preview() {
+        let path = std::env::var_os("MJ_CHAT_CAPTURE_PATH")
+            .expect("set MJ_CHAT_CAPTURE_PATH to the preview JSON path");
+        let dimension = |name, fallback| {
+            std::env::var_os(name)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .expect("capture dimensions must be Unicode")
+                        .parse::<u16>()
+                        .expect("capture dimensions must be unsigned integers")
+                })
+                .unwrap_or(fallback)
+        };
+        let columns = dimension("MJ_CHAT_CAPTURE_COLUMNS", 110);
+        let rows = dimension("MJ_CHAT_CAPTURE_ROWS", 40);
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_header_summary("local / mjolnir", "Claude · Sonnet");
+        chat.mark_prompt_submitted("Make the terminal feel beautifully crafted.");
+        chat.turn_started_at_epoch_seconds = Some(hel::clock::epoch_seconds().saturating_sub(42));
+        chat.set_current_step_start(Some(hel::clock::epoch_millis().saturating_sub(7_000)));
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            execution: Some(hel::hel_worker::RelayExecutionState::Running),
+            ..Default::default()
+        });
+        chat.entries = vec![
+            ChatEntry::plain(
+                1,
+                ChatRole::User,
+                "Make the terminal feel beautifully crafted. Keep it fast, readable, and calm.",
+            ),
+            ChatEntry::plain(
+                2,
+                ChatRole::Agent,
+                "I’m bringing the interface together around a midnight palette, clear hierarchy, and the original animated activity indicators.\n\n### A little more room to think\n\n- Focus follows a soft teal border\n- **Your conversation stays readable** while tools work\n- Code and keyboard shortcuts have their own quiet surfaces",
+            ),
+            ChatEntry::tool(
+                3,
+                "cargo test -p brokk-mj-chat",
+                None,
+                hel::hel_transcript::ToolStatus::Completed,
+            ),
+            ChatEntry::plain(
+                4,
+                ChatRole::Agent,
+                "The shared theme is in place. Here’s the panel style used throughout the app:\n\n```rust\nlet panel = theme::panel(focused)\n    .title(\" Conversation \");\n```\n\nI’m checking the narrow layouts and selection behavior now.",
+            ),
+            ChatEntry::tool(
+                5,
+                "cargo clippy --all-targets -- -D warnings",
+                None,
+                hel::hel_transcript::ToolStatus::Running,
+            ),
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(columns, rows)).expect("terminal");
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, false))
+            .expect("render preview");
+        let buffer = terminal.backend().buffer();
+        let color = |color, fallback| match color {
+            ratatui::style::Color::Rgb(r, g, b) => [r, g, b],
+            _ => fallback,
+        };
+        let rows = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        serde_json::json!({
+                            "text": cell.symbol(),
+                            "fg": color(cell.fg, [223, 235, 244]),
+                            "bg": color(cell.bg, [11, 18, 32]),
+                            "bold": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                            "italic": cell.modifier.contains(ratatui::style::Modifier::ITALIC),
+                            "underline": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let capture = serde_json::json!({ "width": buffer.area.width, "height": buffer.area.height, "rows": rows });
+        std::fs::write(path, serde_json::to_vec(&capture).expect("encode preview"))
+            .expect("write preview");
+    }
 
     #[tokio::test]
     async fn replacement_chat_preserves_the_latest_same_session_draft_even_when_cleared() {
@@ -3931,7 +4039,7 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Background import finished"));
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, Color::Yellow);
+        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::WARNING);
 
         shared.clear();
         terminal
@@ -3942,7 +4050,7 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, Color::DarkGray);
+        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::TEXT);
     }
 
     /// The composer's own row is where a user typing in it learns the keys,
@@ -3993,6 +4101,34 @@ mod tests {
     }
 
     #[test]
+    fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
+        let chat = ChatState::new(&snapshot(), &[]);
+        for width in [7, 20, 32, 40, 80] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    render_chat_footer(frame, area, &chat, true);
+                })
+                .expect("draw narrow footer");
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.trim_end().ends_with("F1 help"), "{width}: {text:?}");
+            if width >= 20 {
+                assert!(text.contains("F2 palette"), "{width}: {text:?}");
+            }
+            if width == 32 {
+                assert_eq!(text.trim_end(), "F2 palette · F1 help");
+            }
+        }
+    }
+
+    #[test]
     fn composer_title_shows_live_model_and_effort_without_outer_session_frame() {
         use agent_client_protocol::schema::v1::{
             SessionConfigSelectOption, SessionConfigSelectOptions,
@@ -4039,7 +4175,7 @@ mod tests {
         // No outer frame wraps the whole session: the transcript's own titled
         // border is the first thing on the frame, not a session title bar.
         assert!(!rendered.contains("HEL /"));
-        assert!(rendered.starts_with(" Conversation "), "{rendered:?}");
+        assert!(rendered.starts_with("╭ Conversation "), "{rendered:?}");
     }
 
     #[test]
@@ -4191,7 +4327,7 @@ mod tests {
     /// The title names the conversation you are in. The rule around it is
     /// chrome and stays dim; the name draws bright white so it stands out.
     #[test]
-    fn the_conversation_title_is_bright_white_and_not_dimmed_with_its_rule() {
+    fn the_conversation_title_remains_readable_above_its_quiet_rule() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
 
@@ -4211,7 +4347,7 @@ mod tests {
             let column = u16::try_from(title_start + offset).unwrap();
             assert_eq!(
                 buffer[(column, 0)].fg,
-                Color::White,
+                theme::TEXT,
                 "the title draws bright white: {}",
                 cells.concat()
             );
@@ -4222,7 +4358,7 @@ mod tests {
             .expect("the rule follows the title");
         assert_eq!(
             buffer[(u16::try_from(rule).unwrap(), 0)].fg,
-            Color::DarkGray,
+            theme::BORDER,
             "the rule stays chrome"
         );
     }
@@ -4267,9 +4403,9 @@ mod tests {
             "the prompt's titled border is at the region's top: {:?}",
             row(16)
         );
-        // The composer has focus here, so its border is the doubled variant.
+        // Focus changes the border's color without changing its geometry.
         assert!(
-            row(20).starts_with('\u{255a}'),
+            row(20).starts_with('╰'),
             "the prompt's bottom border closes the region: {:?}",
             row(20)
         );

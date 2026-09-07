@@ -112,6 +112,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     let mut config = HelConfig {
         version: CONFIG_VERSION,
         newer_config_version: None,
+        spinner: Default::default(),
         phone: Default::default(),
         review: Default::default(),
         startup: Default::default(),
@@ -223,6 +224,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = HelConfig {
         version: CONFIG_VERSION,
         newer_config_version: None,
+        spinner: Default::default(),
         phone: Default::default(),
         review: Default::default(),
         startup: Default::default(),
@@ -341,6 +343,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = HelConfig {
         version: CONFIG_VERSION,
         newer_config_version: None,
+        spinner: Default::default(),
         phone: Default::default(),
         review: Default::default(),
         startup: Default::default(),
@@ -566,6 +569,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let config = HelConfig {
         version: CONFIG_VERSION,
         newer_config_version: None,
+        spinner: Default::default(),
         phone: Default::default(),
         review: Default::default(),
         startup: Default::default(),

@@ -1,7 +1,7 @@
 //! Small drawing primitives shared by the dashboard, dialogs, and wizards.
 
 use ratatui::layout::Rect;
-use ratatui::widgets::{BorderType, Paragraph};
+use ratatui::widgets::Paragraph;
 
 // Modal geometry is shared with the chat view, so it lives in `mj-chat`. These
 // re-exports keep `crate::widgets` the single import site for dashboard code.
@@ -51,14 +51,6 @@ pub(crate) fn popup_height(
         .saturating_sub(2);
     let wrapped = u16::try_from(paragraph.line_count(inner_width)).unwrap_or(u16::MAX);
     nominal.max(wrapped)
-}
-
-pub(crate) fn focus_border(focused: bool) -> BorderType {
-    if focused {
-        BorderType::Double
-    } else {
-        BorderType::Plain
-    }
 }
 
 pub(crate) fn format_resource_bytes(bytes: u64) -> String {

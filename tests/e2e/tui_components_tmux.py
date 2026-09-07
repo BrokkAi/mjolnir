@@ -364,16 +364,19 @@ def create_session(
     """Create a running fake-ACP session for dashboard and chat controls."""
 
     tmux.start("dashboard-create", 140, 40)
-    screen = tmux.wait_for("Workspaces", "workspace picker")
+    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "workspace picker or dashboard")
+    picker_input = "initial launch"
+    if "Workspaces" not in screen:
+        tmux.send_key("F3")
+        screen = tmux.wait_for("Workspaces", "workspace picker opened from dashboard")
+        picker_input = "initial launch; F3 from the remembered workspace"
     evidence.event(
         "workspace-picker",
-        "initial launch",
+        picker_input,
         "Workspaces visible",
         "Workspaces visible",
         evidence.capture("workspace-picker", screen),
     )
-    tmux.send_key("Enter")
-    time.sleep(0.05)
     tmux.send_key("Enter")
     screen = tmux.wait_for_any(
         ("Sessions", "Prompt (no live session)"),
@@ -381,7 +384,7 @@ def create_session(
     )
     evidence.event(
         "dashboard-ready",
-        "Enter, Enter",
+        "Enter",
         "Sessions dashboard visible",
         "Sessions dashboard visible",
         evidence.capture("dashboard-ready", screen),
@@ -400,9 +403,18 @@ def create_session(
     title = f"live-components-{seed}"
     from tui_components_actions import create_through_dialog
     session_id = create_through_dialog(lab, tmux, evidence)
-    status, _ = lab.request("POST", "/api/actions", {"action": "rename", "session_id": session_id, "title": title})
+    lab.wait_snapshot(
+        lambda value: any(
+            item.get("id") == session_id
+            and item.get("state") == "running"
+            and item.get("capabilities", {}).get("rename")
+            for item in value.get("sessions", [])
+        ),
+        "created session accepts rename after launch",
+    )
+    status, response = lab.request("POST", "/api/actions", {"action": "rename", "session_id": session_id, "title": title})
     if status != 202:
-        raise ScenarioFailure(f"fixture rename returned {status}")
+        raise ScenarioFailure(f"fixture rename returned {status}: {response!r}")
     lab.wait_snapshot(lambda value: any(item.get("id") == session_id and item.get("state") == "running" and item.get("title") == title for item in value.get("sessions", [])), "created session running")
     tmux.wait_for(title, "new session title")
 
@@ -486,7 +498,7 @@ def run_workflow(
         evidence.capture("target-actions", target_screen),
     )
     tmux.send_key("F1")
-    help_screen = tmux.wait_for("Keys ·", "nested help over target actions")
+    help_screen = tmux.wait_for("Keyboard shortcuts", "nested help over target actions")
     evidence.event(
         "nested-help-open",
         "F1",
@@ -495,7 +507,7 @@ def run_workflow(
         evidence.capture("nested-help-open", help_screen),
     )
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Keys ·" not in tmux.capture(), "nested Help dismissed")
+    tmux.wait_until(lambda: "Keyboard shortcuts" not in tmux.capture(), "nested Help dismissed")
     target_screen = tmux.wait_for("Target actions", "target actions restored after help")
     evidence.event(
         "nested-help-close",
@@ -556,7 +568,7 @@ def run_workflow(
     )
     tmux.send_key("Tab")
     tmux.send_key("Space")
-    checkbox_screen = tmux.wait_for("[x]", "read-only checkbox toggled")
+    checkbox_screen = tmux.wait_for("[✓]", "read-only checkbox toggled")
     evidence.event(
         "container-read-only",
         "Tab, Space",
@@ -606,7 +618,7 @@ def run_workflow(
 
     # Verify ordinary help and palette after a migrated modal changes focus.
     tmux.send_key("F1")
-    help_screen = tmux.wait_for("Keys ·", "help after editor")
+    help_screen = tmux.wait_for("Keyboard shortcuts", "help after editor")
     evidence.event(
         "help-after-editor",
         "F1",

@@ -156,7 +156,7 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 3;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1040,6 +1040,88 @@ impl StartupConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpinnerStyle {
+    /// A bright dot glides across a faint row (typing-indicator feel).
+    Pulse,
+    /// An undulating braille ribbon rolls across the strip.
+    Wave,
+    /// Vertical bars bounce like an audio equalizer.
+    Bars,
+    /// The whole row breathes brightness in unison (calmest).
+    Shimmer,
+    /// A lit sphere rotates in place, carrying its dark side into view.
+    Globe,
+    /// A lit head sweeps to one wall and back, trailing a fading tail.
+    #[default]
+    Scan,
+}
+
+impl SpinnerStyle {
+    pub const ALL: [Self; 6] = [
+        Self::Pulse,
+        Self::Wave,
+        Self::Bars,
+        Self::Shimmer,
+        Self::Globe,
+        Self::Scan,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pulse => "pulse",
+            Self::Wave => "wave",
+            Self::Bars => "bars",
+            Self::Shimmer => "shimmer",
+            Self::Globe => "globe",
+            Self::Scan => "scan",
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Next animation in the command palette's stable cycle.
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|style| *style == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+impl std::fmt::Display for SpinnerStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SpinnerStyle {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pulse" => Ok(Self::Pulse),
+            "wave" => Ok(Self::Wave),
+            "bars" => Ok(Self::Bars),
+            "shimmer" => Ok(Self::Shimmer),
+            "globe" => Ok(Self::Globe),
+            "scan" => Ok(Self::Scan),
+            _ => Err(format!(
+                "unknown spinner {value:?}; expected one of: {}",
+                Self::ALL
+                    .iter()
+                    .map(|style| style.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelConfig {
@@ -1050,6 +1132,9 @@ pub struct HelConfig {
     /// older Hel never overwrites a file a newer Mjolnir maintains.
     #[serde(skip)]
     pub newer_config_version: Option<u32>,
+    /// Client-side activity animation; omitted configurations retain the classic scan.
+    #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
+    pub spinner: SpinnerStyle,
     #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     pub phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
@@ -1069,6 +1154,7 @@ impl Default for HelConfig {
         Self {
             version: CONFIG_VERSION,
             newer_config_version: None,
+            spinner: SpinnerStyle::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
             startup: StartupConfig::default(),
@@ -1143,10 +1229,10 @@ impl HelConfig {
         reject_non_bare_permissions(&contents)?;
         let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
-        // Version 2 only adds Podman workspace storage. Version-1 Podman
-        // targets acquire the portable named-volume default in memory and the
-        // file is upgraded the next time an ordinary config save occurs.
-        if config.version == 1 {
+        // Version 2 adds Podman workspace storage; version 3 restores the
+        // spinner preference. Earlier configs acquire defaults in memory and
+        // upgrade on the next ordinary save.
+        if matches!(config.version, 1 | 2) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;
@@ -1176,6 +1262,9 @@ impl HelConfig {
     /// written in a future shape costs only that target.
     fn salvage(document: &toml::Value) -> Self {
         let mut config = Self::default();
+        if let Some(spinner) = salvage_section::<SpinnerStyle>(document, "spinner") {
+            config.spinner = spinner;
+        }
         if let Some(phone) = salvage_section::<PhoneConfig>(document, "phone")
             && phone.validate().is_ok()
         {
@@ -1730,6 +1819,7 @@ mod tests {
         HelConfig {
             version: CONFIG_VERSION,
             newer_config_version: None,
+            spinner: SpinnerStyle::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
             startup: Default::default(),
@@ -2330,6 +2420,43 @@ mod tests {
             PodmanWorkspaceStorage::PodmanVolume
         );
         assert!(fs::read_to_string(path).unwrap().starts_with("version = 1"));
+    }
+
+    #[test]
+    fn old_config_restores_scan_without_rewriting_until_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "version = 2\n").unwrap();
+
+        let config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.spinner, SpinnerStyle::Scan);
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "version = 2\n");
+        config.save_to(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with(&format!("version = {CONFIG_VERSION}")));
+        assert!(!saved.contains("spinner"));
+    }
+
+    #[test]
+    fn spinner_preferences_round_trip_without_replacing_other_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = sample_config();
+        config.phone.enabled = false;
+        config.save_to(&path).unwrap();
+
+        for spinner in SpinnerStyle::ALL {
+            HelConfig::update_to(&path, |config| {
+                config.spinner = spinner;
+                Ok(())
+            })
+            .unwrap();
+            let reloaded = HelConfig::load_from(&path).unwrap();
+            assert_eq!(reloaded.spinner, spinner);
+            assert_eq!(reloaded.phone, config.phone);
+            assert_eq!(reloaded.profiles, config.profiles);
+        }
     }
 
     #[test]

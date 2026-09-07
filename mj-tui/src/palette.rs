@@ -15,11 +15,12 @@ use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mj_chat::components::{ChoiceList, ControlKind, Form, Interaction, TextField};
+use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
@@ -308,7 +309,19 @@ pub(crate) fn render_palette(
     // it to the usable terminal bounds when the list cannot fit.
     let popup_height = u16::try_from(lines.len().saturating_add(4).max(5)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
-    let outer = Block::default().borders(Borders::ALL).title(" Commands ");
+    let outer = theme::modal()
+        .title(" ✦ Commands ")
+        .title(
+            Line::styled(
+                format!(" {} commands ", palette.entries.len()),
+                theme::muted(),
+            )
+            .right_aligned(),
+        )
+        .title_bottom(Line::styled(
+            " ↑↓ browse · Tab moves · Enter runs · Esc closes ",
+            theme::muted(),
+        ));
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
     let rows = Layout::default()
@@ -329,6 +342,15 @@ pub(crate) fn render_palette(
         &mut form,
         PaletteControl::Query,
     );
+    if palette.query.is_empty() {
+        frame.render_widget(
+            Line::styled(
+                "Search commands…",
+                theme::muted().add_modifier(Modifier::ITALIC),
+            ),
+            rows[0],
+        );
+    }
 
     // Keep the rail outside the list's registered area. Besides leaving the
     // command text untouched, this means clicking the scrollbar cannot be
@@ -354,12 +376,12 @@ pub(crate) fn render_palette(
             PaletteLine::Heading(heading) => {
                 row_map.push(None);
                 enabled.push(true);
-                Line::styled(
-                    clip(heading, width),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
+                let heading = clip(heading, width.saturating_sub(4));
+                let rule_width = width.saturating_sub(heading.chars().count() + 4);
+                Line::from(vec![
+                    Span::styled(format!("  {heading}  "), theme::title(true)),
+                    Span::styled("─".repeat(rule_width), theme::border(false)),
+                ])
             }
             PaletteLine::Command(index) => {
                 row_map.push(Some(*index));
@@ -376,16 +398,37 @@ pub(crate) fn render_palette(
                     Availability::Blocked(reason) => format!("  ({reason})"),
                     Availability::Ready | Availability::Hidden => String::new(),
                 };
-                // Not `truncate_text`, which collapses runs of spaces: the
-                // key column is padding, and collapsing it puts every label
-                // hard against a key of a different length.
-                let text = clip(&format!("  {:<12}{}{reason}", keys, spec.label), width);
-                let style = if entry.availability == Availability::Ready {
+                let selected = *index == palette.selected;
+                let ready = entry.availability == Availability::Ready;
+                // Keep command labels aligned and reserve a visible gap before
+                // right-aligned shortcuts, even when a chord has several keys.
+                let keys = clip(&keys, width.saturating_sub(4) / 2);
+                let key_width = Line::raw(keys.as_str()).width();
+                let label_width = width.saturating_sub(key_width + 4);
+                let text = clip(&format!("{}{reason}", spec.label), label_width);
+                let style = if !ready {
+                    theme::muted()
+                } else if selected {
                     Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme::TEXT)
                 };
-                Line::from(vec![Span::styled(text, style)])
+                let padding = label_width.saturating_sub(Line::raw(text.as_str()).width()) + 2;
+                Line::from(vec![
+                    Span::styled(if selected { "› " } else { "  " }, theme::title(true)),
+                    Span::styled(text, style),
+                    Span::raw(" ".repeat(padding)),
+                    Span::styled(
+                        keys,
+                        Style::default().fg(if ready {
+                            theme::SECONDARY
+                        } else {
+                            theme::MUTED
+                        }),
+                    ),
+                ])
             }
         })
         .collect::<Vec<_>>();
@@ -421,13 +464,11 @@ pub(crate) fn render_palette(
     );
     form.end_frame(PaletteControl::Query);
 
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            "type to filter · Up/Down browse · Tab moves · Enter runs · Esc closes",
-            Style::default().fg(Color::DarkGray),
-        )),
-        rows[2],
+    let description = palette.entries.get(palette.selected).map_or(
+        "Try a command name or a word from its description.",
+        |entry| spec(entry.id).description,
     );
+    frame.render_widget(Paragraph::new(description).style(theme::muted()), rows[2]);
 }
 
 #[cfg(test)]

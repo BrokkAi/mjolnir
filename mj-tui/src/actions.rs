@@ -42,6 +42,7 @@ pub enum CommandId {
     QuitDetach,
     Palette,
     ReviewSettings,
+    CycleSpinner,
     Help,
 }
 
@@ -209,6 +210,16 @@ macro_rules! footer_word {
 
 fn always_ready(_: &DashboardState) -> Availability {
     Availability::Ready
+}
+
+fn spinner_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.spinner_save_pending {
+        Availability::Blocked("The spinner preference is being saved")
+    } else if dashboard.config.newer_config_version.is_some() {
+        Availability::Blocked("This configuration belongs to a newer Mjolnir")
+    } else {
+        Availability::Ready
+    }
 }
 
 fn selected_session_ready(dashboard: &DashboardState) -> Availability {
@@ -598,6 +609,17 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::CycleSpinner,
+        label: "Next spinner style",
+        description: "Cycle activity animations: scan, pulse, wave, bars, shimmer, globe.",
+        scope: Scope::Settings,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Function,
+        footer_rank: 0,
+        available: spinner_available,
+    },
+    CommandSpec {
         id: CommandId::Help,
         label: "Help",
         description: "List every key this surface answers.",
@@ -770,6 +792,19 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ReviewSettings => self.begin_review_settings(),
+            CommandId::CycleSpinner => {
+                if self.spinner_save_pending {
+                    return DashboardAction::None;
+                }
+                if let Some(notice) = self.config.newer_build_notice() {
+                    self.set_notice(notice);
+                    return DashboardAction::None;
+                }
+                let style = self.config.spinner.next();
+                self.spinner_save_pending = true;
+                self.set_notice(format!("Saving {style} spinner…"));
+                DashboardAction::SaveSpinnerStyle { style }
+            }
             CommandId::RenameSession => {
                 self.begin_rename();
                 DashboardAction::None
@@ -877,6 +912,62 @@ mod tests {
     use super::*;
     use crate::SessionOperationKind;
     use crate::test_support::{dashboard_with_session, operation, running_session};
+
+    #[test]
+    fn spinner_selection_waits_for_the_current_save_before_accepting_another() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let first = dashboard.dispatch_command(CommandId::CycleSpinner);
+        assert!(matches!(
+            first,
+            DashboardAction::SaveSpinnerStyle {
+                style: hel::hel_config::SpinnerStyle::Pulse
+            }
+        ));
+        assert!(matches!(
+            spinner_available(&dashboard),
+            Availability::Blocked(_)
+        ));
+        assert!(matches!(
+            dashboard.dispatch_command(CommandId::CycleSpinner),
+            DashboardAction::None
+        ));
+
+        dashboard.config.spinner = hel::hel_config::SpinnerStyle::Pulse;
+        dashboard.finish_spinner_style_save();
+        assert_eq!(spinner_available(&dashboard), Availability::Ready);
+        assert!(matches!(
+            dashboard.dispatch_command(CommandId::CycleSpinner),
+            DashboardAction::SaveSpinnerStyle {
+                style: hel::hel_config::SpinnerStyle::Wave
+            }
+        ));
+    }
+
+    #[test]
+    fn session_activity_arms_redraws_until_the_work_settles() {
+        let mut dashboard = dashboard_with_session(running_session());
+        assert!(!dashboard.needs_fast_tick());
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .activity
+            .foreground_tool_started_at_ms = Some(1);
+        assert!(dashboard.needs_fast_tick());
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .activity = mj_chat::usage_format::SessionActivity::default();
+        assert!(!dashboard.needs_fast_tick());
+        dashboard.session_operations.insert(
+            "session-1".into(),
+            operation(SessionOperationKind::Launching, None),
+        );
+        assert!(dashboard.needs_fast_tick());
+        dashboard.session_operations.clear();
+        assert!(!dashboard.needs_fast_tick());
+    }
 
     /// `spec()` panics on a missing entry, so prove every id has one before
     /// any other test relies on it.
