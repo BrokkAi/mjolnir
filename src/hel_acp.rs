@@ -38,12 +38,12 @@ use agent_client_protocol::schema::v1::{
     KillTerminalResponse, LoadSessionRequest, McpServer, McpServerStdio, NewSessionRequest,
     PermissionOptionKind, PromptRequest, PromptResponse, ReleaseTerminalRequest,
     ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, ToolCallUpdateFields, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalExitStatus,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCallUpdateFields,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -434,6 +434,15 @@ fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> LoadSession
         // session and can make its history replay emit updates for tools whose
         // creation was never part of this relay stream. New sessions receive
         // the server above; resumed sessions keep whatever they began with.
+        .meta(session_request_meta(spec))
+}
+
+fn resume_session_request(spec: &LaunchSpec, session_id: SessionId) -> ResumeSessionRequest {
+    ResumeSessionRequest::new(session_id, spec.cwd.clone())
+        .additional_directories(spec.additional_directories.clone())
+        // Resuming must preserve the native session's original MCP set, just
+        // like loading it. The adapter only needs the session context here;
+        // future live updates are delivered on this connection.
         .meta(session_request_meta(spec))
 }
 
@@ -2214,28 +2223,40 @@ async fn serve_session(
     .await?;
 
     let loaded_session = if let Some(existing) = &spec.resume_session {
-        let loaded = connection
-            .send_request(load_session_request(
-                spec,
-                SessionId::from(existing.clone()),
-            ))
-            .block_task()
-            .await;
-        spec.acp_activity.mark();
-        let loaded = loaded.with_context(|| format!("load ACP session {existing}"))?;
+        let session_id = SessionId::from(existing.clone());
+        // The relay already owns the transcript. Prefer resuming without
+        // replay so a large native history cannot delay worker readiness.
+        let (loaded_meta, config_options, modes) = if initialized
+            .agent_capabilities
+            .session_capabilities
+            .resume
+            .is_some()
+        {
+            let resumed = connection
+                .send_request(resume_session_request(spec, session_id.clone()))
+                .block_task()
+                .await;
+            spec.acp_activity.mark();
+            let resumed = resumed.with_context(|| format!("resume ACP session {existing}"))?;
+            (resumed.meta, resumed.config_options, resumed.modes)
+        } else {
+            let loaded = connection
+                .send_request(load_session_request(spec, session_id.clone()))
+                .block_task()
+                .await;
+            spec.acp_activity.mark();
+            let loaded = loaded.with_context(|| format!("load ACP session {existing}"))?;
+            (loaded.meta, loaded.config_options, loaded.modes)
+        };
         if let Some(state) = grok_models.as_mut()
-            && let Some(fresh) = grok::model_state(loaded.meta.as_ref())
+            && let Some(fresh) = grok::model_state(loaded_meta.as_ref())
         {
             *state = fresh;
         }
         // The response is the boundary between provider replay and future
         // live updates for this connection.
         session_updates_enabled.store(true, Ordering::Release);
-        Some((
-            SessionId::from(existing.clone()),
-            loaded.config_options,
-            loaded.modes,
-        ))
+        Some((session_id, config_options, modes))
     } else {
         None
     };

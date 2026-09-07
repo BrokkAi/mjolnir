@@ -22,7 +22,113 @@ pub const MAX_IMAGE_BYTES: usize = 700 * 1024;
 const MAX_IMAGE_BASE64_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 const MAX_DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
-const WSL_CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(5);
+const WSL_CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
+const WSL_IMAGE_ENCODER_SCRIPT: &str = r#"
+function Resize-ImageHighQuality {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Drawing.Image] $Image,
+        [Parameter(Mandatory = $true)]
+        [int] $Width,
+        [Parameter(Mandatory = $true)]
+        [int] $Height
+    )
+
+    $resizedImage = [System.Drawing.Bitmap]::new(
+        $Width,
+        $Height,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+    )
+    $graphics = $null
+    try {
+        $graphics = [System.Drawing.Graphics]::FromImage($resizedImage)
+        $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+        $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $graphics.Clear([System.Drawing.Color]::Transparent)
+        $graphics.DrawImage(
+            $Image,
+            [System.Drawing.Rectangle]::new(0, 0, $Width, $Height),
+            0,
+            0,
+            $Image.Width,
+            $Image.Height,
+            [System.Drawing.GraphicsUnit]::Pixel
+        )
+    } catch {
+        $resizedImage.Dispose()
+        throw
+    } finally {
+        if ($null -ne $graphics) {
+            $graphics.Dispose()
+        }
+    }
+    return ,$resizedImage
+}
+
+function Convert-ImageToPngBytes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Drawing.Image] $Image,
+        [Parameter(Mandatory = $true)]
+        [long] $MaxImageBytes,
+        [Parameter(Mandatory = $true)]
+        [long] $MaxDecodedImageBytes
+    )
+
+    $currentImage = $Image
+    $ownsCurrentImage = $false
+    try {
+        while ($true) {
+            $decodedBytes = [double]$currentImage.Width * [double]$currentImage.Height * 4
+            if ($decodedBytes -gt $MaxDecodedImageBytes) {
+                $scale = [Math]::Min(0.9, [Math]::Sqrt($MaxDecodedImageBytes / $decodedBytes))
+            } else {
+                $stream = [System.IO.MemoryStream]::new()
+                try {
+                    $currentImage.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+                    if ($stream.Length -le $MaxImageBytes) {
+                        return ,$stream.ToArray()
+                    }
+                    # Leave headroom so nearly fitting PNGs do not shrink one pixel at a time.
+                    $scale = [Math]::Min(0.9, [Math]::Sqrt($MaxImageBytes / [double]$stream.Length))
+                } finally {
+                    $stream.Dispose()
+                }
+            }
+
+            $newWidth = [Math]::Max(1, [int][Math]::Floor([double]$currentImage.Width * $scale))
+            $newHeight = [Math]::Max(1, [int][Math]::Floor([double]$currentImage.Height * $scale))
+            if ($newWidth -eq $currentImage.Width -and $newHeight -eq $currentImage.Height) {
+                if ($currentImage.Width -gt 1) {
+                    $newWidth = $currentImage.Width - 1
+                } elseif ($currentImage.Height -gt 1) {
+                    $newHeight = $currentImage.Height - 1
+                } else {
+                    throw 'clipboard image cannot be reduced below one pixel'
+                }
+            }
+
+            $resizedImage = Resize-ImageHighQuality `
+                -Image $currentImage `
+                -Width $newWidth `
+                -Height $newHeight
+            if ($ownsCurrentImage) {
+                $currentImage.Dispose()
+            }
+            $currentImage = $resizedImage
+            $ownsCurrentImage = $true
+        }
+    } finally {
+        if ($ownsCurrentImage) {
+            $currentImage.Dispose()
+        }
+    }
+}
+"#;
 #[cfg(target_os = "linux")]
 const WSL_CLIPBOARD_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
@@ -36,14 +142,14 @@ for ($attempt = 0; $attempt -lt 3; $attempt++) {
         if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
             $image = [System.Windows.Forms.Clipboard]::GetImage()
             if ($null -eq $image) { throw 'clipboard image disappeared while reading' }
-            $stream = [System.IO.MemoryStream]::new()
             try {
-                $image.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-                if ($stream.Length -gt $maxImageBytes) { throw "Image is too large; use a smaller screenshot (700 KiB maximum)" }
+                $pngBytes = Convert-ImageToPngBytes `
+                    -Image $image `
+                    -MaxImageBytes $maxImageBytes `
+                    -MaxDecodedImageBytes $maxDecodedImageBytes
                 $kind = 'IMAGE'
-                $payload = [Convert]::ToBase64String($stream.ToArray())
+                $payload = [Convert]::ToBase64String([byte[]]$pngBytes)
             } finally {
-                $stream.Dispose()
                 $image.Dispose()
             }
         } elseif ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -258,7 +364,7 @@ fn read_wsl_clipboard() -> Result<ClipboardContent> {
 fn read_wsl_clipboard_with_script(script: &str) -> Result<ClipboardContent> {
     let executable = wsl_powershell_executable()
         .context("Windows PowerShell is unavailable; cannot read the WSL clipboard")?;
-    let script = format!("$maxImageBytes = {MAX_IMAGE_BYTES};\n{script}");
+    let script = compose_wsl_script(script);
     let command = hel::hel_targets::CommandSpec::new(
         executable.to_string_lossy(),
         [
@@ -289,6 +395,13 @@ fn read_wsl_clipboard_with_script(script: &str) -> Result<ClipboardContent> {
         bail!("Windows clipboard helper failed: {detail}");
     }
     parse_wsl_clipboard_output(&output.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_wsl_script(script: &str) -> String {
+    format!(
+        "$maxImageBytes = {MAX_IMAGE_BYTES};\n$maxDecodedImageBytes = {MAX_DECODED_IMAGE_BYTES};\n{WSL_IMAGE_ENCODER_SCRIPT}\n{script}"
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -414,6 +527,106 @@ mod tests {
             writer.write_image_data(&pixels).unwrap();
         }
         png
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn downsizes_oversized_synthetic_image_in_powershell() {
+        let Some(executable) = wsl_powershell_executable() else {
+            return;
+        };
+        if !executable.is_file() {
+            // The fallback executable name can only be checked from a WSL
+            // environment, where the Windows PATH is available to tests.
+            return;
+        }
+        let script = compose_wsl_script(
+            r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+$width = 768
+$height = 768
+$bitmap = [System.Drawing.Bitmap]::new(
+    $width,
+    $height,
+    [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+)
+$rectangle = [System.Drawing.Rectangle]::new(0, 0, $width, $height)
+$bitmapData = $null
+try {
+    $bitmapData = $bitmap.LockBits(
+        $rectangle,
+        [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+    )
+    $pixels = [byte[]]::new($width * $height * 4)
+    [Random]::new(20260906).NextBytes($pixels)
+    [System.Runtime.InteropServices.Marshal]::Copy(
+        $pixels,
+        0,
+        $bitmapData.Scan0,
+        $pixels.Length
+    )
+} finally {
+    if ($null -ne $bitmapData) {
+        $bitmap.UnlockBits($bitmapData)
+    }
+}
+try {
+    [byte[]]$pngBytes = Convert-ImageToPngBytes `
+        -Image $bitmap `
+        -MaxImageBytes $maxImageBytes `
+        -MaxDecodedImageBytes $maxDecodedImageBytes
+    $resultStream = [System.IO.MemoryStream]::new($pngBytes)
+    try {
+        $resultImage = [System.Drawing.Image]::FromStream($resultStream)
+        try {
+            [Console]::Out.Write("$($pngBytes.Length)|$($bitmap.Width)|$($bitmap.Height)|$($resultImage.Width)|$($resultImage.Height)")
+        } finally {
+            $resultImage.Dispose()
+        }
+    } finally {
+        $resultStream.Dispose()
+    }
+} finally {
+    $bitmap.Dispose()
+}
+"#,
+        );
+        let command = hel::hel_targets::CommandSpec::new(
+            executable.to_string_lossy(),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Sta",
+                "-Command",
+                script.as_str(),
+            ],
+        )
+        .purpose("test Windows clipboard image resizing");
+        let output =
+            hel::hel_targets::CancellableProcessExecutor::with_timeout(WSL_CLIPBOARD_TIMEOUT)
+                .execute(&command)
+                .expect("PowerShell image resize fixture should finish");
+        assert_eq!(
+            output.status,
+            0,
+            "PowerShell image resize fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let fields: Vec<usize> = String::from_utf8(output.stdout)
+            .expect("PowerShell fixture output should be UTF-8")
+            .split('|')
+            .map(|field| {
+                field
+                    .parse()
+                    .expect("PowerShell fixture field should be numeric")
+            })
+            .collect();
+        assert_eq!(fields.len(), 5);
+        assert!(fields[0] <= MAX_IMAGE_BYTES);
+        assert_eq!((fields[1], fields[2]), (768, 768));
+        assert!(fields[3] < fields[1] || fields[4] < fields[2]);
     }
 
     #[test]

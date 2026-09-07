@@ -197,6 +197,33 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
 }
 
 #[test]
+fn resumed_session_request_keeps_load_context() {
+    let spec = LaunchSpec {
+        command: "claude-agent-acp".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: "/workspace/app".into(),
+        additional_directories: vec!["/workspace/api".into()],
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: Some("native".into()),
+        accepted_config: Default::default(),
+        harness: HarnessKind::Claude,
+        execution_policy: ExecutionPolicy::Unconstrained,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::hel_acp::StepClock::default(),
+    };
+    let load = serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
+        .expect("load request serializes");
+    let resume = serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
+        .expect("resume request serializes");
+
+    for field in ["sessionId", "cwd", "additionalDirectories", "_meta"] {
+        assert_eq!(resume[field], load[field], "resume request changed {field}");
+    }
+}
+
+#[test]
 fn claude_sdk_messages_keep_only_non_ambient_background_task_levels() {
     let notification = <ClaudeSdkMessageNotification as agent_client_protocol::JsonRpcMessage>::parse_message(
         "_claude/sdkMessage",
@@ -237,7 +264,13 @@ fn claude_sdk_messages_keep_only_non_ambient_background_task_levels() {
 async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_step() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    for resume_session in [None, Some("native")] {
+    for (resume_session, advertised_resume) in [
+        (None, false),
+        (None, true),
+        (Some("native"), false),
+        (Some("native"), true),
+    ] {
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let bridge = tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(bridge_stream);
@@ -248,24 +281,33 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
                 let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
+                let _ = observed_tx.send(request.clone());
                 let id = request
                     .get("id")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
                 let response = match method {
-                    "initialize" => serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {"protocolVersion": 1},
-                    }),
-                    "session/new" | "session/load" => serde_json::json!({
+                    "initialize" => {
+                        let mut result = serde_json::json!({"protocolVersion": 1});
+                        if advertised_resume {
+                            result["agentCapabilities"] = serde_json::json!({
+                                "sessionCapabilities": {"resume": {}}
+                            });
+                        }
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result,
+                        })
+                    }
+                    "session/new" | "session/load" | "session/resume" => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": {"sessionId": "scripted"},
                     }),
                     _ => continue,
                 };
-                if matches!(method, "session/new" | "session/load") {
+                if matches!(method, "session/new" | "session/load" | "session/resume") {
                     for message in [
                         serde_json::json!({
                             "jsonrpc": "2.0",
@@ -367,6 +409,30 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             .expect("closing the command channel ends the runtime")
             .expect("the runtime task does not panic")
             .expect("the fake adapter session ends cleanly");
+        let mut session_requests = Vec::new();
+        while let Ok(request) = observed_rx.try_recv() {
+            if matches!(
+                request["method"].as_str(),
+                Some("session/new" | "session/load" | "session/resume")
+            ) {
+                session_requests.push(request);
+            }
+        }
+        assert_eq!(session_requests.len(), 1, "open exactly one native session");
+        assert_eq!(
+            session_requests[0]["method"],
+            if resume_session.is_none() {
+                "session/new"
+            } else if advertised_resume {
+                "session/resume"
+            } else {
+                "session/load"
+            },
+            "session setup must select the advertised lifecycle method"
+        );
+        if resume_session.is_some() {
+            assert_eq!(session_requests[0]["params"]["sessionId"], "native");
+        }
         bridge.abort();
     }
 }
