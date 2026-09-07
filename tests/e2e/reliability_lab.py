@@ -605,6 +605,9 @@ bind = "127.0.0.1:{port}"
 tailscale_detect = false
 {tls_config}
 
+[startup]
+enabled = false
+
 [profiles.fake]
 kind = "codex"
 home = {json.dumps(str(self.profile))}
@@ -848,8 +851,6 @@ kind = "local-bare"
     def run(self) -> None:
         port = self.prepare()
         first = self.start_tui("tui-1")
-        first.wait_for("Workspaces")
-        first.send(b"\r\r")
         first.wait_for("Sessions")
         code, _ = self.wait_daemon_status(port)
         self.base_url = f"http://127.0.0.1:{port}"
@@ -974,8 +975,6 @@ kind = "local-bare"
         # cannot accidentally pass by waiting for the fake agent to finish.
         port = self.prepare(fake_acp_prompt_delay_ms=60_000)
         client = self.start_tui("tui-1")
-        client.wait_for("Workspaces")
-        client.send(b"\r\r")
         client.wait_for("Sessions")
         code, _ = self.wait_daemon_status(port)
         self.base_url = f"http://127.0.0.1:{port}"
@@ -1045,7 +1044,7 @@ kind = "local-bare"
             raise ScenarioFailure("active Stop did not leave a resumable recovery archive")
         self.record_action("active-stop", session_id=session_id, elapsed_seconds=elapsed)
 
-        marker = "active ACP turn interrupted before checkpoint barrier"
+        marker = "active turn cancellation settled before checkpoint barrier"
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             logs = self.data / "logs"
