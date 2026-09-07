@@ -48,6 +48,12 @@ const login = document.querySelector('#login'),
   resumeError = document.querySelector('#resume-error'),
   feed = document.querySelector('#conversation-feed'),
   feedScroll = document.querySelector('#conversation-scroll'),
+  conversationTransition = document.querySelector('#conversation-transition'),
+  conversationTransitionTitle = document.querySelector('#conversation-transition-title'),
+  conversationTransitionStage = document.querySelector('#conversation-transition-stage'),
+  conversationTransitionNotice = document.querySelector('#conversation-transition-notice'),
+  conversationTransitionError = document.querySelector('#conversation-transition-error'),
+  conversationTransitionCancel = document.querySelector('#conversation-transition-cancel'),
   jumpToLatest = document.querySelector('#jump-to-latest'),
   cancelTurnButton = document.querySelector('#cancel-turn'),
   commandPalette = document.querySelector('#command-palette'),
@@ -85,7 +91,8 @@ let snapshot,
   moveDraft,
   cursor = 0,
   acknowledged = 0,
-  eventSource;
+  eventSource,
+  conversationMode = null;
 
 /// Actions the browser has asked for and not yet heard back about.
 ///
@@ -213,7 +220,7 @@ function applyRoute() {
   // has one. Otherwise it is a stale link, and the dashboard is the answer.
   if (route.name === 'conversation') {
     const session = snapshot.sessions.find(s => s.id === route.sessionId);
-    if (!session?.capabilities?.open) {
+    if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) {
       navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return;
     }
@@ -483,16 +490,30 @@ function seedDashboardOrders(data) {
   }
   for (const workspaceId of workspaceIds) {
     const workspaceLive = (data.sessions || []).filter(session =>
-      session.workspace_id === workspaceId && ['live', 'starting', 'stopping'].includes(session.lifecycle),
+      session.workspace_id === workspaceId && isDashboardSession(session),
     );
     orderState(workspaceId, workspaceLive);
   }
   // Snapshots predating workspaces still have a single implicit workspace.
   if (!(data.workspaces || []).length) {
     orderState('', (data.sessions || []).filter(session =>
-      ['live', 'starting', 'stopping'].includes(session.lifecycle),
+      isDashboardSession(session),
     ));
   }
+}
+
+function isTransitioningSession(session) {
+  if (!session) return false;
+  if (session.transitioning === true) return true;
+  // A snapshot from just before the shared boolean was deployed still has
+  // enough information to protect its transcript: every operation except a
+  // normal checkpoint owns the conversation until completion.
+  return Boolean(session.operation && session.operation.kind !== 'checkpoint');
+}
+
+function isDashboardSession(session) {
+  return ['live', 'starting', 'stopping'].includes(session.lifecycle)
+    || isTransitioningSession(session);
 }
 
 function orderedSessions(live) {
@@ -508,7 +529,7 @@ function liveSessions() {
   return (snapshot.sessions || []).filter(
     session =>
       session.workspace_id === workspaceId &&
-      (['live', 'starting', 'stopping'].includes(session.lifecycle) || session.operation?.kind === 'move'),
+      isDashboardSession(session),
   );
 }
 
@@ -540,7 +561,7 @@ function renderSessions() {
     closeSessionMenu();
   }
   if (!groups.length) {
-    sessions.replaceChildren(el('p', 'dim', 'No live sessions in this workspace.'));
+    sessions.replaceChildren(el('p', 'dim', 'No live sessions or operations in this workspace.'));
     return;
   }
   const renderedGroups = groups.map(group => {
@@ -646,7 +667,7 @@ function sessionMenuActions(session) {
 function updateSessionCard(card, session) {
   card._session = session;
   const can = session.capabilities || {};
-  const openable = can.open === true;
+  const openable = can.open === true || isTransitioningSession(session);
   card.dataset.openable = String(openable);
   if (openable) {
     card.setAttribute('role', 'link');
@@ -659,7 +680,7 @@ function updateSessionCard(card, session) {
   const attentionText = attention.map(([, label]) => label.toLowerCase()).join(', ');
   card.setAttribute(
     'aria-label',
-    `${openable ? 'Open session' : 'Session'} ${session.title || session.id}${attentionText ? `; needs attention: ${attentionText}` : ''}`,
+    `${can.open === true ? 'Open session' : openable ? 'View session status' : 'Session'} ${session.title || session.id}${attentionText ? `; needs attention: ${attentionText}` : ''}`,
   );
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
@@ -759,15 +780,28 @@ function idleSinceLabel(startedAt, now) {
 
 function operationLabel(operation, now) {
   if (!operation) return '';
-  const started = epochSecondsMs(operation.started_at_epoch_seconds);
+  const stages = [...(operation.stages || [])]
+    .filter(stage => stage && stage.label)
+    .sort((left, right) => (left.started_at_epoch_seconds || 0) - (right.started_at_epoch_seconds || 0));
+  const oldestStage = stages[0] && epochSecondsMs(stages[0].started_at_epoch_seconds);
+  const started = oldestStage ?? epochSecondsMs(operation.started_at_epoch_seconds);
   const clock = started == null ? '' : ` ${formatClock(now - started)}`;
-  const stage = operation.stages?.at(-1)?.label;
-  const kind = String(operation.kind || 'Operation').replace(/-/g, ' ');
-  return `${stage || kind}${clock}`;
+  const labels = stages.map(stage => stage.label).join(' · ');
+  const kind = {
+    create: 'Starting',
+    resume: 'Resuming',
+    move: 'Moving',
+    stop: 'Stopping',
+    destroy: 'Destroying',
+    cleanup: 'Cleaning up',
+    checkpoint: 'Checkpointing',
+  }[operation.kind] || String(operation.kind || 'Operation').replace(/-/g, ' ');
+  return `${labels || kind}${clock}`;
 }
 
 function sessionActivityLabel(session, now = serverClockMs()) {
   if (session.operation) return operationLabel(session.operation, now);
+  if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'stopping', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
   }
@@ -814,6 +848,10 @@ function updateSessionClocks() {
     // This is intentionally the only per-tick mutation: card identity and
     // all controls stay put while a clock advances.
     card._activity.textContent = sessionActivityLabel(card._session);
+  }
+  const selected = snapshot?.sessions.find(session => session.id === currentSession);
+  if (isTransitioningSession(selected)) {
+    conversationTransitionStage.textContent = sessionActivityLabel(selected);
   }
 }
 
@@ -1990,8 +2028,13 @@ function startEvents() {
   eventSource.addEventListener('open', () => setConnection('online'));
   eventSource.addEventListener('revision', () => {
     setConnection('online');
-    refresh();
-    if (currentSession) loadConversation(true);
+    refresh().then(ok => {
+      if (!ok || !currentSession) return;
+      const session = snapshot?.sessions.find(item => item.id === currentSession);
+      if (session?.capabilities?.open && !isTransitioningSession(session)) {
+        loadConversation(true);
+      }
+    });
   });
   // The browser reconnects a stream on its own; saying so is what stops the
   // page looking current while it is not.
@@ -2032,10 +2075,11 @@ async function refresh() {
     menuButton.classList.remove('hidden');
     if (currentSession) {
       const session = snapshot.sessions.find(x => x.id === currentSession);
-      if (!session?.capabilities?.open) {
+      if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) {
         navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
         return true;
       }
+      syncConversationMode(session);
       renderQueue(session);
       renderElicitations(session);
       renderTurnReview(session);
@@ -3326,8 +3370,67 @@ let conversationGeneration = 0;
 let conversationInFlight = false;
 let conversationPending = false;
 
+function clearConversationContents() {
+  entryNodes.clear();
+  feed.replaceChildren();
+  jumpToLatest.classList.add('hidden');
+  elicitations.replaceChildren();
+  elicitationCards.clear();
+  reviewHost.replaceChildren();
+  reviewSignature = null;
+}
+
+/// A lifecycle snapshot retires every transcript request issued under the
+/// previous mode. This is independent of navigation: a late response from a
+/// still-valid session is just as stale once its operation owns the session.
+function syncConversationMode(session) {
+  const transition = isTransitioningSession(session);
+  const operationId = session?.operation?.id || session?.state || session?.lifecycle || '';
+  const next = transition ? `transition:${operationId}` : 'conversation';
+  if (next === conversationMode) return;
+  conversationMode = next;
+  conversationGeneration += 1;
+  conversationPending = false;
+  cursor = 0;
+  acknowledged = 0;
+  conversationTransitionError.textContent = '';
+  clearConversationContents();
+}
+
+function renderConversationTransition(session) {
+  const transition = isTransitioningSession(session);
+  conversationTransition.hidden = !transition;
+  feedScroll.hidden = transition;
+  jumpToLatest.hidden = transition;
+  elicitations.hidden = transition;
+  reviewHost.hidden = transition;
+  if (transition) conversationSide.hidden = true;
+  else conversationSide.hidden = (queue.children.length === 0 && shells.children.length === 0);
+  document.querySelector('#prompt-form').hidden = transition;
+  cancelTurnButton.classList.toggle('hidden', transition || !session?.capabilities?.cancel_turn);
+  if (!transition) return;
+  conversationTransitionTitle.textContent = session.title || session.id;
+  conversationTransitionStage.textContent = sessionActivityLabel(session);
+  const notice = session.operation?.notice
+    || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
+  conversationTransitionNotice.textContent = notice;
+  conversationTransitionNotice.hidden = !notice;
+  conversationTransitionCancel.dataset.id = session.id;
+  conversationTransitionCancel.disabled = !session.capabilities?.cancel_operation
+    || pendingActions.has(`cancel:${session.id}`);
+  conversationTransitionCancel.classList.toggle(
+    'hidden',
+    !session.capabilities?.cancel_operation,
+  );
+}
+
 async function loadConversation(delta = false) {
   if (!currentSession) return;
+  const current = snapshot?.sessions.find(session => session.id === currentSession);
+  if (!current?.capabilities?.open || isTransitioningSession(current)) {
+    if (isTransitioningSession(current)) renderConversationTransition(current);
+    return;
+  }
   // Revisions arrive in bursts. One load runs at a time and remembers that
   // another was asked for, so a burst costs one extra fetch rather than one
   // fetch each.
@@ -3342,7 +3445,12 @@ async function loadConversation(delta = false) {
     const result = await request(
       `/api/conversations/${encodeURIComponent(sessionId)}${delta && cursor ? `?after_seq=${cursor}` : ''}`,
     );
-    if (generation !== conversationGeneration) return;
+    const latest = snapshot?.sessions.find(session => session.id === sessionId);
+    if (
+      generation !== conversationGeneration
+      || !latest?.capabilities?.open
+      || isTransitioningSession(latest)
+    ) return;
     renderEntries(result.entries, !delta || result.reset);
     cursor = result.latest_seq;
     if (cursor > acknowledged) {
@@ -3351,11 +3459,21 @@ async function loadConversation(delta = false) {
         method: 'POST',
         body: JSON.stringify({ through }),
       });
-      if (generation !== conversationGeneration) return;
+      const latest = snapshot?.sessions.find(session => session.id === sessionId);
+      if (
+        generation !== conversationGeneration
+        || !latest?.capabilities?.open
+        || isTransitioningSession(latest)
+      ) return;
       acknowledged = through;
     }
   } catch (err) {
-    if (generation !== conversationGeneration) return;
+    const latest = snapshot?.sessions.find(session => session.id === sessionId);
+    if (
+      generation !== conversationGeneration
+      || !latest?.capabilities?.open
+      || isTransitioningSession(latest)
+    ) return;
     if (err.message === 'unauthorized') {
       showLogin();
       return;
@@ -3363,9 +3481,16 @@ async function loadConversation(delta = false) {
     document.querySelector('#conversation-error').textContent = err.message;
   } finally {
     conversationInFlight = false;
-    if (conversationPending && generation === conversationGeneration) {
+    if (conversationPending) {
       conversationPending = false;
-      loadConversation(true);
+      const latest = snapshot?.sessions.find(session => session.id === sessionId);
+      if (
+        currentSession === sessionId
+        && latest?.capabilities?.open
+        && !isTransitioningSession(latest)
+      ) {
+        loadConversation(generation === conversationGeneration);
+      }
     }
   }
 }
@@ -3373,16 +3498,17 @@ async function loadConversation(delta = false) {
 async function openConversation(id) {
   if (currentSession === id) return;
   const session = snapshot?.sessions.find(x => x.id === id);
-  if (!session?.capabilities?.open) return;
+  if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) return;
   currentSession = id;
   conversationGeneration += 1;
+  conversationMode = null;
   conversationPending = false;
   cursor = 0;
   acknowledged = 0;
-  entryNodes.clear();
-  feed.replaceChildren();
+  clearConversationContents();
   document.querySelector('#conversation-title').textContent = session.title;
   document.querySelector('#conversation-state').textContent = sessionLifecycleLabel(session);
+  syncConversationMode(session);
   renderQueue(session);
   renderElicitations(session);
   renderTurnReview(session);
@@ -3390,7 +3516,7 @@ async function openConversation(id) {
   promptImages = [];
   renderAttachments();
   restoreDraft(id, conversationGeneration);
-  await loadConversation(false);
+  if (!isTransitioningSession(session)) await loadConversation(false);
 }
 
 /// The header, the turn control and the composer, all from what the daemon
@@ -3404,11 +3530,16 @@ function renderSessionTitle(node, session) {
 }
 
 function renderConversationHeader(session) {
+  syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   const state = document.querySelector('#conversation-state');
   state.textContent = sessionLifecycleLabel(session);
   state.className = `pill state-${session.lifecycle}`;
-  cancelTurnButton.classList.toggle('hidden', !session.capabilities?.cancel_turn);
+  renderConversationTransition(session);
+  cancelTurnButton.classList.toggle(
+    'hidden',
+    isTransitioningSession(session) || !session.capabilities?.cancel_turn,
+  );
 
   const running = session.chat_phase === 'running';
   const queued = (session.queued_prompts || []).length;
@@ -3438,16 +3569,12 @@ function renderConversationHeader(session) {
 /// the next conversation opens on top of the last one's rows.
 function leaveConversation() {
   currentSession = null;
+  conversationMode = null;
   conversationGeneration += 1;
   conversationPending = false;
   cursor = 0;
   acknowledged = 0;
-  entryNodes.clear();
-  feed.replaceChildren();
-  elicitations.replaceChildren();
-  elicitationCards.clear();
-  reviewHost.replaceChildren();
-  reviewSignature = null;
+  clearConversationContents();
   promptImages = [];
   renderAttachments();
 }
@@ -3735,6 +3862,20 @@ feedScroll.addEventListener('scroll', () => {
 cancelTurnButton.onclick = async () => {
   await sendAction({ action: 'cancel-turn', session_id: currentSession });
 };
+conversationTransitionCancel.onclick = async () => {
+  const id = conversationTransitionCancel.dataset.id || currentSession;
+  if (!id) return;
+  conversationTransitionCancel.disabled = true;
+  try {
+    await runSessionAction(
+      { action: 'cancel', id },
+      conversationTransitionError,
+    );
+  } finally {
+    const session = snapshot?.sessions.find(item => item.id === id);
+    if (session && currentSession === id) renderConversationHeader(session);
+  }
+};
 // Rich text, and anything a paste or drop would inject as markup, never
 // belongs in a prompt: refuse it here and re-insert the plain text instead.
 promptText.addEventListener('beforeinput', e => {
@@ -3928,7 +4069,10 @@ function reconnect() {
   cursor = 0;
   refresh().then(ok => {
     if (ok) setConnection('online');
-    if (ok && currentSession) loadConversation(false);
+    const session = snapshot?.sessions.find(item => item.id === currentSession);
+    if (ok && session?.capabilities?.open && !isTransitioningSession(session)) {
+      loadConversation(false);
+    }
   });
 }
 

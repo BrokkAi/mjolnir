@@ -43,6 +43,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     display_location: options.displayLocation || '/work/project',
     state: lifecycle === 'live' ? 'running' : lifecycle,
     lifecycle,
+    transitioning: Boolean(options.transitioning),
     created_at: '2030-06-15T00:00:00Z',
     updated_at: '2030-06-15T00:00:00Z',
     last_activity_at_ms: options.activity || SERVER_TIME_MS,
@@ -60,7 +61,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     latest_event_ordinal: 1,
     activity: '',
     activity_details: options.activityDetails || { kind: 'idle' },
-    operation: null,
+    operation: options.operation || null,
     chat_phase: 'idle',
     is_idle: options.isIdle !== false,
     config_options: [],
@@ -89,6 +90,11 @@ function stateWith(sessions) {
     },
     snapshots: 0,
     actions: [],
+    conversationRequests: 0,
+    conversationResponses: 0,
+    conversation: { entries: [], latest_seq: 0, reset: true },
+    holdConversation: false,
+    releaseConversation: null,
     failAction: null,
   };
 }
@@ -139,7 +145,14 @@ async function mount(page, sessions) {
       return route.fulfill({ status: 202, body: '' });
     }
     if (pathname.startsWith('/api/conversations/')) {
-      return json({ entries: [], latest_seq: 0, reset: true });
+      if (route.request().method() === 'GET') {
+        state.conversationRequests += 1;
+        if (state.holdConversation) {
+          await new Promise(resolve => { state.releaseConversation = resolve; });
+        }
+      }
+      state.conversationResponses += 1;
+      return json(state.conversation);
     }
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);
     if (ASSETS.has(file)) {
@@ -186,6 +199,25 @@ function card(page, id) {
 
 function activity(kind, fields = {}) {
   return { kind, ...fields };
+}
+
+function transcript(text) {
+  return {
+    entries: [{
+      id: 1,
+      updated_seq: 1,
+      role: 'agent',
+      label: 'Agent',
+      recorded_at_ms: SERVER_TIME_MS,
+      lines: [text],
+      glyph: '●',
+      tone: 'agent',
+      tool_status: null,
+      diffstats: [],
+    }],
+    latest_seq: 1,
+    reset: true,
+  };
 }
 
 test('compact cards sort initial activity, expose metadata, clocks, attention, and a phone screenshot', async ({ page }) => {
@@ -302,6 +334,102 @@ test('compact cards sort initial activity, expose metadata, clocks, attention, a
   }));
   expect(overflow.documentWidth).toBeLessThanOrEqual(overflow.viewportWidth + 1);
   await page.screenshot({ path: '/tmp/compact-web-cards.png', fullPage: true });
+});
+
+test('transition cards show compact stages and suppress a late transcript response', async ({ page }) => {
+  const state = await mount(page, [
+    session('stopping', 'project-transition', 'Transition', {
+      capabilities: { open: true },
+    }),
+    session('other-live', 'project-other', 'Other'),
+  ]);
+  state.conversation = transcript('old conversation must not return');
+  state.holdConversation = true;
+
+  await card(page, 'stopping').click();
+  await expect(page).toHaveURL(/#conversation\/stopping$/);
+  await expect.poll(() => state.conversationRequests).toBe(1);
+
+  const stopping = state.snapshot.sessions.find(item => item.id === 'stopping');
+  Object.assign(stopping, {
+    lifecycle: 'stopping',
+    state: 'closing',
+    transitioning: true,
+    operation: {
+      id: 'stop-operation-1',
+      session_id: 'stopping',
+      kind: 'stop',
+      started_at_epoch_seconds: Math.floor((SERVER_TIME_MS - 60_000) / 1_000),
+      stages: [
+        {
+          label: 'Stop target',
+          started_at_epoch_seconds: Math.floor((SERVER_TIME_MS - 60_000) / 1_000),
+        },
+        {
+          label: 'Remove storage',
+          started_at_epoch_seconds: Math.floor((SERVER_TIME_MS - 30_000) / 1_000),
+        },
+      ],
+      notice: null,
+      cancellable: true,
+    },
+    capabilities: {
+      ...stopping.capabilities,
+      open: false,
+      cancel_operation: true,
+      rename: false,
+      stop: false,
+    },
+  });
+  await refresh(page, state);
+
+  await expect(page.locator('#conversation-transition')).toBeVisible();
+  await expect(page.locator('#conversation-transition-stage')).toHaveText(/Stop target · Remove storage 1m\d\ds/);
+  const firstStageClock = await page.locator('#conversation-transition-stage').textContent();
+  await expect.poll(
+    () => page.locator('#conversation-transition-stage').textContent(),
+    { timeout: 5_000 },
+  ).not.toBe(firstStageClock);
+  await expect(page.locator('#conversation-scroll')).toBeHidden();
+  await expect(page.locator('#prompt-form')).toBeHidden();
+  await expect(card(page, 'other-live')).toHaveCount(1);
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect(page.locator('#conversation-transition')).toBeVisible();
+  await expect(page.locator('#conversation-scroll')).toBeHidden();
+  await expect(page.locator('#prompt-form')).toBeHidden();
+
+  state.releaseConversation();
+  await expect.poll(() => state.conversationResponses).toBe(1);
+  await expect(page.locator('#conversation-feed')).not.toContainText('old conversation must not return');
+  await expect(page.locator('#conversation-transition')).toBeVisible();
+  await page.locator('#back').click();
+  await expect(card(page, 'stopping').locator('.session-activity')).toHaveText(/Stop target · Remove storage/);
+});
+
+test('ordinary checkpoint keeps the conversation and composer readable', async ({ page }) => {
+  const checkpointAt = Math.floor((SERVER_TIME_MS - 30_000) / 1_000);
+  const state = await mount(page, [
+    session('checkpoint', 'project-checkpoint', 'Checkpoint', {
+      operation: {
+        id: 'checkpoint-1',
+        session_id: 'checkpoint',
+        kind: 'checkpoint',
+        started_at_epoch_seconds: checkpointAt,
+        stages: [{ label: 'Checkpointing', started_at_epoch_seconds: checkpointAt }],
+        notice: null,
+        cancellable: false,
+      },
+    }),
+  ]);
+  state.conversation = transcript('checkpoint conversation remains readable');
+
+  await card(page, 'checkpoint').click();
+  await expect(page).toHaveURL(/#conversation\/checkpoint$/);
+  await expect(page.locator('#conversation-feed')).toContainText('checkpoint conversation remains readable');
+  await expect(page.locator('#conversation-transition')).toBeHidden();
+  await expect(page.locator('#conversation-scroll')).toBeVisible();
+  await expect(page.locator('#prompt-form')).toBeVisible();
 });
 
 test('refresh, workspace navigation, and reconnect preserve card identity, focus, order, and an active press', async ({ page }) => {

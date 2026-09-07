@@ -36,7 +36,7 @@ use hel::hel_config::{HelConfig, TargetTemplate, project_history_host, validate_
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
 use hel::hel_state::{
     HelState, MoveOperation, MovePhase, MovePreparation, MoveSelection, MoveSessionRequest,
-    ProjectSourceIdentity, SessionResourceAllocation, SessionState,
+    ProjectSourceIdentity, SessionResourceAllocation, SessionState, SessionTransitionKind,
 };
 use hel::hel_targets::AdditionalMount;
 
@@ -477,6 +477,7 @@ impl ViewerSnapshot {
                     project_key: project_key(&source.key),
                     display_location: session.project_target(config, &session.target_template_id),
                     lifecycle,
+                    transitioning: session.state.transition_kind().is_some(),
                     latest_event_ordinal: 0,
                     last_activity_at_ms: None,
                     activity_details: None,
@@ -648,6 +649,11 @@ pub struct ViewerSession {
     #[serde(default)]
     pub display_location: String,
     pub lifecycle: ViewerLifecycleCategory,
+    /// A lifecycle transition temporarily owns this session's conversation.
+    /// This remains separate from the coarse lifecycle category so Move can
+    /// hide the old transcript while its durable record is still `Running`.
+    #[serde(default)]
+    pub transitioning: bool,
     /// How far the controller's projection of this session has advanced. A
     /// phone compares it against its own read frontier to know what is unread,
     /// without fetching a transcript to find out.
@@ -1148,7 +1154,36 @@ pub enum ViewerOperationKind {
     Resume,
     Move,
     Stop,
+    Destroy,
+    Cleanup,
     Checkpoint,
+}
+
+impl ViewerOperationKind {
+    pub const fn transition_kind(self) -> Option<SessionTransitionKind> {
+        match self {
+            Self::Create => Some(SessionTransitionKind::Starting),
+            Self::Resume => Some(SessionTransitionKind::Resuming),
+            Self::Move => Some(SessionTransitionKind::Moving),
+            Self::Stop => Some(SessionTransitionKind::Stopping),
+            Self::Destroy | Self::Cleanup => Some(SessionTransitionKind::Destroying),
+            // Checkpointing is an ordinary live-session operation. It must
+            // not replace a readable conversation with a placeholder.
+            Self::Checkpoint => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Create => "Starting",
+            Self::Resume => "Resuming",
+            Self::Move => "Moving",
+            Self::Stop => "Stopping",
+            Self::Destroy => "Destroying",
+            Self::Cleanup => "Cleaning up",
+            Self::Checkpoint => "Checkpointing",
+        }
+    }
 }
 
 /// One stage of a running operation, with the clock it started on.
@@ -1875,6 +1910,16 @@ async fn conversation(
     Query(query): Query<ConversationQuery>,
 ) -> Result<Json<BrowserTranscript>, ApiError> {
     validate_public_id(&session_id)?;
+    let transitioning = {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?.transitioning
+    };
+    if transitioning {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conversation unavailable while the session is transitioning",
+        ));
+    }
     let conversations = state.conversation_rx.borrow();
     let transcript = conversations
         .get(&session_id)
@@ -1902,7 +1947,16 @@ async fn mark_conversation_read(
     Json(request): Json<ReadRequest>,
 ) -> Result<StatusCode, ApiError> {
     validate_public_id(&session_id)?;
-    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let transitioning = {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?.transitioning
+    };
+    if transitioning {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conversation unavailable while the session is transitioning",
+        ));
+    }
     let (reply, result) = tokio::sync::oneshot::channel();
     let client_id = viewer_client_id(&state, &headers).ok_or_else(ApiError::unauthorized)?;
     state
@@ -5930,6 +5984,42 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         assert_eq!(body["reset"], false);
         assert_eq!(body["entries"].as_array().unwrap().len(), 1);
         assert_eq!(body["entries"][0]["lines"][0], "live");
+    }
+
+    #[tokio::test]
+    async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
+        let transcript = BrowserTranscript {
+            latest_seq: 1,
+            window_start_seq: 1,
+            reset: false,
+            entries: vec![BrowserTranscriptEntry {
+                id: 1,
+                updated_seq: 1,
+                role: "agent",
+                label: "Agent".into(),
+                recorded_at_ms: None,
+                lines: vec!["stale".into()],
+                glyph: "●",
+                tone: "agent",
+                tool_status: None,
+                diffstats: Vec::new(),
+            }],
+        };
+        let (app, _, _, _, _) = app_with(
+            BTreeMap::from([("session-1".into(), transcript)]),
+            |snapshot| snapshot.sessions[0].transitioning = true,
+        );
+        let cookie = login_cookie(&app).await;
+        let response = app
+            .oneshot(
+                Request::get("/api/conversations/session-1")
+                    .header(COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

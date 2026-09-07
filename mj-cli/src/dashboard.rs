@@ -26,9 +26,7 @@ use crossterm::event::{
 };
 use hel::hel_config::{HelConfig, config_path};
 use hel::hel_credentials::CredentialSyncHandle;
-use hel::hel_state::{
-    MaterializedSession, MoveOperation, SessionRecord, SessionResourceAllocation, SessionState,
-};
+use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
 use hel::hel_targets::DeploymentCapacityTarget;
 use hel_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption,
@@ -61,12 +59,12 @@ use crate::import::{
 };
 use crate::pollers::{
     CapacityPollUpdate, CredentialSyncNotices, CredentialSyncSignalTracker, Feed, LifecycleUpdate,
-    QuotaRefreshBatch, QuotaUpdate, ResourcePollTarget, ResourcePollUpdate, WorkerDiagnosisTracker,
-    WorkerPollTarget, apply_worker_poll_update, complete_manual_quota_refresh,
-    dashboard_worker_targets, projected_queued_prompts, quota_refresh_profiles,
-    refresh_dashboard_poll_targets, schedule_due_credential_syncs, session_target_is_pollable,
-    spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller, spawn_quota_refresher,
-    spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
+    QuotaRefreshBatch, QuotaUpdate, ResourcePollTarget, ResourcePollUpdate, RuntimeStateUpdate,
+    WorkerDiagnosisTracker, WorkerPollTarget, apply_worker_poll_update,
+    complete_manual_quota_refresh, dashboard_worker_targets, projected_queued_prompts,
+    quota_refresh_profiles, refresh_dashboard_poll_targets, schedule_due_credential_syncs,
+    session_target_is_pollable, spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller,
+    spawn_quota_refresher, spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
 use crate::session_presentation::{
     apply_lifecycle_display, apply_session_activity, lifecycle_kind,
@@ -413,8 +411,7 @@ pub(crate) struct DashboardContext {
 
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
-    runtime_lifecycles: Feed<watch::Receiver<Vec<crate::daemon::RuntimeLifecycleView>>>,
-    runtime_moves: Feed<watch::Receiver<Vec<MoveOperation>>>,
+    runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
     runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>>,
@@ -427,9 +424,10 @@ pub(crate) struct DashboardContext {
     /// is on screen so a subsequently opened chat starts in the right state.
     runtime_review_views: BTreeMap<String, mj_controller::hel_review_host::RuntimeReviewView>,
     runtime_config: Feed<watch::Receiver<HelConfig>>,
-    runtime_records: Feed<watch::Receiver<Vec<SessionRecord>>>,
     config_reload_in_flight: bool,
     remote_lifecycle_sessions: BTreeSet<String>,
+    remote_lifecycle_operations: BTreeMap<String, String>,
+    runtime_state_revision: u64,
     pub(crate) worker_commands_tx: SessionManagerControl,
     worker_shutdown: Option<SessionManagerShutdown>,
     worker_diagnoses: WorkerDiagnosisTracker,
@@ -682,14 +680,6 @@ pub(crate) async fn run_dashboard_for_workspace(
                 let woke = context.worker.accept(update);
                 context.dirty |= woke;
             }
-            update = context.runtime_lifecycles.wait(), if context.runtime_lifecycles.is_open() => {
-                let woke = context.runtime_lifecycles.accept(update);
-                context.dirty |= woke;
-            }
-            update = context.runtime_moves.wait(), if context.runtime_moves.is_open() => {
-                let woke = context.runtime_moves.accept(update);
-                context.dirty |= woke;
-            }
             update = context.runtime_reviews.wait(), if context.runtime_reviews.is_open() => {
                 let woke = context.runtime_reviews.accept(update);
                 context.dirty |= woke;
@@ -702,8 +692,8 @@ pub(crate) async fn run_dashboard_for_workspace(
                 let woke = context.runtime_config.accept(update);
                 context.dirty |= woke;
             }
-            update = context.runtime_records.wait(), if context.runtime_records.is_open() => {
-                let woke = context.runtime_records.accept(update);
+            update = context.runtime_state.wait(), if context.runtime_state.is_open() => {
+                let woke = context.runtime_state.accept(update);
                 context.dirty |= woke;
             }
             result = context.credential_sync.wait(), if context.credential_sync.is_open() => {
@@ -979,9 +969,8 @@ impl DashboardContext {
         let worker_updates_rx = remote_worker.updates;
         let worker_commands_tx = remote_worker.control;
         let worker_shutdown = remote_worker.shutdown;
-        let runtime_lifecycles_rx = remote_worker.lifecycles;
-        let runtime_moves_rx = remote_worker.moves;
-        dashboard.set_move_operations(runtime_moves_rx.borrow().clone());
+        let runtime_state_rx = remote_worker.state;
+        dashboard.set_move_operations(runtime_state_rx.borrow().moves.clone());
         let runtime_reviews_rx = remote_worker.reviews;
         let runtime_review_views: BTreeMap<
             String,
@@ -1003,7 +992,6 @@ impl DashboardContext {
             .map(|notice| notice.id)
             .max();
         let runtime_config_rx = remote_worker.config;
-        let runtime_records_rx = remote_worker.records;
         worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
         let (lifecycle_updates_tx, lifecycle_updates_rx) =
             tokio::sync::mpsc::unbounded_channel::<LifecycleUpdate>();
@@ -1068,16 +1056,16 @@ impl DashboardContext {
             review_discovery_cancel: None,
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
-            runtime_lifecycles: Feed::new(runtime_lifecycles_rx),
-            runtime_moves: Feed::new(runtime_moves_rx),
+            runtime_state: Feed::new(runtime_state_rx),
             runtime_reviews: Feed::new(runtime_reviews_rx),
             runtime_notices: Feed::new(runtime_notices_rx),
             reported_notice_id,
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
-            runtime_records: Feed::new(runtime_records_rx),
             config_reload_in_flight: false,
             remote_lifecycle_sessions: BTreeSet::new(),
+            remote_lifecycle_operations: BTreeMap::new(),
+            runtime_state_revision: 0,
             worker_commands_tx,
             worker_shutdown: Some(worker_shutdown),
             worker_diagnoses: WorkerDiagnosisTracker::default(),
@@ -1237,7 +1225,13 @@ impl DashboardContext {
 
     /// Opens whatever the selection moved on to while an attach was running.
     pub(super) fn open_pending_chat_session(&mut self) {
-        if let Some(session_id) = self.pending_chat_session.take() {
+        if let Some(session_id) = self.pending_chat_session.take()
+            && self.dashboard.transition_kind(&session_id).is_none()
+            && self
+                .dashboard
+                .transition_failure_kind(&session_id)
+                .is_none()
+        {
             self.open_chat_session(&session_id);
         }
     }
@@ -1253,6 +1247,12 @@ impl DashboardContext {
         let Some(selected) = self.dashboard.selected_session_id().map(str::to_owned) else {
             return;
         };
+        if self.dashboard.transition_kind(&selected).is_some()
+            || self.dashboard.transition_failure_kind(&selected).is_some()
+        {
+            self.pending_chat_session = None;
+            return;
+        }
         if self.opening_chat_session.as_deref() == Some(selected.as_str()) {
             return;
         }
@@ -1278,15 +1278,17 @@ impl DashboardContext {
     /// conversation, so it is hidden until its own attach settles. Its feeds
     /// keep running either way: a failed attach brings it back current.
     pub(crate) fn visible_chat(&mut self) -> Option<&mut mj_chat::hel_chat::ActiveChat> {
-        let Self {
-            active_chat,
-            opening_chat_session,
-            ..
-        } = self;
+        let dashboard = &self.dashboard;
+        let active_chat = &mut self.active_chat;
+        let opening_chat_session = &self.opening_chat_session;
         let opening = opening_chat_session.as_deref();
-        active_chat
-            .as_mut()
-            .filter(|chat| chat_is_visible(opening, chat.session_id()))
+        active_chat.as_mut().filter(|chat| {
+            chat_is_visible(opening, chat.session_id())
+                && dashboard.transition_kind(chat.session_id()).is_none()
+                && dashboard
+                    .transition_failure_kind(chat.session_id())
+                    .is_none()
+        })
     }
 
     /// The user took the choice into their own hands, so the surface stops
@@ -1309,11 +1311,14 @@ impl DashboardContext {
             return;
         }
         let Some(session_id) = startup_session_choice(
-            self.controller
-                .state
-                .sessions
-                .values()
-                .filter(|session| session.state.is_active()),
+            self.controller.state.sessions.values().filter(|session| {
+                session.state.is_active()
+                    && self.dashboard.transition_kind(&session.id).is_none()
+                    && self
+                        .dashboard
+                        .transition_failure_kind(&session.id)
+                        .is_none()
+            }),
             |session_id| self.dashboard.session_activity_at_ms(session_id),
         ) else {
             self.dashboard.focus_sessions();
@@ -1407,9 +1412,13 @@ impl DashboardContext {
             render_combined(
                 frame,
                 dashboard,
-                active_chat
-                    .as_mut()
-                    .filter(|chat| chat_is_visible(opening, chat.session_id())),
+                active_chat.as_mut().filter(|chat| {
+                    chat_is_visible(opening, chat.session_id())
+                        && dashboard.transition_kind(chat.session_id()).is_none()
+                        && dashboard
+                            .transition_failure_kind(chat.session_id())
+                            .is_none()
+                }),
                 transcript_selected,
             );
             *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
@@ -1702,6 +1711,17 @@ impl DashboardContext {
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
         self.dashboard.select_active_session(session_id);
         self.save_active_question_draft();
+        // A lifecycle owns the row's conversation until its authoritative
+        // completion. Do not start an attach that can arrive after Stop/Move
+        // and put a retiring chat back on screen.
+        if self.dashboard.transition_kind(session_id).is_some()
+            || self.dashboard.transition_failure_kind(session_id).is_some()
+        {
+            self.pending_chat_session = None;
+            self.dashboard.set_current_session(None);
+            self.dirty = true;
+            return;
+        }
         if self
             .active_chat
             .as_ref()
@@ -1883,10 +1903,8 @@ impl DashboardContext {
     /// feed, in the order the UI depends on.
     fn drain_feeds(&mut self) {
         self.drain_quota_updates();
-        self.drain_runtime_records();
+        self.drain_runtime_state();
         self.drain_worker_updates();
-        self.drain_runtime_lifecycles();
-        self.drain_runtime_moves();
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
         self.drain_runtime_config();
@@ -2065,14 +2083,28 @@ impl DashboardContext {
         }
     }
 
-    fn drain_runtime_lifecycles(&mut self) {
+    fn drain_runtime_state(&mut self) {
         let mut latest = None;
-        while let Some(lifecycles) = self.runtime_lifecycles.next_ready() {
-            latest = Some(lifecycles);
+        while let Some(update) = self.runtime_state.next_ready() {
+            latest = Some(update);
         }
-        let Some(lifecycles) = latest else {
+        let Some(update) = latest else {
             return;
         };
+        // Watch receivers can be primed with revision zero and later receive
+        // the same revision during startup. Accept that first snapshot, but
+        // never let an older daemon response roll a completed operation back.
+        if update.revision < self.runtime_state_revision {
+            return;
+        }
+        self.runtime_state_revision = update.revision;
+        self.apply_runtime_records(update.records);
+        self.dashboard.set_move_operations(update.moves);
+        self.apply_runtime_lifecycles(update.lifecycles);
+        self.controller_changed = true;
+    }
+
+    fn apply_runtime_lifecycles(&mut self, lifecycles: Vec<crate::daemon::RuntimeLifecycleView>) {
         let active = lifecycles
             .iter()
             .map(|lifecycle| lifecycle.session_id.clone())
@@ -2083,8 +2115,12 @@ impl DashboardContext {
             .cloned()
             .collect::<Vec<_>>()
         {
-            self.dashboard.finish_session_operation(&session_id);
+            let move_active = self.dashboard.move_operation_active(&session_id);
+            if !self.lifecycle_operations.contains_key(&session_id) && !move_active {
+                self.dashboard.finish_session_operation(&session_id);
+            }
             self.remote_lifecycle_sessions.remove(&session_id);
+            self.remote_lifecycle_operations.remove(&session_id);
         }
         for lifecycle in lifecycles {
             let kind = lifecycle_kind(lifecycle.kind);
@@ -2093,14 +2129,35 @@ impl DashboardContext {
                 &lifecycle.session_id,
                 kind,
             );
+            // Keep the daemon identity even while a local action is waiting
+            // for its callback. The callback is keyed only by session id, so
+            // this lets it distinguish an authoritative newer operation.
+            let previous_operation_id = self
+                .remote_lifecycle_operations
+                .insert(lifecycle.session_id.clone(), lifecycle.operation_id.clone());
+            self.remote_lifecycle_sessions
+                .insert(lifecycle.session_id.clone());
             if !self
                 .lifecycle_operations
                 .contains_key(&lifecycle.session_id)
             {
-                self.remote_lifecycle_sessions
-                    .insert(lifecycle.session_id.clone());
+                if previous_operation_id
+                    .as_ref()
+                    .is_some_and(|previous| previous != &lifecycle.operation_id)
+                {
+                    // A new daemon operation for the same session supersedes
+                    // the old overlay even when both snapshots use the same
+                    // lifecycle kind.
+                    self.dashboard
+                        .finish_session_operation(&lifecycle.session_id);
+                }
                 apply_lifecycle_display(&mut self.dashboard, &lifecycle);
             } else {
+                self.dashboard.set_session_operation_identity(
+                    &lifecycle.session_id,
+                    Some(lifecycle.operation_id.clone()),
+                    lifecycle.cancellable,
+                );
                 self.dashboard.replace_session_operation_stages(
                     &lifecycle.session_id,
                     lifecycle.active_stages,
@@ -2117,19 +2174,6 @@ impl DashboardContext {
                 self.dashboard.set_notice(notice);
             }
         }
-        self.controller_changed = true;
-    }
-
-    fn drain_runtime_moves(&mut self) {
-        let mut latest = None;
-        while let Some(moves) = self.runtime_moves.next_ready() {
-            latest = Some(moves);
-        }
-        let Some(moves) = latest else {
-            return;
-        };
-        self.dashboard.set_move_operations(moves);
-        self.controller_changed = true;
     }
 
     /// Hands the open conversation the surface's current view of the config
@@ -2183,37 +2227,11 @@ impl DashboardContext {
         );
     }
 
-    fn drain_runtime_records(&mut self) {
-        let mut latest = None;
-        while let Some(records) = self.runtime_records.next_ready() {
-            latest = Some(records);
-        }
-        let Some(records) = latest else {
-            return;
-        };
+    fn apply_runtime_records(&mut self, records: Vec<SessionRecord>) {
         let sessions: BTreeMap<String, SessionRecord> = records
             .into_iter()
             .map(|session| (session.id.clone(), session))
             .collect();
-        let settled_remote_operations = self
-            .remote_lifecycle_sessions
-            .iter()
-            .filter(|session_id| {
-                self.dashboard
-                    .session_operation_kind(session_id)
-                    .is_some_and(|kind| {
-                        remote_lifecycle_settled(
-                            kind,
-                            sessions.get(*session_id).map(|session| session.state),
-                        )
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for session_id in settled_remote_operations {
-            self.dashboard.finish_session_operation(&session_id);
-            self.remote_lifecycle_sessions.remove(&session_id);
-        }
         if let Some(chat) = self.active_chat.as_mut() {
             let feed_expected = sessions
                 .get(chat.session_id())
@@ -2229,7 +2247,11 @@ impl DashboardContext {
                             | SessionOperationKind::Destroying
                             | SessionOperationKind::Moving,
                     )
-                );
+                )
+                || self
+                    .dashboard
+                    .transition_failure_kind(chat.session_id())
+                    .is_some();
             chat.set_session_retiring(retiring);
             // Order matters: an expected feed clears the retiring flag.
             chat.set_session_feed_expected(feed_expected);
@@ -2375,7 +2397,16 @@ impl DashboardContext {
             self.controller_changed = true;
             let session_id = update.session_id.clone();
             let operation = self.lifecycle_operations.remove(&session_id);
-            self.dashboard.finish_session_operation(&session_id);
+            // A completion callback carries only the session id. If a newer
+            // daemon operation is already present in the coherent runtime
+            // snapshot, retain its overlay; the next snapshot that removes
+            // that operation will settle it. This prevents an old local
+            // callback from hiding an authoritative newer operation.
+            if !self.remote_lifecycle_operations.contains_key(&session_id)
+                && !self.dashboard.move_operation_active(&session_id)
+            {
+                self.dashboard.finish_session_operation(&session_id);
+            }
             spawn_lifecycle_reload(
                 LifecycleReload { update, operation },
                 self.workspace_id.clone(),
@@ -2549,63 +2580,6 @@ fn mark_active_chat_retiring_for_remote_lifecycle(
             | SessionOperationKind::Moving
     ) {
         actions::mark_active_chat_retiring(active_chat, session_id);
-    }
-}
-
-/// A durable terminal lifecycle state is authoritative over a remote UI
-/// overlay. The daemon lifecycle feed normally removes the overlay first, but
-/// records and lifecycles travel on separate watch channels; retaining a
-/// completed overlay would otherwise force a fresh Running record back to a
-/// displayed Provisioning state indefinitely.
-fn remote_lifecycle_settled(kind: SessionOperationKind, state: Option<SessionState>) -> bool {
-    match kind {
-        SessionOperationKind::Launching | SessionOperationKind::Importing => {
-            state.is_none_or(|state| {
-                matches!(
-                    state,
-                    SessionState::Running
-                        | SessionState::Disconnected
-                        | SessionState::Lost
-                        | SessionState::Error
-                        | SessionState::DestroyedWithDataLoss
-                )
-            })
-        }
-        SessionOperationKind::Resuming | SessionOperationKind::Moving => {
-            state.is_none_or(|state| {
-                matches!(
-                    state,
-                    SessionState::Running
-                        | SessionState::Disconnected
-                        | SessionState::Stopped
-                        | SessionState::Lost
-                        | SessionState::Error
-                        | SessionState::DestroyedWithDataLoss
-                )
-            })
-        }
-        SessionOperationKind::Connecting => state.is_some_and(|state| {
-            matches!(
-                state,
-                SessionState::Running
-                    | SessionState::Disconnected
-                    | SessionState::Lost
-                    | SessionState::Error
-                    | SessionState::DestroyedWithDataLoss
-            )
-        }),
-        SessionOperationKind::Stopping => state.is_some_and(|state| {
-            matches!(
-                state,
-                SessionState::Stopped
-                    | SessionState::Lost
-                    | SessionState::Error
-                    | SessionState::DestroyedWithDataLoss
-            )
-        }),
-        SessionOperationKind::Destroying => {
-            state.is_none_or(|state| matches!(state, SessionState::DestroyedWithDataLoss))
-        }
     }
 }
 
@@ -3033,34 +3007,6 @@ mod tests {
         assert!(chat_is_visible(None, "session-a"));
         assert!(chat_is_visible(Some("session-a"), "session-a"));
         assert!(!chat_is_visible(Some("session-b"), "session-a"));
-    }
-
-    #[test]
-    fn durable_terminal_state_settles_remote_lifecycle_overlay() {
-        assert!(remote_lifecycle_settled(
-            SessionOperationKind::Launching,
-            Some(SessionState::Running)
-        ));
-        assert!(!remote_lifecycle_settled(
-            SessionOperationKind::Stopping,
-            Some(SessionState::Running)
-        ));
-        assert!(remote_lifecycle_settled(
-            SessionOperationKind::Stopping,
-            Some(SessionState::Stopped)
-        ));
-        assert!(remote_lifecycle_settled(
-            SessionOperationKind::Resuming,
-            Some(SessionState::Stopped)
-        ));
-        assert!(remote_lifecycle_settled(
-            SessionOperationKind::Launching,
-            None
-        ));
-        assert!(remote_lifecycle_settled(
-            SessionOperationKind::Destroying,
-            None
-        ));
     }
 
     #[tokio::test]
@@ -3769,7 +3715,7 @@ mod tests {
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),
-            state: SessionState::Running,
+            state: hel::hel_state::SessionState::Running,
             target: None,
             native_session_id: None,
             acp_session_title: None,

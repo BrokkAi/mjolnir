@@ -60,6 +60,10 @@ function cardHarness() {
     snapshot: {},
     epochMs(value) { return typeof value === 'number' ? value : null; },
     sessionLifecycleLabel(session) { return session.state || session.lifecycle || 'live'; },
+    isTransitioningSession(session) {
+      return session.transitioning === true
+        || Boolean(session.operation && session.operation.kind !== 'checkpoint');
+    },
     document: { createElement: makeNode },
   });
   vm.runInContext(

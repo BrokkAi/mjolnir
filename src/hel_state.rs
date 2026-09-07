@@ -42,6 +42,59 @@ pub enum SessionState {
     DestroyedWithDataLoss,
 }
 
+/// A lifecycle transition temporarily replaces the conversation in control surfaces.
+/// Operation ownership takes precedence over intermediate durable session states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionTransitionKind {
+    Starting,
+    Resuming,
+    Moving,
+    Stopping,
+    Destroying,
+}
+
+impl SessionTransitionKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Resuming => "Resuming",
+            Self::Moving => "Moving",
+            Self::Stopping => "Stopping",
+            Self::Destroying => "Destroying",
+        }
+    }
+
+    pub fn for_session(state: SessionState, operation: Option<Self>) -> Option<Self> {
+        operation.or_else(|| state.transition_kind())
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::{SessionState, SessionTransitionKind};
+
+    #[test]
+    fn operation_ownership_hides_intermediate_move_states_but_not_ordinary_live_work() {
+        for state in [
+            SessionState::Stopped,
+            SessionState::Running,
+            SessionState::Disconnected,
+        ] {
+            assert_eq!(
+                SessionTransitionKind::for_session(state, Some(SessionTransitionKind::Moving)),
+                Some(SessionTransitionKind::Moving)
+            );
+            assert_eq!(SessionTransitionKind::for_session(state, None), None);
+        }
+        assert_eq!(SessionState::Checkpointing.transition_kind(), None);
+        assert_eq!(
+            SessionState::Closing.transition_kind(),
+            Some(SessionTransitionKind::Stopping)
+        );
+    }
+}
+
 /// Controller-owned execution state derived from the relay event stream.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -624,6 +677,17 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl SessionState {
+    /// Recovery without a live operation still hides an unfinished target transition.
+    /// Ordinary checkpoints and reconnects deliberately keep their conversation visible.
+    pub const fn transition_kind(self) -> Option<SessionTransitionKind> {
+        match self {
+            Self::Provisioning => Some(SessionTransitionKind::Starting),
+            Self::Closing => Some(SessionTransitionKind::Stopping),
+            Self::Destroying => Some(SessionTransitionKind::Destroying),
+            _ => None,
+        }
+    }
+
     /// True while the session still belongs on the dashboard. `Closing` and
     /// `Checkpointing` stay active on purpose: a stop that has not produced a
     /// verified checkpoint must not make its row disappear.

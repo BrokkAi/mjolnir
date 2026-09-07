@@ -24,6 +24,12 @@ use crate::{DashboardState, Mode, SessionOperationKind, nth_key};
 #[derive(Debug, Clone)]
 pub(crate) struct SessionOperationDisplay {
     pub(crate) kind: SessionOperationKind,
+    /// Daemon-owned identity used to reject a stale lifecycle result after a
+    /// later operation for the same session has started.
+    pub(crate) operation_id: Option<String>,
+    /// Whether the daemon still accepts cancellation. Create becomes
+    /// uncancellable at its atomic commit boundary.
+    pub(crate) cancellable: bool,
     pub(crate) started_at_epoch_seconds: u64,
     pub(crate) placeholder: Option<SessionRecord>,
     /// Launch stages currently in flight and when each began. More than one
@@ -522,6 +528,17 @@ impl DashboardState {
     /// row visible while the normal lifecycle feed catches up. Retained failed
     /// and cancelled intents stay attached to resume rows for explicit recovery.
     pub fn set_move_operations(&mut self, operations: impl IntoIterator<Item = MoveOperation>) {
+        let previous_active = self
+            .move_operations
+            .values()
+            .filter(|operation| operation.is_active())
+            .map(|operation| {
+                (
+                    operation.selection.session_id.clone(),
+                    operation.operation_id.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         self.move_operations = operations
             .into_iter()
             .map(|operation| (operation.selection.session_id.clone(), operation))
@@ -540,7 +557,22 @@ impl DashboardState {
                 )
             })
             .collect::<Vec<_>>();
-        for (session_id, _operation_id, profile_id, target_template_id, created_at) in active {
+        for (session_id, operation_id) in previous_active {
+            let still_active = self
+                .move_operations
+                .get(&session_id)
+                .is_some_and(|operation| operation.is_active());
+            if !still_active
+                && self
+                    .session_operations
+                    .get(&session_id)
+                    .and_then(|operation| operation.operation_id.as_ref())
+                    == Some(&operation_id)
+            {
+                self.finish_session_operation(&session_id);
+            }
+        }
+        for (session_id, operation_id, profile_id, target_template_id, created_at) in active {
             if self.session_operation_kind(&session_id).is_none() {
                 let started_at = chrono::DateTime::parse_from_rfc3339(&created_at)
                     .ok()
@@ -556,6 +588,7 @@ impl DashboardState {
             if let (Some(profile_id), Some(target_template_id)) = (profile_id, target_template_id) {
                 self.set_resume_destination(&session_id, profile_id, target_template_id);
             }
+            self.set_session_operation_identity(&session_id, Some(operation_id), true);
         }
         self.rebuild_resume_rows();
         self.clamp_selections();
@@ -581,10 +614,31 @@ impl DashboardState {
         placeholder: Option<SessionRecord>,
         started_at_epoch_seconds: u64,
     ) {
+        self.begin_session_operation_at_with_id(
+            session_id,
+            kind,
+            placeholder,
+            started_at_epoch_seconds,
+            None,
+            true,
+        );
+    }
+
+    pub fn begin_session_operation_at_with_id(
+        &mut self,
+        session_id: String,
+        kind: SessionOperationKind,
+        placeholder: Option<SessionRecord>,
+        started_at_epoch_seconds: u64,
+        operation_id: Option<String>,
+        cancellable: bool,
+    ) {
         self.session_operations.insert(
             session_id,
             SessionOperationDisplay {
                 kind,
+                operation_id,
+                cancellable,
                 started_at_epoch_seconds,
                 placeholder,
                 active_stages: BTreeMap::new(),
@@ -603,6 +657,18 @@ impl DashboardState {
     ) {
         if let Some(operation) = self.session_operations.get_mut(session_id) {
             operation.active_stages = stages.into_iter().collect();
+        }
+    }
+
+    pub fn set_session_operation_identity(
+        &mut self,
+        session_id: &str,
+        operation_id: Option<String>,
+        cancellable: bool,
+    ) {
+        if let Some(operation) = self.session_operations.get_mut(session_id) {
+            operation.operation_id = operation_id;
+            operation.cancellable = cancellable;
         }
     }
 
@@ -685,6 +751,15 @@ impl DashboardState {
             })
     }
 
+    /// Whether the daemon still owns an active Move intent for this session.
+    /// Surfaces use this to keep the transition row while intermediate durable
+    /// records (Stopped/Provisioning/Running) catch up.
+    pub fn move_operation_active(&self, session_id: &str) -> bool {
+        self.move_operations
+            .get(session_id)
+            .is_some_and(|operation| operation.is_active())
+    }
+
     fn apply_operation_projection(&mut self) {
         for (session_id, operation) in &self.session_operations {
             if let Some(placeholder) = &operation.placeholder {
@@ -698,7 +773,6 @@ impl DashboardState {
                 SessionOperationKind::Launching
                     | SessionOperationKind::Resuming
                     | SessionOperationKind::Moving
-                    | SessionOperationKind::Importing
             ) && let Some(session) = self.state.sessions.get_mut(session_id)
             {
                 session.state = SessionState::Provisioning;
@@ -1905,6 +1979,40 @@ mod tests {
                 .copied()
                 .collect::<Vec<_>>(),
             vec![ProvisionStage::Syncing]
+        );
+    }
+
+    #[test]
+    fn transition_kind_prefers_operations_and_import_does_not_hide_chat() {
+        use hel::hel_state::SessionTransitionKind;
+
+        let mut session = stopped_session();
+        session.state = SessionState::Provisioning;
+        let mut dashboard = dashboard_with_session(session);
+
+        assert_eq!(
+            dashboard.transition_kind("session-1"),
+            Some(SessionTransitionKind::Starting)
+        );
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Importing,
+            None,
+        );
+        assert_eq!(dashboard.transition_kind("session-1"), None);
+    }
+
+    #[test]
+    fn failed_closing_record_is_recovery_status_not_an_active_transition() {
+        let mut session = stopped_session();
+        session.state = SessionState::Closing;
+        session.last_error = Some("checkpoint copy failed".into());
+        let dashboard = dashboard_with_session(session);
+
+        assert_eq!(dashboard.transition_kind("session-1"), None);
+        assert_eq!(
+            dashboard.transition_failure_kind("session-1"),
+            Some(hel::hel_state::SessionTransitionKind::Stopping)
         );
     }
 }

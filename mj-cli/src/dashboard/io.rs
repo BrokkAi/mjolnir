@@ -1281,6 +1281,20 @@ impl DashboardContext {
                 }
                 self.opening_chat_session = None;
                 self.dashboard.set_opening_session(None);
+                // The attach may have crossed a lifecycle boundary while it
+                // was preparing. Keep the warm chat/draft untouched and drop
+                // the late result instead of reviving a retiring conversation.
+                if self.dashboard.transition_kind(&session_id).is_some()
+                    || self
+                        .dashboard
+                        .transition_failure_kind(&session_id)
+                        .is_some()
+                {
+                    self.dashboard.set_current_session(None);
+                    self.open_pending_chat_session();
+                    self.dirty = true;
+                    return;
+                }
                 match *result {
                     Ok(chat) => {
                         let mut chat = chat.open();

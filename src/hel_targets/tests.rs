@@ -2811,6 +2811,93 @@ struct FakeExecutor {
     fail_at: Option<usize>,
 }
 
+struct StageRecordingExecutor {
+    events: RefCell<Vec<(ProvisionStage, bool)>>,
+    active: RefCell<BTreeSet<ProvisionStage>>,
+    fail: bool,
+}
+
+impl CommandExecutor for StageRecordingExecutor {
+    fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        assert!(
+            self.active.borrow().contains(&ProvisionStage::RecoveryCopy),
+            "controlled recovery work must run inside its stage scope"
+        );
+        if self.fail {
+            anyhow::bail!("controlled recovery work failed")
+        }
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.active.borrow_mut().insert(stage);
+        self.events.borrow_mut().push((stage, true));
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        assert!(
+            self.active.borrow_mut().remove(&stage),
+            "stage finished without a matching start"
+        );
+        self.events.borrow_mut().push((stage, false));
+    }
+}
+
+#[test]
+fn scoped_stage_reports_completion_after_controlled_success() {
+    let executor = StageRecordingExecutor {
+        events: RefCell::new(Vec::new()),
+        active: RefCell::new(BTreeSet::new()),
+        fail: false,
+    };
+    {
+        let _stage = ProvisionStageGuard::new(&executor, ProvisionStage::RecoveryCopy);
+        executor
+            .execute(&CommandSpec::new("capture", std::iter::empty::<String>()))
+            .unwrap();
+        assert!(
+            executor
+                .active
+                .borrow()
+                .contains(&ProvisionStage::RecoveryCopy)
+        );
+    }
+    assert!(executor.active.borrow().is_empty());
+    assert_eq!(
+        executor.events.into_inner(),
+        vec![
+            (ProvisionStage::RecoveryCopy, true),
+            (ProvisionStage::RecoveryCopy, false)
+        ]
+    );
+}
+
+#[test]
+fn scoped_stage_reports_completion_after_controlled_error() {
+    let executor = StageRecordingExecutor {
+        events: RefCell::new(Vec::new()),
+        active: RefCell::new(BTreeSet::new()),
+        fail: true,
+    };
+    let result = {
+        let _stage = ProvisionStageGuard::new(&executor, ProvisionStage::RecoveryCopy);
+        executor.execute(&CommandSpec::new("capture", std::iter::empty::<String>()))
+    };
+    assert!(result.is_err());
+    assert!(executor.active.borrow().is_empty());
+    assert_eq!(
+        executor.events.into_inner(),
+        vec![
+            (ProvisionStage::RecoveryCopy, true),
+            (ProvisionStage::RecoveryCopy, false)
+        ]
+    );
+}
+
 impl CommandExecutor for FakeExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let index = self.seen.borrow().len();

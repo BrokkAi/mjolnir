@@ -701,13 +701,16 @@ mod tests {
                 .iter()
                 .map(|entry| entry.availability)
                 .collect::<Vec<_>>(),
-            vec![Availability::Blocked("an operation is in progress")]
+            vec![Availability::Blocked("a session transition is in progress")]
         );
 
         dashboard.handle_key(key(KeyCode::F(2)));
         type_query(&mut dashboard, "rename");
         let lines = drawn(&mut dashboard, 120, 44).join("\n");
-        assert!(lines.contains("an operation is in progress"), "{lines}");
+        assert!(
+            lines.contains("a session transition is in progress"),
+            "{lines}"
+        );
 
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
@@ -719,7 +722,7 @@ mod tests {
         );
         assert_eq!(
             dashboard.notice().as_deref(),
-            Some("Rename session is unavailable: an operation is in progress.")
+            Some("Rename session is unavailable: a session transition is in progress.")
         );
     }
 

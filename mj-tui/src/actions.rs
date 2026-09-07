@@ -228,6 +228,12 @@ fn session_idle(dashboard: &DashboardState) -> Availability {
     if dashboard.move_queue_admission_incomplete(&session.id) {
         return Availability::Blocked("Move queue admission is incomplete; retry Move first");
     }
+    if dashboard.transition_kind(&session.id).is_some() {
+        return Availability::Blocked("a session transition is in progress");
+    }
+    if dashboard.transition_failure_kind(&session.id).is_some() {
+        return Availability::Blocked("recover the failed transition first");
+    }
     match dashboard.session_operation_kind(&session.id) {
         Some(_) => Availability::Blocked("an operation is in progress"),
         None => Availability::Ready,
@@ -309,7 +315,11 @@ fn support_pane_focused(dashboard: &DashboardState) -> Availability {
 
 fn cancel_footer(dashboard: &DashboardState) -> Option<String> {
     let session = dashboard.selected_session()?;
-    let kind = dashboard.session_operation_kind(&session.id)?;
+    let operation = dashboard.session_operations.get(&session.id)?;
+    if !operation.cancellable {
+        return None;
+    }
+    let kind = operation.kind;
     Some(format!("cancel {}", kind.label().to_lowercase()))
 }
 

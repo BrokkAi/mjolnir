@@ -655,9 +655,9 @@ kind = "local-bare"
         last = ""
         while time.monotonic() < deadline:
             result = self.command("daemon", "status", timeout=3, check=False)
-            last = result.stdout + result.stderr
+            last = re.sub(r"viewer code [0-9]{6}", "viewer code [redacted]", result.stdout + result.stderr)
             match = re.search(
-                rf"web viewer (?:http|https)://127\.0\.0\.1:{port}; viewer code ([0-9]{{6}})",
+                rf"web viewer (?:http|https)://127\.0\.0\.1:{port}/?; viewer code ([0-9]{{6}})",
                 result.stdout,
             )
             if result.returncode == 0 and match:

@@ -4,7 +4,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -13,7 +13,7 @@ use hel::hel_state::{HelState, MaterializedSession, ProjectSourceIdentity, Sessi
 use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, ProcessExecutor};
 use hel::hel_worker::RelayCommand;
 use hel::hel_workspace::WorkspaceRecord;
-use mj_controller::hel_controller::{Controller, SessionLaunchOptions};
+use mj_controller::hel_controller::Controller;
 use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_server::{
     ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, MovePreparationRequest,
@@ -27,7 +27,9 @@ use mj_controller::hel_session_manager::{
 use mj_controller::hel_tailscale::TailscaleTls;
 use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 
-use crate::daemon::{ResumeSessionRequest, RuntimeState};
+use crate::daemon::{
+    CreateSessionControl, CreateSessionRequest, ResumeSessionRequest, RuntimeState,
+};
 use crate::dashboard::io::config_only_controller;
 use crate::pollers::{
     CredentialSyncNotices, CredentialSyncSignalTracker, QUOTA_STALE_AFTER, QuotaRefreshBatch,
@@ -628,71 +630,31 @@ fn apply_read_receipt(state: &mut HelState, session_id: &str, receipt: u64) -> b
     true
 }
 
-#[derive(Clone, Copy)]
-#[repr(u8)]
-enum PhoneNewActionState {
-    Active = 0,
-    CancelRequested = 1,
-    CommitGranted = 2,
-}
-
-struct PhoneNewActionGate {
-    state: AtomicU8,
-}
-
-impl PhoneNewActionGate {
-    fn new() -> Self {
-        Self {
-            state: AtomicU8::new(PhoneNewActionState::Active as u8),
-        }
-    }
-
-    fn request_cancel(&self) -> bool {
-        self.state
-            .compare_exchange(
-                PhoneNewActionState::Active as u8,
-                PhoneNewActionState::CancelRequested as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    fn grant_commit(&self) -> bool {
-        self.state
-            .compare_exchange(
-                PhoneNewActionState::Active as u8,
-                PhoneNewActionState::CommitGranted as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-}
-
 #[derive(Clone)]
 struct PhoneActionControl {
     cancelled: Arc<AtomicBool>,
-    new_gate: Option<Arc<PhoneNewActionGate>>,
+    create: Option<CreateSessionControl>,
 }
 
 impl PhoneActionControl {
     fn for_action(action: &ControllerAction) -> Self {
-        Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            new_gate: matches!(action, ControllerAction::New { .. })
-                .then(|| Arc::new(PhoneNewActionGate::new())),
-        }
+        let create =
+            matches!(action, ControllerAction::New { .. }).then(CreateSessionControl::default);
+        let cancelled = create.as_ref().map_or_else(
+            || Arc::new(AtomicBool::new(false)),
+            |control| control.cancelled.clone(),
+        );
+        Self { cancelled, create }
     }
 
     fn request_cancel(&self) -> bool {
-        let accepted = self.new_gate.as_ref().map_or_else(
+        let accepted = self.create.as_ref().map_or_else(
             || {
                 self.cancelled
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             },
-            |gate| gate.request_cancel(),
+            |control| control.request_cancel(),
         );
         if accepted {
             self.cancelled.store(true, Ordering::Release);
@@ -700,10 +662,11 @@ impl PhoneActionControl {
         accepted
     }
 
+    #[cfg(test)]
     fn grant_new_commit(&self) -> bool {
-        self.new_gate
+        self.create
             .as_ref()
-            .is_some_and(|gate| gate.grant_commit())
+            .is_some_and(|control| control.grant_commit())
     }
 }
 
@@ -739,7 +702,12 @@ pub(crate) async fn run_server(
     let mut operational = std::collections::BTreeMap::new();
     let mut materialized_activity = load_materialized_activity(&controller).await?;
     let mut project_sources = PhoneProjectSources::default();
-    let mut operations = std::collections::BTreeMap::new();
+    let (records, lifecycles) = daemon_runtime.session_projection();
+    controller.state.sessions = records;
+    let mut operations = lifecycles
+        .iter()
+        .map(|view| (view.session_id.clone(), viewer_operation(view)))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut move_recoveries = ViewerMoveRecoveries::new();
     let (move_recovery_tx, mut move_recovery_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<ViewerMoveRecoveries, String>>();
@@ -910,6 +878,18 @@ pub(crate) async fn run_server(
         );
         macro_rules! publish_snapshot {
             ($revision:expr) => {
+                let (records, lifecycles) = daemon_runtime.session_projection();
+                controller.state.sessions = records;
+                for (session_id, error) in &pending_action_errors {
+                    if let Some(session) = controller.state.sessions.get_mut(session_id)
+                        && session.last_error.is_none()
+                    {
+                        session.last_error = Some(error.clone());
+                    }
+                }
+                operations = lifecycles.iter()
+                    .map(|view| (view.session_id.clone(), viewer_operation(view)))
+                    .collect();
                 if let Err(error) = snapshot_tx.send(viewer_snapshot(
                     &controller,
                     &phone_workspaces,
@@ -978,6 +958,8 @@ pub(crate) async fn run_server(
                         break;
                     }
                     daemon_revisions.borrow_and_update();
+                    revision = daemon_runtime.allocate_revision();
+                    publish_snapshot!(revision);
                     request_controller_reload(
                         &mut controller_reload_in_flight,
                         &mut controller_reload_requested,
@@ -1141,11 +1123,6 @@ pub(crate) async fn run_server(
                             update.session_id.clone(),
                             operational_state,
                         );
-                        operations = daemon_runtime
-                            .active_lifecycles()
-                            .iter()
-                            .map(|view| (view.session_id.clone(), viewer_operation(view)))
-                            .collect();
                         revision = daemon_runtime.allocate_revision();
                         conversation_tx.send_replace(conversations.clone());
                         publish_snapshot!(revision);
@@ -1695,29 +1672,7 @@ pub(crate) async fn run_server(
                     };
                     if publication.is_ok() {
                         revision = daemon_runtime.allocate_revision();
-                        if let Err(error) = snapshot_tx.send(viewer_snapshot(
-                            &controller,
-                            &phone_workspaces,
-                            &quotas,
-                            &PhoneSessionViews {
-                                conversations: &conversations,
-                                queued_prompts: &queued_prompts,
-                                active_user_shells: &active_user_shells,
-                                pending_elicitations: &pending_elicitations,
-                                prompt_images: &prompt_images,
-                                operational: &operational,
-                                materialized_activity: &materialized_activity,
-                                project_sources: &project_sources,
-                                operations: &operations,
-                                move_recoveries: &move_recoveries,
-                                capacity: &viewer_capacity(&capacity_state),
-                                launch_failures: &launch_failures,
-                                reviews: &review_views(&daemon_runtime),
-                            },
-                            revision,
-                        )) {
-                            tracing::debug!(revision, %error, "phone snapshot delivery failed; no viewer is subscribed");
-                        }
+                        publish_snapshot!(revision);
                         request_daemon_controller_reload(
                             daemon_runtime.clone(),
                             "new session publication",
@@ -1849,14 +1804,6 @@ pub(crate) async fn run_server(
                             materialized_activity.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)
                             });
-                            // A reload is the moment the controller's own view
-                            // of what is running changes, so the operations the
-                            // phone follows are re-read with it.
-                            operations = daemon_runtime
-                                .active_lifecycles()
-                                .iter()
-                                .map(|view| (view.session_id.clone(), viewer_operation(view)))
-                                .collect();
                             request_move_recovery_reload(
                                 &move_recovery_tx,
                                 &mut move_recovery_load_in_flight,
@@ -2124,7 +2071,7 @@ async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
     action: ControllerAction,
-    executor: &(impl CommandExecutor + Sync),
+    _executor: &(impl CommandExecutor + Sync),
     action_id: u64,
     started: &tokio::sync::mpsc::UnboundedSender<PhoneActionStarted>,
     control: &PhoneActionControl,
@@ -2184,61 +2131,40 @@ async fn apply_phone_action(
                 }
                 true
             };
-            let session_id = controller.register_session_with_resources(
-                &profile_id,
-                &bundle_id,
-                &target_id,
-                title,
-                SessionLaunchOptions {
-                    workspace_id,
-                    additional_mounts: Vec::new(),
-                    allow_dirty_local,
-                    resource_allocation: None,
-                    project_directory,
-                    session_title_override,
-                },
-            )?;
-            let session = controller
-                .state
-                .sessions
-                .get(&session_id)
-                .expect("newly registered phone session exists")
-                .clone();
             let (published, publication) = tokio::sync::oneshot::channel();
-            let publish_result = started
+            let registered = services
+                .daemon_runtime
+                .start_create_session_controlled(
+                    CreateSessionRequest {
+                        workspace_id,
+                        profile_id,
+                        bundle_id,
+                        project_directory,
+                        target_template_id: target_id,
+                        additional_mounts: Vec::new(),
+                        allow_dirty_local,
+                        resource_allocation: None,
+                        title,
+                        session_title_override,
+                    },
+                    control
+                        .create
+                        .clone()
+                        .expect("New action has a daemon create control"),
+                    publication,
+                )
+                .await?;
+            let registered_session_id = registered.session.id.clone();
+            started
                 .send(PhoneActionStarted {
                     action_id,
-                    session,
+                    session: registered.session,
                     published,
                 })
-                .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"));
-            let publish_result = match publish_result {
-                Ok(()) => publication
-                    .await
-                    .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?
-                    .map_err(anyhow::Error::msg),
-                Err(error) => Err(error),
-            };
-            if let Err(error) = publish_result {
-                control.request_cancel();
-                let rollback = controller
-                    .provision_session_controlled(&session_id, executor)
-                    .await;
-                return match rollback {
-                    Ok(()) => Err(error),
-                    Err(rollback) => Err(error.context(format!(
-                        "discard provisional session after publication failure: {rollback:#}"
-                    ))),
-                };
-            }
-            controller
-                .provision_session_controlled_with_commit(&session_id, executor, || {
-                    if control.grant_new_commit() {
-                        Ok(())
-                    } else {
-                        bail!("phone action cancelled before session commit")
-                    }
-                })
+                .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?;
+            services
+                .daemon_runtime
+                .wait_create_session(&registered_session_id)
                 .await
         }
         ControllerAction::Prompt {
@@ -2730,22 +2656,22 @@ fn viewer_operation(
     use mj_controller::hel_server::{ViewerOperationKind, ViewerOperationStage};
 
     mj_controller::hel_server::ViewerOperation {
-        // The session owns at most one operation at a time, so its id is a
-        // stable name for the operation without inventing a second counter.
-        id: view.session_id.clone(),
+        // RuntimeLifecycle owns the identity. A session can have consecutive
+        // operations, and a client must be able to retire a late response from
+        // the previous one without mistaking it for the current operation.
+        id: view.operation_id.clone(),
         session_id: view.session_id.clone(),
         kind: match view.kind {
             crate::daemon::RuntimeLifecycleKind::Create => ViewerOperationKind::Create,
             crate::daemon::RuntimeLifecycleKind::Resume => ViewerOperationKind::Resume,
             crate::daemon::RuntimeLifecycleKind::Move => ViewerOperationKind::Move,
-            // A force stop and a destroy are both stops as far as a phone is
-            // concerned: it watches one thing end, and the difference is in
-            // how much the controller tears down behind it.
+            // Stop, destroy, and retained cleanup remain distinct so a phone
+            // can describe which part of teardown owns the session.
             crate::daemon::RuntimeLifecycleKind::Close
-            | crate::daemon::RuntimeLifecycleKind::ForceStop
-            | crate::daemon::RuntimeLifecycleKind::DestroyStopped
-            | crate::daemon::RuntimeLifecycleKind::ForceDestroy
-            | crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Stop,
+            | crate::daemon::RuntimeLifecycleKind::ForceStop => ViewerOperationKind::Stop,
+            crate::daemon::RuntimeLifecycleKind::DestroyStopped
+            | crate::daemon::RuntimeLifecycleKind::ForceDestroy => ViewerOperationKind::Destroy,
+            crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Cleanup,
         },
         started_at_epoch_seconds: view.started_at_epoch_seconds,
         stages: view
@@ -2757,7 +2683,7 @@ fn viewer_operation(
             })
             .collect(),
         notice: view.notice.clone(),
-        cancellable: true,
+        cancellable: view.cancellable,
     }
 }
 
@@ -2778,7 +2704,12 @@ fn session_capabilities(
     // A session the manager is not driving cannot be talked to, whatever its
     // durable state says.
     let attached = operational.is_some();
-    let busy = operation.is_some();
+    // A failed close/destroy can leave its durable record in an intermediate
+    // state after the lifecycle owner has gone away. Keep the status card
+    // selectable, but do not turn the failure into an endless mutation lock:
+    // the published Stop capability is the recovery action.
+    let transition_busy = session.transitioning && !session.has_error;
+    let busy = operation.is_some() || transition_busy;
     // A failed move can retain a live destination while queue admission is
     // incomplete. The durable move hold owns all mutating session controls in
     // that interval; retry Move is the one intentional exception.
@@ -2789,17 +2720,19 @@ fn session_capabilities(
     let idle = operational
         .is_some_and(|state| state.execution == hel::hel_worker::RelayExecutionState::Idle);
     mj_controller::hel_server::ViewerSessionCapabilities {
-        open: session.conversation_available,
+        open: session.conversation_available
+            && !session.transitioning
+            && session.lifecycle == ViewerLifecycleCategory::Live,
         prompt: live && attached && !mutation_busy,
         run_shell: live && attached && !mutation_busy,
         cancel_turn: live
             && !mutation_busy
             && operational.is_some_and(|state| state.active_prompt.is_some()),
-        cancel_operation: busy,
+        cancel_operation: operation.is_some_and(|operation| operation.cancellable),
         // Stopping a session that is already stopping asks for something that
         // is happening; resuming one that is running asks for a second copy.
         stop: session.lifecycle.is_dashboard_visible() && !mutation_busy,
-        rename: true,
+        rename: !session.transitioning,
         resume: !session.lifecycle.is_dashboard_visible() && !mutation_busy,
         move_session: live && !busy,
         set_config: live && attached && facts.is_some() && !mutation_busy,
@@ -3123,6 +3056,15 @@ fn viewer_snapshot(
             .unwrap_or_default();
         session.prompt_images_supported = prompt_images.contains(&session.id);
         session.operation = operations.get(&session.id).cloned();
+        // Runtime ownership takes precedence over the durable record. Move
+        // can still look Running while its old conversation is no longer a
+        // valid destination, and stopped cleanup/destroy operations have no
+        // live lifecycle category of their own.
+        if let Some(operation) = session.operation.as_ref()
+            && operation.kind.transition_kind().is_some()
+        {
+            session.transitioning = true;
+        }
         let live = operational.get(&session.id);
         let facts = live.map(|state| {
             hel::hel_acp::AcpSessionFacts::from_operational(
@@ -3200,31 +3142,33 @@ fn viewer_snapshot(
         session.available_commands = phone_commands(session, live);
         if let Some(transcript) = conversations.get(&session.id) {
             session.conversation_available = true;
-            let mut lines = transcript
-                .entries
-                .iter()
-                .flat_map(|entry| {
-                    entry
-                        .lines
-                        .iter()
-                        .enumerate()
-                        .filter_map(move |(index, line)| {
-                            let line = line.trim();
-                            (!line.is_empty()).then(|| {
-                                if index == 0 {
-                                    format!("{}: {line}", entry.label)
-                                } else {
-                                    line.to_owned()
-                                }
+            if !session.transitioning {
+                let mut lines = transcript
+                    .entries
+                    .iter()
+                    .flat_map(|entry| {
+                        entry
+                            .lines
+                            .iter()
+                            .enumerate()
+                            .filter_map(move |(index, line)| {
+                                let line = line.trim();
+                                (!line.is_empty()).then(|| {
+                                    if index == 0 {
+                                        format!("{}: {line}", entry.label)
+                                    } else {
+                                        line.to_owned()
+                                    }
+                                })
                             })
-                        })
-                })
-                .collect::<Vec<_>>();
-            session.preview = lines.split_off(lines.len().saturating_sub(4));
+                    })
+                    .collect::<Vec<_>>();
+                session.preview = lines.split_off(lines.len().saturating_sub(4));
+            }
         }
         // `conversation_available` is only known after the transcript loop
         // above, so the capability that depends on it is settled here.
-        session.capabilities.open = session.conversation_available;
+        session.capabilities.open = session.conversation_available && !session.transitioning;
     }
     snapshot.capacity = capacity.to_vec();
     snapshot
@@ -4317,11 +4261,11 @@ mod tests {
     fn phone_cancel_targets_the_matching_background_action() {
         let first = PhoneActionControl {
             cancelled: Arc::new(AtomicBool::new(false)),
-            new_gate: None,
+            create: None,
         };
         let second = PhoneActionControl {
             cancelled: Arc::new(AtomicBool::new(false)),
-            new_gate: None,
+            create: None,
         };
         let action_sessions =
             std::collections::BTreeMap::from([(1, "session-1".into()), (2, "session-2".into())]);
@@ -4345,9 +4289,10 @@ mod tests {
     #[test]
     fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         for _ in 0..100 {
+            let create = CreateSessionControl::default();
             let control = PhoneActionControl {
-                cancelled: Arc::new(AtomicBool::new(false)),
-                new_gate: Some(Arc::new(PhoneNewActionGate::new())),
+                cancelled: create.cancelled.clone(),
+                create: Some(create),
             };
             let cancelling = control.clone();
             let committing = control.clone();
