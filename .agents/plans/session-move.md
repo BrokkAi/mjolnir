@@ -27,7 +27,7 @@ The observable success case is a session that changes its displayed target/profi
 - [x] Validate schema 26 migrations and cancellation persistence; verify original command-ID replay after an acknowledged-command crash and reject replacement relay storage.
 - [x] Implement and validate daemon/API integration, CLI, TUI, and web controls, including exact prepared confirmation, queue inspection, cancellation, and durable recovery controls.
 - [x] Implement and validate bounded performance improvements: direct verified LocalBare archive reads and joined, cancellation-aware cross-harness provisioning/handoff overlap.
-- [ ] Complete integrated validation, user documentation, and commits on the current branch.
+- [x] Complete integrated validation, user documentation, and commits on the current branch. Feature commit: `0c8006d1`; upstream integration: `a6fed911`. Push to `origin/master` is the final authorized handoff.
 
 ## Surprises & Discoveries
 
@@ -231,6 +231,8 @@ Validation evidence (2026-09-06 implementation session; artifact timestamps use 
 - Parallel full runs hit transient `ETXTBSY` in an existing worker-stop shell fixture and `WouldBlock` in an existing supervisor-lease test. Both isolated tests passed. The final full run serializes test cases; the new concurrency tests still exercise their own parallel workers. No host mount changes or production fallback was added.
 - Standalone `brokk-mj-worker` test compilation also passed, ensuring persisted worker-store identity does not depend on the controller-only state module.
 - `cargo test -q -- --test-threads=1` passed across the workspace. Final rollback review additionally preserves a partial destination's managed checkout until target teardown succeeds; retry restores the recorded source identity only after bounded cleanup. The affected controller suite is rerun for that correction.
+- Final controller rerun passed: 674 tests, one intentionally ignored. After merging upstream ACP-resume and clipboard changes, 84 ACP tests and four clipboard tests passed. The integrated `cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, JavaScript syntax check, and diff checks passed.
+- Final integrated real-worker acceptance passed again, including explicit assertions that interrupted prompts are never replayed. Artifacts: `target/reliability-artifacts/session-move-seed-1-2824250/trace.json`. Test processes were stopped and isolated runtime scratch files removed; diagnostic artifacts were preserved.
 
 Proposed human success text is: `Moved SESSION from OLD_PROFILE / OLD_TARGET to NEW_PROFILE / NEW_TARGET; ready and idle.` For Run, report that queued work was accepted, not that all queued tasks completed. Failure text must name whether the source remains available, the session is stopped with a checkpoint, or the destination is live with queue admission incomplete, and identify the applicable retry action.
 
