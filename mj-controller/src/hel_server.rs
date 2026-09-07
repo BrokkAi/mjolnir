@@ -3644,7 +3644,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
     }
 
     #[test]
-    fn web_bundle_labels_and_keys_keep_same_primary_bundles_separate() {
+    fn web_bundle_keys_keep_same_source_labels_separate() {
         let (mut config, mut state) = sample_config_state();
         let shared_bundle = config.bundles["hel"].clone();
         config.bundles.insert("other".into(), shared_bundle);
@@ -3671,7 +3671,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             .expect("second session");
 
         assert_eq!(first.project_label, "hel");
-        assert_eq!(second.project_label, "other");
+        assert_eq!(second.project_label, "hel");
         assert_ne!(first.project_key, second.project_key);
     }
 

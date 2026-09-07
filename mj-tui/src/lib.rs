@@ -1555,6 +1555,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    use hel::hel_config::{ProjectBundle, ProjectRepository};
     use hel::hel_state::{HelState, STATE_VERSION, SessionState};
 
     use super::*;
@@ -2418,6 +2419,88 @@ mod tests {
                 .ordered_sessions()
                 .iter()
                 .all(|session| dashboard.project_is_expanded(session))
+        );
+    }
+
+    #[test]
+    fn bundle_project_heading_uses_source_name_and_disambiguates_bundle() {
+        let mut dashboard_config = config();
+        dashboard_config.bundles.insert(
+            "bifrost".into(),
+            ProjectBundle {
+                primary_repo: "bifrost".into(),
+                repositories: vec![ProjectRepository {
+                    id: "bifrost".into(),
+                    github: Some("BrokkAi/bifrost-dev".into()),
+                    local: None,
+                    destination: "bifrost".into(),
+                    git_ref: None,
+                }],
+            },
+        );
+        let mut bundle_session = running_session();
+        bundle_session.id = "bundle".into();
+        bundle_session.bundle_id = "bifrost".into();
+        assert!(bundle_session.project_directory.is_none());
+
+        let single = DashboardState::new(
+            dashboard_config.clone(),
+            HelState {
+                version: STATE_VERSION,
+                sessions: [(bundle_session.id.clone(), bundle_session.clone())]
+                    .into_iter()
+                    .collect(),
+                mount_history: BTreeMap::new(),
+                container_sizes: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+        );
+        let single_heading = single
+            .sessions_rows()
+            .into_iter()
+            .find_map(|row| match row {
+                SessionsRow::ProjectHeading { label, .. } => Some(label),
+                SessionsRow::Session { .. } => None,
+            })
+            .expect("bundle project heading");
+        assert_eq!(single_heading, "bifrost-dev");
+
+        let mut raw_source = running_session();
+        raw_source.id = "raw".into();
+        raw_source.created_at = "2026-08-09T00:01:00Z".into();
+        let mut dashboard = DashboardState::new(
+            dashboard_config,
+            HelState {
+                version: STATE_VERSION,
+                sessions: [bundle_session, raw_source]
+                    .into_iter()
+                    .map(|session| (session.id.clone(), session))
+                    .collect(),
+                mount_history: BTreeMap::new(),
+                container_sizes: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+        );
+        dashboard.set_project_source(
+            "raw",
+            ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git")
+                .expect("canonical source"),
+        );
+
+        let headings = dashboard
+            .sessions_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                SessionsRow::ProjectHeading { label, .. } => Some(label),
+                SessionsRow::Session { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dashboard.project_keys().len(), 2);
+        assert!(headings.iter().all(|label| label.contains("bifrost-dev")));
+        assert!(
+            headings
+                .iter()
+                .any(|label| label == "bifrost-dev (bifrost)")
         );
     }
 

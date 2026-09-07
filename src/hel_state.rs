@@ -986,18 +986,7 @@ impl SessionRecord {
         if let Some(project_directory) = &self.project_directory {
             return path_leaf(project_directory);
         }
-        config
-            .bundles
-            .get(&self.bundle_id)
-            .and_then(|bundle| {
-                bundle
-                    .repositories
-                    .iter()
-                    .find(|repository| repository.id == bundle.primary_repo)
-                    .or_else(|| bundle.repositories.first())
-            })
-            .map(|repository| path_leaf(&repository.destination))
-            .unwrap_or_else(|| path_leaf(Path::new(&self.bundle_id)))
+        self.bundle_source_name(config)
     }
 
     /// Target label used by the live session summary. Bare targets identify
@@ -1025,8 +1014,9 @@ impl SessionRecord {
     /// back at their source repository, raw sessions use their project
     /// directory until their Git origin is resolved, and bundle sessions use
     /// the bundle itself. The bundle identity keeps bundles separate even
-    /// when they happen to share a primary repository.
-    pub fn project_source(&self, _config: &HelConfig) -> ProjectSourceIdentity {
+    /// when they happen to share a primary repository, while its display name
+    /// comes from that repository's canonical source when configured.
+    pub fn project_source(&self, config: &HelConfig) -> ProjectSourceIdentity {
         if let Some(worktree) = &self.managed_worktree {
             return ProjectSourceIdentity::path(&worktree.source_repository, None);
         }
@@ -1037,12 +1027,41 @@ impl SessionRecord {
             };
             return ProjectSourceIdentity::path(project_directory, remote);
         }
-        let name = path_leaf(Path::new(&self.bundle_id));
+        let name = self.bundle_source_name(config);
+        let full = if name == self.bundle_id {
+            self.bundle_id.clone()
+        } else {
+            format!("{name} ({})", self.bundle_id)
+        };
         ProjectSourceIdentity {
             key: format!("bundle:{}", self.bundle_id),
             short: name,
-            full: self.bundle_id.clone(),
+            full,
         }
+    }
+
+    /// Resolve the display name shared by session headings, chat headers, and
+    /// resume details for a bundle-backed session.
+    fn bundle_source_name(&self, config: &HelConfig) -> String {
+        let Some(repository) = config
+            .bundles
+            .get(&self.bundle_id)
+            .and_then(|bundle| bundle.primary().or_else(|| bundle.repositories.first()))
+        else {
+            return path_leaf(Path::new(&self.bundle_id));
+        };
+        if let Some(source) = repository
+            .github
+            .as_deref()
+            .and_then(ProjectSourceIdentity::git_remote)
+        {
+            return source.short;
+        }
+        repository
+            .local
+            .as_deref()
+            .map(path_leaf)
+            .unwrap_or_else(|| path_leaf(Path::new(&self.bundle_id)))
     }
 
     /// Orders two sessions the way the session list's sequence view does:
@@ -1792,6 +1811,63 @@ mod tests {
     }
 
     #[test]
+    fn bundle_project_name_uses_the_primary_github_repository_name() {
+        let mut config = sample_config();
+        config.bundles.insert(
+            "bifrost".into(),
+            ProjectBundle {
+                primary_repo: "bifrost".into(),
+                repositories: vec![ProjectRepository {
+                    id: "bifrost".into(),
+                    github: Some("BrokkAi/bifrost-dev".into()),
+                    local: None,
+                    destination: PathBuf::from("bifrost"),
+                    git_ref: None,
+                }],
+            },
+        );
+        let mut session = sample_session();
+        session.bundle_id = "bifrost".into();
+
+        assert_eq!(session.project_name(&config), "bifrost-dev");
+        assert_eq!(
+            session.project_source(&config),
+            ProjectSourceIdentity {
+                key: "bundle:bifrost".into(),
+                short: "bifrost-dev".into(),
+                full: "bifrost-dev (bifrost)".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn bundle_project_name_uses_a_local_source_or_bundle_id_fallback() {
+        let mut config = sample_config();
+        config.bundles.insert(
+            "local-bundle".into(),
+            ProjectBundle {
+                primary_repo: "local".into(),
+                repositories: vec![ProjectRepository {
+                    id: "local".into(),
+                    github: None,
+                    local: Some(PathBuf::from("/home/test/Projects/bifrost-dev")),
+                    destination: PathBuf::from("bifrost"),
+                    git_ref: None,
+                }],
+            },
+        );
+        let mut session = sample_session();
+        session.bundle_id = "local-bundle".into();
+
+        assert_eq!(session.project_name(&config), "bifrost-dev");
+        assert_eq!(session.project_source(&config).short, "bifrost-dev");
+
+        session.bundle_id = "missing-bundle".into();
+        assert_eq!(session.project_name(&config), "missing-bundle");
+        assert_eq!(session.project_source(&config).short, "missing-bundle");
+    }
+
+    #[test]
     fn project_target_adds_the_raw_project_name_only_for_bare_targets() {
         let mut config = sample_config();
         config
@@ -1859,7 +1935,9 @@ mod tests {
         let first_source = first.project_source(&config);
         let second_source = second.project_source(&config);
         assert_eq!(first_source.short, "hel");
-        assert_eq!(second_source.short, "other");
+        assert_eq!(second_source.short, "hel");
+        assert_eq!(first_source.full, "hel");
+        assert_eq!(second_source.full, "hel (other)");
         assert_ne!(first_source.key, second_source.key);
     }
 
