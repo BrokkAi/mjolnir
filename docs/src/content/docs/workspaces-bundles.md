@@ -17,7 +17,10 @@ Persistent project memory follows the project identity, not the workspace name.
 
 ## Workspaces organize the dashboard
 
-Run `mj` to open a workspace. If there is one usable workspace, Mjolnir selects
+Run `mj` to open a workspace. If none exists, Mjolnir creates one using the
+current directory name. An empty workspace starts its default agent and focuses
+the prompt; see [startup defaults](/configuration/#first-session-defaults-startup).
+If there is one usable workspace, Mjolnir selects
 it automatically; with several, it opens the workspace picker. Use either of
 these forms when you want to choose explicitly:
 

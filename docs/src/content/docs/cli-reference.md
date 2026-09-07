@@ -3,7 +3,7 @@ title: CLI reference
 description: Public mj commands for the dashboard, setup, diagnosis, login, import, checkpoints, daemon control, and recovery.
 ---
 
-Running `mj` without a subcommand starts the per-user daemon when necessary and opens the terminal dashboard.
+Running `mj` without a subcommand starts the per-user daemon when necessary and opens the terminal dashboard. If no workspace exists, it creates one using the current directory name. Empty workspaces launch the default session and focus its prompt; configure the profile and target in `[startup]`. Existing workspace selection is unchanged.
 
 ```text
 mj [--workspace <name>] [command]

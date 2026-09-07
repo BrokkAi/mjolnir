@@ -159,6 +159,12 @@ pub enum DashboardAction {
     Open {
         session_id: String,
     },
+    /// Resolve available local runtimes and the current project off the UI loop.
+    CreateStartupSession {
+        profile_id: String,
+        target_template_id: Option<String>,
+        project_directory: std::path::PathBuf,
+    },
     CreateSession {
         profile_id: String,
         bundle_id: String,

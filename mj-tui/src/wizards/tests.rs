@@ -17,6 +17,142 @@ use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
 
 #[test]
+fn empty_workspace_starts_codex_in_the_launch_directory_with_prompt_focus() {
+    let mut config = config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let directory = std::env::current_dir().unwrap().join("project with spaces");
+    assert_eq!(
+        dashboard.begin_startup_session(directory.clone()).unwrap(),
+        DashboardAction::CreateStartupSession {
+            profile_id: "codex-1".into(),
+            project_directory: directory,
+            target_template_id: None,
+        }
+    );
+    assert!(dashboard.prompt_has_focus());
+    assert!(!dashboard.modal_open());
+
+    let mut session = running_session();
+    session.state = SessionState::Provisioning;
+    let mut state = HelState::default();
+    state.sessions.insert(session.id.clone(), session.clone());
+    dashboard.set_state(state.clone());
+    dashboard.begin_session_operation(
+        session.id.clone(),
+        crate::SessionOperationKind::Launching,
+        None,
+    );
+    assert!(dashboard.prompt_has_focus());
+    state.sessions.get_mut(&session.id).unwrap().state = SessionState::Running;
+    dashboard.set_state(state);
+    dashboard.finish_session_operation(&session.id);
+    dashboard.select_active_session(&session.id);
+    assert_eq!(dashboard.selected_session_id(), Some(session.id.as_str()));
+    assert!(dashboard.prompt_has_focus());
+}
+
+#[test]
+fn startup_respects_the_configured_agent_and_uses_an_existing_agent_without_codex() {
+    let mut config = config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.startup.profile = Some("claude-1".into());
+    config.startup.target = Some("localhost".into());
+    for explicit in [true, false] {
+        if !explicit {
+            config.startup.profile = None;
+            config
+                .profiles
+                .retain(|_, profile| profile.kind != HarnessKind::Codex);
+        }
+        let mut dashboard =
+            DashboardState::new(config.clone(), HelState::default(), BTreeMap::new());
+        assert!(
+            matches!(dashboard.begin_startup_session(std::env::current_dir().unwrap()).unwrap(),
+            DashboardAction::CreateStartupSession { profile_id, target_template_id, .. } if profile_id == "claude-1" && target_template_id.as_deref() == Some("localhost"))
+        );
+    }
+}
+
+#[test]
+fn startup_leaves_live_sessions_and_disabled_workspaces_alone() {
+    for state in [
+        SessionState::Running,
+        SessionState::Provisioning,
+        SessionState::Disconnected,
+        SessionState::Error,
+    ] {
+        let mut session = running_session();
+        session.state = state;
+        let mut dashboard = dashboard_with_session(session);
+        let selected = dashboard.selected_session_id().map(str::to_owned);
+        let focus = dashboard.focus();
+        assert_eq!(
+            dashboard
+                .begin_startup_session(std::env::current_dir().unwrap())
+                .unwrap(),
+            DashboardAction::None
+        );
+        assert_eq!(dashboard.selected_session_id(), selected.as_deref());
+        assert_eq!(dashboard.focus(), focus);
+    }
+    let mut config = config();
+    config.startup.enabled = false;
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    assert_eq!(
+        dashboard
+            .begin_startup_session(std::env::current_dir().unwrap())
+            .unwrap(),
+        DashboardAction::None
+    );
+    assert!(!dashboard.prompt_has_focus());
+}
+
+#[test]
+fn stopped_history_does_not_block_the_first_prompt() {
+    let mut config = config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut state = HelState::default();
+    let session = stopped_session();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    assert!(matches!(
+        dashboard
+            .begin_startup_session(std::env::current_dir().unwrap())
+            .unwrap(),
+        DashboardAction::CreateStartupSession { .. }
+    ));
+    assert!(dashboard.prompt_has_focus());
+}
+
+#[test]
+fn startup_reports_missing_agent_profiles() {
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let directory = std::env::current_dir().unwrap();
+    dashboard.config.startup.profile = Some("missing".into());
+    assert!(
+        dashboard
+            .begin_startup_session(directory.clone())
+            .unwrap_err()
+            .contains("not configured")
+    );
+    dashboard.config.startup.profile = None;
+    dashboard.config.profiles.clear();
+    assert!(
+        dashboard
+            .begin_startup_session(directory)
+            .unwrap_err()
+            .contains("mj setup")
+    );
+}
+
+#[test]
 fn new_session_wizard_returns_all_three_choices() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
     assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);

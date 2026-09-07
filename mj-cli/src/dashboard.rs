@@ -14,6 +14,7 @@ pub(crate) mod actions;
 mod attachment;
 pub(crate) mod io;
 mod pane_sizes;
+mod startup;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -509,6 +510,11 @@ pub(crate) async fn run_dashboard_for_workspace(
         return Ok(DashboardExit::Normal);
     }
 
+    tokio::task::spawn_blocking(|| {
+        mj_controller::hel_setup::initialize_local_startup_config(&config_path())
+    })
+    .await
+    .context("initialize startup configuration task failed")??;
     let Some(mut context) = DashboardContext::open(workspace_id, client_id)? else {
         return Ok(DashboardExit::Normal);
     };
@@ -925,8 +931,7 @@ impl DashboardContext {
                     retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
                     dashboard.set_config(controller.config.clone());
                     dashboard.set_state(controller.state.clone());
-                    dashboard
-                        .set_notice("Setup complete. Press Alt-N to start your first session.");
+                    dashboard.set_notice("Setup complete.");
                 }
                 SetupOutcome::Cancelled => return Ok(None),
             }
@@ -1173,9 +1178,17 @@ impl DashboardContext {
             std::time::Instant::now(),
         );
         if sessions.is_empty() {
-            // With nothing to talk to, the keyboard belongs on the list, where
-            // a session can be created or resumed.
-            self.dashboard.focus_sessions();
+            let action = std::env::current_dir()
+                .map_err(|error| format!("Could not read the launch directory: {error}"))
+                .and_then(|directory| self.dashboard.begin_startup_session(directory));
+            match action {
+                Ok(DashboardAction::None) => self.dashboard.focus_sessions(),
+                Ok(action) => actions::start_session_launch(self, action),
+                Err(error) => {
+                    self.dashboard.focus_sessions();
+                    self.dashboard.set_failure_notice(error);
+                }
+            }
         }
         for (session_id, viewed_through_event_ordinal) in sessions {
             spawn_stored_session_summary(
@@ -2849,7 +2862,7 @@ pub(crate) fn resume_progress_notice(
 }
 
 fn configuration_needs_setup(config: &HelConfig) -> bool {
-    config.profiles.is_empty() && config.bundles.is_empty() && config.targets.is_empty()
+    config.is_unconfigured()
 }
 
 #[cfg(test)]

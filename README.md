@@ -171,20 +171,24 @@ to build your own.
 
 ## Quickstart
 
-1. Run `mj`. The first run creates a named workspace and opens a plain-terminal setup dialog: it finds your
-   local harness homes, checks that credentials look present, detects the
-   current GitHub repository, configures each usable local container runtime
-   as its own target, and writes `config.toml` after you confirm.
-2. Run `mj doctor` (or `mj doctor --json`) and fix what it reports, until it
-   is clean. Log in to any profile that needs it with
-   `mj login --profile <id>`.
-3. Press `Alt+N` to create a session — that works from anywhere, including
-   the prompt — and pick a profile, a repository bundle, and a target. From
-   the Sessions pane, plain `n` does the same. Focus returns to the prompt;
-   send your first message.
-4. Detach whenever you like (`Alt+Q`). The session keeps running and your
-   queued prompts keep executing. Reattach by running `mj` again, or open the
-   daemon-owned web viewer shown by `mj daemon status`.
+1. Run `mj` from your project directory. If no workspace exists, Mjolnir
+   creates one using the directory name. An empty workspace automatically
+   starts a session and focuses the prompt. Existing workspace selection and
+   live-session startup keep their current behavior.
+2. On Linux and macOS, a fresh configuration starts with your Codex home
+   (`CODEX_HOME`, or `~/.codex`). Automatic target selection prefers usable
+   Podman, then Docker, then a local directory session. Container sessions use
+   the current repository, including its uncommitted changes; plain directories
+   use the local target. Runtime checks and session launch run in the background.
+3. Type your first prompt when launch finishes. Use `[startup]` in `config.toml`
+   to set `profile = "your-profile"`, `target = "your-target"`, or
+   `enabled = false`. Explicit targets are honored even when unavailable, so
+   their launch errors remain visible. Use `mj setup` for guided configuration
+   of additional execution environments, and `Alt+N` for a custom session.
+4. If launch reports a prerequisite failure, run `mj doctor` and use
+   `mj login --profile <id>` when authentication is needed. Detach with `Alt+Q`;
+   running sessions continue. Reattach with `mj` or use the daemon-owned web
+   viewer shown by `mj daemon status`.
 
 ## The terminal surface
 
@@ -276,8 +280,8 @@ next prompt submitted after the command finishes. Press Escape in the TUI, or
 use the shell's Cancel button in the viewer, to stop it.
 
 Configuration lives at `~/.config/mjolnir/config.toml` (the platform-equivalent
-directory elsewhere). The first-run dialog writes a working single-target
-setup; everything beyond that is edited in TOML. A minimal example:
+directory elsewhere). First launch writes minimal local defaults; `mj setup`
+offers guided discovery, and further settings can be edited in TOML. A minimal example:
 
 ```toml
 version = 2

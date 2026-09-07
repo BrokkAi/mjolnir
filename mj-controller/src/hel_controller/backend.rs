@@ -1656,6 +1656,7 @@ mod tests {
             newer_config_version: None,
             phone: Default::default(),
             review: Default::default(),
+            startup: Default::default(),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
             targets: BTreeMap::from([

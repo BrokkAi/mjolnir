@@ -36,7 +36,7 @@ const AWS_TARGET_ID: &str = "aws";
 // .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
 // Git, gh, and the pinned ACP bridges, so a first session does not have to
 // install them.
-const DEFAULT_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
+pub const DEFAULT_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredHome {
@@ -143,6 +143,52 @@ pub struct SetupDiscovery {
 pub enum SetupOutcome {
     Written,
     Cancelled,
+}
+
+/// Give an unconfigured terminal installation a local Codex session without
+/// making remote/container setup a prerequisite for the first prompt.
+pub fn initialize_local_startup_config(config_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let config = HelConfig::load_from(config_path)?;
+        if config.startup.enabled
+            && config.is_unconfigured()
+            && config.newer_config_version.is_none()
+        {
+            let kind = HarnessKind::Codex;
+            let home = std::env::var_os(kind.home_env())
+                .map(|value| kind.home_from_environment(value))
+                .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
+                .context("locate Codex home for the first session")?;
+            let home = std::path::absolute(home).context("resolve Codex home")?;
+            HelConfig::update_to(config_path, |fresh| {
+                if fresh.is_unconfigured() && fresh.startup.enabled {
+                    configure_local_startup(fresh, home);
+                }
+                Ok(())
+            })?;
+        }
+    }
+    // Local bare targets are unsupported on Windows; retain explicit setup.
+    #[cfg(not(unix))]
+    let _ = config_path;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn configure_local_startup(config: &mut HelConfig, codex_home: PathBuf) {
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile {
+            kind: HarnessKind::Codex,
+            home: codex_home,
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        },
+    );
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
 }
 
 /// Run the setup dialog using the user's normal standard input and output.
@@ -555,23 +601,7 @@ fn build_config_with_runtimes(
         .targets
         .insert("localhost".to_owned(), TargetTemplate::LocalBare);
     for (runtime, image) in runtimes {
-        let container = ContainerTemplate {
-            image: image.trim().to_owned(),
-            pull_policy: Default::default(),
-            platform: None,
-            cpus: None,
-            memory: None,
-            environment: BTreeMap::new(),
-            workspace_storage: Default::default(),
-        };
-        let (target_id, target) = match runtime {
-            RuntimeKind::Podman => ("podman", TargetTemplate::LocalPodman { container }),
-            RuntimeKind::Docker => ("docker", TargetTemplate::LocalDocker { container }),
-            RuntimeKind::AppleContainer => (
-                "apple-container",
-                TargetTemplate::AppleContainer { container },
-            ),
-        };
+        let (target_id, target) = local_runtime_target(*runtime, image);
         config.targets.insert(target_id.to_owned(), target);
     }
     if let Some(aws) = aws {
@@ -637,6 +667,27 @@ fn build_config_with_runtimes(
             .insert(unique_id(&config.targets, &ssh.name), target);
     }
     config
+}
+
+/// The shared setup/startup template for a locally available container engine.
+pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str, TargetTemplate) {
+    let container = ContainerTemplate {
+        image: image.trim().to_owned(),
+        pull_policy: Default::default(),
+        platform: None,
+        cpus: None,
+        memory: None,
+        environment: BTreeMap::new(),
+        workspace_storage: Default::default(),
+    };
+    match runtime {
+        RuntimeKind::Podman => ("podman", TargetTemplate::LocalPodman { container }),
+        RuntimeKind::Docker => ("docker", TargetTemplate::LocalDocker { container }),
+        RuntimeKind::AppleContainer => (
+            "apple-container",
+            TargetTemplate::AppleContainer { container },
+        ),
+    }
 }
 
 /// The same default `serde` applies to a hand-written `ssh-bare` target.
@@ -1266,6 +1317,54 @@ mod tests {
 
     use super::*;
     use hel::hel_targets::CommandOutput;
+
+    #[cfg(unix)]
+    #[test]
+    fn first_terminal_launch_writes_a_local_codex_config_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        initialize_local_startup_config(&path).unwrap();
+        let config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.profiles["codex"].kind, HarnessKind::Codex);
+        assert!(config.profiles["codex"].home.is_absolute());
+        assert!(matches!(
+            config.targets["localhost"],
+            TargetTemplate::LocalBare
+        ));
+        assert!(config.bundles.is_empty());
+        let written = fs::read(&path).unwrap();
+        initialize_local_startup_config(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), written);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_startup_preserves_existing_settings_and_respects_disabled_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = HelConfig::default();
+        config.phone.enabled = false;
+        config.save_to(&path).unwrap();
+        initialize_local_startup_config(&path).unwrap();
+        assert!(!HelConfig::load_from(&path).unwrap().phone.enabled);
+
+        // Even a partially configured installation belongs to the user.
+        let configured =
+            "version = 2\n# keep this comment\n[targets.custom]\nkind = 'local-bare'\n";
+        fs::write(&path, configured).unwrap();
+        initialize_local_startup_config(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), configured);
+
+        let disabled = "version = 2\n[startup]\nenabled = false\n";
+        fs::write(&path, disabled).unwrap();
+        initialize_local_startup_config(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), disabled);
+
+        let newer = "version = 999\nfuture_field = true\n";
+        fs::write(&path, newer).unwrap();
+        initialize_local_startup_config(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+    }
 
     struct FakeExecutor {
         commands: RefCell<Vec<CommandSpec>>,

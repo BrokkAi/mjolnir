@@ -9,11 +9,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use sha2::{Digest, Sha256};
 
 use hel::hel_config::{
     HelConfig, TargetTemplate, container_size_host, is_bare_project_target, mount_history_host,
-    project_history_host,
+    project_history_host, raw_project_context_id,
 };
 use hel::hel_state::{
     HelState, MaterializedQueuedPrompt, MoveOperation, MovePreparation, ResumeQueueDisposition,
@@ -1875,15 +1874,6 @@ fn resource_allocation_label(
         Some(error) => format!("{allocation} · {error}"),
         None => allocation,
     }
-}
-
-fn raw_project_context_id(project_directory: &str) -> String {
-    let digest = Sha256::digest(project_directory.trim().as_bytes());
-    let suffix = digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("remote-project-{suffix}")
 }
 
 fn default_resource_destination(

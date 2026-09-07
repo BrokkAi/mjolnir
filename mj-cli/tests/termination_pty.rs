@@ -13,9 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Empty-session text that appears only after the workspace picker has handed
-/// the terminal to the combined dashboard. The Sessions title is also drawn
-/// behind the picker, so using it can send the quit key during the handoff.
+/// Empty-session text that appears after the combined dashboard is ready.
 const READY_MARKER: &[u8] = b"Prompt (no live session)";
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -219,6 +217,14 @@ fn spawn_dashboard_pty_with_idle_exit(exit_when_idle: bool) -> DashboardPty {
 }
 
 fn spawn_dashboard_pty_fixture(exit_when_idle: bool, pending_session: bool) -> DashboardPty {
+    spawn_dashboard_pty_with_startup(exit_when_idle, pending_session, false)
+}
+
+fn spawn_dashboard_pty_with_startup(
+    exit_when_idle: bool,
+    pending_session: bool,
+    local_startup: bool,
+) -> DashboardPty {
     let storage = DashboardStorage {
         directory: Some(tempfile::tempdir().expect("create Hel test storage")),
         stop_daemon: !exit_when_idle,
@@ -252,6 +258,27 @@ image = "ubuntu:24.04"
 "#,
     )
     .expect("write Hel test config");
+    if local_startup {
+        let path = config_root.join("hel/config.toml");
+        let mut config = hel::hel_config::HelConfig::load_from(&path).unwrap();
+        let home = storage.path().join("codex");
+        fs::create_dir_all(&home).unwrap();
+        config.profiles.get_mut("codex").unwrap().home = home;
+        config.targets.clear();
+        config.targets.insert(
+            "localhost".into(),
+            hel::hel_config::TargetTemplate::LocalBare,
+        );
+        config.save_to(&path).unwrap();
+    }
+    if !local_startup {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(config_root.join("hel/config.toml"))
+            .unwrap();
+        file.write_all(b"\n[startup]\nenabled = false\n").unwrap();
+    }
     let seeded_workspace = pending_session.then(|| {
         let database = storage.path().join("data/hel/mj.sqlite3");
         let workspace = hel::hel_database::create_workspace_at(&database, "Pending session test").unwrap();
@@ -289,7 +316,7 @@ image = "ubuntu:24.04"
         0,
         "create PTY"
     );
-    let mut master = unsafe { File::from_raw_fd(master_fd) };
+    let master = unsafe { File::from_raw_fd(master_fd) };
     let slave = unsafe { File::from_raw_fd(slave_fd) };
     let original_termios = termios(slave.as_raw_fd());
     let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
@@ -305,6 +332,7 @@ image = "ubuntu:24.04"
         command.args(["--workspace", workspace]);
     }
     command
+        .current_dir(storage.path())
         .stdin(Stdio::from(duplicate(slave.as_raw_fd())))
         .stdout(Stdio::from(duplicate(slave.as_raw_fd())))
         .stderr(Stdio::from(duplicate(slave.as_raw_fd())))
@@ -336,18 +364,6 @@ image = "ubuntu:24.04"
         });
     }
     let child = command.spawn().expect("spawn hel PTY helper");
-    if !pending_session {
-        let mut startup = Vec::new();
-        wait_for_output(
-            &mut master,
-            &mut startup,
-            b"Workspaces",
-            Instant::now() + TIMEOUT,
-        );
-        master
-            .write_all(b"\r\r")
-            .expect("accept suggested workspace name");
-    }
     DashboardPty {
         _storage: storage,
         master,
@@ -355,6 +371,52 @@ image = "ubuntu:24.04"
         original_termios,
         child: ReapChild(Some(child)),
     }
+}
+
+#[test]
+fn first_launch_creates_a_workspace_and_local_session_without_terminal_input() {
+    let DashboardPty {
+        _storage: storage,
+        mut master,
+        mut child,
+        ..
+    } = spawn_dashboard_pty_with_startup(false, false, true);
+    let database = storage.path().join("data/hel/mj.sqlite3");
+    let mut output = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    let session = loop {
+        drain(&mut master, &mut output);
+        if database.exists()
+            && let Ok(state) = hel::hel_database::load_state_from(&database)
+            && let Some(session) = state.sessions.values().next()
+        {
+            assert_eq!(state.sessions.len(), 1);
+            break session.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "first session was not created: {}",
+            String::from_utf8_lossy(&output)
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(session.last_profile, "codex");
+    assert_eq!(session.target_template_id, "localhost");
+    assert_eq!(session.project_directory.as_deref(), Some(storage.path()));
+    let workspaces = hel::hel_database::list_workspaces_from(&database).unwrap();
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].id, session.workspace_id);
+    assert_eq!(
+        workspaces[0].name,
+        storage.path().file_name().unwrap().to_string_lossy()
+    );
+    let rendered = String::from_utf8_lossy(&output);
+    assert!(!rendered.contains("Welcome to Mjolnir setup"));
+    assert!(!rendered.contains("Workspaces"));
+    // This fake profile cannot launch a real agent. Quitting during its
+    // background launch must still release the terminal promptly.
+    master.write_all(QUIT_KEY).unwrap();
+    assert!(wait_for_exit(child.child_mut(), &mut master, &mut output, "startup quit").success());
 }
 
 #[test]

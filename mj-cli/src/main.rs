@@ -707,6 +707,11 @@ async fn run_workspace_dashboard(
             })
             .map(|candidate| candidate.workspace.id.clone())
             .with_context(|| format!("unknown workspace {requested:?}"))?
+    } else if !force_selector && workspaces.is_empty() {
+        daemon
+            .create_workspace(suggested_workspace_name(&workspaces)?)
+            .await?
+            .id
     } else if !force_selector && workspaces.len() == 1 && workspaces[0].attached_pids.is_empty() {
         workspaces[0].workspace.id.clone()
     } else if !std::io::IsTerminal::is_terminal(&std::io::stdin())

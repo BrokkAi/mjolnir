@@ -2336,6 +2336,47 @@ impl DashboardState {
         self.cancel_modal();
     }
 
+    /// Prepare the first prompt without opening the new-session wizard.
+    /// Called once when the surface opens, never on subsequent state refreshes.
+    pub fn begin_startup_session(
+        &mut self,
+        project_directory: std::path::PathBuf,
+    ) -> Result<DashboardAction, String> {
+        if !self.config.startup.enabled
+            || self
+                .state
+                .sessions
+                .values()
+                .any(|session| session.state.is_active())
+        {
+            return Ok(DashboardAction::None);
+        }
+        let profile_id = self
+            .config
+            .startup
+            .profile
+            .as_ref()
+            .or_else(|| {
+                self.config
+                    .profiles
+                    .iter()
+                    .find(|(_, profile)| profile.kind == hel::hel_config::HarnessKind::Codex)
+                    .map(|(id, _)| id)
+            })
+            .or_else(|| self.config.profiles.keys().next())
+            .ok_or("No agent profile is configured. Run `mj setup` to configure one.")?;
+        if !self.config.profiles.contains_key(profile_id) {
+            return Err(format!("Startup profile {profile_id:?} is not configured."));
+        }
+        let action = DashboardAction::CreateStartupSession {
+            profile_id: profile_id.clone(),
+            target_template_id: self.config.startup.target.clone(),
+            project_directory,
+        };
+        self.focus_prompt();
+        Ok(action)
+    }
+
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
         if self.config.profiles.is_empty() || self.config.targets.is_empty() {
             self.notices

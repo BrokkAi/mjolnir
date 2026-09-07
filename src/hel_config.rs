@@ -11,6 +11,17 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Stable context identity for a bare project at the serialized path boundary.
+pub fn raw_project_context_id(project_directory: &str) -> String {
+    let digest = Sha256::digest(project_directory.trim().as_bytes());
+    let suffix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("remote-project-{suffix}")
+}
 
 fn default_phone_bind() -> String {
     "127.0.0.1:3765".to_owned()
@@ -983,6 +994,52 @@ fn validate_environment(owner: &str, environment: &BTreeMap<String, String>) -> 
     Ok(())
 }
 
+/// The first session opened when a terminal workspace has no live sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            profile: None,
+            target: None,
+        }
+    }
+}
+
+impl StartupConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    fn validate(
+        &self,
+        profiles: &BTreeMap<String, HarnessProfile>,
+        targets: &BTreeMap<String, TargetTemplate>,
+    ) -> Result<()> {
+        if let Some(profile) = &self.profile
+            && !profiles.contains_key(profile)
+        {
+            bail!("startup profile {profile:?} is not configured");
+        }
+        if let Some(target) = &self.target
+            && !targets.contains_key(target)
+        {
+            bail!("startup target {target:?} is not configured");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelConfig {
@@ -997,6 +1054,8 @@ pub struct HelConfig {
     pub phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     pub review: ReviewConfig,
+    #[serde(default, skip_serializing_if = "StartupConfig::is_default")]
+    pub startup: StartupConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, HarnessProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1012,6 +1071,7 @@ impl Default for HelConfig {
             newer_config_version: None,
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
+            startup: StartupConfig::default(),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
             targets: BTreeMap::new(),
@@ -1020,6 +1080,10 @@ impl Default for HelConfig {
 }
 
 impl HelConfig {
+    pub fn is_unconfigured(&self) -> bool {
+        self.profiles.is_empty() && self.bundles.is_empty() && self.targets.is_empty()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.version != CONFIG_VERSION {
             bail!(
@@ -1034,6 +1098,7 @@ impl HelConfig {
         // Checked after the profiles, so a review pointing at a malformed
         // profile reports the profile's own error first.
         self.review.validate(&self.profiles)?;
+        self.startup.validate(&self.profiles, &self.targets)?;
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }
@@ -1126,6 +1191,11 @@ impl HelConfig {
         }
         config.bundles = salvage_map(document, "bundles", ProjectBundle::validate);
         config.targets = salvage_map(document, "targets", TargetTemplate::validate);
+        if let Some(startup) = salvage_section::<StartupConfig>(document, "startup")
+            && startup.validate(&config.profiles, &config.targets).is_ok()
+        {
+            config.startup = startup;
+        }
         config
     }
 
@@ -1242,6 +1312,9 @@ impl HelConfig {
         }
         config.targets.remove("raw-localhost");
         config.targets.entry("localhost".into()).or_insert(legacy);
+        if config.startup.target.as_deref() == Some("raw-localhost") {
+            config.startup.target = Some("localhost".into());
+        }
         config.save_to_locked(path)?;
         Ok(true)
     }
@@ -1576,6 +1649,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_defaults_round_trip_and_validate_the_selected_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = sample_config();
+        config.save_to(&path).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("[startup]"));
+        assert_eq!(
+            HelConfig::load_from(&path).unwrap().startup,
+            StartupConfig::default()
+        );
+        config.startup.profile = Some("codex-1".into());
+        config.startup.target = config.targets.keys().next().cloned();
+        config.startup.enabled = false;
+        config.save_to(&path).unwrap();
+        assert_eq!(HelConfig::load_from(&path).unwrap(), config);
+        config.startup.profile = Some("missing".into());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("startup profile")
+        );
+        config.startup.profile = None;
+        config.startup.target = Some("missing".into());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("startup target")
+        );
+    }
+
+    #[test]
     fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
         let home = Path::new("/private/session/muse");
         let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
@@ -1624,6 +1732,7 @@ mod tests {
             newer_config_version: None,
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
+            startup: Default::default(),
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
