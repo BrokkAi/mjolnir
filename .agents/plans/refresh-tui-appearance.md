@@ -16,7 +16,7 @@ Mjolnir's terminal UI should feel polished and alive. Users will see a coordinat
 - [x] (2026-09-07) Restored six configurable spinner styles, F2 preference cycling with supervised persistence, config migration, and active-only animation timing.
 - [x] (2026-09-07) Reviewed dashboard, palette, wizard, and active conversation captures at 110×40, 80×24, and 32×20. Full workspace tests and Clippy passed; the live tmux harness passed 79 checks with seed 523.
 - [x] (2026-09-07) Final narrow-footer checks passed (3 chat and 10 TUI tests), along with final Clippy, rustfmt, and diff checks.
-- [ ] Commit validated changes, push the branch, and create the requested PR.
+- [x] (2026-09-07) Committed implementation as `ea3ce678`, pushed `agent/tui-sparkle`, and opened https://github.com/BrokkAi/mjolnir/pull/977.
 
 ## Surprises & Discoveries
 
@@ -45,6 +45,8 @@ Visual review caught long command-palette shortcut labels running into command n
 
 
 The visual refresh and spinner restoration are implemented and visually reviewed. The full workspace test suite, Clippy, and 79 real terminal acceptance events pass. A final narrow-footer refinement keeps complete palette/help hints visible at 32 columns and shares the fitting logic between chat and dashboard. The original checkout remains clean; all source changes and commits belong to the requested worktree.
+
+The completed implementation is published on `agent/tui-sparkle` in PR #977. No task work remains. Visual validation used deterministic renderer captures and a private tmux lab; physical microphone capture and emulator-specific glyph rendering remain outside this appearance task.
 
 ## Context and Orientation
 
@@ -109,3 +111,5 @@ Revision note (2026-09-07): Created the plan after inspecting production renderi
 Revision note (2026-09-07): Recorded completed implementation, source-level animation gating and configuration decisions, and visual review findings before final validation.
 
 Revision note (2026-09-07): Recorded full passing workspace/lint/live validation and the compact-footer issue caught during final screenshot review.
+
+Revision note (2026-09-07): Recorded the implementation commit, published branch, and requested pull request after successful delivery.
