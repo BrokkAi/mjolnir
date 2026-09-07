@@ -4062,7 +4062,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
     }
 
     #[test]
-    fn web_bundle_keys_keep_same_source_labels_separate() {
+    fn web_project_keys_follow_the_complete_repository_set() {
         let (mut config, mut state) = sample_config_state();
         let shared_bundle = config.bundles["hel"].clone();
         config.bundles.insert("other".into(), shared_bundle);
@@ -4090,7 +4090,42 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
 
         assert_eq!(first.project_label, "hel");
         assert_eq!(second.project_label, "hel");
-        assert_ne!(first.project_key, second.project_key);
+        assert_eq!(first.project_key, second.project_key);
+
+        let secondary = ProjectRepository {
+            id: "secondary".into(),
+            github: Some("owner/secondary".into()),
+            local: None,
+            destination: "secondary".into(),
+            git_ref: None,
+        };
+        config
+            .bundles
+            .get_mut("other")
+            .unwrap()
+            .repositories
+            .push(secondary.clone());
+        let project_keys = |config: &HelConfig| {
+            ViewerSnapshot::from_config_state(config, &state, 1)
+                .sessions
+                .into_iter()
+                .map(|session| session.project_key)
+                .collect::<Vec<_>>()
+        };
+        let keys = project_keys(&config);
+        assert_ne!(
+            keys[0], keys[1],
+            "an added repository must change the bundle identity"
+        );
+
+        let first_bundle = config.bundles.get_mut("hel").unwrap();
+        first_bundle.repositories.insert(0, secondary);
+        first_bundle.primary_repo = "secondary".into();
+        let keys = project_keys(&config);
+        assert_eq!(
+            keys[0], keys[1],
+            "the same repository set must group together despite order or primary choice"
+        );
     }
 
     #[test]

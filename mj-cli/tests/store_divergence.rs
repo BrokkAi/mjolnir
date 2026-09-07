@@ -211,3 +211,87 @@ fn post_publication_error_runs_the_daemon_epilogue() {
         "the failing post-publication path left daemon metadata behind"
     );
 }
+
+/// Discovery can already be gone while the previous writer is still exiting.
+/// Concurrent clients must wait for ownership, then join one replacement.
+#[test]
+fn concurrent_starts_wait_for_controller_ownership_before_launching() {
+    let (_storage, config_directory, data_directory) = configured_storage();
+    fs::create_dir_all(&data_directory).unwrap();
+    let owner = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(data_directory.join("controller.lock"))
+        .unwrap();
+    owner.lock().unwrap();
+
+    struct StopDaemon(std::path::PathBuf, std::path::PathBuf);
+    impl Drop for StopDaemon {
+        fn drop(&mut self) {
+            let _ = Command::new(env!("CARGO_BIN_EXE_mj"))
+                .args(["daemon", "stop"])
+                .env("MJ_CONFIG_DIR", &self.0)
+                .env("MJ_DATA_DIR", &self.1)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let _cleanup = StopDaemon(config_directory.clone(), data_directory.clone());
+    let mut clients = (0..2)
+        .map(|_| {
+            ReapChild(Some(
+                Command::new(env!("CARGO_BIN_EXE_mj"))
+                    .args(["daemon", "restart"])
+                    .env("MJ_CONFIG_DIR", &config_directory)
+                    .env("MJ_DATA_DIR", &data_directory)
+                    .env_remove("MJ_DEV_RESTART_STALE_DAEMON")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    // Let both clients reach startup while metadata is absent. No child may
+    // be launched until it can own the controller store.
+    let deadline = Instant::now() + METADATA_WAIT;
+    while !data_directory.join("daemon-start.lock").exists() {
+        assert!(Instant::now() < deadline, "clients never entered startup");
+        assert!(
+            clients
+                .iter_mut()
+                .all(|client| client.child_mut().try_wait().unwrap().is_none())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !data_directory.join("daemon.log").exists(),
+        "launched a child before controller ownership was available"
+    );
+    assert!(!data_directory.join("daemon.json").exists());
+    owner.unlock().unwrap();
+    drop(owner);
+
+    for client in &mut clients {
+        let deadline = Instant::now() + METADATA_WAIT;
+        loop {
+            if let Some(status) = client.child_mut().try_wait().unwrap() {
+                assert!(status.success(), "startup client failed: {status}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "startup client did not finish");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    assert!(data_directory.join("daemon.json").exists());
+    let log = fs::read_to_string(data_directory.join("daemon.log")).unwrap();
+    assert!(
+        !log.contains("another Mjolnir controller is already using"),
+        "{log}"
+    );
+}

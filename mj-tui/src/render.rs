@@ -5753,7 +5753,7 @@ mod tests {
 
         let (_, _, target, project, _) = session_values(&stopped_session(), None, None, 0, &config);
         assert_eq!(target, "podman");
-        assert_eq!(project, "hel");
+        assert_eq!(project, "anvil + hel");
     }
 
     #[test]

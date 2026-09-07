@@ -28,9 +28,16 @@ The observable success case is a session that changes its displayed target/profi
 - [x] Implement and validate daemon/API integration, CLI, TUI, and web controls, including exact prepared confirmation, queue inspection, cancellation, and durable recovery controls.
 - [x] Implement and validate bounded performance improvements: direct verified LocalBare archive reads and joined, cancellation-aware cross-harness provisioning/handoff overlap.
 - [x] Complete integrated validation, user documentation, and commits on the current branch. Feature commit: `0c8006d1`; upstream integration: `a6fed911`. Push to `origin/master` is the final authorized handoff.
+- [x] (2026-09-07) Completed the original push, then exercised real Codex/Claude moves through tmux in the user-authorized `plandiag` workspace, including active interruption with one discarded queued prompt.
+- [x] (2026-09-07) Fixed and live-retested incorrect Resume labels and the retained Move confirmation modal. A real target-only Move to local Podman preserved Claude native identity and passed provider/file checks; stopped the disposable session and detached its tmux client.
+- [x] (2026-09-07) Completed integrated validation on upstream `68265e46`; follow-up fixes and live evidence are ready for the authorized commit/push.
 
 ## Surprises & Discoveries
 
+
+The requested real-provider tmux follow-up found two presentation defects: the first two Move steps were labeled Resume, and consuming a prepared confirmation left its modal in dashboard state. The lifecycle overlay hid that modal during work, then exposed it again after successful completion. Close the modal only when a matching prepared confirmation is successfully consumed; missing or mismatched preparations must leave it available for correction.
+
+The shared live database advanced to schema 27 during testing through another published build. This checkout initially rejected launches correctly because it supported schema 26. Fast-forwarded to published upstream `ff8ac5d6` for compatibility; did not downgrade data. Initial live tests used the exact running daemon executable, whose Move UI matched this implementation and whose orchestration differed only in new Muse compatibility guards irrelevant to Codex/Claude.
 
 Stop already interrupts active work without steering the next queued prompt into that turn. `checkpoint_session_latched` in `mj-controller/src/hel_controller/checkpoint.rs` uses `LatchExclusivity::HoldThroughClose`, whose `BarrierBusyPolicy` is `InterruptWhileRunning`. It submits `BeginCheckpoint` before `CancelTurn`. `src/hel_worker.rs` contains `cancel_turn_bypasses_a_pending_checkpoint_without_steering_the_queue`. Reuse this behavior; do not implement Move by issuing the ordinary composer cancel action first.
 
@@ -55,6 +62,8 @@ Review found that terminal failed/cancelled Move operations can still have a Clo
 ## Decision Log
 
 
+Decision (2026-09-07, live follow-up): use only a disposable `plandiag` session with real configured Codex/Claude profiles and existing localhost/Podman targets. Keep the shared database at its current schema and integrate published upstream before building the patched client. Close a Move wizard at the successful confirmation handoff, not at preparation or only at eventual lifecycle completion, so invalid confirmations remain correctable and unrelated later UI state is not dismissed.
+
 Decision (2026-09-06, user): use verified stop followed by resume, accepting that a failed destination leaves the session stopped and recoverable. This keeps the existing integrity and teardown guarantees and avoids a staged two-environment handover.
 
 Decision (2026-09-06, user): support target-only, profile-only, combined, and cross-harness profile changes. Same-harness moves restore native state; cross-harness moves use the existing transcript handoff.
@@ -77,6 +86,8 @@ Decision (2026-09-06, design): admit retained queued commands only after verifie
 Implementation is complete. Move is one daemon-owned operation with durable intent, verified source teardown, ready-before-queue destination admission, same-store command deduplication on retry, and CLI/TUI/web confirmation and recovery. Source settings, workspace, draft/title, history, native identity for same-harness moves, and recoverable Git state are retained. Interrupted turns are never replayed. Final checks and the requested commit/push are recorded below.
 
 The implementation reused normal Stop/Resume behavior but corrected managed raw-worktree capture and the ready-worker-to-session-actor handoff uncovered by the real-worker test. Managed worktrees deliberately bypass relay-frontier-only archive reuse: host Git edits do not advance that frontier, and older metadata-only archives must not be reused before deleting a checkout. No container reuse or new inference service was introduced.
+
+The real-provider tmux follow-up passed cross-harness profile changes, an active turn with explicit queued-work discard, and a same-harness target change from localhost to Podman. The same logical session and uncommitted marker survived; the target-only move retained native identity, and both destination providers answered verification prompts. Fixed the two UI defects exposed by this walkthrough: mislabeled selection steps and the confirmation modal left behind after submission. The disposable session was stopped with a recovery copy and its container removed. Full workspace tests and Clippy passed before the final upstream web-viewer integration. After fast-forwarding to `68265e46`, the affected controller, TUI, and CLI suites and all-target Clippy passed again; formatting and diff checks passed.
 
 ## Context and Orientation
 
@@ -248,3 +259,9 @@ Extend archive retention/reconciliation to honor operation-owned checkpoints and
 Revision note (2026-09-06): created from the agreed conversational plan, including the user's final Discard/Run queue choice and safe-overlap performance scope. Earlier proposals for automatic continuation, a durable paused queue, and retaining the source until destination readiness are not part of this plan.
 
 Revision note (2026-09-06, implementation): recorded implementation and push authorization, schema 26, completed design adjustments, regression coverage, live local-bare acceptance, timings, and explicit backend/provider coverage limits.
+
+Revision note (2026-09-07, live tmux follow-up): user requested actual tmux testing in `plandiag` and fixes for discovered bugs. Private tmux server `mj-move-live`, session `5ad09463fc50405f95544017d0db5790`, and disposable repository `/tmp/mj-move-real-qQP4xe` exercised real Codex-to-Claude and Claude-to-Codex moves on localhost. The uncommitted `move-proof.txt` retained exactly `LIVE_TMUX_MOVE_OK\n`; Claude independently verified it after the first move. A later active Codex turn and one queued prompt were confirmed in the Move dialog, discarded by a completed Move, and neither `active-replay-sentinel.txt` nor `queue-discard-sentinel.txt` existed afterward. An earlier queue attempt was inconclusive because the provider ended its turn before queueing; it is not counted as a queue test. Remaining work is patched-client retest, required checks, cleanup of only this disposable session, and the follow-up commit.
+
+Patched-client retest (2026-09-07): both selection steps now display Move, and successful prepared handoff closes the modal without its reappearing after completion. Target-only localhost-to-Podman Move completed at 13:36:06Z with matching source/destination Claude native identity. The real container provider answered `CONTAINER_MOVE_VERIFIED`; independent `podman exec` checks confirmed the exact 18 marker bytes and both absent sentinels. Local evidence is `target/live-move-tmux-20260907/container-verified.txt`. The disposable session is stopped with no last error, its container is removed through normal Stop, and its checkpoint/session record and scratch source repository remain recoverable. No primary-workspace session actions were submitted. Full validation is in progress; the 46-test wizard module, formatting, and diff checks passed.
+
+Final follow-up validation (2026-09-07): `cargo test -q -- --test-threads=1` passed across the workspace. After integrating the two published web-viewer commits, `cargo test -q -p brokk-mj-tui -p brokk-mj-controller -p brokk-mjolnir -- --test-threads=1` passed, including 675 controller, 339 TUI, 186 CLI tests and the CLI integration tests. `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed. The earlier remaining-work notes above are superseded: implementation, live retest, cleanup, and validation are complete.

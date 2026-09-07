@@ -1172,6 +1172,105 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
 }
 
 #[test]
+fn move_wizard_labels_each_step_as_move() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw move profile step");
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Move · 1/3"));
+    assert!(!rendered.contains("Resume · 1/3"));
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw move target step");
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Move · 2/3"));
+    assert!(!rendered.contains("Resume · 2/3"));
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw move review step");
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Move · 3/3"));
+    assert!(!rendered.contains("Resume · 3/3"));
+}
+
+#[test]
+fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+
+    // A submission that arrives before preparation is ready must leave the
+    // wizard open so the user can wait or reprepare the move.
+    assert!(dashboard.take_move_preparation("session-1").is_none());
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
+
+    let preparation = hel::hel_state::MovePreparation {
+        selection: hel::hel_state::MoveSelection {
+            session_id: "session-1".into(),
+            profile_id: Some("codex-1".into()),
+            target_template_id: Some("podman".into()),
+            additional_mounts: Some(Vec::new()),
+            resource_allocation: None,
+            clear_resource_allocation: false,
+        },
+        source_profile_id: "codex-1".into(),
+        source_target_template_id: "podman".into(),
+        cross_harness: false,
+        active: true,
+        queued_commands: Vec::new(),
+        fingerprint: "fingerprint".into(),
+        operation_id: "move-1".into(),
+    };
+    dashboard.apply_move_preparation(preparation.clone());
+
+    // A stale action for another session must not consume the confirmation.
+    assert!(dashboard.take_move_preparation("other-session").is_none());
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("invalid session handoff must keep the move wizard open");
+    };
+    assert_eq!(wizard.preparation.as_ref(), Some(&preparation));
+
+    assert_eq!(
+        dashboard.take_move_preparation("session-1"),
+        Some(preparation.clone())
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+
+    // State/lifecycle replies arriving after handoff must not resurrect the
+    // confirmation modal or reapply the consumed preparation.
+    dashboard.set_state(dashboard.state.clone());
+    dashboard.apply_move_preparation(preparation);
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
 fn raw_resume_review_names_the_exact_reused_project_directory() {
     let mut session = stopped_session();
     session.target_template_id = "localhost".into();

@@ -1276,15 +1276,20 @@ impl DashboardState {
     /// sessions appear here; everything else belongs to the resume dialog.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
         let active = partition_sessions(self.state.sessions.values()).0;
-        let mut groups = BTreeMap::<(String, String, String), Vec<&SessionRecord>>::new();
+        let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
-            let source = self.project_source(session);
             groups
-                .entry((source.short.to_lowercase(), source.full, source.key))
+                .entry(self.project_source(session).key)
                 .or_default()
                 .push(session);
         }
-        groups.into_values().flatten().collect()
+        let mut groups = groups.into_values().collect::<Vec<_>>();
+        // Display spelling must not split sessions with the same canonical key.
+        groups.sort_by_cached_key(|sessions| {
+            let source = self.project_source(sessions[0]);
+            (source.short.to_lowercase(), source.full, source.key)
+        });
+        groups.into_iter().flatten().collect()
     }
 
     pub fn project_source(&self, session: &SessionRecord) -> ProjectSourceIdentity {
@@ -2467,7 +2472,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_project_heading_uses_source_name_and_disambiguates_bundle() {
+    fn bundle_and_checkout_share_one_canonical_project_heading() {
         let mut dashboard_config = config();
         dashboard_config.bundles.insert(
             "bifrost".into(),
@@ -2539,13 +2544,32 @@ mod tests {
                 SessionsRow::Session { .. } => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(dashboard.project_keys().len(), 2);
-        assert!(headings.iter().all(|label| label.contains("bifrost-dev")));
-        assert!(
-            headings
-                .iter()
-                .any(|label| label == "bifrost-dev (bifrost)")
+        assert_eq!(dashboard.project_keys(), ["github:brokkai/bifrost-dev"]);
+        assert_eq!(headings, ["bifrost-dev"]);
+        assert_eq!(dashboard.ordered_sessions().len(), 2);
+
+        // Case differences in a remote's spelling must not let another owner
+        // split this canonical group into two headings during display sorting.
+        dashboard.set_project_source(
+            "raw",
+            ProjectSourceIdentity::git_remote("https://github.com/brokkai/bifrost-dev.git")
+                .unwrap(),
         );
+        let mut unrelated = running_session();
+        unrelated.id = "unrelated".into();
+        dashboard
+            .state
+            .sessions
+            .insert(unrelated.id.clone(), unrelated);
+        dashboard.set_project_source(
+            "unrelated",
+            ProjectSourceIdentity::git_remote("https://github.com/Else/bifrost-dev.git").unwrap(),
+        );
+        let keys = dashboard.project_keys();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"github:brokkai/bifrost-dev".to_owned()));
+        assert!(keys.contains(&"github:else/bifrost-dev".to_owned()));
+        assert_eq!(dashboard.ordered_sessions().len(), 3);
     }
 
     #[test]
