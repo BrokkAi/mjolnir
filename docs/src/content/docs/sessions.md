@@ -38,6 +38,17 @@ Press `Esc` to cancel the active agent turn or shell command. This does not stop
 
 Run `mj` again to reattach. Mjolnir selects the workspace and opens the session whose agent spoke most recently. You can also reconnect through the authenticated [web viewer](/web-viewer/).
 
+While the terminal says **Opening session**, `Esc` cancels that attachment,
+selecting another session switches immediately, and `Alt+Q` still quits.
+Opening times out after 15 seconds. A failed or cancelled open stays stopped;
+press `Enter` on the session in Sessions to retry. Cancelling attachment leaves
+the agent running.
+
+Draft saves run in the background. If the daemon does not confirm a save within
+15 seconds, Mjolnir reports the uncertainty and allows exit. An unconfirmed
+draft-save warning remains visible after the terminal closes; reconnect to
+check the saved state.
+
 Stopping the daemon is different from detaching:
 
 ```sh
